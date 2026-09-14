@@ -687,6 +687,10 @@ async function streamLocalFileToSsh(input: {
     });
     source.on("error", fail);
     ssh.on("error", fail);
+    // pipe() does not forward destination errors: when the remote script exits
+    // early, the kernel answers our continued writes with EPIPE on ssh.stdin,
+    // which crashes the whole server process as an unhandled 'error' event.
+    ssh.stdin?.on("error", fail);
     if (input.progress) {
       input.progress.counter.on("error", fail);
       source.pipe(input.progress.counter).pipe(ssh.stdin ?? null);
@@ -1462,6 +1466,9 @@ export async function syncDirectoryToSsh(input: {
       reject(error);
     };
 
+    // pipe() does not forward destination errors: an early ssh exit surfaces
+    // as EPIPE on ssh.stdin and would crash the server if left unhandled.
+    ssh.stdin?.on("error", fail);
     if (progress) {
       progress.counter.on("error", fail);
       tar.stdout?.pipe(progress.counter).pipe(ssh.stdin ?? null);
@@ -1573,6 +1580,9 @@ export async function syncDirectoryFromSsh(input: {
         reject(error);
       };
 
+      // pipe() does not forward destination errors: an early tar exit surfaces
+      // as EPIPE on tar.stdin and would crash the server if left unhandled.
+      tar.stdin?.on("error", fail);
       if (progress) {
         progress.counter.on("error", fail);
         ssh.stdout?.pipe(progress.counter).pipe(tar.stdin ?? null);
