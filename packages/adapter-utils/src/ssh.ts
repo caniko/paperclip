@@ -679,6 +679,14 @@ async function streamLocalFileToSsh(input: {
       settled = true;
       source.destroy();
       ssh.kill("SIGTERM");
+      // A destination EPIPE usually means the remote script exited early; if
+      // it left a diagnostic on stderr, surface that instead of the bare
+      // EPIPE so the run log shows the real cause.
+      const remoteStderr = sshStderr.trim();
+      if ((error as NodeJS.ErrnoException).code === "EPIPE" && remoteStderr) {
+        reject(new Error(remoteStderr));
+        return;
+      }
       reject(error);
     };
 
@@ -1463,6 +1471,13 @@ export async function syncDirectoryToSsh(input: {
       settled = true;
       tar.kill("SIGTERM");
       ssh.kill("SIGTERM");
+      // Prefer the remote diagnostic over a bare EPIPE (see
+      // streamLocalFileToSsh).
+      const remoteStderr = sshStderr.trim();
+      if ((error as NodeJS.ErrnoException).code === "EPIPE" && remoteStderr) {
+        reject(new Error(remoteStderr));
+        return;
+      }
       reject(error);
     };
 
@@ -1577,6 +1592,14 @@ export async function syncDirectoryFromSsh(input: {
         settled = true;
         ssh.kill("SIGTERM");
         tar.kill("SIGTERM");
+        // The EPIPE destination is the local tar, but the actual failure is
+        // usually the remote side (ssh stderr), so prefer that diagnostic
+        // over the bare EPIPE (see streamLocalFileToSsh).
+        const remoteStderr = sshStderr.trim();
+        if ((error as NodeJS.ErrnoException).code === "EPIPE" && remoteStderr) {
+          reject(new Error(remoteStderr));
+          return;
+        }
         reject(error);
       };
 

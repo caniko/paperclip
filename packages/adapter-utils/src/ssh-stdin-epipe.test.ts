@@ -79,9 +79,12 @@ describe("ssh sync stdin EPIPE guard", () => {
     await vi.waitFor(() => {
       expect(ssh.stdin!.listenerCount("error")).toBeGreaterThan(0);
     });
+    // The remote script left a diagnostic on stderr before exiting early;
+    // the rejection must surface that instead of the bare EPIPE.
+    ssh.stderr!.write("mkdir: cannot create directory /workspace: Permission denied\n");
     ssh.stdin!.emit("error", epipe());
 
-    await expect(pending).rejects.toMatchObject({ code: "EPIPE" });
+    await expect(pending).rejects.toThrow(/Permission denied/);
     expect(ssh.kill).toHaveBeenCalled();
   });
 
