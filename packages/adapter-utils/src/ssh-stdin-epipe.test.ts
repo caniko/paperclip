@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { spawn } from "node:child_process";
-import { syncDirectoryFromSsh, syncDirectoryToSsh } from "./ssh.js";
+import { execFileSync, spawn } from "node:child_process";
+import { prepareWorkspaceForSshExecution, syncDirectoryFromSsh, syncDirectoryToSsh } from "./ssh.js";
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -108,5 +108,56 @@ describe("ssh sync stdin EPIPE guard", () => {
 
     await expect(pending).rejects.toMatchObject({ code: "EPIPE" });
     expect(tar.kill).toHaveBeenCalled();
+  });
+});
+
+describe("ssh git-bundle upload stdin EPIPE guard", () => {
+  let localDir: string;
+
+  beforeEach(() => {
+    localDir = mkdtempSync(path.join(tmpdir(), "paperclip-epipe-git-"));
+    execFileSync("git", ["-C", localDir, "init", "-q"]);
+    execFileSync("git", [
+      "-C", localDir,
+      "-c", "user.name=Epipe Test",
+      "-c", "user.email=epipe-test@example.com",
+      "commit", "-q", "--allow-empty", "-m", "init",
+    ]);
+  });
+
+  afterEach(() => {
+    rmSync(localDir, { recursive: true, force: true });
+    vi.clearAllMocks();
+  });
+
+  // Greptile: the EPIPE guard also covers streamLocalFileToSsh (the git-bundle
+  // upload inside importGitWorkspaceToSsh), which the directory-sync tests do
+  // not reach. Drive it through the public prepareWorkspaceForSshExecution
+  // entry with a real local git repo and a mocked ssh child.
+  it("rejects instead of crashing when ssh closes stdin early during the git-bundle upload", async () => {
+    const ssh = fakeChild({ stdin: true, stderr: true });
+    spawnMock.mockImplementation((command: string) =>
+      (command === "ssh" ? ssh : fakeChild({})) as unknown as ReturnType<typeof spawn>,
+    );
+
+    const pending = prepareWorkspaceForSshExecution({
+      spec,
+      localDir,
+      remoteDir: "/workspace",
+    });
+
+    // Wait until the bundle transfer wired its error listener onto ssh.stdin,
+    // then simulate the kernel answering a late write with EPIPE after the
+    // remote setup script exited early.
+    await vi.waitFor(() => {
+      expect(ssh.stdin!.listenerCount("error")).toBeGreaterThan(0);
+    });
+    // The remote script left a diagnostic on stderr before exiting early;
+    // the rejection must surface that instead of the bare EPIPE.
+    ssh.stderr!.write("mkdir: cannot create directory /workspace: Permission denied\n");
+    ssh.stdin!.emit("error", epipe());
+
+    await expect(pending).rejects.toThrow(/Permission denied/);
+    expect(ssh.kill).toHaveBeenCalled();
   });
 });
