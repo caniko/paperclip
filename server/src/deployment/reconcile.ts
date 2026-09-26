@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { and, eq, sql } from "drizzle-orm";
 import {
   type Db, deploymentResources, companies, projects, agents, routines,
-  routineTriggers, agentApiKeys, companySecrets, companyMemberships,
+  routineTriggers, agentApiKeys, companySecrets, companySecretVersions, companyMemberships,
   pluginManagedResources, builtInManagedResources,
   instanceSettings,
 } from "@paperclipai/db";
@@ -19,6 +20,7 @@ import { validateCron } from "../services/cron.js";
 import { bootstrapOperator } from "./bootstrap.js";
 import { readCredential, type DeploymentDescriptor } from "./runtime.js";
 import type { Config } from "../config.js";
+import { verifyLocalEncryptedMaterials } from "../secrets/local-encrypted-provider.js";
 
 const tables = { company: companies, project: projects, agent: agents, routine: routines, schedule: routineTriggers, secret: companySecrets, taskBridge: agentApiKeys };
 type Kind = keyof typeof tables;
@@ -86,6 +88,15 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     if (options.apply) await tx.execute(sql`select set_config('paperclip.deployment_apply', 'on', true)`);
     const [identity] = await tx.select().from(instanceSettings).where(eq(instanceSettings.singletonKey, "deployment"));
     if (identity && identity.general.instance !== options.descriptor.instance) throw new Error("Database belongs to another deployment instance");
+    // Validate historical and unmanaged local secrets too: the instance key is
+    // shared, and a no-op declaration must not mask a broken restore/rotation.
+    const encrypted = await tx.select({ material: companySecretVersions.material }).from(companySecretVersions)
+      .innerJoin(companySecrets, eq(companySecretVersions.secretId, companySecrets.id))
+      .where(eq(companySecrets.provider, "local_encrypted"));
+    const keyFile = options.descriptor.serverCredentials.encryption ?? options.config.secretsMasterKeyFilePath;
+    if (encrypted.length || options.descriptor.serverCredentials.encryption || existsSync(keyFile)) {
+      verifyLocalEncryptedMaterials(readCredential(keyFile), encrypted.map((v) => v.material));
+    }
     const ledger = await tx.select().from(deploymentResources);
     const owned = ledger.filter((b) => b.owner === m.owner);
     const bindings = new Map(owned.map((b) => [`${b.kind}/${b.key}`, b]));

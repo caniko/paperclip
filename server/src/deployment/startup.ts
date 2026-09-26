@@ -4,11 +4,11 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import type { Config } from "../config.js";
 import { loadDeploymentDescriptor, readJson } from "./runtime.js";
-import { reconcileDeployment } from "./reconcile.js";
 
 export async function reconcileDeploymentOnStartup(db: Db, config: Config) {
   const file = process.env.PAPERCLIP_DEPLOYMENT_FILE;
   if (!file) return;
+  const { reconcileDeployment } = await import("./reconcile.js");
   const descriptor = loadDeploymentDescriptor(file);
   const manifest = descriptor.manifestFile ? readJson(descriptor.manifestFile)
     : { version: 1, owner: descriptor.instance, companies: {} };

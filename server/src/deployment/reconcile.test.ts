@@ -1,11 +1,11 @@
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
-import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, companySecretVersions, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
+import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, companySecrets, companySecretVersions, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
 import { reconcileDeployment } from "./reconcile.js";
 import { loadConfig } from "../config.js";
 import { secretService } from "../services/secrets.js";
@@ -35,7 +35,7 @@ const root = mkdtempSync(join(tmpdir(), "paperclip-deployment-"));
 const config = { ...loadConfig(), deploymentMode: "authenticated" as const, authBaseUrlMode: "explicit" as const, authPublicBaseUrl: "http://localhost:3100" };
 const descriptor: DeploymentDescriptor = {
   version: 1, home: root, instance: "test", configFile: "/unused",
-  credentialFiles: { gateway: join(root, "gateway"), bridge: join(root, "bridge") }, serverCredentials: {},
+  credentialFiles: { gateway: join(root, "gateway"), bridge: join(root, "bridge") }, serverCredentials: { encryption: join(root, "master.key") },
   bootstrap: { name: "Test operator", email: "operator@example.test", passwordFile: join(root, "password") },
 };
 const manifest = {
@@ -52,6 +52,7 @@ beforeAll(async () => {
   if (!address || typeof address === "string") throw new Error("Missing fixture address");
   manifest.agents.worker.fields.adapterConfig.apiBaseUrl = `http://127.0.0.1:${address.port}`;
   process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = join(root, "master.key");
+  writeFileSync(descriptor.serverCredentials.encryption!, "11".repeat(32), { mode: 0o600 });
   process.env.BETTER_AUTH_SECRET = "fixture-auth-secret-not-for-real-deployments";
   writeFileSync(descriptor.bootstrap!.passwordFile, "fixture-only-password", { mode: 0o600 });
   writeFileSync(descriptor.credentialFiles.gateway, "fixture-only-gateway-key", { mode: 0o600 });
@@ -118,6 +119,31 @@ it("rejects invalid references and ownership conflicts without partial writes", 
   const [owned] = before.filter((r) => r.kind === "company");
   await expect(reconcile({ version: 1, owner: "other", companies: { stolen: { adopt: owned.resourceId, fields: { name: "Stolen" } } } })).rejects.toThrow("ownership");
   expect(await db.select().from(deploymentResources)).toEqual(before);
+});
+
+it("validates unchanged encrypted material before planning or applying without secret access writes", async () => {
+  const declaration = { ...manifest, owner: "key-readiness", companies: { example: { fields: { name: "Key readiness" } } }, routines: {}, taskBridges: {} };
+  await reconcile(declaration);
+  const snapshot = async () => ({
+    secrets: await db.select().from(companySecrets),
+    versions: await db.select().from(companySecretVersions),
+    ledger: await db.select().from(deploymentResources),
+  });
+  const before = await snapshot();
+  const file = descriptor.serverCredentials.encryption!;
+  const key = readFileSync(file, "utf8");
+  try {
+    expect((await reconcile(declaration, false)).differences).toEqual([]);
+    for (const apply of [false, true]) {
+      writeFileSync(file, "22".repeat(32), { mode: 0o600 });
+      await expect(reconcile(declaration, apply)).rejects.toThrow("Deployment encryption key cannot decrypt stored secrets");
+      rmSync(file);
+      await expect(reconcile(declaration, apply)).rejects.toThrow("Deployment credential");
+      expect(existsSync(file)).toBe(false);
+    }
+    expect(await snapshot()).toEqual(before);
+  } finally { writeFileSync(file, key, { mode: 0o600 }); }
+  expect((await reconcile(declaration)).differences).toEqual([]);
 });
 
 it("fences concurrent writers and refuses an unknown migration journal", async () => {
