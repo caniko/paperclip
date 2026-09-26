@@ -11,7 +11,7 @@ import {
 } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { eq, sql } from "drizzle-orm";
 import {
   agents,
@@ -739,7 +739,9 @@ const recoveryFakeCodex = resolve(
       expect(() => parseNativeExecutionInput(firstExecution)).not.toThrow();
       const runnerInstanceId = randomUUID();
       const environment = {
-        PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+        // The synthetic provider only needs its wrapper and Node. An operator's
+        // unbounded development PATH is not part of this fixture's launch contract.
+        PATH: `${bin}:${dirname(process.execPath)}`,
         HOME: sourceHome,
         CODEX_HOME: sourceHome,
       };

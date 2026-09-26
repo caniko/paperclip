@@ -68,7 +68,9 @@ describe("prepareCursorSandboxCommand", () => {
         cwd: remoteWorkspace,
         env: {
           HOME: managedHomeDir,
-          PATH: "/usr/bin:/bin",
+          // This fixture executes the sandbox shell on the test host. NixOS
+          // does not provide bash in /usr/bin; retain the pinned host tool PATH.
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
         },
         remoteSystemHomeDirHint: systemHomeDir,
         timeoutSec: 30,
@@ -114,7 +116,7 @@ describe("prepareCursorSandboxCommand", () => {
         cwd: remoteWorkspace,
         env: {
           HOME: managedHomeDir,
-          PATH: "/usr/bin:/bin",
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
         },
         remoteSystemHomeDirHint: systemHomeDir,
         timeoutSec: 30,
