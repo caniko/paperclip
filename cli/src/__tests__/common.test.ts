@@ -18,6 +18,7 @@ describe("resolveCommandContext", () => {
     process.env = { ...ORIGINAL_ENV };
     delete process.env.PAPERCLIP_API_URL;
     delete process.env.PAPERCLIP_API_KEY;
+    delete process.env.PAPERCLIP_API_KEY_FILE;
     delete process.env.PAPERCLIP_COMPANY_ID;
     delete process.env.PAPERCLIP_AUTH_STORE;
     delete process.env.PAPERCLIP_SERVER_PORT;
@@ -81,6 +82,22 @@ describe("resolveCommandContext", () => {
     expect(resolved.api.apiBase).toBe("http://override:3200");
     expect(resolved.companyId).toBe("company-override");
     expect(resolved.api.apiKey).toBe("direct-token");
+  });
+
+  it("reads a protected runtime token file without exporting it or falling back on file errors", () => {
+    const credentialFile = createTempPath("token");
+    fs.writeFileSync(credentialFile, "fixture-file-token\n", { mode: 0o600 });
+    process.env.PAPERCLIP_API_KEY_FILE = credentialFile;
+    process.env.PAPERCLIP_API_KEY = "unrelated-environment-token";
+    const options = { apiBase: "http://localhost:3100", context: createTempPath("context.json") };
+    const resolved = resolveCommandContext(options);
+    expect(resolved.api.apiKey).toBe("fixture-file-token");
+    expect(resolved.authSource).toBe("file");
+    expect(process.env.PAPERCLIP_API_KEY).toBe("unrelated-environment-token");
+    fs.chmodSync(credentialFile, 0o644);
+    expect(() => resolveCommandContext(options)).toThrow("publicly readable");
+    fs.rmSync(credentialFile);
+    expect(() => resolveCommandContext(options)).toThrow("missing");
   });
 
   it("throws when company is required but unresolved", () => {

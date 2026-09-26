@@ -1,4 +1,6 @@
 import pc from "picocolors";
+import { closeSync, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import type { Command } from "commander";
 import { getStoredBoardCredential, loginBoardCli } from "../../client/board-auth.js";
 import { buildCliCommandLabel } from "../../client/command-label.js";
@@ -24,7 +26,7 @@ export interface ResolvedClientContext {
   profileName: string;
   profile: ClientContextProfile;
   json: boolean;
-  authSource: "explicit" | "env" | "profile_env" | "stored_board" | "none";
+  authSource: "explicit" | "file" | "env" | "profile_env" | "stored_board" | "none";
 }
 
 export function addCommonClientOptions(command: Command, opts?: { includeCompany?: boolean }): Command {
@@ -167,9 +169,24 @@ export function inferContentTypeFromPath(filePath: string): string | undefined {
 function resolveApiKey(
   options: Pick<BaseClientOptions, "apiKey">,
   profile: ClientContextProfile,
-): { value: string | undefined; source: "explicit" | "env" | "profile_env" | "none" } {
+): { value: string | undefined; source: "explicit" | "file" | "env" | "profile_env" | "none" } {
   const optionValue = options.apiKey?.trim();
   if (optionValue) return { value: optionValue, source: "explicit" };
+
+  const credentialFile = process.env.PAPERCLIP_API_KEY_FILE;
+  if (credentialFile) {
+    try {
+      if (!isAbsolute(credentialFile) || realpathSync(credentialFile).startsWith("/nix/store/")) throw new Error();
+      const fd = openSync(credentialFile, "r");
+      try {
+        const stat = fstatSync(fd);
+        if (!stat.isFile() || (stat.mode & 0o007) !== 0 || stat.size > 1024 * 1024) throw new Error();
+        const value = readFileSync(fd, "utf8").trimEnd();
+        if (!value || /[\r\n\0]/.test(value)) throw new Error();
+        return { value, source: "file" };
+      } finally { closeSync(fd); }
+    } catch { throw new Error("CLI credential file is missing, invalid or publicly readable"); }
+  }
 
   const envValue = process.env.PAPERCLIP_API_KEY?.trim();
   if (envValue) return { value: envValue, source: "env" };
