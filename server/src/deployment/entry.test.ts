@@ -96,6 +96,7 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
   expect(environment).not.toContain("entry-test-signing-secret");
   expect(output).not.toContain("entry-test-signing-secret");
   expect(output).not.toContain("entry-test-operator-password");
+  expect(output).toContain("set (runtime credential)");
   await stop();
   expect((await command("apply")).code).toBe(0);
 }, 120000);
