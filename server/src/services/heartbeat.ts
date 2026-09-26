@@ -15101,6 +15101,16 @@ export function heartbeatService(
         continue;
       }
       const message = `Interrupted by graceful server shutdown (${signal})`;
+      // Hermes runs have no local child to terminate. Ask the live adapter to
+      // stop its gateway run and wait for its finalizer before recording the
+      // shutdown disposition; an unverified stop must stay unresolved.
+      const hermesControl = run.runtimeMode === "legacy" && agent.adapterType === "hermes_gateway"
+        ? adapterExecutionControls.get(run.id)
+        : undefined;
+      if (hermesControl) {
+        hermesControl.controller.abort(new Error(message));
+        await waitForAdapterStop(hermesControl.settled, 20_000);
+      }
       const running = runningProcesses.get(run.id);
       try {
         if (run.runtimeMode === "native") {

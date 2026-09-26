@@ -3708,6 +3708,28 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(wakeup?.status).toBe("claimed");
   });
 
+  it("waits for an active Hermes gateway cancellation before draining its run", async () => {
+    const { runId } = await seedRunFixture({ adapterType: "hermes_gateway", agentStatus: "running" });
+    const control = createAdapterExecutionControl();
+    adapterExecutionControls.set(runId, control);
+    let cancellationSettled = false;
+    control.controller.signal.addEventListener("abort", () => {
+      setTimeout(() => {
+        cancellationSettled = true;
+        control.finish();
+      }, 20);
+    }, { once: true });
+
+    try {
+      await heartbeatService(db).drainRunningRunsForShutdown("SIGTERM");
+      expect(control.controller.signal.aborted).toBe(true);
+      expect(cancellationSettled).toBe(true);
+    } finally {
+      control.finish();
+      adapterExecutionControls.delete(runId);
+    }
+  });
+
   it("does not duplicate a legacy reconciliation action across repeated shutdowns", async () => {
     const { agentId, runId, issueId } = await seedRunFixture({
       adapterType: "process",
