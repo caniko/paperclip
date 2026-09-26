@@ -167,8 +167,10 @@ The Hermes worker must be provisioned separately using its supported API server:
 The separate-node `split-network` check now proves controller-to-worker gateway
 dispatch, a worker-to-controller scoped read with cross-company denial,
 revocation of the worker's Paperclip API key, idle controller restart with
-persistent identities and continued callback access, and that the worker VM lacks the controller's
-signing path and local PostgreSQL socket. It runs under **trusted-local** with
+persistent identities and continued callback access, and a live cancellation
+that reaches the worker's `/stop` endpoint before the controller acknowledges
+its terminal status. The worker VM lacks the controller's signing path and
+local PostgreSQL socket. The check runs under **trusted-local** with
 a test-only HTTP gateway; it is staging transport evidence, not remote-only
 confinement. Active-run restart cancellation and recovery, stronger worker
 isolation/credential exclusion, and complete split-deployment backup/restore
@@ -627,8 +629,10 @@ declaration/reconciler, while the worker is a separate NixOS VM with a test-only
 Hermes-compatible HTTP gateway. The worker's scoped Paperclip key reaches its
 company's issue-list endpoint before and after the controller restart, while
 the other company's endpoint returns 403; the same callback returns 401 after
-revocation. The check does not exercise remote-only mode, real Hermes execution,
-active-run restart, or backup/restore.
+revocation. A subsequent in-flight gateway run is stopped exactly once when the
+board cancels it; the controller persists an acknowledged cancellation only after
+the gateway reports `cancelled`. The check does not exercise remote-only mode,
+real Hermes execution, active-run *restart*, or backup/restore.
 
 A bounded independent read-only review covered the native adapter contracts,
 closed-profile gate, namespace restrictions, examples and fixtures. It reported
@@ -642,7 +646,7 @@ initial full run were pre-existing.
 | --- | --- |
 | Native packaging and declarative services | Build and native-service acceptance proven on x86_64-linux; suitable for isolated staging. Repository-wide release readiness remains blocked by the general-server test gate and incomplete independent review. |
 | Remote-only execution enforcement | Not implemented end to end. The selector refuses startup before imports/credentials/database changes; that refusal is tested, but is not a usable remote-only controller. |
-| Complete split deployment | Not qualified. Separate-node trusted-local transport, callback access/revocation and idle restart pass in a staging VM; no run under an enforced remote-only policy exists. Complete credential exclusion, in-flight restart recovery and split restore still need proof. |
+| Complete split deployment | Not qualified. Separate-node trusted-local transport, callback access/revocation, live cancellation and idle restart pass in a staging VM; no run under an enforced remote-only policy exists. Complete credential exclusion, in-flight restart recovery and split restore still need proof. |
 
 **Downstream readiness: not established; this is not a production-ready
 contract.** Remaining acceptance work includes:
