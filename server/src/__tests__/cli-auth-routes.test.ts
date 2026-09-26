@@ -1,6 +1,9 @@
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockAccessService = vi.hoisted(() => ({
   isInstanceAdmin: vi.fn(),
@@ -91,7 +94,10 @@ async function createApp(actor: any, db: any = {} as any) {
 }
 
 describe.sequential("cli auth routes", () => {
+  let claudeHome: string;
   beforeEach(() => {
+    claudeHome = mkdtempSync(join(tmpdir(), "paperclip-cli-auth-skills-"));
+    vi.stubEnv("CLAUDE_HOME", claudeHome);
     vi.resetModules();
     vi.doUnmock("../services/index.js");
     vi.doUnmock("../routes/authz.js");
@@ -99,6 +105,10 @@ describe.sequential("cli auth routes", () => {
     vi.doUnmock("../middleware/index.js");
     registerModuleMocks();
     vi.resetAllMocks();
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(claudeHome, { recursive: true, force: true });
   });
 
   it.sequential("creates a CLI auth challenge with approval metadata", async () => {

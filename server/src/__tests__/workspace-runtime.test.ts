@@ -1683,14 +1683,21 @@ describe("realizeExecutionWorkspace", () => {
     const sharedConfigPath = path.join(sharedConfigDir, "config.json");
     const sharedEnvPath = path.join(sharedConfigDir, ".env");
 
+    // Keep pnpm and paperclipai absent without assuming Git/coreutils live in
+    // /usr/bin. Only fixture tools are projected from the pinned host PATH.
+    for (const command of ["bash", "git", "dirname", "basename", "mkdir", "find", "sed", "ln"]) {
+      const { stdout } = await execFileAsync("/bin/sh", ["-c", 'command -v "$1"', "fixture", command]);
+      await fs.symlink(stdout.trim(), path.join(isolatedBin, command));
+    }
+    await fs.symlink(process.execPath, path.join(isolatedBin, "node"));
+    try {
     process.env.PAPERCLIP_HOME = paperclipHome;
     process.env.PAPERCLIP_INSTANCE_ID = instanceId;
     process.env.PAPERCLIP_WORKTREES_DIR = isolatedWorktreeHome;
     delete process.env.PAPERCLIP_CONFIG;
     // Keep this server-side fixture on provision-worktree.sh's config writer path;
     // CLI/database seeding is covered by the CLI worktree tests.
-    await fs.symlink(process.execPath, path.join(isolatedBin, "node"));
-    process.env.PATH = `${isolatedBin}${path.delimiter}/usr/bin${path.delimiter}/bin`;
+    process.env.PATH = isolatedBin;
 
     await fs.mkdir(sharedConfigDir, { recursive: true });
     await fs.writeFile(
@@ -1764,7 +1771,6 @@ describe("realizeExecutionWorkspace", () => {
     await runGit(repoRoot, ["add", "scripts/provision-worktree.sh"]);
     await runGit(repoRoot, ["commit", "-m", "Add worktree provision script"]);
 
-    try {
       const workspaceInput = {
         base: {
           baseCwd: repoRoot,
@@ -6439,9 +6445,10 @@ describeEmbeddedPostgres("workspace dirty quarantine branch repair", () => {
     });
     const commonDirRaw = await readGit(worktreePath, ["rev-parse", "--git-common-dir"]);
     const commonDir = path.isAbsolute(commonDirRaw) ? commonDirRaw : path.resolve(worktreePath, commonDirRaw);
-    const hookPath = path.join(commonDir, "hooks", "commit-msg");
+    const hookPath = path.join(commonDir, "fixture-hooks", "commit-msg");
     await fs.mkdir(path.dirname(hookPath), { recursive: true });
     await fs.writeFile(hookPath, "#!/bin/sh\necho rescue commit blocked >&2\nexit 1\n", { mode: 0o755 });
+    await runGit(worktreePath, ["config", "core.hooksPath", path.dirname(hookPath)]);
 
     await expect(restoreDirtyQuarantine({
       repoRoot,

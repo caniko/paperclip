@@ -2275,6 +2275,10 @@ describe("worktree helpers", () => {
       execFileSync("git", ["commit", "-m", "Initial commit"], { cwd: repoRoot, stdio: "ignore" });
 
       const sourceHooksDir = path.join(repoRoot, ".git", "hooks");
+      fs.mkdirSync(sourceHooksDir, { recursive: true });
+      // This test deliberately exercises hooks. Override only this disposable
+      // repository's hook path, including when the scoped runner uses no hooks.
+      execFileSync("git", ["config", "core.hooksPath", sourceHooksDir], { cwd: repoRoot });
       const sourceHookPath = path.join(sourceHooksDir, "pre-commit");
       const sourceTokensPath = path.join(sourceHooksDir, "forbidden-tokens.txt");
       fs.writeFileSync(sourceHookPath, "#!/usr/bin/env bash\nexit 0\n", { encoding: "utf8", mode: 0o755 });

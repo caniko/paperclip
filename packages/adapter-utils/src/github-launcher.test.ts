@@ -16,7 +16,9 @@ describe("managed GitHub launchers", () => {
     cleanups.push(() => rm(root, { recursive: true, force: true }));
     const bin = path.join(root, "managed");
     await mkdir(bin);
-    await exec("git", ["init", root]);
+    // The launcher deliberately clears global Git configuration. Do not copy
+    // operator hooks from a host template into this disposable repository.
+    await exec("git", ["init", "--template=", root]);
     await writeFile(path.join(bin, "git"), githubLauncherSource(), { mode: 0o700 });
     const env = { ...process.env, ...githubBrokerEnvironment({
       GH_TOKEN: "host-token", GIT_AUTHOR_NAME: "Host", GIT_COMMITTER_NAME: "Host",
@@ -40,7 +42,7 @@ describe("managed GitHub launchers", () => {
     cleanups.push(() => rm(root, { recursive: true, force: true }));
     const bin = path.join(root, "managed");
     await mkdir(bin);
-    await exec("git", ["init", root]);
+    await exec("git", ["init", "--template=", root]);
     await exec("git", ["-C", root, "config", "user.name", "Local Author"]);
     await exec("git", ["-C", root, "config", "user.email", "local@example.test"]);
     await writeFile(path.join(bin, "git"), githubLauncherSource(), { mode: 0o700 });

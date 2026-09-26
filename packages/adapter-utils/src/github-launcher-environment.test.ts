@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -30,7 +30,19 @@ async function sandbox(layout: string) {
   for (const cli of ["claude", "codex", "git", "gh"]) {
     await writeFile(path.join(bin, cli), `#!/bin/sh\nprintf '%s\\n' '${cli} started'\n`, { mode: 0o700 });
   }
-  const remotePath = `${bin}:${path.dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`;
+  // Model the provider's toolchain explicitly rather than assuming FHS paths
+  // on the test host. No host PATH or environment is inherited by the runner.
+  const tools = path.join(root, "provider-tools");
+  await mkdir(tools);
+  for (const command of ["sh", "bash", "git", "mkdir", "dirname", "cat", "chmod", "mv", "rm", "cp", "readlink", "base64", "awk", "sleep", "rmdir"]) {
+    const { stdout } = await exec("/bin/sh", ["-c", 'command -v "$1"', "fixture", command]);
+    await symlink(stdout.trim(), path.join(tools, command));
+  }
+  for (const command of ["sha256sum", "shasum", "realpath"]) {
+    const { stdout } = await exec("/bin/sh", ["-c", 'command -v "$1" || true', "fixture", command]);
+    if (stdout.trim()) await symlink(stdout.trim(), path.join(tools, command));
+  }
+  const remotePath = `${bin}:${tools}:${path.dirname(process.execPath)}`;
   // Execute real shells and staged launchers, with a provider-owned environment.
   // Do not inherit the controller's PATH, HOME, credentials, or shell hooks.
   const execute: CommandManagedRuntimeRunner["execute"] = async (input) => {
@@ -179,6 +191,7 @@ describe("managed GitHub launcher environment", () => {
   it("preserves local host credential helpers and validates worktree metadata", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-host-git-")); roots.push(root);
     vi.stubEnv("HOME", root);
+    vi.stubEnv("GIT_CONFIG_GLOBAL", undefined);
     vi.stubEnv("GH_TOKEN", "legacy-token");
     await writeFile(path.join(root, ".gitconfig"), '[credential]\n  helper = store\n');
     await exec("git", ["init", path.join(root, "repo")]);
@@ -221,7 +234,10 @@ describe("managed GitHub launcher environment", () => {
         expect(result.stdout).toBe(env.PATH);
       }
       // The wrappers' Node interpreter and underlying commands are still reachable.
-      const github = await fixture.runner.execute({ command: "bash", args: ["-c", "git; gh"], env });
+      // The provider fixture owns its startup environment; do not run the
+      // controller host's global rc file (which can replace PATH on NixOS).
+      // Bash still loads the staged BASH_ENV for this noninteractive shell.
+      const github = await fixture.runner.execute({ command: "bash", args: ["--noprofile", "--norc", "-c", "git; gh"], env });
       expect(github.exitCode, github.stderr).toBe(0);
       expect(github.stdout).toBe("git started\ngh started\n");
     },
