@@ -29,6 +29,7 @@ application provisioning.
 | `checks.x86_64-linux.module-evaluation` | System/user module evaluation and invalid-configuration assertions |
 | `checks.x86_64-linux.nixos-module` | Original singleton VM check |
 | `checks.x86_64-linux.declarative-instances` | Concurrent system embedded/external PostgreSQL and real Home Manager services |
+| `checks.x86_64-linux.split-network` | Separate NixOS controller/worker VM staging check with a fake Hermes gateway and scoped API-key callback |
 
 The native deployment executable is:
 
@@ -46,7 +47,7 @@ services use `paperclip-deployment`.
 
 Both system and user instances share:
 
-- `enable`, `package`, `stateDir`, `host`, `port`, `extraPackages`;
+- `enable`, `package`, `stateDir`, `host`, `port`, `extraPackages`, `executionProfile`;
 - `publicExposure`, `allowedHostnames`, `auth.enable`, `auth.publicBaseUrl`,
   `auth.secretFile`;
 - `database.mode`, `database.embeddedPort`, `database.embeddedUser`,
@@ -56,8 +57,8 @@ Both system and user instances share:
   and `settings`.
 
 System instances additionally support `user`, `openFirewall`, `memoryMax`,
-`tasksMax`, and `database.local.enable`. The latter provisions a local PostgreSQL
-database with a runtime DML role and a separate migration/owner role. Connections
+`tasksMax`, `inaccessiblePaths`, and `database.local.enable`. The latter provisions
+a local PostgreSQL database with a runtime DML role and a separate migration/owner role. Connections
 use peer authentication over `/run/postgresql`; the module writes their runtime
 connection files and orders the service after database setup. It does not create
 passwords in the store. Both roles are accessible to that instance's service UID
@@ -93,6 +94,116 @@ Choose ports explicitly when enabling multiple instances. User services require
 a running user manager; configure lingering when they must survive logout.
 Activation/restart behavior follows the systemd and Home Manager activation
 policy chosen by the operator.
+
+## Split-control-plane qualification boundary
+
+**A functioning remote-only control plane is not ready in this revision.**
+`executionProfile = "remote-only"` is a deployment-owned, fail-closed reservation:
+the native launcher rejects `serve`, `plan`, `apply`, and `check` before importing
+the server/adapter registry, reading credentials, or making application database
+changes. It reports `remote-only execution is not yet qualified`. It does not
+start a reduced-function server or fall back to local execution. This is a
+qualification gate, not a completed runtime policy implementation.
+
+`executionProfile = "trusted-local"` is the compatibility default for existing
+descriptors and both module systems. It permits the existing execution paths;
+select it only when controller-local code has the controller's trust. The profile
+is independent of `auth.enable`: human authentication does not isolate execution.
+
+The source audit found these blockers to safely opening the remote-only gate:
+
+| Path | Finding and required enforcement |
+| --- | --- |
+| `server/src/services/execution-allowlist.ts` | Existing Kubernetes/managed-sandbox guards restrict environment drivers, not every controller-side action. |
+| `server/src/adapters/registry.ts` | External adapters load at module initialization, can replace built-ins, and unknown `getServerAdapter` types fall back to `process`. A safe profile must prevent loading/installation and fallback before effects, not classify names. |
+| `server/src/services/heartbeat.ts` | Shared run preparation resolves workspaces, Git identity and runtime tools before gateway invocation; the existing driver guard occurs after workspace resolution. Persisted configuration and per-run merged overrides require early enforcement. |
+| `server/src/services/workspace-runtime.ts`, `execution-workspaces.ts`, `tool-gateway.ts` | Preview/build/provisioning commands and local stdio tools can execute under controller authority independently of the selected adapter. |
+| `server/src/app.ts`, `services/plugin-loader.ts`, `routes/adapters.ts`, `routes/board-chat.ts` | Startup plugin loading, package installation, and the local board-chat relay need policy gates of their own. |
+| `packages/adapters/hermes/src/gateway/server/execute.ts` | The executor uses HTTP/SSE and stable idempotency/session headers. It now registers for the run's cancellation signal and verifies a terminal gateway status after `/stop` for a known run ID. An ambiguous create response, an unresponsive gateway, controller restart recovery and duplicate prevention across restart remain unqualified. |
+
+The same NixOS module works on a host or a NixOS VM. A production controller VM
+is optional; acceptance and staging use isolated VMs. No VM lifecycle framework,
+scheduler, or alternate worker protocol is introduced.
+
+### Evaluated controller and client examples
+
+`nix/examples/split-controller.nix` is the intended staging contract: a dedicated
+system identity, NixOS-managed PostgreSQL, private loopback listener, authentication,
+telemetry off, runtime signing/encryption/worker credential references, and the
+existing `hermes_gateway` adapter. **It intentionally cannot start while the
+remote-only gate remains closed.** Import it alongside `nixosModules.default`;
+the downstream operator supplies private HTTPS routing and runtime files.
+
+`nix/examples/split-client.nix` imports with `homeManagerModules.default` and
+configures only the CLI against that controller. Module evaluation checks both
+examples and verifies that the client creates no Paperclip server instance.
+
+`nix/examples/external-postgres.nix` uses the same controller contract with
+operator-managed PostgreSQL and distinct runtime/migration URL files. Module
+evaluation checks that it selects `postgres` and disables local database
+provisioning. The downstream database owner supplies TLS trust, role grants,
+network policy and backups; the example does not create or alter that external
+database. Its remote-only profile is subject to the same closed qualification
+gate.
+
+The Hermes worker must be provisioned separately using its supported API server:
+
+- `adapterConfig.apiBaseUrl` addresses that worker's HTTP API. In real deployments
+  use private HTTPS; the adapter's development-only insecure-HTTP override is not
+  a private-network guarantee.
+- `credentials.apiKey` supplies the worker's Hermes `API_SERVER_KEY`. It is not a
+  Paperclip API key. The controller uses `/v1/runs`, run status/events and `/stop`;
+  results and session IDs use the existing adapter contract.
+- `adapterConfig.paperclipApiUrl` supplies the callback address only. The gateway
+  executor does not forward `ctx.authToken` as a worker Paperclip credential.
+  Provision a separate scoped native Paperclip credential on the worker; use a
+  declared task bridge for its supported project/assignee-limited task ingress.
+  That task-bridge key is not a general result/session-management credential.
+- The worker receives no controller signing/encryption files, database role,
+  deployment descriptor credentials, sudo, or privileged socket access. Coding
+  agents/builds need separately confined worker execution environments. A
+  same-UID child is not isolated by an environment-variable filter.
+
+The separate-node `split-network` check now proves controller-to-worker gateway
+dispatch, a worker-to-controller scoped read with cross-company denial,
+revocation of the worker's Paperclip API key, idle controller restart with
+persistent identities and continued callback access, and that the worker VM lacks the controller's
+signing path and local PostgreSQL socket. It runs under **trusted-local** with
+a test-only HTTP gateway; it is staging transport evidence, not remote-only
+confinement. Active-run restart cancellation and recovery, stronger worker
+isolation/credential exclusion, and complete split-deployment backup/restore
+remain unexecuted acceptance requirements.
+
+### Confidentiality outside the service state
+
+`ProtectSystem=strict` makes host files read-only; it does not hide their contents
+or prevent connecting to a Unix socket. NixOS instances additionally hide known
+Docker, containerd, Podman, libvirt, and Nix daemon socket locations when those
+locations exist at namespace creation. `ProtectHome` hides home directories.
+
+Downstream deployments must list other private workspace/mount roots, including
+paths outside `/home`, in `inaccessiblePaths`, for example:
+
+```nix
+services.paperclip.instances.control.inaccessiblePaths = [
+  "/srv/operator-workspaces"
+  "/data/private"
+  "/run/custom-container-engine"
+];
+```
+
+These explicit paths must exist before service startup; a missing path fails
+namespace setup. Prefer hiding a stable parent directory for sockets created
+later. Optional default socket paths absent at startup are not a promise to hide
+future endpoints; inventory custom paths and aliases, order their provisioning
+before the service, and restart the service when that inventory changes. Do not
+hide the service's required credential or PostgreSQL socket directories.
+
+The native VM check verifies that a world-readable `/srv` workspace is readable
+by the service UID outside the namespace but unreadable inside it. It also checks
+connection denial to a world-connectable fake container-engine socket from the
+actual service mount namespace. This is filesystem/socket confinement evidence,
+not certification of the blocked remote-only execution policy.
 
 ## Credentials and client-only configuration
 
@@ -356,6 +467,7 @@ nix build .#checks.x86_64-linux.module-evaluation
 nix build .#checks.x86_64-linux.native-runtime-tools
 nix build .#checks.x86_64-linux.declarative-instances
 nix build .#checks.x86_64-linux.nixos-module
+nix build .#checks.x86_64-linux.split-network
 pnpm -r typecheck
 pnpm test:run
 pnpm build
@@ -367,7 +479,7 @@ Focused native tests are in `server/src/deployment/`,
 `cli/src/__tests__/common.test.ts`. They exercise real PostgreSQL, the real
 launcher and local fake HTTP gateway, rather than paid provider accounts.
 
-Verification on 2026-09-26:
+Initial verification on 2026-09-26 (before the split-control-plane follow-up):
 
 | Gate | Result |
 | --- | --- |
@@ -404,28 +516,146 @@ Simit's optional test command keeps checkout Git policy intact while giving
 temporary fixture repositories their own inherited-hook/signing policy:
 
 ```sh
-nix develop --command simit test --git-fixtures -- \
+nix develop --no-update-lock-file --command simit test --git-fixtures -- \
   npm exec --yes --package=pnpm@9.15.4 -- pnpm test:run
 ```
 
 Use a Simit build that includes `test --git-fixtures`, and the workspace's pinned
 pnpm version. Simit is a development helper, not a package/runtime dependency.
-Fixtures must honor `TMPDIR` to participate. Existing source-level Railway tests
+Fixtures must honor `TMPDIR` to participate. If the checkout's parent contains a
+Cargo workspace, choose an existing `TMPDIR` outside that workspace before
+invoking Simit so disposable Rust crates do not join it accidentally. Keep host
+Git configuration intact; tests that deliberately exercise hooks must configure
+their own disposable repositories rather than relaxing policy for the checkout.
+Existing source-level Railway tests
 assume `/usr/bin/ssh-keygen`; the package substitutes the pinned OpenSSH path and
-its native-runtime check verifies real key generation. Cursor remote fixtures
-and native-session resume still fail in focused runs; their relationship to the
-deployment changes has not been established. No complete post-triage full-suite
-rerun or independent review is recorded.
+its native-runtime check verifies real key generation.
+
+The follow-up verified Simit `2202df98b77dddc46e46cdaab459a914c91296a1`
+in a clean checkout, independent of unrelated canonical-checkout changes:
+
+- Build and all six runner boundary/lifecycle tests passed.
+- Full `cargo test --locked --no-fail-fast` through that runner: 483 passed,
+  15 failed. Its parent `4055d25` had 477 passed and the same 15 failures.
+- Formatting and strict Clippy failed on both revisions with the same affected
+  formatting locations and error summaries. The committed runner adds no observed
+  failure to those gates; Simit as a whole is not green.
+
+Under Paperclip's pinned development environment and that clean runner, source
+tests at baseline `7f3c06dac` and pre-edit branch HEAD `ea7eb17d4` reproduced the
+same two Cursor failures and native-session bounded-launch failure. Railway key
+generation also failed at both revisions. These targeted source comparisons used
+the same installed dependencies and pre-edit build artifacts; they are not a
+claim of a clean rebuild/full-suite baseline comparison.
+
+The Cursor fixture had replaced the executable PATH with `/usr/bin:/bin`, where
+this host has no Bash. It now preserves the pinned test-host tool PATH while
+retaining all path-discovery assertions. Native recovery's synthetic provider
+inherited an oversized development PATH: `shell_environment_policy.set` was
+11,471 bytes against the unchanged 4,096-byte argument limit. Its fixture now
+projects only the fake provider and Node directories, retaining the real runner
+and every recovery assertion. Production argument limits and host Git policy
+remain enforced. Real deployments with oversized launch arguments still fail;
+this fixture change is not a production long-PATH workaround.
+
+Follow-up focused verification: 70 tests passed across six files, including all
+39 native-session resume tests, both Cursor tests, native adapter contracts,
+reconciliation, credential/publication failure, real-server lease-loss exit and
+the closed-profile gate. Repository typecheck, build and token gates passed.
+The final namespace VM run passed with actual workspace read denial and
+connection denial to both a world-connectable container-engine socket and the
+Nix daemon. Its retained log records `PermissionError: [Errno 13]`, and the same
+UID successfully connects outside the service namespace. The native package,
+helper check, module evaluation, and original singleton VM passed as well.
+
+The Hermes gateway's separate execution suite passed all 30 tests after adding
+cancel-before-dispatch, cancel-during-create-response, active-run cancellation,
+stop failure and ambiguous-create cases. Its package typecheck passed. The
+full Hermes package suite passed 85 tests in nine files, and the repository
+typecheck and build passed after the adapter change. The adapter acknowledges
+cancellation only before the remote request or after a
+successful stop and terminal-status observation; otherwise it records an
+unverified request. This does not prove controller restart recovery or end-to-end
+controller confinement. Provider create can still be ambiguous after a lost
+response; this revision does not manufacture a run ID or claim it was stopped.
+
+The next fixture-isolation pass passed **533 tests across eight files**, including
+the full workspace-runtime, CLI worktree, GitHub launcher, sandbox execution,
+multi-repository staging and CLI-auth route suites. It:
+
+- projects required fixture tools instead of assuming `/usr/bin` or `/bin`;
+- encloses workspace fixture environment changes in cleanup even if setup fails;
+- gives hook-copy and hook-failure fixtures explicit repository-local hook paths;
+- uses empty templates where the launcher intentionally clears global Git config;
+- isolates provider shells and skill lookup from unrelated host configuration;
+- fixes a real application failure in `withShallowGitWorkspaceClone`: temporary
+  clones now create `.git/info` before adding nested-repository exclusions. The
+  regression test explicitly selects an empty Git template.
+
+The remaining focused source failures also reproduce at `7f3c06dac` under the
+same pinned tool environment: three higher-level Cursor remote adapter cases,
+the anonymous GitHub-launcher image fixture, and the SSH lease fixture. Railway
+source key generation remains a separate absolute-path portability failure.
+They are unresolved; these targeted baseline comparisons do not classify every
+full-suite failure. Packaged OpenSSH verification remains green.
+
+The staged workspace-A gate passed 7,231 tests in 700 files (UI and CLI).
+Workspace B subsequently reached a Daytona cleanup fixture that hard-coded
+`/bin/rm`; that failure reproduced at the baseline. Commit `91a503678` resolves
+the real executable before installing the failure-injection wrapper. Its full
+file-sync suite passed all 23 tests, including the assertion that exactly two
+cleanup attempts leave no scratch file or warning.
+
+The workspace-B rerun passed 3,625 tests in 277 files (12 tests and two files
+skipped by their existing suite configuration). The post-fixture serialized
+server lane passed 2,694 tests across 148 files. The earlier full `pnpm test:run`
+attempt, started before fixture corrections, failed with 74 tests in eight files
+and 13,523 passed. Most failures were in workspace-runtime, whose entire 161-test
+file subsequently passed under the scoped runner. The remaining general-server
+stage is not green or comprehensively baseline-classified; the passing staged
+lanes are not a substitute for a complete successful `pnpm test:run`.
+
+The final native gate run after `439caf84e` passed the package, module evaluation,
+native runtime helpers, declarative-instances VM, and singleton VM together.
+Repository typecheck, build, and token gates also passed after the Git/fixture
+changes. The later Daytona change is test-only.
+
+The separate-node `split-network` VM check passed with `canix cache build
+--no-push .#checks.x86_64-linux.split-network`, including a controller restart
+and cross-company denial in the final run. Its controller uses NixOS-managed PostgreSQL and the native
+declaration/reconciler, while the worker is a separate NixOS VM with a test-only
+Hermes-compatible HTTP gateway. The worker's scoped Paperclip key reaches its
+company's issue-list endpoint before and after the controller restart, while
+the other company's endpoint returns 403; the same callback returns 401 after
+revocation. The check does not exercise remote-only mode, real Hermes execution,
+active-run restart, or backup/restore.
+
+A bounded independent read-only review covered the native adapter contracts,
+closed-profile gate, namespace restrictions, examples and fixtures. It reported
+no concrete defect in those changes, but stopped at its step limit and did not
+audit the remaining execution paths or independently run tests. This is not a
+complete security review or release approval. In particular, neither the review
+nor the targeted baseline comparisons establishes that all 196 failures in the
+initial full run were pre-existing.
+
+| Readiness dimension | Verdict |
+| --- | --- |
+| Native packaging and declarative services | Build and native-service acceptance proven on x86_64-linux; suitable for isolated staging. Repository-wide release readiness remains blocked by the general-server test gate and incomplete independent review. |
+| Remote-only execution enforcement | Not implemented end to end. The selector refuses startup before imports/credentials/database changes; that refusal is tested, but is not a usable remote-only controller. |
+| Complete split deployment | Not qualified. Separate-node trusted-local transport, callback access/revocation and idle restart pass in a staging VM; no run under an enforced remote-only policy exists. Complete credential exclusion, in-flight restart recovery and split restore still need proof. |
 
 **Downstream readiness: not established; this is not a production-ready
 contract.** Remaining acceptance work includes:
 
 - Resolve the remaining test failures and complete all stages of the full gate.
+- Implement and qualify the remote-only runtime policy across every audited
+  startup, mutation, override and dispatch boundary before opening its gate.
 - Prove in-flight provider cancellation across service restart and inject failures
   at every background-dispatch startup boundary in managed-service tests.
-- Extend native adapter validation beyond the current UI configuration schemas.
-  The built-in `process` and `http` adapters currently lack those schemas and are
-  rejected by declarative provisioning; unsupported structured fields also fail.
+- Extend the native declaration contracts when additional adapters or nested
+  credential projections are needed; unsupported adapters remain rejected.
+- Complete the separate controller/worker VM acceptance matrix. Successful
+  gateway execution under the complete remote-only policy is still blocked.
 - Complete independent review of reconciliation, ownership guards, credential
   boundaries and the downstream contract.
 
