@@ -15,7 +15,7 @@ import { routineService } from "../services/routines.js";
 import { secretService } from "../services/secrets.js";
 import { stableJson } from "../services/managed-resource-drift.js";
 import { logActivity } from "../services/activity-log.js";
-import { findServerAdapter } from "../adapters/registry.js";
+import { validateDeclaredAdapterConfig } from "./adapter-config.js";
 import { validateCron } from "../services/cron.js";
 import { bootstrapOperator } from "./bootstrap.js";
 import { readCredential, type DeploymentDescriptor } from "./runtime.js";
@@ -37,28 +37,9 @@ export function changedFields(before: Fields, after: Fields): string[] {
 
 async function validateAdapters(manifest: DeploymentManifest, credentials: Record<string, string>) {
   for (const a of Object.values(manifest.agents)) {
-    const adapter = findServerAdapter(a.fields.adapterType);
-    if (!adapter?.getConfigSchema) throw new Error("Declared adapter has no configuration schema");
-    const schema = await adapter.getConfigSchema();
-    const fields = new Map(schema.fields.map((f) => [f.key, f]));
-    for (const [name, value] of Object.entries(a.fields.adapterConfig)) {
-      const field = fields.get(name);
-      if (!field) throw new Error("Unsupported declared adapter configuration field");
-      if (field.meta?.secret) throw new Error("Adapter secrets must use deployment credential bindings");
-      if (field.type === "number" && (typeof value !== "number" || !Number.isFinite(value))) throw new Error("Invalid adapter number");
-      if (field.type === "toggle" && typeof value !== "boolean") throw new Error("Invalid adapter toggle");
-      if (field.type === "select" && !field.options?.some((o) => o.value === value)) throw new Error("Invalid adapter selection");
-      if (["text", "textarea", "combobox"].includes(field.type) && typeof value !== "string") throw new Error("Invalid adapter text");
-    }
-    for (const [field, credential] of Object.entries(a.credentials)) {
+    validateDeclaredAdapterConfig(a.fields.adapterType, a.fields.adapterConfig, a.credentials);
+    for (const credential of Object.values(a.credentials)) {
       if (!credentials[credential]) throw new Error("Missing declared worker credential");
-      if (!field.startsWith("env.") && !fields.get(field)?.meta?.secret) throw new Error("Adapter field does not support secret references");
-      if (field.startsWith("env.PAPERCLIP_") || /^(env\.)?(DATABASE_|BETTER_AUTH_|NODE_OPTIONS|LD_)/.test(field)) throw new Error("Reserved adapter credential binding");
-      if (Object.hasOwn(a.fields.adapterConfig, field)) throw new Error("Conflicting adapter credential binding");
-    }
-    for (const field of schema.fields) {
-      if (field.required && field.default === undefined && !Object.hasOwn(a.fields.adapterConfig, field.key)
-        && !Object.hasOwn(a.credentials, field.key)) throw new Error("Missing required adapter configuration field");
     }
   }
   for (const r of Object.values(manifest.routines)) {

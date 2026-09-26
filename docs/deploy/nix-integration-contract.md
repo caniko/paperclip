@@ -211,15 +211,31 @@ credentials before enabling it. `nix/tests/module-evaluation.nix` and
 module systems, including concurrent instances.
 
 Native agent validators define roles, permissions, adapter settings and budgets.
-`reportsTo` names an agent key. Adapter schemas reject unknown fields and require
-secret fields to use credential references. Environment credentials use keys
-such as `credentials."env.PROVIDER_API_KEY"`. Agent adapter type defaults and
-provider/session semantics remain those of the selected native adapter.
-Adapters without `getConfigSchema` currently fail closed; in this baseline that
-includes the built-in `process` and `http` adapters. Structured adapter fields
-that are not represented by the current configuration schema also need a native
-validation contract before they can be declared. The tested end-to-end provider
-path here is `hermes_gateway`.
+`reportsTo` names an agent key. Native deployment contracts in
+`server/src/deployment/adapter-config.ts` validate execution configuration without
+depending on UI form schemas. The supported declaration adapters are:
+
+- `hermes_gateway`: requires `apiBaseUrl` and `credentials.apiKey`; supports
+  structured nonsecret `headers` and `payloadTemplate`, `instructions`,
+  `paperclipApiUrl`, `sessionKeyStrategy`, `timeoutSec`, `eventReconnectMs`, and
+  `pollIntervalMs`. Remote HTTP requires the adapter's existing explicit
+  `dangerouslyAllowInsecureRemoteHttp` development escape hatch.
+- `process`: requires `command`; supports string-array `args`, `cwd`, string-map
+  `env`, `timeoutSec`, and `graceSec`. Runtime environment credentials use keys
+  such as `credentials."env.PROVIDER_API_KEY"`; conflicting inline entries and
+  reserved controller environment credentials are rejected. This is trusted-local
+  execution, not an isolated worker.
+- `http`: requires `url`; supports `method` (`POST`, `PUT`, `PATCH`), structured
+  nonsecret `headers` and `payloadTemplate`, and `timeoutMs` (milliseconds, matching
+  the executor). Nested HTTP header credential references are not implemented.
+
+Unknown fields, malformed values, URL userinfo, inline Hermes API keys, and
+well-known authentication headers fail validation. Arbitrary payloads and custom
+headers must still contain only nonsecret data; validation cannot recognize
+secrets by their values. Other adapters now fail closed until they have a native
+declaration contract; an existing UI schema alone is no longer sufficient.
+The tested end-to-end provider path here is `hermes_gateway`. Declaration support
+does not certify a remote-only execution boundary.
 
 A task bridge declares an existing agent, project, allowed assignees, and a
 credential key:

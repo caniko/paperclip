@@ -121,6 +121,36 @@ it("rejects invalid references and ownership conflicts without partial writes", 
   expect(await db.select().from(deploymentResources)).toEqual(before);
 });
 
+it("reconciles structured native adapter configuration and resolves process credentials", async () => {
+  const declaration = {
+    version: 1, owner: "structured",
+    companies: { example: { fields: { name: "Structured contracts" } } },
+    agents: {
+      process: { company: "example", enabled: false, fields: {
+        name: "Trusted local process", adapterType: "process",
+        adapterConfig: { command: "worker", args: ["--once"], env: { MODE: "test" } },
+      }, credentials: { "env.WORKER_TOKEN": "gateway" } },
+      http: { company: "example", enabled: false, fields: {
+        name: "HTTP worker", adapterType: "http", adapterConfig: {
+          url: "https://worker.example.test", headers: { Accept: "application/json" },
+          payloadTemplate: { task: { labels: ["fixture"] } }, timeoutMs: 1000,
+        },
+      } },
+    },
+  };
+  const first = await reconcile(declaration);
+  expect((await reconcile(declaration, false)).differences).toEqual([]);
+  const [agent] = await db.select().from(agents).where(eq(agents.id, first.bindings["agent/process"]));
+  const resolved = await secretService(db).resolveAdapterConfigForRuntime(agent.companyId, agent.adapterConfig,
+    { consumerType: "agent", consumerId: agent.id }, { adapterType: "process" });
+  expect(resolved.config).toMatchObject({ command: "worker", args: ["--once"], env: {
+    MODE: "test", WORKER_TOKEN: "fixture-only-gateway-key",
+  } });
+  expect(agent.status).toBe("paused");
+  const [http] = await db.select().from(agents).where(eq(agents.id, first.bindings["agent/http"]));
+  expect(http.adapterConfig).toEqual(declaration.agents.http.fields.adapterConfig);
+});
+
 it("validates unchanged encrypted material before planning or applying without secret access writes", async () => {
   const declaration = { ...manifest, owner: "key-readiness", companies: { example: { fields: { name: "Key readiness" } } }, routines: {}, taskBridges: {} };
   await reconcile(declaration);
