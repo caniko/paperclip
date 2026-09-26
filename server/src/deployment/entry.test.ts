@@ -47,12 +47,20 @@ beforeAll(async () => {
     telemetry: { enabled: false },
   });
   writeFileSync(join(root, "config.json"), JSON.stringify(config));
-  writeFileSync(join(root, "manifest.json"), JSON.stringify({ version: 1, owner: "entry", companies: { example: { fields: { name: "Entry test" } } } }));
+  writeFileSync(join(root, "manifest.json"), JSON.stringify({ version: 1, owner: "entry",
+    companies: { example: { fields: { name: "Entry test" } }, other: { fields: { name: "Other company" } } },
+    projects: { main: { company: "example", fields: { name: "Main" } }, outside: { company: "example", fields: { name: "Outside bridge" } } },
+    agents: { worker: { company: "example", fields: { name: "Bridge worker", adapterType: "hermes_gateway", adapterConfig: { apiBaseUrl: "http://127.0.0.1:1" } }, credentials: { apiKey: "gateway" } } },
+    taskBridges: { ingress: { agent: "worker", project: "main", allowedAssignees: ["worker"], credential: "bridge" } },
+  }));
   writeFileSync(join(root, "database"), database.connectionString, { mode: 0o600 });
   writeFileSync(join(root, "auth"), "entry-test-signing-secret-at-least-32-characters", { mode: 0o600 });
   writeFileSync(join(root, "password"), "entry-test-operator-password", { mode: 0o600 });
+  writeFileSync(join(root, "bridge"), "entry-test-bridge-token-at-least-32-characters", { mode: 0o600 });
+  writeFileSync(join(root, "gateway"), "fixture-gateway-token", { mode: 0o600 });
   writeFileSync(descriptorFile, JSON.stringify({ version: 1, home: root, instance: "entry", configFile: join(root, "config.json"),
     manifestFile: join(root, "manifest.json"), serverCredentials: { auth: join(root, "auth"), database: join(root, "database") },
+    credentialFiles: { bridge: join(root, "bridge"), gateway: join(root, "gateway") },
     bootstrap: { email: "operator@example.test", name: "Entry operator", passwordFile: join(root, "password") } }));
 }, 90000);
 afterAll(async () => { await stop(); await database?.cleanup(); rmSync(root, { recursive: true, force: true }); });
@@ -70,6 +78,15 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
     body: JSON.stringify({ email: "operator@example.test", password: "entry-test-operator-password" }),
   });
   expect(response.status, await response.text()).toBe(200);
+  const bindings = JSON.parse(readFileSync(join(root, "instances/entry/deployment-bindings.json"), "utf8")).bindings as Record<string, string>;
+  const createIssue = (company: string, project: string) => fetch(`http://localhost:${port}/api/companies/${company}/issues`, {
+    method: "POST", headers: { "content-type": "application/json", authorization: "Bearer entry-test-bridge-token-at-least-32-characters" },
+    body: JSON.stringify({ title: "Bridge request", status: "backlog", projectId: project, assigneeAgentId: bindings["agent/worker"] }),
+  });
+  const allowed = await createIssue(bindings["company/example"], bindings["project/main"]);
+  expect(allowed.status, await allowed.text()).toBe(201);
+  expect((await createIssue(bindings["company/example"], bindings["project/outside"])).status).toBe(403);
+  expect((await createIssue(bindings["company/other"], bindings["project/main"])).status).toBe(403);
   const plan = await command("plan");
   expect(plan.code, plan.stderr).toBe(0);
   expect(JSON.parse(plan.stdout).differences).toEqual([]);
@@ -82,6 +99,13 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
   await stop();
   expect((await command("apply")).code).toBe(0);
 }, 120000);
+
+it("refuses HTTP port collisions instead of silently moving the instance", async () => {
+  await stop();
+  const occupied = createServer(); occupied.listen(port, "127.0.0.1"); await once(occupied, "listening");
+  try { expect((await command("serve")).code).toBe(1); }
+  finally { await new Promise<void>((resolve) => occupied.close(() => resolve())); }
+}, 30000);
 
 it("refuses invalid provisioning before opening a listener", async () => {
   await stop();

@@ -46,7 +46,7 @@ async function validateAdapters(manifest: DeploymentManifest, credentials: Recor
       if (field.type === "number" && (typeof value !== "number" || !Number.isFinite(value))) throw new Error("Invalid adapter number");
       if (field.type === "toggle" && typeof value !== "boolean") throw new Error("Invalid adapter toggle");
       if (field.type === "select" && !field.options?.some((o) => o.value === value)) throw new Error("Invalid adapter selection");
-      if (["text", "textarea"].includes(field.type) && typeof value !== "string") throw new Error("Invalid adapter text");
+      if (["text", "textarea", "combobox"].includes(field.type) && typeof value !== "string") throw new Error("Invalid adapter text");
     }
     for (const [field, credential] of Object.entries(a.credentials)) {
       if (!credentials[credential]) throw new Error("Missing declared worker credential");

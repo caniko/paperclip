@@ -85,8 +85,8 @@ export function loadDeploymentDescriptor(file: string): DeploymentDescriptor {
   if (descriptor.manifestFile && !deploymentManifestSchema.safeParse(readJson(descriptor.manifestFile)).success) {
     throw new Error("Invalid deployment manifest");
   }
-  if (config.server.deploymentMode === "authenticated" && !descriptor.serverCredentials.auth) {
-    throw new Error("Authenticated deployment requires an auth credential file");
+  if (!descriptor.serverCredentials.auth) {
+    throw new Error("Deployment requires a signing credential for authentication and scoped agent tokens");
   }
   if (config.database.mode === "postgres" && !descriptor.serverCredentials.database) {
     throw new Error("External PostgreSQL requires a database credential file");

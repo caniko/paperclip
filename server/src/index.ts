@@ -711,6 +711,9 @@ async function startServerWithDatabaseTeardown(
     port: requestedListenPort,
     hostname: config.host,
   });
+  if (process.env.PAPERCLIP_DECLARATIVE === "true" && listenPort !== requestedListenPort) {
+    throw new Error("Configured HTTP port is already in use; declarative deployments never select another port");
+  }
   if (config.authBaseUrlMode === "explicit" && config.authPublicBaseUrl) {
     config.authPublicBaseUrl = rewriteLoopbackUrlPort(config.authPublicBaseUrl, listenPort);
   }
