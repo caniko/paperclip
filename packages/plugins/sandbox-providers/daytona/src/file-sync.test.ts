@@ -575,6 +575,9 @@ describe("daytona file-sync inbound zstd transport compression", () => {
       // own inline `.zst` cleanup. It defers to the real `rm` for every later
       // call. This simulates a transient cleanup failure: the bounded sweep's
       // own, separate `rm -f` is the second call, and it succeeds.
+      const realRm = spawnSync("/bin/sh", ["-c", "command -v rm"], { encoding: "utf8" });
+      expect(realRm.status).toBe(0);
+      const realRmPath = realRm.stdout.trim().replace(/'/g, "'\\''");
       const fakeBinDir = await mkTempDir("paperclip-daytona-zstd-fakebin-");
       const counterFile = path.join(fakeBinDir, "rm-call-count");
       const fakeRmPath = path.join(fakeBinDir, "rm");
@@ -587,7 +590,7 @@ describe("daytona file-sync inbound zstd transport compression", () => {
           "n=$((n + 1))",
           `printf '%s' "$n" > "${counterFile}"`,
           '[ "$n" -eq 1 ] && exit 1',
-          'exec /bin/rm "$@"',
+          `exec '${realRmPath}' "$@"`,
           "",
         ].join("\n"),
       );
