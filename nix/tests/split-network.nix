@@ -57,7 +57,10 @@ let
                     if (root / "other-company").exists():
                         cross_company_status = call_controller(base.group(1), (root / "other-company").read_text().strip(), token)
                 run_id = "fixture-" + str(len(runs) + 1)
-                runs[run_id] = {"status": "completed", "callbackStatus": callback_status, "crossCompanyStatus": cross_company_status}
+                held = root / "hold-next"
+                status = "running" if held.exists() else "completed"
+                held.unlink(missing_ok=True)
+                runs[run_id] = {"status": status, "stops": 0, "callbackStatus": callback_status, "crossCompanyStatus": cross_company_status}
                 self.send_json(200, {"run_id": run_id, "status": "started"})
             elif self.path.endswith("/stop"):
                 run_id = self.path.split("/")[3]
@@ -65,6 +68,7 @@ let
                     self.send_json(404, {"error": "missing"})
                     return
                 runs[run_id]["status"] = "cancelled"
+                runs[run_id]["stops"] += 1
                 self.send_json(200, {"status": "cancelled"})
             else:
                 self.send_json(404, {"error": "missing"})
@@ -80,7 +84,11 @@ let
             if run is None:
                 self.send_json(404, {"error": "missing"})
             elif self.path.endswith("/events"):
-                body = ("event: run.completed\ndata: " + json.dumps({"status": run["status"], "output": "fixture completed"}) + "\n\n").encode()
+                if run["status"] == "running":
+                    self.send_response(204)
+                    self.end_headers()
+                    return
+                body = ("event: run." + run["status"] + "\ndata: " + json.dumps({"status": run["status"], "output": "fixture completed"}) + "\n\n").encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Content-Length", str(len(body)))
@@ -249,6 +257,13 @@ pkgs.testers.nixosTest {
     controller.succeed(f"curl -fsS -X DELETE -b /run/board-cookies -H 'Origin: http://controller:3115' http://controller:3115/api/agents/{agent_id}/keys/{key_id} > /run/revoked.json")
     invoke()
     worker.succeed("curl -fsS http://localhost:8642/__fixture/status | jq -e '.runs[\"fixture-3\"].callbackStatus == 401'")
+    worker.succeed("install -m 0600 -o hermes-fixture -g hermes-fixture /dev/null /var/lib/hermes-fixture/hold-next")
+    controller.succeed(f"curl -fsS -b /run/board-cookies -H 'Content-Type: application/json' -H 'Origin: http://controller:3115' --data '{{}}' http://controller:3115/api/agents/{agent_id}/heartbeat/invoke > /run/active.json")
+    active_id = json.loads(controller.succeed("cat /run/active.json"))["id"]
+    worker.wait_until_succeeds("curl -fsS http://localhost:8642/__fixture/status | jq -e '.runs[\"fixture-4\"].status == \"running\"'", timeout=120)
+    controller.succeed(f"curl -fsS -b /run/board-cookies -H 'Content-Type: application/json' -H 'Origin: http://controller:3115' --data '{{}}' http://controller:3115/api/heartbeat-runs/{active_id}/cancel > /run/cancelled.json")
+    controller.wait_until_succeeds(f"curl -fsS -b /run/board-cookies http://controller:3115/api/heartbeat-runs/{active_id} | jq -e '.status == \"cancelled\" and .resultJson.executionCancellation.state == \"acknowledged\"'", timeout=120)
+    worker.succeed("curl -fsS http://localhost:8642/__fixture/status | jq -e '.runs[\"fixture-4\"].status == \"cancelled\" and .runs[\"fixture-4\"].stops == 1'")
     controller.succeed("pid=$(systemctl show paperclip-control -p MainPID --value); ! tr '\\0' '\\n' < /proc/$pid/environ | grep -E '^(BETTER_AUTH_SECRET|DATABASE_URL|DATABASE_MIGRATION_URL)='")
   '';
 }
