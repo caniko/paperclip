@@ -411,6 +411,9 @@
               declarative-instances = import ./nix/tests/declarative-instances.nix {
                 inherit pkgs self home-manager;
               };
+              split-network = import ./nix/tests/split-network.nix {
+                inherit pkgs self;
+              };
             };
 
             devShells.default = pkgs.mkShell {
