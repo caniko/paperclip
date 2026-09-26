@@ -4,6 +4,10 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    home-manager = {
+      url = "github:nix-community/home-manager";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -11,6 +15,7 @@
       self,
       nixpkgs,
       flake-utils,
+      home-manager,
     }:
     let
       paperclipModule = import ./nix/modules/nixos/paperclip.nix;
@@ -22,7 +27,12 @@
       nixosModule =
         { lib, pkgs, ... }:
         {
-          imports = [ paperclipModule ];
+          imports = [
+            paperclipModule
+            ./nix/modules/nixos/instances.nix
+          ];
+
+          nixpkgs.overlays = [ paperclipOverlay ];
 
           services.paperclip.package =
             lib.mkDefault
@@ -35,6 +45,13 @@
         paperclip = nixosModule;
       };
 
+      homeManagerModules.default = { ... }: {
+        imports = [ ./nix/modules/home-manager/paperclip.nix ];
+        nixpkgs.overlays = [ paperclipOverlay ];
+      };
+      homeManagerModules.paperclip = self.homeManagerModules.default;
+      lib.configuration = import ./nix/modules/shared.nix;
+
       overlays = {
         default = paperclipOverlay;
         paperclip = paperclipOverlay;
@@ -44,8 +61,6 @@
       flake-utils.lib.eachSystem
         [
           "x86_64-linux"
-          "aarch64-linux"
-          "aarch64-darwin"
         ]
         (
           system:
@@ -71,12 +86,12 @@
                 ./tsconfig.base.json
                 ./tsconfig.json
                 ./cli
+                ./announcements
                 ./packages
                 ./patches
                 ./scripts
                 ./server
                 ./skills
-                ./skills-releases
                 ./ui
               ];
             };
@@ -86,8 +101,10 @@
               pkgs.gh
               pkgs.git
               pkgs.jq
+              pkgs.lsof
               pkgs.openssh
               pkgs.postgresql
+              pkgs.procps
               pkgs.ripgrep
               pkgs.wget
             ];
@@ -97,6 +114,38 @@
             # Add it in the lightweight public wrapper layer so every adapter
             # child inherits Node without rebuilding the large JS runtime.
             adapterRuntimePath = lib.makeBinPath [ nodejs ];
+
+            runner = pkgs.rustPlatform.buildRustPackage {
+              pname = "paperclip-runnerd";
+              inherit version;
+              src = ./packages/paperclip-runner;
+              cargoRoot = "runner";
+              buildAndTestSubdir = "runner";
+              cargoLock.lockFile = ./packages/paperclip-runner/runner/Cargo.lock;
+              cargoBuildFlags = [ "--bin=paperclip-runnerd" ];
+              nativeBuildInputs = [
+                pkgs.cmake
+                pkgs.pkg-config
+              ];
+              nativeCheckInputs = [
+                pkgs.procps
+                pkgs.which
+              ];
+              postPatch = ''
+                # Fixtures and descendant cleanup need executable paths in the
+                # sandbox, where /bin contains only sh.
+                substituteInPlace runner/crates/runner-core/src/codex_provider.rs \
+                  --replace-fail '"/bin/cat"' '"${pkgs.coreutils}/bin/cat"'
+                substituteInPlace runner/crates/runner-core/tests/codex_provider.rs \
+                  --replace-fail '"/bin/kill"' '"${pkgs.procps}/bin/kill"'
+                substituteInPlace runner/crates/runner-core/tests/process_supervisor.rs \
+                  --replace-fail '"/usr/bin/which"' '"${pkgs.which}/bin/which"'
+                # The supervisor deliberately clears its child environment;
+                # PATH additions cannot make its signal helper resolvable.
+                substituteInPlace runner/crates/runner-core/src/process_supervisor.rs \
+                  --replace-fail 'Command::new("kill")' 'Command::new("${pkgs.procps}/bin/kill")'
+              '';
+            };
 
             paperclipUnwrapped = pkgs.stdenv.mkDerivation (finalAttrs: {
               pname = "paperclip";
@@ -118,6 +167,14 @@
                 pkgs.postgresql
                 pkgs.vips
               ];
+
+              postPatch = ''
+                # These helpers deliberately bypass PATH upstream. NixOS has no
+                # /usr/bin OpenSSH; retain the trusted absolute-path contract.
+                substituteInPlace server/src/services/railway-ssh.ts \
+                  --replace-fail '"/usr/bin/ssh-keygen"' '"${pkgs.openssh}/bin/ssh-keygen"' \
+                  --replace-fail '"/usr/bin/ssh"' '"${pkgs.openssh}/bin/ssh"'
+              '';
 
               # The workspace packages export TypeScript sources during monorepo
               # development. Hoisting keeps those exports and their dependencies
@@ -142,9 +199,7 @@
                 pnpm config set fetch-retry-maxtimeout 120000
                 pnpm config set fetch-timeout 600000
 
-                substituteInPlace pnpm-lock.yaml \
-                  --replace-fail x3fethhotv43zektyl5prdwf54 a93c6b5344b036508a5a86ba7e8589b11302119d46bdc51318e297b74fa5666e \
-                  --replace-fail 55uhvnotpqyiy37rn3pqpukhei d8b1e087e95f559a6342fc15954f11af22d9dca43a7fcca5762b6459913b5800
+                ${nodejs}/bin/node scripts/nix-pnpm-patch-hashes.mjs
               '';
 
               pnpmDeps = pkgs.fetchPnpmDeps {
@@ -157,7 +212,7 @@
                   ;
                 inherit pnpm;
                 fetcherVersion = 4;
-                hash = "sha256-xcAji32woqLG93dclH/hDaWyNUeLHWdXfW+AKeIPF7o=";
+                hash = "sha256-e2PGbttFzg89GKuJOdO0F+VcVu6wYFevs1UI/E8M+2g=";
               };
 
               buildPhase = ''
@@ -165,6 +220,18 @@
 
                 # Keep this aligned with the production Docker build. The CLI is
                 # built as well because it is the flake's default executable.
+                pnpm --filter @paperclipai/paperclip-runner build:typescript
+                mkdir -p packages/paperclip-runner/dist/bin
+                cp ${runner}/bin/paperclip-runnerd packages/paperclip-runner/dist/bin/
+                # The separately built, locked Rust derivation provides the native
+                # runner. Keep the server's vendor validation and asset staging.
+                ${nodejs}/bin/node --input-type=module -e '
+                  import fs from "node:fs";
+                  const file = "server/package.json";
+                  const manifest = JSON.parse(fs.readFileSync(file));
+                  manifest.scripts["prepare:runner-vendor"] = "pnpm --filter @paperclipai/paperclip-runner build:typescript";
+                  fs.writeFileSync(file, JSON.stringify(manifest));
+                '
                 pnpm --filter @paperclipai/ui build
                 pnpm --filter @paperclipai/plugin-sdk build
                 # TypeScript's server program exceeds V8's default ~2 GiB heap
@@ -213,7 +280,7 @@
                 homepage = "https://github.com/paperclipai/paperclip";
                 license = lib.licenses.mit;
                 mainProgram = "paperclip";
-                platforms = lib.platforms.unix;
+                platforms = [ "x86_64-linux" ];
               };
             });
 
@@ -298,6 +365,11 @@
                     "$out/bin/paperclip-server" \
                     --prefix PATH : ${lib.escapeShellArg adapterRuntimePath} \
                     --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ]}
+                  makeWrapper ${nodejs}/bin/node "$out/bin/paperclip-deployment" \
+                    --add-flags "--import ${paperclipRuntime}/lib/paperclip/server/node_modules/tsx/dist/loader.mjs" \
+                    --add-flags "${paperclipRuntime}/lib/paperclip/server/dist/deployment-entry.js" \
+                    --prefix PATH : ${lib.escapeShellArg "${adapterRuntimePath}:${runtimePath}"} \
+                    --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ]}
                 '';
           in
           {
@@ -319,10 +391,25 @@
 
             checks = {
               package = paperclip;
+              native-runtime-tools = import ./nix/tests/runtime-tools.nix {
+                inherit pkgs runtimePath;
+                package = paperclip;
+              };
+              module-evaluation = import ./nix/tests/module-evaluation.nix {
+                inherit
+                  pkgs
+                  self
+                  home-manager
+                  nixpkgs
+                  ;
+              };
             }
             // lib.optionalAttrs pkgs.stdenv.isLinux {
               nixos-module = import ./nix/tests/nixos-module.nix {
                 inherit pkgs self;
+              };
+              declarative-instances = import ./nix/tests/declarative-instances.nix {
+                inherit pkgs self home-manager;
               };
             };
 
@@ -334,6 +421,7 @@
                 pkgs.gh
                 pkgs.git
                 pkgs.jq
+                pkgs.lsof
                 pkgs.openssh
                 pkgs.pkg-config
                 pkgs.playwright-driver.browsers
