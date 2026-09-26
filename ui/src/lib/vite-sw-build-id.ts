@@ -71,7 +71,9 @@ export function serviceWorkerBuildIdPlugin(
         buildId = deriveBuildIdFromEntryFileName(entry.fileName);
       }
     },
-    closeBundle() {
+    // closeBundle also runs after a failed build, before public assets exist,
+    // which masks the actual build error with an unrelated ENOENT.
+    writeBundle() {
       const swPath = path.resolve(outDir, serviceWorkerFileName);
       const source = fs.readFileSync(swPath, "utf8");
       const stamped = stampServiceWorkerBuildId(source, buildId ?? "build");
