@@ -15,6 +15,40 @@ function createUtilitySql(url: string) {
   return postgres(url, { max: 1, onnotice: () => {} });
 }
 
+/** Fences declarative startup/offline reconciliation against another live server. */
+export async function acquireDeploymentLease(connection: string, onLost?: () => void) {
+  let active = false;
+  const client = postgres(connection, { max: 1, onnotice: () => {}, onclose: () => {
+    if (active) { active = false; onLost?.(); }
+  } });
+  const reserved = await client.reserve();
+  try {
+    const [result] = await reserved`select pg_try_advisory_lock(1735289202) as acquired`;
+    if (!result.acquired) throw new Error("A declarative server or provisioner already owns this database");
+    active = true;
+  } catch (error) { reserved.release(); await client.end(); throw error; }
+  return async () => {
+    const held = active; active = false;
+    try { if (held) await reserved`select pg_advisory_unlock(1735289202)`; }
+    finally { reserved.release(); await client.end(); }
+  };
+}
+
+/** Managed launches must never infer compatibility from a newer journal. */
+export async function assertDeploymentSchemaCompatible(url: string) {
+  const connection = createUtilitySql(url);
+  try {
+    const schema = await discoverMigrationTableSchema(connection);
+    if (!schema) return;
+    const columns = await getMigrationTableColumnNames(connection, schema);
+    if (!columns.has("hash")) throw new Error("Declarative deployment requires a hash-based migration journal");
+    const files = await listMigrationFiles();
+    const known = await mapHashesToMigrationFiles(files);
+    const rows = await connection.unsafe<{ hash: string }[]>(`SELECT hash FROM ${quoteIdentifier(schema)}.${quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE)} ORDER BY id`);
+    if (rows.some((r) => !known.has(r.hash))) throw new Error("Database contains unknown or newer migrations; restore a compatible backup or use a compatible binary");
+  } finally { await connection.end(); }
+}
+
 type RegisteredPostgresClient = ReturnType<typeof postgres>;
 
 /**
