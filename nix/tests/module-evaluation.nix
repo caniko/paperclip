@@ -81,6 +81,7 @@ let
     services.paperclip.instances.one.inaccessiblePaths = [ "/srv/operator-workspaces" ];
   };
   splitController = system { imports = [ ../examples/split-controller.nix ]; };
+  externalController = system { imports = [ ../examples/external-postgres.nix ]; };
   splitClient = home-manager.lib.homeManagerConfiguration {
     inherit pkgs;
     modules = [
@@ -97,6 +98,9 @@ in
 assert lib.assertMsg (valid machine.config) (explain machine.config);
 assert lib.assertMsg (valid home.config) (explain home.config);
 assert lib.assertMsg (valid splitController.config) (explain splitController.config);
+assert lib.assertMsg (valid externalController.config) (explain externalController.config);
+assert !externalController.config.services.paperclip.instances.control.database.local.enable;
+assert externalController.config.services.paperclip.instances.control.database.mode == "postgres";
 assert lib.assertMsg (valid splitClient.config) (explain splitClient.config);
 assert splitClient.config.services.paperclip.instances == { };
 assert
