@@ -39,6 +39,14 @@ rec {
         default = [ ];
         description = "Prebuilt helper executables available to trusted local adapters.";
       };
+      executionProfile = mkOption {
+        type = types.enum [
+          "trusted-local"
+          "remote-only"
+        ];
+        default = "trusted-local";
+        description = "Deployment-owned execution profile, independent of human authentication. trusted-local preserves compatibility. remote-only currently refuses startup: the shared workspace, tools and plugin paths are not yet qualified for controller isolation.";
+      };
       publicExposure = mkOption {
         type = types.bool;
         default = false;
@@ -202,7 +210,7 @@ rec {
         home = cfg.stateDir;
         instance = name;
         inherit configFile;
-        inherit (cfg) credentialFiles;
+        inherit (cfg) credentialFiles executionProfile;
         serverCredentials = lib.filterAttrs (_: v: v != null) {
           auth = cfg.auth.secretFile;
           database = cfg.database.urlFile;

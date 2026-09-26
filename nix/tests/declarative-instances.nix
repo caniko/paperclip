@@ -31,6 +31,16 @@ pkgs.testers.nixosTest {
       diskSize = 24576;
     };
     services.paperclip.instances = {
+      closed = {
+        enable = true;
+        port = 3114;
+        executionProfile = "remote-only";
+        auth.secretFile = "/run/must-not-be-read/signing";
+        database = {
+          mode = "postgres";
+          urlFile = "/run/must-not-be-read/database";
+        };
+      };
       embedded = {
         enable = true;
         port = 3111;
@@ -53,6 +63,7 @@ pkgs.testers.nixosTest {
         enable = true;
         port = 3112;
         database.local.enable = true;
+        inaccessiblePaths = [ "/srv/operator-workspaces" ];
         auth = {
           secretFile = "/var/lib/paperclip-external/credentials/auth";
           publicBaseUrl = "http://localhost:3112";
@@ -104,6 +115,9 @@ pkgs.testers.nixosTest {
       };
       script = ''
         umask 0077
+        install -d -m 0755 /srv/operator-workspaces
+        printf 'private operator workspace\n' > /srv/operator-workspaces/probe
+        chmod 0644 /srv/operator-workspaces/probe
         for instance in embedded external; do
           root=/var/lib/paperclip-$instance
           install -d -m 0700 -o paperclip-$instance -g paperclip-$instance "$root/credentials"
@@ -120,6 +134,15 @@ pkgs.testers.nixosTest {
     };
     systemd.services.paperclip-embedded.serviceConfig.Restart = lib.mkForce "no";
     systemd.services.paperclip-external.serviceConfig.Restart = lib.mkForce "no";
+    systemd.services.paperclip-closed.serviceConfig.Restart = lib.mkForce "no";
+    systemd.sockets.paperclip-fixture-docker = {
+      wantedBy = [ "sockets.target" ];
+      before = [ "paperclip-external.service" ];
+      listenStreams = [ "/run/docker.sock" ];
+      socketConfig.SocketMode = "0666";
+    };
+    systemd.services.paperclip-fixture-docker.serviceConfig.ExecStart =
+      "${pkgs.coreutils}/bin/sleep infinity";
     environment.systemPackages = [
       package
       pkgs.curl
@@ -130,6 +153,10 @@ pkgs.testers.nixosTest {
   testScript = ''
     import json
     start_all()
+    machine.wait_until_succeeds("systemctl is-failed paperclip-closed.service")
+    machine.succeed("journalctl -u paperclip-closed --no-pager | grep 'remote-only execution is not yet qualified'")
+    machine.fail("curl -fsS --max-time 2 http://localhost:3114/api/health")
+    machine.fail("test -e /var/lib/paperclip-closed/instances/closed/deployment-bindings.json")
     for port in [3111, 3112, 3113]:
         try:
             machine.wait_for_open_port(port, timeout=120)
@@ -137,7 +164,9 @@ pkgs.testers.nixosTest {
             print(machine.succeed("journalctl -b --no-pager -u paperclip-embedded -u paperclip-external -u paperclip-external-database -u home-manager-operator"))
             print(machine.succeed("journalctl -b --no-pager _UID=1000"))
             raise
-        machine.succeed(f"curl -fsS http://localhost:{port}/api/health | jq -e '.status == \"ok\"'")
+        # The listener binds before startup recovery completes. Readiness, not
+        # merely a successful TCP connection, is the acceptance boundary.
+        machine.wait_until_succeeds(f"curl -fsS http://localhost:{port}/api/health | jq -e '.status == \"ok\"'", timeout=120)
     for name in ["embedded", "external"]:
         machine.wait_for_unit(f"paperclip-{name}.service")
     machine.succeed("runuser -u operator -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active paperclip-home.service")
@@ -157,6 +186,16 @@ pkgs.testers.nixosTest {
         machine.fail(f"curl -fsS http://localhost:{port}/api/companies")
         machine.succeed(f"pid=$(systemctl show paperclip-{name} -p MainPID --value); ! tr '\\0' '\\n' < /proc/$pid/environ | grep -E '^(BETTER_AUTH_SECRET|DATABASE_URL|DATABASE_MIGRATION_URL)='")
     # Real runtime role cannot perform schema changes; migration role can.
+    # The file is readable to this UID outside the service. Inside the actual
+    # service mount namespace even read access is denied (not merely writes).
+    machine.succeed("runuser -u paperclip-external -- cat /srv/operator-workspaces/probe")
+    pid = machine.succeed("systemctl show paperclip-external -p MainPID --value").strip()
+    machine.fail(f"nsenter -t {pid} -m -- runuser -u paperclip-external -- cat /srv/operator-workspaces/probe")
+    machine.fail(f"nsenter -t {pid} -m -- runuser -u paperclip-external -- ls /nix/var/nix/daemon-socket")
+    for socket_path in ["/run/docker.sock", "/nix/var/nix/daemon-socket/socket"]:
+        socket_probe = f"python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(2); s.connect(\"{socket_path}\")'"
+        machine.succeed(f"runuser -u paperclip-external -- {socket_probe}")
+        machine.fail(f"nsenter -t {pid} -m -- runuser -u paperclip-external -- {socket_probe}")
     machine.fail("runuser -u paperclip-external -- psql 'postgresql://paperclip-external@localhost/paperclip_external?host=/run/postgresql' -c 'create table runtime_must_not_create (id int)'")
     external_command = machine.succeed("systemctl cat paperclip-external | sed -n 's/^ExecStart=//p'").strip()
     machine.succeed(f"runuser -u paperclip-external -- {external_command} check")

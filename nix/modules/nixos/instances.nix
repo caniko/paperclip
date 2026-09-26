@@ -41,6 +41,15 @@ in
               default = 512;
               description = "systemd task limit.";
             };
+            inaccessiblePaths = lib.mkOption {
+              type = lib.types.listOf (lib.types.strMatching "^/[^[:space:]]+$");
+              default = [ ];
+              example = [
+                "/srv/operator-workspaces"
+                "/data/private"
+              ];
+              description = "Existing paths hidden from the service mount namespace, including readable operator workspaces outside /home. Missing paths fail startup. This is stronger than read-only access.";
+            };
             database.local.enable = lib.mkEnableOption "a local PostgreSQL database with separate runtime and migration roles, authenticated over a Unix socket";
           };
           config.stateDir = lib.mkDefault "/var/lib/paperclip-${name}";
@@ -158,6 +167,17 @@ in
             TimeoutStopSec = 120;
             ProtectSystem = "strict";
             ProtectHome = true;
+            # Read-only mounts do not prevent reading workspaces or connecting
+            # to privileged Unix sockets. These paths are hidden, not read-only.
+            InaccessiblePaths =
+              (map (p: "-${p}") [
+                "/run/docker.sock"
+                "/run/containerd"
+                "/run/podman"
+                "/run/libvirt"
+                "/nix/var/nix/daemon-socket"
+              ])
+              ++ c.inaccessiblePaths;
             PrivateTmp = true;
             ReadWritePaths = [ c.stateDir ] ++ lib.optional (c.database.dataDir != null) c.database.dataDir;
             NoNewPrivileges = true;
