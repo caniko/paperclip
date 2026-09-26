@@ -3,7 +3,7 @@ import { lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildRemoteGitDeltaBundleScript,
@@ -34,6 +34,7 @@ describe("git workspace sync", () => {
   const cleanupDirs: string[] = [];
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     setExpensiveWorkspaceGitExecutor(null);
     while (cleanupDirs.length > 0) {
       const dir = cleanupDirs.pop();
@@ -189,8 +190,12 @@ describe("git workspace sync", () => {
   it.skipIf(process.platform === "win32")("preserves nested repository symlinks after the temporary clone is removed", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-nested-links-"));
     cleanupDirs.push(rootDir);
+    const template = path.join(rootDir, "empty-template");
+    await mkdir(template);
+    vi.stubEnv("GIT_TEMPLATE_DIR", template);
     const repo = await createRepo(rootDir);
     const nested = await createRepo(path.join(repo, ".paperclip-repositories"));
+    await mkdir(path.join(repo, ".git/info"), { recursive: true });
     await writeFile(path.join(repo, ".git/info/exclude"), ".paperclip-repositories/\n");
     await mkdir(path.join(nested, "skills", "demo"), { recursive: true });
     await mkdir(path.join(nested, ".claude", "skills"), { recursive: true });

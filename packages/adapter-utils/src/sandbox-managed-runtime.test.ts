@@ -362,6 +362,8 @@ describe("sandbox managed runtime", () => {
       await git(cwd, ["commit", "-m", contents!]);
       await writeFile(path.join(cwd, "secret.txt"), "must stay local");
     }
+    // Git installations with empty templates do not create info/exclude.
+    await mkdir(path.join(local, ".git/info"), { recursive: true });
     await writeFile(path.join(local, ".git/info/exclude"), ".paperclip-repositories/\n");
     await writeFile(path.join(local, secondPath, "dirty.txt"), "local edit");
     await writeFile(path.join(local, secondPath, "host-config.txt"), "excluded by operator");
