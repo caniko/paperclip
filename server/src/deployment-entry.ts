@@ -1,4 +1,4 @@
-import { loadDeploymentDescriptor, deploymentEnvironment } from "./deployment/runtime.js";
+import { loadDeploymentDescriptor, deploymentEnvironment, UnqualifiedRemoteExecutionError } from "./deployment/runtime.js";
 
 try {
   const [file, command = "serve", ...extra] = process.argv.slice(2);
@@ -20,7 +20,8 @@ try {
     console.log(JSON.stringify(result, null, 2));
     process.exitCode = exitCode;
   }
-} catch {
-  console.error("Paperclip declarative startup failed; check configuration and runtime credential availability.");
+} catch (error) {
+  console.error(error instanceof UnqualifiedRemoteExecutionError ? error.message
+    : "Paperclip declarative startup failed; check configuration and runtime credential availability.");
   process.exitCode = 1;
 }

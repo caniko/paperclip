@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,7 +6,8 @@ import { createServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { startEmbeddedPostgresTestDatabase } from "@paperclipai/db";
+import { createDb, startEmbeddedPostgresTestDatabase } from "@paperclipai/db";
+import { sql } from "drizzle-orm";
 import { paperclipConfigSchema } from "@paperclipai/shared";
 
 const root = mkdtempSync(join(tmpdir(), "paperclip-deployment-entry-"));
@@ -107,6 +108,61 @@ it("refuses HTTP port collisions instead of silently moving the instance", async
   try { expect((await command("serve")).code).toBe(1); }
   finally { await new Promise<void>((resolve) => occupied.close(() => resolve())); }
 }, 30000);
+
+it("fails closed for the unqualified remote-only profile before publishing readiness", async () => {
+  await stop();
+  const original = readFileSync(descriptorFile, "utf8");
+  writeFileSync(descriptorFile, JSON.stringify({ ...JSON.parse(original), executionProfile: "remote-only" }));
+  try {
+    for (const name of ["serve", "plan", "apply", "check"]) {
+      const failed = await command(name);
+      expect(failed.code).toBe(1);
+      expect(failed.stderr).toContain("remote-only execution is not yet qualified");
+      expect(failed.stdout).toBe("");
+    }
+    await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
+  } finally { writeFileSync(descriptorFile, original); }
+}, 30000);
+
+it("refuses missing credentials and failed binding publication without readiness", async () => {
+  await stop();
+  for (const name of ["auth", "gateway"]) {
+    const file = join(root, name), held = `${file}.held`;
+    renameSync(file, held);
+    try {
+      expect((await command("serve")).code).toBe(1);
+      await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
+    } finally { renameSync(held, file); }
+  }
+  const bindings = join(root, "instances/entry/deployment-bindings.json"), held = `${bindings}.held`;
+  renameSync(bindings, held);
+  mkdirSync(bindings);
+  writeFileSync(join(bindings, "barrier"), "publication barrier");
+  try {
+    expect((await command("serve")).code).toBe(1);
+    await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
+  } finally { rmSync(bindings, { recursive: true }); renameSync(held, bindings); }
+  expect((await command("check")).code).toBe(0);
+}, 60000);
+
+it("exits the real server when its database lease is lost", async () => {
+  child = launch("serve");
+  let logs = "";
+  child.stdout!.on("data", (chunk) => { logs += chunk; });
+  child.stderr!.on("data", (chunk) => { logs += chunk; });
+  await expect.poll(async () => {
+    if (child?.exitCode !== null) throw new Error(`Launcher exited: ${logs}`);
+    try { return (await fetch(`http://127.0.0.1:${port}/api/health`)).status; } catch { return 0; }
+  }, { timeout: 45000, interval: 500 }).toBe(200);
+  const exited = once(child, "exit");
+  const db = createDb(database.connectionString);
+  await db.execute(sql`select pg_terminate_backend(pid) from pg_locks where locktype = 'advisory' and objid = 1735289202 and database = (select oid from pg_database where datname = current_database())`);
+  const [code] = await exited;
+  expect(code).toBe(1);
+  child = undefined;
+  await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
+  expect((await command("check")).code).toBe(0);
+}, 60000);
 
 it("refuses invalid provisioning before opening a listener", async () => {
   await stop();

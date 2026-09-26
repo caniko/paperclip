@@ -9,6 +9,7 @@ export const deploymentDescriptorSchema = z.object({
   version: z.literal(1),
   home: runtimeFile,
   instance: z.string().regex(/^[a-z][a-z0-9_-]{0,30}$/),
+  executionProfile: z.enum(["trusted-local", "remote-only"]).optional(),
   configFile: z.string(),
   manifestFile: z.string().optional(),
   credentialFiles: z.record(z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/), runtimeFile).default({}),
@@ -26,6 +27,12 @@ export const deploymentDescriptorSchema = z.object({
   bootstrap: z.object({ email: z.string().email(), name: z.string().min(1), passwordFile: runtimeFile }).strict().optional(),
 }).strict();
 export type DeploymentDescriptor = z.infer<typeof deploymentDescriptorSchema>;
+
+export class UnqualifiedRemoteExecutionError extends Error {
+  constructor() {
+    super("Paperclip remote-only execution is not yet qualified; refusing startup before adapter/plugin loading or database mutation.");
+  }
+}
 
 // Server credentials live in this process, never in the inherited environment.
 let serverCredentials: Partial<Record<"auth" | "database" | "migration", string>> = {};
@@ -80,6 +87,11 @@ export function loadDeploymentDescriptor(file: string): DeploymentDescriptor {
   const parsed = deploymentDescriptorSchema.safeParse(readJson(file));
   if (!parsed.success) throw new Error("Invalid deployment descriptor");
   const descriptor = parsed.data;
+  // The shared dispatch path still prepares controller-local workspaces and
+  // runtime tools before invoking HTTP gateways. Do not advertise containment
+  // by merely filtering adapter names. The profile stays closed until those
+  // paths and plugin/stdio loading have end-to-end enforcement and VM evidence.
+  if (descriptor.executionProfile === "remote-only") throw new UnqualifiedRemoteExecutionError();
   const config = validateDeploymentConfig(readJson(descriptor.configFile));
   if (config.database.connectionString) throw new Error("Database connections must use runtime credential files");
   if (descriptor.manifestFile && !deploymentManifestSchema.safeParse(readJson(descriptor.manifestFile)).success) {
