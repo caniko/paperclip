@@ -579,6 +579,120 @@ describe("execute", () => {
     expect(result.errorCode).toBe("hermes_gateway_timeout");
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/stop"))).toBe(true);
   });
+
+  it("acknowledges cancellation before dispatch without creating a Hermes run", async () => {
+    const abort = new AbortController();
+    abort.abort();
+    const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key" });
+    ctx.signal = abort.signal;
+    ctx.onCancellationReady = vi.fn(async () => undefined);
+    ctx.onDispatch = vi.fn();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute(ctx);
+
+    expect(ctx.onCancellationReady).toHaveBeenCalledOnce();
+    expect(ctx.onDispatch).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.resultJson?.executionCancellation).toMatchObject({ state: "acknowledged", proof: "no_remote_request" });
+  });
+
+  it("stops a created Hermes run and acknowledges only its verified terminal status", async () => {
+    const abort = new AbortController();
+    const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key", timeoutSec: 5 });
+    ctx.signal = abort.signal;
+    ctx.onCancellationReady = vi.fn(async () => undefined);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) {
+        // The request has crossed the dispatch boundary. Cancellation racing
+        // with its response must still stop the run whose ID the response names.
+        abort.abort();
+        return new Response(JSON.stringify({ run_id: "run-created" }), { status: 200 });
+      }
+      if (url.endsWith("/stop")) return new Response(JSON.stringify({ status: "stopping" }), { status: 200 });
+      if (init?.method === "GET") return new Response(JSON.stringify({ status: "cancelled" }), { status: 200 });
+      throw new Error(`Unexpected Hermes request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute(ctx);
+
+    expect(ctx.onCancellationReady).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/v1/runs/run-created/stop"))).toBe(true);
+    expect(result.resultJson?.executionCancellation).toMatchObject({ state: "acknowledged", proof: "gateway_terminal_status" });
+    expect(result.resultJson?.run_id).toBe("run-created");
+  });
+
+  it("stops an in-flight Hermes run when the controller cancels during status polling", async () => {
+    const abort = new AbortController();
+    const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key", timeoutSec: 5 });
+    ctx.signal = abort.signal;
+    ctx.onCancellationReady = vi.fn(async () => undefined);
+    let stopRequested = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) return new Response(JSON.stringify({ run_id: "run-active" }), { status: 200 });
+      if (url.endsWith("/events")) return new Response(sseStream(""), { status: 200, headers: { "content-type": "text/event-stream" } });
+      if (url.endsWith("/stop")) {
+        stopRequested = true;
+        return new Response(JSON.stringify({ status: "stopping" }), { status: 200 });
+      }
+      if (init?.method === "GET") {
+        if (!stopRequested) abort.abort();
+        return new Response(JSON.stringify({ status: stopRequested ? "cancelled" : "running" }), { status: 200 });
+      }
+      throw new Error(`Unexpected Hermes request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute(ctx);
+
+    expect(stopRequested).toBe(true);
+    expect(result.resultJson?.executionCancellation).toMatchObject({ state: "acknowledged", proof: "gateway_terminal_status" });
+    expect(result.resultJson?.run_id).toBe("run-active");
+  });
+
+  it("does not acknowledge cancellation if Hermes refuses stop", async () => {
+    const abort = new AbortController();
+    const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key", timeoutSec: 5 });
+    ctx.signal = abort.signal;
+    ctx.onCancellationReady = vi.fn(async () => undefined);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) {
+        abort.abort();
+        return new Response(JSON.stringify({ run_id: "run-unstopped" }), { status: 200 });
+      }
+      if (url.endsWith("/stop")) return new Response(JSON.stringify({ error: "unavailable" }), { status: 503 });
+      throw new Error(`Unexpected Hermes request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute(ctx);
+
+    expect(result.errorCode).toBe("hermes_gateway_cancel_unverified");
+    expect(result.resultJson?.executionCancellation).toMatchObject({ state: "requested" });
+    expect(result.resultJson?.run_id).toBe("run-unstopped");
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/v1/runs/run-unstopped/stop"))).toBe(true);
+  });
+
+  it("does not claim the remote run stopped if creation fails after dispatch", async () => {
+    const abort = new AbortController();
+    const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key" });
+    ctx.signal = abort.signal;
+    ctx.onCancellationReady = vi.fn(async () => undefined);
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      abort.abort();
+      throw new Error("connection lost after send");
+    }));
+
+    const result = await execute(ctx);
+
+    expect(result.errorCode).toBe("hermes_gateway_cancel_unverified");
+    expect(result.resultJson?.executionCancellation).toMatchObject({ state: "requested" });
+  });
 });
 
 describe("testEnvironment", () => {
