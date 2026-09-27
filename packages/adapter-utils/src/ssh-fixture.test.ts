@@ -22,6 +22,10 @@ import { prepareRemoteManagedRuntime } from "./remote-managed-runtime.js";
 
 const SSH_FIXTURE_TEST_TIMEOUT_MS = 30_000;
 let sshEnvLabUnsupportedReason: string | null = null;
+// The SSH listener is on the real test host, whose managed Git hooks may
+// enforce its configured identity. Use it for remote fixture commits rather
+// than overriding it with a fabricated committer.
+const configureRemoteGitIdentity = `git config user.name "$(git config --global --get user.name || printf '%s' 'Paperclip SSH')" && git config user.email "$(git config --global --get user.email || printf '%s' 'ssh@paperclip.dev')"`;
 
 // One entry per fixture root directory, registered at creation time so
 // teardown survives a setup call that throws before the fixture starts, an
@@ -779,7 +783,7 @@ describe("ssh env-lab fixture", () => {
 
     await runSshCommand(
       config,
-      `cd ${JSON.stringify(started.workspaceDir)} && git config user.name "Paperclip SSH" && git config user.email "ssh@paperclip.dev" && git add tracked.txt untracked.txt && git commit -m "remote update" >/dev/null && printf "remote dirty\\n" > tracked.txt && printf "remote extra\\n" > remote-only.txt`,
+      `cd ${JSON.stringify(started.workspaceDir)} && ${configureRemoteGitIdentity} && git add tracked.txt untracked.txt && git commit -m "remote update" >/dev/null && printf "remote dirty\\n" > tracked.txt && printf "remote extra\\n" > remote-only.txt`,
       { timeoutMs: 30_000, maxBuffer: 256 * 1024 },
     );
 
@@ -939,7 +943,7 @@ describe("ssh env-lab fixture", () => {
 
     await runSshCommand(
       config,
-      `cd ${JSON.stringify(prepared.workspaceRemoteDir)} && git config user.name "Paperclip SSH" && git config user.email "ssh@paperclip.dev" && printf "committed\\n" > tracked.txt && git add tracked.txt && git commit -m "remote update" >/dev/null && printf "dirty remote\\n" > tracked.txt`,
+      `cd ${JSON.stringify(prepared.workspaceRemoteDir)} && ${configureRemoteGitIdentity} && printf "committed\\n" > tracked.txt && git add tracked.txt && git commit -m "remote update" >/dev/null && printf "dirty remote\\n" > tracked.txt`,
       { timeoutMs: 30_000, maxBuffer: 256 * 1024 },
     );
 
@@ -994,7 +998,7 @@ describe("ssh env-lab fixture", () => {
     // sync-back alone — no `git push`, no fetch from any origin.
     await runSshCommand(
       config,
-      `cd ${JSON.stringify(prepared.workspaceRemoteDir)} && git config user.name "Paperclip SSH" && git config user.email "ssh@paperclip.dev" && printf "deliverable\\n" > tracked.txt && git add tracked.txt && git commit -m "remote-only commit" >/dev/null`,
+      `cd ${JSON.stringify(prepared.workspaceRemoteDir)} && ${configureRemoteGitIdentity} && printf "deliverable\\n" > tracked.txt && git add tracked.txt && git commit -m "remote-only commit" >/dev/null`,
       { timeoutMs: 30_000, maxBuffer: 256 * 1024 },
     );
 
@@ -1047,12 +1051,12 @@ describe("ssh env-lab fixture", () => {
 
     await runSshCommand(
       config,
-      `cd ${JSON.stringify(preparedA.workspaceRemoteDir)} && git config user.name "Paperclip SSH" && git config user.email "ssh@paperclip.dev" && printf "from run a\\n" > run-a.txt && git add run-a.txt && git commit -m "remote update a" >/dev/null`,
+      `cd ${JSON.stringify(preparedA.workspaceRemoteDir)} && ${configureRemoteGitIdentity} && printf "from run a\\n" > run-a.txt && git add run-a.txt && git commit -m "remote update a" >/dev/null`,
       { timeoutMs: 30_000, maxBuffer: 256 * 1024 },
     );
     await runSshCommand(
       config,
-      `cd ${JSON.stringify(preparedB.workspaceRemoteDir)} && git config user.name "Paperclip SSH" && git config user.email "ssh@paperclip.dev" && printf "from run b\\n" > run-b.txt && git add run-b.txt && git commit -m "remote update b" >/dev/null`,
+      `cd ${JSON.stringify(preparedB.workspaceRemoteDir)} && ${configureRemoteGitIdentity} && printf "from run b\\n" > run-b.txt && git add run-b.txt && git commit -m "remote update b" >/dev/null`,
       { timeoutMs: 30_000, maxBuffer: 256 * 1024 },
     );
 

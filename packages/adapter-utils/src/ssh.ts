@@ -1904,6 +1904,11 @@ export async function startSshEnvLabFixture(input: {
   const sshdConfigPath = path.join(rootDir, "sshd_config");
   const sshdLogPath = path.join(rootDir, "sshd.log");
   const sshdPidPath = path.join(rootDir, "sshd.pid");
+  // The isolated listener runs commands on this same host. Without an explicit
+  // PATH, sshd gives remote shells an FHS default that cannot find coreutils
+  // on NixOS, even though the commands are installed for the fixture user.
+  const fixturePath = process.env.PATH ?? "/usr/bin:/bin";
+  if (/[\r\n]/.test(fixturePath)) throw new Error("SSH env-lab PATH contains a newline");
 
   await fs.mkdir(workspaceDir, { recursive: true });
   await execFileText("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", clientPrivateKeyPath], {
@@ -1941,6 +1946,7 @@ export async function startSshEnvLabFixture(input: {
       "LogLevel VERBOSE",
       "PrintMotd no",
       "UseDNS no",
+      `SetEnv PATH=${JSON.stringify(fixturePath)}`,
       "Subsystem sftp internal-sftp",
       "",
     ].join("\n"),
