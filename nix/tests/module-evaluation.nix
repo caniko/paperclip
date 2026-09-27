@@ -87,6 +87,20 @@ let
     services.paperclip.instances.one.settings.database.connectionString =
       "postgres://operator:secret@localhost/paperclip";
   };
+  storedHomeCredential = home-manager.lib.homeManagerConfiguration {
+    inherit pkgs;
+    modules = [
+      self.homeManagerModules.default
+      {
+        home.username = "operator";
+        home.homeDirectory = "/home/operator";
+        home.stateVersion = "26.05";
+        services.paperclip.instances = lib.recursiveUpdate enabled {
+          one.settings.llm.apiKey = "would-leak-to-the-nix-store";
+        };
+      }
+    ];
+  };
   confined = system {
     services.paperclip.instances.one.inaccessiblePaths = [ "/srv/operator-workspaces" ];
   };
@@ -123,6 +137,7 @@ assert !(valid sharedCredential.config);
 assert !(valid sharedDatabase.config);
 assert !(valid storedLlmCredential.config);
 assert !(valid storedDatabaseCredential.config);
+assert !(builtins.tryEval storedHomeCredential.activationPackage.drvPath).success;
 assert lib.elem "/srv/operator-workspaces"
   confined.config.systemd.services.paperclip-one.serviceConfig.InaccessiblePaths;
 assert lib.elem "-/nix/var/nix/daemon-socket"
