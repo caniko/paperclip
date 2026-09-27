@@ -42,7 +42,7 @@ console.log(JSON.stringify({
 }
 
 async function writeFakeSandboxCursorAgent(commandPath: string, capturePath: string): Promise<void> {
-  const script = `#!/usr/bin/env node
+  const script = `#!${process.execPath}
 const fs = require("node:fs");
 
 const payload = {
@@ -90,7 +90,12 @@ function createLocalSandboxRunner() {
       counter += 1;
       return await runChildProcess(`cursor-sandbox-execute-${counter}`, input.command, input.args ?? [], {
         cwd: input.cwd ?? process.cwd(),
-        env: input.env ?? {},
+        // The local fake sandbox needs host utilities for Paperclip's setup
+        // shell; a real sandbox image supplies its own coreutils PATH.
+        env: {
+          ...input.env,
+          PATH: [input.env?.PATH, process.env.PATH ?? "/usr/bin:/bin"].filter(Boolean).join(":"),
+        },
         stdin: input.stdin,
         timeoutSec: Math.max(1, Math.ceil((input.timeoutMs ?? 30_000) / 1000)),
         graceSec: 5,

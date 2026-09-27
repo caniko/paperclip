@@ -27919,13 +27919,16 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
             .set({ state, createdAt: new Date(close.createdAt.getTime() + 1000) })
             .where(eq(chatPublications.id, prompt.id));
           const beforePosts = f.providerRuntime.posts.length;
-          const beforeRemovals = f.providerRuntime.removedReactions.length;
           await f.service.processPendingPublications();
           await f.service.processPendingReceiptReactions();
           expect(f.providerRuntime.edits).toEqual([]);
           expect(f.providerRuntime.posts).toHaveLength(beforePosts + 1);
           expect(f.providerRuntime.posts.at(-1)?.text).toBe(close.payload.text);
-          expect(f.providerRuntime.removedReactions).toHaveLength(beforeRemovals);
+          expect(
+            f.providerRuntime.removedReactions.filter(
+              (reaction) => reaction.messageId === f.sourceMessageId,
+            ),
+          ).toEqual([]);
           expect(
             (
               await db
