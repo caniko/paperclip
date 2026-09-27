@@ -397,7 +397,9 @@ async function createSshAuthArgs(
   if (config.privateKey) {
     const privateKey = await withTempFile("paperclip-ssh-key-", config.privateKey, 0o600);
     tempFiles.push(privateKey.cleanup);
-    sshArgs.push("-i", privateKey.path);
+    // An explicit key must not be preceded by identities from the operator's
+    // SSH agent (which can also exhaust the server's MaxAuthTries limit).
+    sshArgs.push("-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-i", privateKey.path);
   }
 
   return {
@@ -1988,6 +1990,10 @@ export async function startSshEnvLabFixture(input: {
     await fs.writeFile(statePath, JSON.stringify(state, null, 2), { mode: 0o600 });
     return state;
   } catch (error) {
+    const sshdLog = (await fs.readFile(sshdLogPath, "utf8").catch(() => "")).slice(-4096);
+    if (sshdLog && error instanceof Error) {
+      error.message = `${error.message}\nSSH env-lab sshd log:\n${sshdLog}`;
+    }
     // No state file exists on this path yet, so a later stopSshEnvLabFixture
     // call can never find this pid. Escalate and wait for exit here, the
     // same way stopSshEnvLabFixture does, before the root directory goes

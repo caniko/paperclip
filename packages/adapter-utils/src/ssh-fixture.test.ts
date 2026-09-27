@@ -490,6 +490,31 @@ describe("ssh env-lab fixture", () => {
     await target.cleanup();
   });
 
+  it("uses only the declared private key instead of offering ambient agent identities", async () => {
+    const target = await buildSshSpawnTarget({
+      spec: {
+        host: "ssh.example.test",
+        port: 22,
+        username: "ssh-user",
+        remoteCwd: "/srv/paperclip/workspace",
+        remoteWorkspacePath: "/srv/paperclip/workspace",
+        privateKey: "fixture-key",
+        knownHosts: null,
+        strictHostKeyChecking: true,
+      },
+      command: "true",
+      args: [],
+      env: {},
+    });
+    try {
+      expect(target.args).toContain("IdentitiesOnly=yes");
+      expect(target.args).toContain("IdentityAgent=none");
+      expect(target.args).toContain("-i");
+    } finally {
+      await target.cleanup();
+    }
+  });
+
   it("rejects invalid environment variable keys when constructing SSH spawn targets", async () => {
     await expect(
       buildSshSpawnTarget({
