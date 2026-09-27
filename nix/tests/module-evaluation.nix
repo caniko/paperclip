@@ -83,6 +83,10 @@ let
       apiKey = "would-leak-to-the-nix-store";
     };
   };
+  storedDatabaseCredential = system {
+    services.paperclip.instances.one.settings.database.connectionString =
+      "postgres://operator:secret@localhost/paperclip";
+  };
   confined = system {
     services.paperclip.instances.one.inaccessiblePaths = [ "/srv/operator-workspaces" ];
   };
@@ -118,6 +122,7 @@ assert !(valid publicLoopback.config);
 assert !(valid sharedCredential.config);
 assert !(valid sharedDatabase.config);
 assert !(valid storedLlmCredential.config);
+assert !(valid storedDatabaseCredential.config);
 assert lib.elem "/srv/operator-workspaces"
   confined.config.systemd.services.paperclip-one.serviceConfig.InaccessiblePaths;
 assert lib.elem "-/nix/var/nix/daemon-socket"
