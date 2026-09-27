@@ -12,7 +12,7 @@ export async function reconcileDeploymentOnStartup(db: Db, config: Config) {
   const descriptor = loadDeploymentDescriptor(file);
   const manifest = descriptor.manifestFile ? readJson(descriptor.manifestFile)
     : { version: 1, owner: descriptor.instance, companies: {} };
-  const result = await reconcileDeployment(db, manifest, { apply: true, descriptor, config });
+  const result = await reconcileDeployment(db, manifest, { apply: true, descriptor, config, singleOwner: true });
   // Database commit precedes publication. A crash here leaves no ready listener;
   // restart retries the no-op apply and publishes the same stable bindings.
   await publishDeploymentBindings(descriptor, result);

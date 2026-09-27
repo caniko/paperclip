@@ -51,7 +51,7 @@ async function validateAdapters(manifest: DeploymentManifest, credentials: Recor
 
 /** One process-local reconciler for startup, plan, apply and check. No HTTP bypass. */
 export async function reconcileDeployment(db: Db, raw: unknown, options: {
-  apply: boolean; descriptor: DeploymentDescriptor; config: Config;
+  apply: boolean; descriptor: DeploymentDescriptor; config: Config; singleOwner: boolean;
 }) {
   const parsed = deploymentManifestSchema.safeParse(raw);
   if (!parsed.success) throw new Error("Invalid deployment manifest or references");
@@ -69,6 +69,9 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     if (options.apply) await tx.execute(sql`select set_config('paperclip.deployment_apply', 'on', true)`);
     const [identity] = await tx.select().from(instanceSettings).where(eq(instanceSettings.singletonKey, "deployment"));
     if (identity && identity.general.instance !== options.descriptor.instance) throw new Error("Database belongs to another deployment instance");
+    if (options.singleOwner && identity?.general.owner && identity.general.owner !== m.owner) {
+      throw new Error("Deployment owner changed; an explicit ownership handoff is required");
+    }
     // Validate historical and unmanaged local secrets too: the instance key is
     // shared, and a no-op declaration must not mask a broken restore/rotation.
     const encrypted = await tx.select({ material: companySecretVersions.material }).from(companySecretVersions)
@@ -79,6 +82,9 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       verifyLocalEncryptedMaterials(readCredential(keyFile), encrypted.map((v) => v.material));
     }
     const ledger = await tx.select().from(deploymentResources);
+    if (options.singleOwner && ledger.some((binding) => binding.owner !== m.owner)) {
+      throw new Error("Deployment owner changed; an explicit ownership handoff is required");
+    }
     const owned = ledger.filter((b) => b.owner === m.owner);
     const bindings = new Map(owned.map((b) => [`${b.kind}/${b.key}`, b]));
     const ids = new Map<string, string>();
@@ -137,13 +143,14 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     }
     for (const [key, r] of Object.entries(m.routines).sort()) {
       const companyId = getId("company", r.company);
+      const { adopt: scheduleAdopt, ...schedule } = r.schedule;
       const fields = () => ({ ...r.fields, projectId: getId("project", r.project), assigneeAgentId: getId("agent", r.agent), companyId });
       add({ kind: "routine", key, adopt: r.adopt, companyId, enabled: r.enabled, fields,
         create: async () => (await routineSvc.create(companyId, { ...r.fields, projectId: getId("project", r.project), assigneeAgentId: getId("agent", r.agent), status: r.enabled ? "active" : "paused", variables: [] }, actor)).id,
         update: (f) => routineSvc.update(getId("routine", key), f, actor) });
-      add({ kind: "schedule", key, companyId, enabled: true, fields: () => ({ ...r.schedule, routineId: getId("routine", key) }),
-        create: async () => (await routineSvc.createTrigger(getId("routine", key), { ...r.schedule, enabled: true }, actor)).trigger.id,
-        update: () => routineSvc.updateTrigger(getId("schedule", key), r.schedule, actor) });
+      add({ kind: "schedule", key, adopt: scheduleAdopt, companyId, enabled: true, fields: () => ({ ...schedule, routineId: getId("routine", key) }),
+        create: async () => (await routineSvc.createTrigger(getId("routine", key), { ...schedule, enabled: true }, actor)).trigger.id,
+        update: () => routineSvc.updateTrigger(getId("schedule", key), schedule, actor) });
     }
     for (const [key, b] of Object.entries(m.taskBridges).sort()) {
       const companyId = getId("company", m.agents[b.agent].company);
@@ -156,6 +163,9 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     }
     const differences: DeploymentDifference[] = [];
     if (!identity) differences.push({ kind: "instance", key: options.descriptor.instance, action: "create", fields: ["instance"] });
+    else if (options.singleOwner && !identity.general.owner) {
+      differences.push({ kind: "instance", key: options.descriptor.instance, action: "update", fields: ["owner"] });
+    }
     const actions = new Map<Spec, DeploymentDifference>();
     // Read and validate ALL existing identities before the first application write.
     for (const spec of specs) {
@@ -189,6 +199,25 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         const rows = await tx.execute(sql`select company_id from ${table} where id = ${spec.id}`);
         if (rows[0]?.company_id !== spec.companyId) throw new Error("Adopted resource belongs to a different company");
       }
+      if (spec.kind === "schedule") {
+        const routineId = spec.fields().routineId as string;
+        if (existing.length) {
+          const [trigger] = await tx.select({ routineId: routineTriggers.routineId, kind: routineTriggers.kind })
+            .from(routineTriggers).where(eq(routineTriggers.id, spec.id));
+          if (!trigger || trigger.routineId !== routineId || trigger.kind !== "schedule") {
+            throw new Error("Adopted schedule must belong to the declared routine");
+          }
+        }
+        if (!binding) {
+          const active = await tx.select({ id: routineTriggers.id }).from(routineTriggers).where(and(
+            eq(routineTriggers.routineId, routineId), eq(routineTriggers.kind, "schedule"),
+            eq(routineTriggers.enabled, true), eq(routineTriggers.archived, false),
+          ));
+          if (active.some((trigger) => trigger.id !== (spec.adopt ?? ""))) {
+            throw new Error("Existing active schedule requires explicit adoption before declaring this routine");
+          }
+        }
+      }
       const changed = changedFields(binding?.fields ?? {}, spec.fields());
       if (binding && spec.kind === "taskBridge" && changed.length) throw new Error("Task bridge rotation requires a new declaration key and removal of the old key");
       if (!binding || changed.length || binding.enabled !== spec.enabled) {
@@ -200,7 +229,13 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     for (const b of removed) differences.push({ kind: b.kind, key: b.key, action: "disable", fields: [] });
     if (options.descriptor.bootstrap && !actorId) differences.unshift({ kind: "operator", key: "bootstrap", action: "create", fields: [] });
     if (options.apply) {
-      if (!identity) await tx.insert(instanceSettings).values({ singletonKey: "deployment", general: { instance: options.descriptor.instance } });
+      if (!identity) await tx.insert(instanceSettings).values({ singletonKey: "deployment", general: {
+        instance: options.descriptor.instance, ...(options.singleOwner ? { owner: m.owner } : {}),
+      } });
+      else if (options.singleOwner && !identity.general.owner) {
+        await tx.update(instanceSettings).set({ general: { ...identity.general, owner: m.owner } })
+          .where(eq(instanceSettings.id, identity.id));
+      }
       actor.userId = await bootstrapOperator(tx, options.config, options.descriptor.bootstrap, true);
       for (const spec of specs) {
         if (!actions.has(spec)) continue;

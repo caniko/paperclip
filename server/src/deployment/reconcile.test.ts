@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, companySecrets, companySecretVersions, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
 import { reconcileDeployment } from "./reconcile.js";
 import { loadConfig } from "../config.js";
@@ -61,7 +61,8 @@ beforeAll(async () => {
   db = createDb(database.connectionString);
 }, 90000);
 afterAll(async () => { gateway.closeAllConnections(); gateway.close(); await database?.cleanup(); rmSync(root, { recursive: true, force: true }); });
-const reconcile = (raw: unknown, apply = true) => reconcileDeployment(db, raw, { descriptor, config, apply });
+// This fixture intentionally exercises multiple independent owners in one test database.
+const reconcile = (raw: unknown, apply = true) => reconcileDeployment(db, raw, { descriptor, config, apply, singleOwner: false });
 
 it("plans without writes, bootstraps once and preserves identities, pauses and spending", async () => {
   const plan = await reconcile(manifest, false);
@@ -214,6 +215,39 @@ it("requires explicit adoption and rolls back an apply that fails after creating
   expect(await db.select().from(deploymentResources).where(eq(deploymentResources.owner, "rollback"))).toEqual([]);
 });
 
+it("adopts an existing routine schedule without creating a second active trigger", async () => {
+  const declaration = { ...manifest, owner: "schedule-adoption", companies: { example: { fields: { name: "Schedule adoption" } } }, taskBridges: {} };
+  const initial = await reconcile(declaration);
+  const routineId = initial.bindings["routine/daily"];
+  const scheduleId = initial.bindings["schedule/daily"];
+  await db.delete(deploymentResources).where(and(
+    eq(deploymentResources.owner, declaration.owner),
+    sql`${deploymentResources.kind} in ('routine', 'schedule')`,
+  ));
+  const adopted = { ...declaration, routines: { daily: { ...declaration.routines.daily, adopt: routineId } } };
+  await expect(reconcile(adopted)).rejects.toThrow("Existing active schedule requires explicit adoption");
+  expect(await db.select().from(routineTriggers).where(eq(routineTriggers.routineId, routineId))).toHaveLength(1);
+  const [otherRoutine] = await db.insert(routines).values({
+    companyId: initial.bindings["company/example"], projectId: initial.bindings["project/main"],
+    assigneeAgentId: initial.bindings["agent/worker"], title: "Other routine",
+  }).returning();
+  const [otherSchedule] = await db.insert(routineTriggers).values({
+    companyId: otherRoutine.companyId, routineId: otherRoutine.id, kind: "schedule",
+    cronExpression: "0 12 * * *", timezone: "UTC",
+  }).returning();
+  await expect(reconcile({ ...adopted, routines: { daily: {
+    ...adopted.routines.daily, schedule: { ...adopted.routines.daily.schedule, adopt: otherSchedule.id },
+  } } })).rejects.toThrow("Adopted schedule must belong to the declared routine");
+  const withSchedule = { ...adopted, routines: { daily: {
+    ...adopted.routines.daily, schedule: { ...adopted.routines.daily.schedule, adopt: scheduleId },
+  } } };
+  const result = await reconcile(withSchedule);
+  expect(result.bindings["routine/daily"]).toBe(routineId);
+  expect(result.bindings["schedule/daily"]).toBe(scheduleId);
+  expect(await db.select().from(routineTriggers).where(eq(routineTriggers.routineId, routineId))).toHaveLength(1);
+  expect((await reconcile(withSchedule, false)).differences).toEqual([]);
+});
+
 it("restores ownership, stable IDs, encrypted credentials and schema guards from a logical backup", async () => {
   const restoredManifest = { ...manifest, owner: "restore", companies: { example: { fields: { name: "Restore fixture" } } }, routines: {}, taskBridges: {} };
   const original = await reconcile(restoredManifest);
@@ -225,7 +259,7 @@ it("restores ownership, stable IDs, encrypted credentials and schema guards from
   await runDatabaseRestore({ connectionString: target.toString(), backupFile: backup.backupFile });
   await assertDeploymentSchemaCompatible(target.toString());
   const restored = createDb(target.toString());
-  const after = await reconcileDeployment(restored, restoredManifest, { descriptor, config, apply: false });
+  const after = await reconcileDeployment(restored, restoredManifest, { descriptor, config, apply: false, singleOwner: false });
   expect(after.differences).toEqual([]);
   expect(after.bindings).toEqual(original.bindings);
   const [agent] = await restored.select().from(agents).where(eq(agents.id, after.bindings["agent/worker"]));

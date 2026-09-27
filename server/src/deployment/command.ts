@@ -28,7 +28,13 @@ export async function deploymentCommand(command: "plan" | "apply" | "check", des
     connectionUrl = url;
     // An offline apply cannot change resources underneath a running server.
     // Read-only checks may run concurrently with it.
-    if (apply) release = await acquireDeploymentLease(url);
+    if (apply) release = await acquireDeploymentLease(url, () => {
+      // The lease lives on a separate connection from migrations and the apply
+      // transaction. Once it is gone another controller can start immediately.
+      // Exit rather than letting either connection continue without ownership.
+      console.error("Declarative database lease was lost; aborting offline apply");
+      process.exit(1);
+    });
     const migrationUrl = config.databaseMigrationUrl ?? url;
     await assertDeploymentSchemaCompatible(migrationUrl);
     if (apply) await applyPendingMigrations(migrationUrl);
@@ -38,7 +44,7 @@ export async function deploymentCommand(command: "plan" | "apply" | "check", des
     db = createDb(url);
     const manifest = descriptor.manifestFile ? readJson(descriptor.manifestFile)
       : { version: 1, owner: descriptor.instance, companies: {} };
-    const result = await reconcileDeployment(db, manifest, { apply, descriptor, config });
+    const result = await reconcileDeployment(db, manifest, { apply, descriptor, config, singleOwner: true });
     if (apply) await publishDeploymentBindings(descriptor, result);
     return { result, exitCode: command === "check" && result.differences.length ? 2 : 0 };
   } finally {

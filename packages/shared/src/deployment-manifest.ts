@@ -33,7 +33,9 @@ const routine = identity.extend({
     title: true, description: true, priority: true, concurrencyPolicy: true,
     catchUpPolicy: true,
   }).strict(),
-  schedule: createRoutineTriggerSchema.options[0].omit({ enabled: true }).strict(),
+  schedule: createRoutineTriggerSchema.options[0].omit({ enabled: true }).extend({
+    adopt: z.string().uuid().optional(),
+  }).strict(),
 }).strict();
 
 /** Deployment v1 deliberately reuses the native validators for owned fields. */

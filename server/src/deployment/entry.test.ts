@@ -48,7 +48,7 @@ beforeAll(async () => {
     telemetry: { enabled: false },
   });
   writeFileSync(join(root, "config.json"), JSON.stringify(config));
-  writeFileSync(join(root, "manifest.json"), JSON.stringify({ version: 1, owner: "entry",
+  writeFileSync(join(root, "manifest.json"), JSON.stringify({ version: 1, owner: "entry-owner",
     companies: { example: { fields: { name: "Entry test" } }, other: { fields: { name: "Other company" } } },
     projects: { main: { company: "example", fields: { name: "Main" } }, outside: { company: "example", fields: { name: "Outside bridge" } } },
     agents: { worker: { company: "example", fields: { name: "Bridge worker", adapterType: "hermes_gateway", adapterConfig: { apiBaseUrl: "http://127.0.0.1:1" } }, credentials: { apiKey: "gateway" } } },
@@ -108,6 +108,79 @@ it("refuses HTTP port collisions instead of silently moving the instance", async
   try { expect((await command("serve")).code).toBe(1); }
   finally { await new Promise<void>((resolve) => occupied.close(() => resolve())); }
 }, 30000);
+
+it("rejects manifest owner changes and omissions without leaving the old fleet unmanaged", async () => {
+  await stop();
+  const originalManifest = readFileSync(join(root, "manifest.json"), "utf8");
+  const originalDescriptor = readFileSync(descriptorFile, "utf8");
+  try {
+    writeFileSync(join(root, "manifest.json"), JSON.stringify({ ...JSON.parse(originalManifest), owner: "another-owner" }));
+    for (const name of ["plan", "check", "apply"]) expect((await command(name)).code).toBe(1);
+    writeFileSync(join(root, "manifest.json"), originalManifest);
+    writeFileSync(descriptorFile, JSON.stringify({ ...JSON.parse(originalDescriptor), manifestFile: undefined }));
+    expect((await command("apply")).code).toBe(1);
+  } finally {
+    writeFileSync(join(root, "manifest.json"), originalManifest);
+    writeFileSync(descriptorFile, originalDescriptor);
+  }
+  expect((await command("check")).code).toBe(0);
+  const db = createDb(database.connectionString);
+  await db.execute(sql`update instance_settings set general = '{"instance":"entry"}'::jsonb
+    where singleton_key = 'deployment'`);
+  const legacyPlan = await command("plan");
+  expect(legacyPlan.code).toBe(0);
+  expect(JSON.parse(legacyPlan.stdout).differences).toContainEqual({
+    kind: "instance", key: "entry", action: "update", fields: ["owner"],
+  });
+  expect((await command("check")).code).toBe(2);
+  expect((await command("apply")).code).toBe(0);
+  expect((await command("check")).code).toBe(0);
+}, 60000);
+
+it("stops offline apply when its database lease is lost while reconciliation is blocked", async () => {
+  await stop();
+  const db = createDb(database.connectionString);
+  const originalManifest = readFileSync(join(root, "manifest.json"), "utf8");
+  const changed = JSON.parse(originalManifest);
+  changed.companies.example.fields.name = "Should not be applied after lease loss";
+  writeFileSync(join(root, "manifest.json"), JSON.stringify(changed));
+  let signalLocked!: () => void;
+  let releaseLock!: () => void;
+  const locked = new Promise<void>((resolve) => { signalLocked = resolve; });
+  const unlock = new Promise<void>((resolve) => { releaseLock = resolve; });
+  const blocker = db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(1735289201)`);
+    signalLocked();
+    await unlock;
+  });
+  const applying = launch("apply");
+  let stderr = "";
+  applying.stderr!.on("data", (chunk) => { stderr += chunk; });
+  try {
+    await locked;
+    await expect.poll(async () => {
+      const [row] = await db.execute(sql`select count(*)::int as count from pg_locks
+        where locktype = 'advisory' and objid = 1735289202 and granted`);
+      return Number(row?.count ?? 0);
+    }, { timeout: 30000, interval: 100 }).toBe(1);
+    const exited = once(applying, "exit");
+    await db.execute(sql`select pg_terminate_backend(pid) from pg_locks
+      where locktype = 'advisory' and objid = 1735289202 and granted`);
+    const [code] = await exited;
+    expect(code).toBe(1);
+    expect(stderr).toContain("database lease was lost");
+  } finally {
+    if (applying.exitCode === null) {
+      const exited = once(applying, "exit");
+      applying.kill("SIGTERM");
+      await exited;
+    }
+    releaseLock();
+    await blocker;
+    writeFileSync(join(root, "manifest.json"), originalManifest);
+  }
+  expect((await command("check")).code).toBe(0);
+}, 60000);
 
 it("fails closed for the unqualified remote-only profile before publishing readiness", async () => {
   await stop();
