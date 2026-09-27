@@ -77,6 +77,12 @@ let
   sharedDatabase = system {
     services.paperclip.instances.two.database.dataDir = "/var/lib/paperclip-one/instances/one/db";
   };
+  storedLlmCredential = system {
+    services.paperclip.instances.one.settings.llm = {
+      provider = "openai";
+      apiKey = "would-leak-to-the-nix-store";
+    };
+  };
   confined = system {
     services.paperclip.instances.one.inaccessiblePaths = [ "/srv/operator-workspaces" ];
   };
@@ -111,6 +117,7 @@ assert !(valid invalidPath.config);
 assert !(valid publicLoopback.config);
 assert !(valid sharedCredential.config);
 assert !(valid sharedDatabase.config);
+assert !(valid storedLlmCredential.config);
 assert lib.elem "/srv/operator-workspaces"
   confined.config.systemd.services.paperclip-one.serviceConfig.InaccessiblePaths;
 assert lib.elem "-/nix/var/nix/daemon-socket"
