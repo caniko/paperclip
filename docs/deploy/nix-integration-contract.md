@@ -119,7 +119,7 @@ The source audit found these blockers to safely opening the remote-only gate:
 | `server/src/services/heartbeat.ts` | Shared run preparation resolves workspaces, Git identity and runtime tools before gateway invocation; the existing driver guard occurs after workspace resolution. Persisted configuration and per-run merged overrides require early enforcement. |
 | `server/src/services/workspace-runtime.ts`, `execution-workspaces.ts`, `tool-gateway.ts` | Preview/build/provisioning commands and local stdio tools can execute under controller authority independently of the selected adapter. |
 | `server/src/app.ts`, `services/plugin-loader.ts`, `routes/adapters.ts`, `routes/board-chat.ts` | Startup plugin loading, package installation, and the local board-chat relay need policy gates of their own. |
-| `packages/adapters/hermes/src/gateway/server/execute.ts` | The executor uses HTTP/SSE and stable idempotency/session headers. It now registers for the run's cancellation signal and verifies a terminal gateway status after `/stop` for a known run ID. An ambiguous create response, an unresponsive gateway, controller restart recovery and duplicate prevention across restart remain unqualified. |
+| `packages/adapters/hermes/src/gateway/server/execute.ts` | The executor uses HTTP/SSE and stable idempotency/session headers. It registers for the run's cancellation signal and verifies a terminal gateway status after `/stop` for a known run ID. Graceful restart cancellation and expired-lease crash classification have separate staging VM evidence below; ambiguous create responses, unresponsive gateways and automated remote-work recovery remain unqualified. |
 
 The same NixOS module works on a host or a NixOS VM. A production controller VM
 is optional; acceptance and staging use isolated VMs. No VM lifecycle framework,
@@ -164,17 +164,21 @@ The Hermes worker must be provisioned separately using its supported API server:
   agents/builds need separately confined worker execution environments. A
   same-UID child is not isolated by an environment-variable filter.
 
-The separate-node `split-network` check now proves controller-to-worker gateway
+The separate-node `split-network` check proves controller-to-worker gateway
 dispatch, a worker-to-controller scoped read with cross-company denial,
 revocation of the worker's Paperclip API key, idle controller restart with
-persistent identities and continued callback access, and a live cancellation
-that reaches the worker's `/stop` endpoint before the controller acknowledges
-its terminal status. The worker VM lacks the controller's signing path and
-local PostgreSQL socket. The check runs under **trusted-local** with
-a test-only HTTP gateway; it is staging transport evidence, not remote-only
-confinement. Active-run restart cancellation and recovery, stronger worker
-isolation/credential exclusion, and complete split-deployment backup/restore
-remain unexecuted acceptance requirements.
+persistent identities, and a live cancellation acknowledged only after the
+worker's `/stop`. The nixpkgs VM fixture additionally passed graceful restart
+with an in-flight run (one verified stop), a SIGKILL recovery after deliberately
+expiring the crashed owner's lease (no speculative redispatch; the operator
+stops the still-running worker), and a stopped-controller PostgreSQL dump/restore
+with the original service credentials. It verified the operator session,
+bindings, run history, secret-backed gateway dispatch and revoked callback key
+after restore. The worker VM lacks the controller's signing path and local
+PostgreSQL socket. These checks run under **trusted-local** with a test-only HTTP
+gateway: they do not prove remote-only confinement, ambiguous-create recovery,
+or restoration on a fresh controller with separately recovered credentials and
+storage.
 
 ### Confidentiality outside the service state
 
@@ -631,8 +635,19 @@ company's issue-list endpoint before and after the controller restart, while
 the other company's endpoint returns 403; the same callback returns 401 after
 revocation. A subsequent in-flight gateway run is stopped exactly once when the
 board cancels it; the controller persists an acknowledged cancellation only after
-the gateway reports `cancelled`. The check does not exercise remote-only mode,
-real Hermes execution, active-run *restart*, or backup/restore.
+the gateway reports `cancelled`. The upstream check does not exercise remote-only
+mode, real Hermes execution, active-run *restart*, or backup/restore. The
+separate nixpkgs fixture exercises the additional restart and restore cases
+described above.
+
+At nixpkgs PR #567242 commit `b9484698bfb2`, review-worker run
+`36281952418` built the x86_64-linux Paperclip package and passed
+`nixosTests.paperclip`, including the same-controller restore rehearsal. The
+full Paperclip `pnpm test:run` gate remains red on this NixOS development host:
+the latest completed run had 13,586 passing and 11 failing tests, including
+host-specific SSH/FHS-path assumptions and unstable Telegram progress-retirement
+assertions. The focused deployment and Hermes recovery suites passing does not
+replace that full-suite gate.
 
 A bounded independent read-only review covered the native adapter contracts,
 closed-profile gate, namespace restrictions, examples and fixtures. It reported
@@ -646,7 +661,8 @@ initial full run were pre-existing.
 | --- | --- |
 | Native packaging and declarative services | Build and native-service acceptance proven on x86_64-linux; suitable for isolated staging. Repository-wide release readiness remains blocked by the general-server test gate and incomplete independent review. |
 | Remote-only execution enforcement | Not implemented end to end. The selector refuses startup before imports/credentials/database changes; that refusal is tested, but is not a usable remote-only controller. |
-| Complete split deployment | Not qualified. Separate-node trusted-local transport, callback access/revocation, live cancellation and idle restart pass in a staging VM; no run under an enforced remote-only policy exists. Complete credential exclusion, in-flight restart recovery and split restore still need proof. |
+| Trusted-local split-node staging | The nixpkgs VM passed package, callbacks, revocation, in-flight graceful cancellation, lease-expired crash classification without replay, and a same-controller database restore. Ambiguous gateway-create and full independent security review remain open. |
+| Complete remote-only split deployment | Not qualified. No run under an enforced remote-only policy exists; complete worker isolation and fresh-controller disaster recovery still need proof. |
 
 **Downstream readiness: not established; this is not a production-ready
 contract.** Remaining acceptance work includes:
@@ -654,8 +670,9 @@ contract.** Remaining acceptance work includes:
 - Resolve the remaining test failures and complete all stages of the full gate.
 - Implement and qualify the remote-only runtime policy across every audited
   startup, mutation, override and dispatch boundary before opening its gate.
-- Prove in-flight provider cancellation across service restart and inject failures
-  at every background-dispatch startup boundary in managed-service tests.
+- Inject failures at every background-dispatch startup boundary in managed-service
+  tests. The fixture's successful graceful restart does not prove ambiguous
+  create-response recovery or a stopped worker after SIGKILL.
 - Extend the native declaration contracts when additional adapters or nested
   credential projections are needed; unsupported adapters remain rejected.
 - Complete the separate controller/worker VM acceptance matrix. Successful
