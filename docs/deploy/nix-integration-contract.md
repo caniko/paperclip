@@ -283,7 +283,8 @@ subprocesses.
 
 `packages/shared/src/deployment-manifest.ts` is the executable v1 contract.
 Resource identities are **owner + kind + key**, never display names. Companies,
-projects, agents and routines support explicit `adopt = "<existing UUID>"`.
+projects, agents, routines and routine schedules support explicit
+`adopt = "<existing UUID>"` (for schedules, set `routines.<key>.schedule.adopt`).
 Ambiguous name matches, cross-company references, reporting cycles, conflicting
 owners, and adoption of plugin/bundled managed resources fail.
 
@@ -381,7 +382,11 @@ Startup acquires a database lease, checks schema compatibility, applies pending
 migrations and reconciles declarations before constructing the application and
 starting listeners or dispatch services. A failed reconciliation rolls back its
 database writes and prevents startup. A database's deployment identity prevents
-an accidentally reused connection from becoming a different named instance.
+an accidentally reused connection from becoming a different named instance. Its
+manifest owner is likewise fixed: changing the owner or omitting a manifest whose
+owner differs from the instance name fails closed rather than leaving the prior
+owner's agents and schedules active. A legacy deployment with a matching ledger
+owner but no recorded owner pins that owner on apply; plan/check report the update.
 
 - **plan:** read-only transaction; reports resource action and changed field
   names. Never bootstraps users, migrates, writes bindings, or initializes a DB.
@@ -389,7 +394,9 @@ an accidentally reused connection from becoming a different named instance.
   differences, `1` means validation/connection/reconciliation failure.
 - **apply:** offline operation; refuses while the server/provisioner holds the
   lease. May initialize/start the embedded cluster and migrate. Uses the same
-  transactional reconciler as startup, then atomically publishes bindings.
+  transactional reconciler as startup, then atomically publishes bindings. Loss
+  of its database lease terminates the process before it can continue migrations
+  or reconciliation without exclusive ownership.
 
 Plan/check need an already initialized, reachable database. For embedded mode,
 run them while the service or a separately supervised PostgreSQL process is
@@ -438,8 +445,11 @@ alongside `services.paperclip.instances`. Migration is explicit:
    represented by the module-owned paths, use a reviewed descriptor/configuration
    with the native executable until the layout is explicitly migrated.
 6. Introduce declarations with `adopt` UUIDs for existing resources. Do not rely
-   on matching names. Plan against the existing database, then start/apply under
-   the new service definition and verify IDs and authentication.
+   on matching names. When adopting a routine with an active schedule, declare
+   that schedule's existing UUID with `schedule.adopt`; an unadopted active
+   schedule prevents reconciliation rather than creating a duplicate. Plan
+   against the existing database, then start/apply under the new service
+   definition and verify IDs and authentication.
 
 The module does not copy, move, chown recursively, reset or delete databases.
 Changing a module name or state root is not a database migration.
@@ -642,26 +652,30 @@ mode, real Hermes execution, active-run *restart*, or backup/restore. The
 separate nixpkgs fixture exercises the additional restart and restore cases
 described above.
 
-At nixpkgs PR #567242 commit `b9484698bfb2`, review-worker run
-`36281952418` built the x86_64-linux Paperclip package and passed
-`nixosTests.paperclip`, including the same-controller restore rehearsal. The
-full Paperclip `pnpm test:run` gate remains red on this NixOS development host:
-the latest completed run had 13,586 passing and 11 failing tests, including
-host-specific SSH/FHS-path assumptions and unstable Telegram progress-retirement
-assertions. The focused deployment and Hermes recovery suites passing does not
-replace that full-suite gate.
+At nixpkgs PR #567242 commit `ebbe656e268`, [review-worker run
+`36306368223`](https://github.com/caniko/nixpkgs-review-gha/actions/runs/36306368223)
+built the x86_64-linux Paperclip package and passed `nixosTests.paperclip`,
+including the same-controller restore rehearsal and lease-expired SIGKILL
+classification. The VM log confirms final callback revocation after restore.
+The full Paperclip `pnpm test:run` rerun at `20066db79` exited successfully
+after the SSH env-lab fixture correction. The subsequent lease-loss,
+owner-fencing and routine-schedule adoption changes passed their focused
+integration tests, repository typecheck, build and another full `pnpm test:run`
+at this revision. The nixpkgs review below still describes an older source pin;
+the current source requires a refreshed package and VM review.
 
 A bounded independent read-only review covered the native adapter contracts,
 closed-profile gate, namespace restrictions, examples and fixtures. It reported
-no concrete defect in those changes, but stopped at its step limit and did not
-audit the remaining execution paths or independently run tests. This is not a
-complete security review or release approval. In particular, neither the review
-nor the targeted baseline comparisons establishes that all 196 failures in the
-initial full run were pre-existing.
+no concrete defect in its limited scope, but stopped at its step limit and did
+not audit the remaining execution paths or independently run tests. A subsequent
+configuration review found that `settings.llm.apiKey` and
+`settings.database.connectionString` could place credentials in generated Nix
+store JSON; both system and Home Manager instance assertions now reject them.
+This is not a complete security review or release approval.
 
 | Readiness dimension | Verdict |
 | --- | --- |
-| Native packaging and declarative services | Build and native-service acceptance proven on x86_64-linux; suitable for isolated staging. Repository-wide release readiness remains blocked by the general-server test gate and incomplete independent review. |
+| Native packaging and declarative services | Build and native-service acceptance proven on x86_64-linux for the older pin; suitable for isolated staging. The current source passed the complete test gate, but awaits refreshed package/VM review and independent review. |
 | Remote-only execution enforcement | Not implemented end to end. The selector refuses startup before imports/credentials/database changes; that refusal is tested, but is not a usable remote-only controller. |
 | Trusted-local split-node staging | The nixpkgs VM passed package, callbacks, revocation, in-flight graceful cancellation, lease-expired crash classification without replay, and a same-controller database restore. Ambiguous gateway-create and full independent security review remain open. |
 | Complete remote-only split deployment | Not qualified. No run under an enforced remote-only policy exists; complete worker isolation and fresh-controller disaster recovery still need proof. |
