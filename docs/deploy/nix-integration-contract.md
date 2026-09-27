@@ -65,7 +65,9 @@ passwords in the store. Both roles are accessible to that instance's service UID
 because the process performs startup migrations and plugin migrations.
 
 `settings` is checked against the upstream configuration schema at launch;
-unknown fields fail. It cannot override module-owned fields. Environment
+unknown fields fail. It cannot override module-owned fields or embed
+`llm.apiKey` or `database.connectionString` in the Nix store. Supply database
+credentials through `database.urlFile` instead. Environment
 configuration overrides and `.env` files are ignored in declarative mode.
 Authentication defaults on, network binding defaults to loopback, and first-party
 telemetry defaults off. Public exposure must be declared even when a public
