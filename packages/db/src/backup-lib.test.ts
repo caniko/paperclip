@@ -106,12 +106,20 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
         if (native) {
           const [version] = await probe`SHOW server_version_num`;
           const serverMajor = Math.floor(Number(version.server_version_num) / 10_000);
-          // CI can ship older clients than the embedded server. pg_dump refuses
-          // that server, and auto correctly falls back to JS. Require matching
-          // client/server majors before claiming native-engine coverage.
-          if (nativeClientMajors.some((major) => major !== serverMajor)) {
-            context.skip(`Native socket round trip requires PostgreSQL ${serverMajor} clients; found pg_dump ${nativeClientMajors[0]} and psql ${nativeClientMajors[1]}`);
+          const [pgDumpMajor] = nativeClientMajors;
+          // Older pg_dump refuses newer servers; auto would silently fall back
+          // to JS. Newer clients can work (18 -> 17 was round-trip tested), but
+          // pg_dump 17+ emits SET transaction_timeout, which PG <=16 rejects
+          // during restore even when the dump came from that same server.
+          if (pgDumpMajor < serverMajor) {
+            context.skip(`pg_dump ${pgDumpMajor} cannot dump PostgreSQL ${serverMajor}`);
           }
+          if (serverMajor < 17 && pgDumpMajor >= 17) {
+            context.skip(`PostgreSQL ${serverMajor} cannot restore pg_dump ${pgDumpMajor}'s SET transaction_timeout`);
+          }
+          // Do not gate psql on major equality: its SQL/meta-command support is
+          // checked by the real restore below. Unknown incompatibilities fail
+          // the test rather than becoming a blanket skip for newer clients.
         }
       } finally {
         await probe.end();
