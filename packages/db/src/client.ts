@@ -23,7 +23,8 @@ type RegisteredPostgresClient = ReturnType<typeof postgres>;
  */
 function hostPortKey(url: string): string {
   const parsed = new URL(url);
-  return `${parsed.hostname}:${parsed.port || "5432"}`;
+  const host = parsed.searchParams.get("host") || parsed.hostname;
+  return `${host}:${parsed.port || "5432"}`;
 }
 
 /**

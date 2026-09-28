@@ -5,7 +5,7 @@ import { gunzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { createBufferedTextFileWriter, runDatabaseBackup, runDatabaseRestore } from "./backup-lib.js";
-import { ensurePostgresDatabase } from "./client.js";
+import { closeRegisteredClients, createDb, ensurePostgresDatabase, getPostgresDataDirectory } from "./client.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -75,6 +75,59 @@ describe("createBufferedTextFileWriter", () => {
 });
 
 describeEmbeddedPostgres("runDatabaseBackup", () => {
+  it.skipIf(process.platform === "win32").each(["javascript", "auto"] as const)(
+    "backs up and restores over a Unix socket with the %s engine",
+    async (backupEngine) => {
+      const tcpUrl = await createTempDatabase();
+      const probe = postgres(tcpUrl, { max: 1 });
+      let socketDir: string;
+      try {
+        const [row] = await probe`SHOW unix_socket_directories`;
+        socketDir = row.unix_socket_directories.split(",")[0].trim();
+      } finally {
+        await probe.end();
+      }
+      expect(path.isAbsolute(socketDir)).toBe(true);
+      const url = new URL(tcpUrl);
+      // A TCP fallback must fail rather than silently making this test pass.
+      url.hostname = "127.0.0.2";
+      url.searchParams.set("host", socketDir);
+      const sourceUrl = url.toString();
+      const targetUrl = await createSiblingDatabase(sourceUrl, "socket_restore_target");
+      const source = createDb(sourceUrl, { connectTimeoutSeconds: 2 }).$client;
+      const target = createDb(targetUrl, { connectTimeoutSeconds: 2 }).$client;
+      const originalPsqlPath = process.env.PAPERCLIP_PSQL_PATH;
+      try {
+        const [connection] = await source`SELECT inet_server_addr() AS address`;
+        expect(connection.address).toBeNull();
+        expect(await getPostgresDataDirectory(sourceUrl)).toBe(await getPostgresDataDirectory(tcpUrl));
+        await source`CREATE TABLE socket_probe (value text NOT NULL)`;
+        await source`INSERT INTO socket_probe VALUES ('socket-backup-fixture')`;
+        const backup = await runDatabaseBackup({
+          connectionString: sourceUrl,
+          backupDir: createTempDir("paperclip-socket-backup-"),
+          retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 2 },
+          backupEngine,
+        });
+        if (backupEngine === "javascript") {
+          // Exercise the postgres.js restore path when the native utility is absent.
+          process.env.PAPERCLIP_PSQL_PATH = path.join(createTempDir("paperclip-no-psql-"), "psql");
+        }
+        await runDatabaseRestore({ connectionString: targetUrl, backupFile: backup.backupFile });
+        const [restored] = await target`SELECT value FROM socket_probe`;
+        expect(restored.value).toBe("socket-backup-fixture");
+      } finally {
+        if (originalPsqlPath === undefined) {
+          delete process.env.PAPERCLIP_PSQL_PATH;
+        } else {
+          process.env.PAPERCLIP_PSQL_PATH = originalPsqlPath;
+        }
+        await closeRegisteredClients(sourceUrl);
+      }
+    },
+    60_000,
+  );
+
   it(
     "keeps the newest backup for each retained calendar month",
     async () => {
