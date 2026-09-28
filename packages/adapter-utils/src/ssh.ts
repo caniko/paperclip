@@ -1197,11 +1197,14 @@ function buildRemoteShellCommand(commandLines: string[]): string {
   // can print a banner or read stdin, but must not alter the transferred bytes.
   // .bash_profile commonly sources .bashrc; use the latter only as a fallback.
   // Do not source nvm.sh directly; a host profile may still opt into it.
+  // `command .` removes the POSIX special-builtin behavior of `.`: under dash,
+  // a bash-only profile line such as `export -a` otherwise exits the whole
+  // shell before `|| true` runs. Keep exports made before that failing line.
   const profiles = [
-    'if [ -f /etc/profile ]; then . /etc/profile || true; fi',
-    'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" || true; fi',
-    'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" || true; elif [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc" || true; fi',
-    'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" || true; fi',
+    'if [ -f /etc/profile ]; then command . /etc/profile || true; fi',
+    'if [ -f "$HOME/.profile" ]; then command . "$HOME/.profile" || true; fi',
+    'if [ -f "$HOME/.bash_profile" ]; then command . "$HOME/.bash_profile" || true; elif [ -f "$HOME/.bashrc" ]; then command . "$HOME/.bashrc" || true; fi',
+    'if [ -f "$HOME/.zprofile" ]; then command . "$HOME/.zprofile" || true; fi',
   ].join(" && ");
   const script = [`{ ${profiles}; } </dev/null >/dev/null 2>&1`, ...commandLines].join(" && ");
   return `sh -c ${shellQuote(script)}`;
