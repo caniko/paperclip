@@ -16,10 +16,22 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+async function commandAvailable(command: string): Promise<boolean> {
+  try {
+    await execFileAsync("sh", ["-c", 'command -v "$1"', "paperclip-ssh-auth-test", command], { timeout: 5_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe("SSH authentication selection", () => {
   it("does not authenticate with an agent key when the supplied key is rejected", async (context) => {
     const support = await getSshEnvLabSupport();
     if (!support.supported) context.skip(support.reason ?? "SSH fixture unavailable");
+    for (const command of ["ssh-agent", "ssh-add"]) {
+      if (!(await commandAvailable(command))) context.skip(`Missing required command: ${command}`);
+    }
     const root = await mkdtemp(path.join(os.tmpdir(), "pc-auth-"));
     const socket = path.join(root, "agent.sock");
     const agent = spawn("ssh-agent", ["-D", "-a", socket], { stdio: "ignore" });
@@ -73,7 +85,8 @@ describe("SSH authentication selection", () => {
     }
   }, 30_000);
 
-  it.each([true, false])("preserves ambient agent selection only without a supplied key (explicit: %s)", async (explicit) => {
+  it.for([true, false])("preserves ambient agent selection only without a supplied key (explicit: %s)", async (explicit, context) => {
+    if (!(await commandAvailable("ssh"))) context.skip("Missing required command: ssh");
     const target = await buildSshSpawnTarget({
       spec: {
         host: "ssh.example.test",
