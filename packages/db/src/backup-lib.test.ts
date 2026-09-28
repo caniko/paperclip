@@ -76,11 +76,16 @@ describe("createBufferedTextFileWriter", () => {
 });
 
 describeEmbeddedPostgres("runDatabaseBackup", () => {
-  it.skipIf(process.platform === "win32").for(["javascript", "auto", "pg_dump"] as const)(
-    "backs up and restores over a Unix socket with the %s engine",
+  it.skipIf(process.platform === "win32").for([
+    { backupEngine: "javascript", native: false },
+    { backupEngine: "auto", native: false },
+    { backupEngine: "auto", native: true },
+    { backupEngine: "pg_dump", native: true },
+  ] as const)(
+    "backs up and restores over a Unix socket with $backupEngine (native tools: $native)",
     { timeout: 60_000 },
-    async (backupEngine, context) => {
-      if (backupEngine === "pg_dump") {
+    async ({ backupEngine, native }, context) => {
+      if (native) {
         for (const command of [process.env.PAPERCLIP_PG_DUMP_PATH || "pg_dump", process.env.PAPERCLIP_PSQL_PATH || "psql"]) {
           if (spawnSync(command, ["--version"], { timeout: 5_000 }).status !== 0) {
             context.skip("Native socket round trip requires both pg_dump and psql");
@@ -108,7 +113,7 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
       const originalPgDumpPath = process.env.PAPERCLIP_PG_DUMP_PATH;
       const originalPsqlPath = process.env.PAPERCLIP_PSQL_PATH;
       try {
-        if (backupEngine !== "pg_dump") {
+        if (!native) {
           // Exercise both the direct JavaScript engine and automatic fallback,
           // independently of which native utilities happen to be installed.
           const missingTools = createTempDir("paperclip-no-native-tools-");
@@ -126,6 +131,10 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
           retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 2 },
           backupEngine,
         });
+        const dump = gunzipSync(fs.readFileSync(backup.backupFile)).toString("utf8");
+        // Prove auto selected the intended engine, rather than merely producing
+        // some backup that the available restore tools can read.
+        expect(dump).toContain(native ? "-- PostgreSQL database dump" : "-- Paperclip database backup");
         await runDatabaseRestore({ connectionString: targetUrl, backupFile: backup.backupFile });
         const [restored] = await target`SELECT value FROM socket_probe`;
         expect(restored.value).toBe("socket-backup-fixture");
