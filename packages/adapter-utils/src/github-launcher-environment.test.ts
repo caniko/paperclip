@@ -22,7 +22,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function sandbox(layout: string) {
+async function sandbox(layout: string, hashTools: "host" | "none" = "host") {
   const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-launcher-env-"));
   roots.push(root);
   const bin = path.join(root, layout);
@@ -35,8 +35,10 @@ async function sandbox(layout: string) {
     const { stdout } = await exec("sh", ["-c", 'command -v "$1"', "fixture-tool", command]);
     await symlink(stdout.trim(), path.join(tools, command));
   }
-  const { stdout: hashCommand } = await exec("sh", ["-c", "command -v sha256sum || command -v shasum"]);
-  await symlink(hashCommand.trim(), path.join(tools, path.basename(hashCommand.trim())));
+  const { stdout: hashCommand } = await exec(path.join(tools, "sh"), ["-c", "command -v sha256sum || command -v shasum || true"], {
+    env: { PATH: hashTools === "none" ? tools : process.env.PATH },
+  });
+  if (hashCommand.trim()) await symlink(hashCommand.trim(), path.join(tools, path.basename(hashCommand.trim())));
   await symlink(process.execPath, path.join(tools, "node"));
   for (const cli of ["claude", "codex", "git", "gh"]) {
     await writeFile(path.join(bin, cli), `#!/bin/sh\nprintf '%s\\n' '${cli} started'\n`, { mode: 0o700 });
@@ -74,10 +76,51 @@ async function sandbox(layout: string) {
   const runner = { execute: vi.fn(execute) };
   const target = { kind: "remote" as const, transport: "sandbox" as const,
     providerKey: "fixture", remoteCwd: root, runner };
-  return { root, bin, remotePath, runner, target };
+  return { root, bin, remotePath, runner, target, hashCommand: hashCommand.trim() };
 }
 
 describe("managed GitHub launcher environment", () => {
+  it.for(["host", "none"] as const)("stages and re-stages launchers with %s hash tools", async (hashTools, context) => {
+    const fixture = await sandbox("usr/bin", hashTools);
+    if (hashTools === "host" && !fixture.hashCommand) context.skip("Neither sha256sum nor shasum is installed");
+    const probe = await fixture.runner.execute({ command: "sh", args: ["-c", "command -v sha256sum || command -v shasum"] });
+    expect(probe.exitCode === 0).toBe(hashTools === "host");
+    const prepare = () => prepareGitHubOperationLaunchers({
+      runId: "run-hash-tools", target: fixture.target, cwd: fixture.root, env: {},
+    });
+    const env = await prepare();
+    fixture.runner.execute.mockClear();
+    await prepare();
+    const uploads = await Promise.all(fixture.runner.execute.mock.calls.flatMap(([input], index) =>
+      input.args?.some((arg) => arg.includes("hash_file()"))
+        ? [fixture.runner.execute.mock.results[index]!.value]
+        : []));
+    expect(uploads.length).toBeGreaterThan(0);
+    for (const result of uploads) {
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout).uploaded).toBe(hashTools === "none");
+      if (hashTools === "none") expect(result.stderr).toContain("sha verify skipped: no sha256sum/shasum on remote");
+      else expect(result.stderr).toBe("");
+    }
+    const launched = await fixture.runner.execute({
+      command: path.join(env.PAPERCLIP_GITHUB_LAUNCHER_DIR, "gh"), env,
+    });
+    expect(launched.exitCode, launched.stderr).toBe(0);
+    expect(launched.stdout).toBe("gh started\n");
+  });
+
+  it("rejects a corrupted launcher upload when a hash utility is available", async (context) => {
+    const fixture = await sandbox("usr/bin");
+    if (!fixture.hashCommand) context.skip("Neither sha256sum nor shasum is installed");
+    const execute = fixture.runner.execute.getMockImplementation()!;
+    fixture.runner.execute.mockImplementation((input) => execute({
+      ...input, ...(input.stdin ? { stdin: Buffer.from("corrupt upload").toString("base64") } : {}),
+    }));
+    await expect(prepareGitHubOperationLaunchers({
+      runId: "run-corrupt", target: fixture.target, cwd: fixture.root, env: {},
+    })).rejects.toThrow("upload sha mismatch");
+  });
+
   it.each(["module", "commonjs"])("runs managed GitHub launchers inside a %s project", async (type) => {
     const fixture = await sandbox("usr/bin");
     const packageJson = JSON.stringify({ type });
