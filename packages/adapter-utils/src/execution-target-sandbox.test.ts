@@ -77,6 +77,8 @@ import {
 } from "./duplex-observability.js";
 
 const execFileAsync = promisify(execFile);
+// Keep shell lookup independent of the remote PATH values supplied by tests.
+const localToolPath = process.env.PATH;
 
 type RecordedSpan = { name: string; parentName: string | null; ended: boolean };
 
@@ -147,7 +149,11 @@ describe("sandbox adapter execution targets", () => {
         onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
       }) => {
         counter += 1;
-        const command = input.command === "bash" ? "/bin/bash" : input.command;
+        const command = input.command === "bash"
+          ? (await execFileAsync("sh", ["-c", "command -v bash"], {
+            env: { ...process.env, PATH: localToolPath },
+          })).stdout.trim()
+          : input.command;
         return runChildProcess(`sandbox-run-${counter}`, command, input.args ?? [], {
           cwd: input.cwd ?? process.cwd(),
           env: input.env ?? {},
@@ -475,7 +481,7 @@ describe("sandbox adapter execution targets", () => {
 
       const nodeBinDir = path.dirname(process.execPath);
       const explicitHostPath = `${nodeBinDir}:/explicit-host-bin`;
-      const sandboxNativePath = `/usr/bin:/bin:${nodeBinDir}`;
+      const sandboxNativePath = process.env.PATH!;
       vi.stubEnv("PATH", explicitHostPath);
 
       const delegate = createLocalSandboxRunner();

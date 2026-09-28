@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -27,10 +27,21 @@ async function sandbox(layout: string) {
   roots.push(root);
   const bin = path.join(root, layout);
   await mkdir(bin, { recursive: true });
+  // Materialize only the fixture's tools. A host PATH would leak controller
+  // CLIs, while FHS-only directories omit installed tools on systems like NixOS.
+  const tools = path.join(root, "system-tools");
+  await mkdir(tools);
+  for (const command of ["sh", "bash", "env", "git", "mkdir", "cp", "rm", "mv", "cat", "base64", "awk", "sleep", "chmod", "readlink", "dirname", "basename"]) {
+    const { stdout } = await exec("sh", ["-c", 'command -v "$1"', "fixture-tool", command]);
+    await symlink(stdout.trim(), path.join(tools, command));
+  }
+  const { stdout: hashCommand } = await exec("sh", ["-c", "command -v sha256sum || command -v shasum"]);
+  await symlink(hashCommand.trim(), path.join(tools, path.basename(hashCommand.trim())));
+  await symlink(process.execPath, path.join(tools, "node"));
   for (const cli of ["claude", "codex", "git", "gh"]) {
     await writeFile(path.join(bin, cli), `#!/bin/sh\nprintf '%s\\n' '${cli} started'\n`, { mode: 0o700 });
   }
-  const remotePath = `${bin}:${path.dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`;
+  const remotePath = `${bin}:${tools}`;
   // Execute real shells and staged launchers, with a provider-owned environment.
   // Do not inherit the controller's PATH, HOME, credentials, or shell hooks.
   const execute: CommandManagedRuntimeRunner["execute"] = async (input) => {
@@ -176,15 +187,19 @@ describe("managed GitHub launcher environment", () => {
     expect(env.PAPERCLIP_GITHUB_LAUNCHER_DIR).toBeUndefined();
   });
 
-  it("preserves local host credential helpers and validates worktree metadata", async () => {
+  it.each([false, true])("preserves local host credential helpers and validates worktree metadata (global config: %s)", async (globalConfig) => {
     const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-host-git-")); roots.push(root);
     vi.stubEnv("HOME", root);
+    vi.stubEnv("XDG_CONFIG_HOME", path.join(root, ".config"));
+    const globalConfigPath = path.join(root, "host.gitconfig");
+    vi.stubEnv("GIT_CONFIG_GLOBAL", globalConfig ? globalConfigPath : undefined);
+    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
     vi.stubEnv("GH_TOKEN", "legacy-token");
-    await writeFile(path.join(root, ".gitconfig"), '[credential]\n  helper = store\n');
+    await writeFile(globalConfig ? globalConfigPath : path.join(root, ".gitconfig"), '[credential]\n  helper = store\n');
     await exec("git", ["init", path.join(root, "repo")]);
     const env = await prepareGitHubExecutionEnvironment({ target: null, cwd: path.join(root, "repo"), env: {}, hostCredentials: true, networkAccess: true });
     expect(env.GH_TOKEN).toBe("legacy-token");
-    expect(env.GIT_CONFIG_GLOBAL).toBeUndefined();
+    expect(env.GIT_CONFIG_GLOBAL).toBe(globalConfig ? globalConfigPath : undefined);
     expect(env.PAPERCLIP_GIT_METADATA_ROOTS).toContain("/repo/.git");
     const config = await exec("git", ["config", "credential.helper"], { cwd: root, env: { ...process.env, ...env } });
     expect(config.stdout.trim()).toBe("store");
@@ -221,9 +236,17 @@ describe("managed GitHub launcher environment", () => {
         expect(result.stdout).toBe(env.PATH);
       }
       // The wrappers' Node interpreter and underlying commands are still reachable.
-      const github = await fixture.runner.execute({ command: "bash", args: ["-c", "git; gh"], env });
+      // BASH_ENV must restore the managed wrappers without host system profiles
+      // replacing the fake provider's PATH. Start with only its base tools.
+      const github = await fixture.runner.execute({ command: "bash",
+        args: ["--noprofile", "--norc", "-c", "command -v git; command -v gh; git; gh"],
+        env: { ...env, PATH: fixture.remotePath } });
       expect(github.exitCode, github.stderr).toBe(0);
-      expect(github.stdout).toBe("git started\ngh started\n");
+      expect(github.stdout.trim().split("\n")).toEqual([
+        `${env.PAPERCLIP_GITHUB_LAUNCHER_DIR}/git`,
+        `${env.PAPERCLIP_GITHUB_LAUNCHER_DIR}/gh`,
+        "git started", "gh started",
+      ]);
     },
   );
 
