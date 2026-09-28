@@ -85,11 +85,16 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
     "backs up and restores over a Unix socket with $backupEngine (native tools: $native)",
     { timeout: 60_000 },
     async ({ backupEngine, native }, context) => {
+      const nativeClientMajors: number[] = [];
       if (native) {
         for (const command of [process.env.PAPERCLIP_PG_DUMP_PATH || "pg_dump", process.env.PAPERCLIP_PSQL_PATH || "psql"]) {
-          if (spawnSync(command, ["--version"], { timeout: 5_000 }).status !== 0) {
+          const result = spawnSync(command, ["--version"], { timeout: 5_000, encoding: "utf8" });
+          if (result.status !== 0) {
             context.skip("Native socket round trip requires both pg_dump and psql");
           }
+          const major = result.stdout.match(/\(PostgreSQL\)\s+(\d+)/)?.[1];
+          if (!major) context.skip("Cannot determine native PostgreSQL client versions");
+          nativeClientMajors.push(Number(major));
         }
       }
       const tcpUrl = await createTempDatabase();
@@ -98,6 +103,16 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
       try {
         const [row] = await probe`SHOW unix_socket_directories`;
         socketDir = row.unix_socket_directories.split(",")[0].trim();
+        if (native) {
+          const [version] = await probe`SHOW server_version_num`;
+          const serverMajor = Math.floor(Number(version.server_version_num) / 10_000);
+          // CI can ship older clients than the embedded server. pg_dump refuses
+          // that server, and auto correctly falls back to JS. Require matching
+          // client/server majors before claiming native-engine coverage.
+          if (nativeClientMajors.some((major) => major !== serverMajor)) {
+            context.skip(`Native socket round trip requires PostgreSQL ${serverMajor} clients; found pg_dump ${nativeClientMajors[0]} and psql ${nativeClientMajors[1]}`);
+          }
+        }
       } finally {
         await probe.end();
       }
