@@ -67,6 +67,7 @@ fn provider_config(directory: &Path, switches: &[&str]) -> CodexProviderConfig {
         externally_sandboxed: false,
         command_environment: None,
         include_skill_instructions: None,
+        conversation_mode: None,
     }
 }
 
