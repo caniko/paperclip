@@ -1,11 +1,14 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { instanceId } from "./fixtures/railway/provider.js";
-const { spawnMock, accessMock } = vi.hoisted(() => ({ spawnMock: vi.fn(), accessMock: vi.fn() }));
-vi.mock("node:child_process", async (original) => ({ ...await original<typeof import("node:child_process")>(), spawn: spawnMock }));
+const { spawnMock, accessMock, execFileMock } = vi.hoisted(() => ({ spawnMock: vi.fn(), accessMock: vi.fn(), execFileMock: vi.fn() }));
+vi.mock("node:child_process", async (original) => {
+  const actual = await original<typeof import("node:child_process")>();
+  return { ...actual, spawn: spawnMock, execFile: execFileMock.mockImplementation(actual.execFile) };
+});
 vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof import("node:fs/promises")>();
   return { ...actual, access: accessMock.mockImplementation(actual.access) };
@@ -28,6 +31,8 @@ afterEach(async () => {
   vi.unstubAllEnvs();
   const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
   accessMock.mockImplementation(actual.access);
+  const childProcess = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+  execFileMock.mockImplementation(childProcess.execFile);
 });
 
 describe("Railway isolated container command runner", () => {
@@ -36,6 +41,27 @@ describe("Railway isolated container command runner", () => {
     const key = await generateRailwaySshKey();
     expect(key.publicKey).toMatch(/^ssh-ed25519 /);
     expect(key.privateKey).toMatch(/^-----BEGIN OPENSSH PRIVATE KEY-----/);
+  });
+  it.each(["ENOENT", "EACCES"])("uses system-profile keygen when earlier locations fail with %s", async (code) => {
+    accessMock.mockImplementation(async (file) => {
+      if (file !== "/run/current-system/sw/bin/ssh-keygen") throw Object.assign(new Error("unavailable"), { code });
+    });
+    execFileMock.mockImplementation((_command, args, _options, callback) => {
+      const keyPath = args[args.indexOf("-f") + 1];
+      void Promise.all([
+        writeFile(keyPath, "fixture-private-key", { mode: 0o600 }),
+        writeFile(`${keyPath}.pub`, "fixture-public-key\n"),
+      ]).then(() => callback(null, "", ""), callback);
+    });
+    await expect(generateRailwaySshKey()).resolves.toEqual({
+      publicKey: "fixture-public-key", privateKey: "fixture-private-key",
+    });
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    const [command, args, options] = execFileMock.mock.calls[0];
+    expect(command).toBe("/run/current-system/sw/bin/ssh-keygen");
+    expect(options.env).toEqual({ PATH: "/usr/bin:/bin" });
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    await expect(actual.access(path.dirname(args[args.indexOf("-f") + 1]))).rejects.toMatchObject({ code: "ENOENT" });
   });
   it.each(["/usr/bin", "/bin", "/run/current-system/sw/bin"])("uses OpenSSH from the trusted %s directory", async (directory) => {
     accessMock.mockImplementation(async (file) => {
