@@ -5,7 +5,7 @@ import {
   type Db, deploymentResources, companies, projects, agents, routines,
   routineTriggers, agentApiKeys, companySecrets, companySecretVersions, companyMemberships,
   pluginManagedResources, builtInManagedResources,
-  instanceSettings,
+  instanceSettings, projectWorkspaces,
 } from "@paperclipai/db";
 import { deploymentManifestSchema, type DeploymentManifest } from "@paperclipai/shared";
 import { companyService } from "../services/companies.js";
@@ -21,8 +21,9 @@ import { bootstrapOperator } from "./bootstrap.js";
 import { readCredential, type DeploymentDescriptor } from "./runtime.js";
 import type { Config } from "../config.js";
 import { verifyLocalEncryptedMaterials } from "../secrets/local-encrypted-provider.js";
+import { mergeProjectWorkspaceRuntimeConfig } from "../services/project-workspace-runtime-config.js";
 
-const tables = { company: companies, project: projects, agent: agents, routine: routines, schedule: routineTriggers, secret: companySecrets, taskBridge: agentApiKeys };
+const tables = { company: companies, project: projects, workspace: projectWorkspaces, agent: agents, routine: routines, schedule: routineTriggers, secret: companySecrets, taskBridge: agentApiKeys };
 type Kind = keyof typeof tables;
 type Binding = typeof deploymentResources.$inferSelect;
 type Fields = Record<string, unknown>;
@@ -86,6 +87,11 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       throw new Error("Deployment owner changed; an explicit ownership handoff is required");
     }
     const owned = ledger.filter((b) => b.owner === m.owner);
+    if (options.apply && (Object.keys(m.projectWorkspaces).length || owned.some((b) => b.kind === "workspace"))) {
+      // Native primary selection updates sibling rows. Prevent a UI/API writer
+      // from inserting or changing a sibling between ownership validation and apply.
+      await tx.execute(sql`lock table project_workspaces in share row exclusive mode`);
+    }
     const bindings = new Map(owned.map((b) => [`${b.kind}/${b.key}`, b]));
     const ids = new Map<string, string>();
     const getId = (kind: Kind, key: string, adopt?: string) => {
@@ -95,6 +101,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     };
     for (const [key, c] of Object.entries(m.companies)) getId("company", key, c.adopt);
     for (const [key, p] of Object.entries(m.projects)) getId("project", key, p.adopt);
+    for (const [key, w] of Object.entries(m.projectWorkspaces)) getId("workspace", key, w.adopt);
     for (const [key, a] of Object.entries(m.agents)) getId("agent", key, a.adopt);
     const actorId = await bootstrapOperator(tx, options.config, options.descriptor.bootstrap, false);
     if (Object.keys(m.routines).length && !actorId && !options.descriptor.bootstrap) throw new Error("Declared routines require an operator bootstrap identity");
@@ -112,6 +119,30 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       add({ kind: "project", key, adopt: p.adopt, companyId, enabled: true, fields: () => ({ ...p.fields, companyId }),
         create: async () => (await projectSvc.create(companyId, { ...p.fields, id: getId("project", key) })).id,
         update: (f) => projectSvc.update(getId("project", key), f) });
+    }
+    // Native services auto-select the first workspace and repair missing primaries.
+    // Apply the declared primary first so those repairs never choose a different row.
+    const workspaceEntries = Object.entries(m.projectWorkspaces).sort(([a, x], [b, y]) =>
+      Number(y.fields.isPrimary) - Number(x.fields.isPrimary) || a.localeCompare(b));
+    for (const [key, w] of workspaceEntries) {
+      const companyId = getId("company", m.projects[w.project].company);
+      const projectId = getId("project", w.project);
+      const { runtimeConfig, ...nativeFields } = w.fields;
+      const fields = {
+        ...nativeFields,
+        sourceType: nativeFields.sourceType ?? (nativeFields.repoUrl ? "git_repo" : "local_path"),
+        ...(runtimeConfig !== undefined ? { metadata: mergeProjectWorkspaceRuntimeConfig(nativeFields.metadata ?? null, runtimeConfig) } : {}),
+        companyId, projectId,
+      };
+      add({ kind: "workspace", key, adopt: w.adopt, companyId, enabled: true, fields: () => fields,
+        create: async () => {
+          const created = await projectSvc.createWorkspace(projectId, fields);
+          if (!created) throw new Error("Declared workspace could not be created");
+          return created.id;
+        },
+        update: async () => {
+          if (!await projectSvc.updateWorkspace(projectId, getId("workspace", key), fields)) throw new Error("Declared workspace could not be updated");
+        } });
     }
     const agentKeys: string[] = [];
     const visit = (key: string) => { if (agentKeys.includes(key)) return; const parent = m.agents[key].reportsTo; if (parent) visit(parent); agentKeys.push(key); };
@@ -167,8 +198,12 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       differences.push({ kind: "instance", key: options.descriptor.instance, action: "update", fields: ["owner"] });
     }
     const actions = new Map<Spec, DeploymentDifference>();
+    const claimed = new Set<string>();
     // Read and validate ALL existing identities before the first application write.
     for (const spec of specs) {
+      const resource = `${spec.kind}/${spec.id}`;
+      if (claimed.has(resource)) throw new Error("Duplicate resource ownership in deployment manifest");
+      claimed.add(resource);
       const binding = bindings.get(`${spec.kind}/${spec.key}`);
       if (spec.adopt && binding && spec.adopt !== binding.resourceId) throw new Error("Adoption cannot change a managed identity");
       if (binding && binding.companyId !== spec.companyId) throw new Error("Moving managed resources between companies is unsupported");
@@ -177,6 +212,23 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       const table = tables[spec.kind];
       const existing = await tx.select({ id: table.id }).from(table).where(eq(table.id, spec.id));
       if ((binding || spec.adopt) && !existing.length) throw new Error("Managed or adopted resource is missing; explicit recovery is required");
+      if (spec.kind === "workspace") {
+        const projectId = spec.fields().projectId as string;
+        const siblings = await tx.select().from(projectWorkspaces).where(eq(projectWorkspaces.projectId, projectId));
+        if (existing.length) {
+          const [workspace] = await tx.select().from(projectWorkspaces).where(eq(projectWorkspaces.id, spec.id));
+          if (workspace.projectId !== projectId || workspace.companyId !== spec.companyId) throw new Error("Workspace belongs to a different project or company");
+        } else if (siblings.some((workspace) =>
+          (spec.fields().name && workspace.name === String(spec.fields().name).trim()) ||
+          (spec.fields().remoteWorkspaceRef && workspace.remoteWorkspaceRef === spec.fields().remoteWorkspaceRef
+            && workspace.remoteProvider === (spec.fields().remoteProvider ?? null)))) {
+          throw new Error("Existing workspace requires explicit adoption");
+        }
+        if (spec.fields().isPrimary && siblings.some((workspace) => workspace.isPrimary && workspace.id !== spec.id
+          && !specs.some((other) => other.kind === "workspace" && other.id === workspace.id && other.fields().projectId === projectId))) {
+          throw new Error("Existing primary workspace requires explicit adoption before changing primary selection");
+        }
+      }
       if (!binding && !spec.adopt && existing.length) throw new Error("Existing unmanaged resource requires explicit adoption");
       if (spec.adopt) {
         for (const registry of [pluginManagedResources, builtInManagedResources]) {
@@ -226,6 +278,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       }
     }
     const removed = owned.filter((b) => b.enabled && !specs.some((s) => s.kind === b.kind && s.key === b.key));
+    if (removed.some((b) => b.kind === "workspace")) throw new Error("Workspace removal requires an explicit ownership handoff; retain the declaration to preserve execution references");
     for (const b of removed) differences.push({ kind: b.kind, key: b.key, action: "disable", fields: [] });
     if (options.descriptor.bootstrap && !actorId) differences.unshift({ kind: "operator", key: "bootstrap", action: "create", fields: [] });
     if (options.apply) {

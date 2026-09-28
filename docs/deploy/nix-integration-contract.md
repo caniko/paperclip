@@ -367,6 +367,66 @@ credentials before enabling it. `nix/tests/module-evaluation.nix` and
 `nix/tests/declarative-instances.nix` contain executable configurations for both
 module systems, including concurrent instances.
 
+Project fields accept the native `executionWorkspacePolicy` alongside `name` and
+`description`. For example, a canonical shared checkout can declare:
+
+```nix
+manifest.projects.main.fields.executionWorkspacePolicy = {
+  enabled = true;
+  defaultMode = "shared_workspace";
+  sharedWorkspaceConcurrency = "serialize";
+  allowIssueOverride = false;
+  workspaceStrategy.type = "project_primary";
+};
+```
+
+Policy updates preserve the project identity. Set the field explicitly to `null`
+to clear it. Explicit `serialize` defers dispatch behind a live shared-workspace
+holder for local and SSH targets as well as sandboxes. `auto` retains concurrent
+local/SSH dispatch. This controller gate uses the existing holder staleness and
+retry rules; filesystem mutation ownership across controller disconnects still
+requires worker-side execution-lifetime locks. Non-null database IDs in
+`defaultProjectWorkspaceId` and `environmentId` are rejected in declarations;
+this contract selects the project's primary workspace.
+
+Named workspaces use `manifest.projectWorkspaces.<key>`, referencing a declared
+project key and inheriting its company:
+
+```nix
+manifest.projectWorkspaces.canonical = {
+  project = "main";
+  fields = {
+    name = "Canonical checkout";
+    sourceType = "remote_managed";
+    remoteProvider = "worker";
+    remoteWorkspaceRef = "main";
+    isPrimary = true;
+  };
+};
+```
+
+Fields reuse the native workspace validator. Reconciliation creates database
+records through the native project service; it does not clone repositories,
+create worktrees, or resolve worker paths. Remote provider/reference strings
+are opaque here; the worker must resolve and authorize them before execution.
+
+Every project with declared workspaces requires exactly one explicit primary.
+Keys own stable IDs, independent of display names, exported as `workspace/<key>`
+in bindings. An existing workspace requires explicit `adopt = "<uuid>"` and must
+belong to the referenced project and company. A primary switch cannot implicitly
+demote an unmanaged or differently owned primary: declare and adopt that workspace
+first. Native edits/deletes of owned fields, including indirect primary-switch
+updates, are rejected by the database ownership trigger.
+
+As with other resource fields, omission relinquishes ownership without clearing
+the stored value; use explicit `null` for nullable fields to clear them. Declaring
+`runtimeConfig` owns the entire native `metadata` column and replaces it with
+the declared metadata plus normalized runtime configuration. Preserve any desired
+metadata explicitly when adopting. Omitting an entire previously owned workspace
+is rejected, because native workspaces have no safe disabled state; retain its
+declaration until an explicit ownership handoff is performed. Existing execution
+references and history are never implicitly deleted.
+
 Native agent validators define roles, permissions, adapter settings and budgets.
 `reportsTo` names an agent key. Native deployment contracts in
 `server/src/deployment/adapter-config.ts` validate execution configuration without

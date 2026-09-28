@@ -5,13 +5,15 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
-import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, companySecrets, companySecretVersions, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
+import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companySecrets, companySecretVersions, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
 import { reconcileDeployment } from "./reconcile.js";
 import { loadConfig } from "../config.js";
 import { secretService } from "../services/secrets.js";
 import type { DeploymentDescriptor } from "./runtime.js";
 import { ensurePostgresDatabase, runDatabaseBackup, runDatabaseRestore } from "@paperclipai/db";
 import { findServerAdapter } from "../adapters/registry.js";
+import { projectWorkspaces } from "@paperclipai/db";
+import { projectService } from "../services/projects.js";
 
 let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
 let db: ReturnType<typeof createDb>;
@@ -120,6 +122,96 @@ it("rejects invalid references and ownership conflicts without partial writes", 
   const [owned] = before.filter((r) => r.kind === "company");
   await expect(reconcile({ version: 1, owner: "other", companies: { stolen: { adopt: owned.resourceId, fields: { name: "Stolen" } } } })).rejects.toThrow("ownership");
   expect(await db.select().from(deploymentResources)).toEqual(before);
+});
+
+it("reconciles project execution policy without replacing the project", async () => {
+  const policy = {
+    enabled: true, defaultMode: "shared_workspace", sharedWorkspaceConcurrency: "serialize",
+    allowIssueOverride: false, workspaceStrategy: { type: "project_primary" },
+  };
+  const declaration = {
+    version: 1, owner: "project-policy",
+    companies: { example: { fields: { name: "Project policy" } } },
+    projects: { main: { company: "example", fields: { name: "Canonical project", executionWorkspacePolicy: policy } } },
+  };
+  const first = await reconcile(declaration);
+  const projectId = first.bindings["project/main"];
+  const readProject = async () => (await db.select().from(projects).where(eq(projects.id, projectId)))[0];
+  expect((await readProject()).executionWorkspacePolicy).toEqual(policy);
+  expect((await reconcile(declaration, false)).differences).toEqual([]);
+  expect((await reconcile(declaration)).bindings).toEqual(first.bindings);
+  const changed = structuredClone(declaration);
+  changed.projects.main.fields.executionWorkspacePolicy.sharedWorkspaceConcurrency = "allow";
+  expect((await reconcile(changed)).bindings["project/main"]).toBe(projectId);
+  expect((await readProject()).executionWorkspacePolicy).toEqual(changed.projects.main.fields.executionWorkspacePolicy);
+  await reconcile({ ...declaration, projects: { main: {
+    ...declaration.projects.main, fields: { name: "Canonical project", executionWorkspacePolicy: null },
+  } } });
+  expect((await readProject()).executionWorkspacePolicy).toBeNull();
+});
+
+it("reconciles named workspaces, switches primaries and protects owned native fields", async () => {
+  const declaration = {
+    version: 1, owner: "workspaces",
+    companies: { example: { fields: { name: "Workspace company" } } },
+    projects: { main: { company: "example", fields: { name: "Workspace project" } } },
+    projectWorkspaces: {
+      alpha: { project: "main", fields: { name: "Alpha", sourceType: "remote_managed", remoteWorkspaceRef: "alpha", remoteProvider: "worker", isPrimary: true, runtimeConfig: { desiredState: "manual" } } },
+      beta: { project: "main", fields: { name: "Beta", cwd: "/fixture/beta", isPrimary: false } },
+    },
+  };
+  const first = await reconcile(declaration);
+  const read = async () => db.select().from(projectWorkspaces).where(eq(projectWorkspaces.projectId, first.bindings["project/main"]));
+  expect(await read()).toHaveLength(2);
+  expect((await reconcile(declaration)).bindings).toEqual(first.bindings);
+  expect((await reconcile(declaration, false)).differences).toEqual([]);
+  const changed = structuredClone(declaration);
+  changed.projectWorkspaces.alpha.fields.isPrimary = false;
+  changed.projectWorkspaces.beta.fields.isPrimary = true;
+  changed.projectWorkspaces.alpha.fields.name = "Renamed";
+  expect((await reconcile(changed)).bindings).toEqual(first.bindings);
+  const rows = await read();
+  expect(rows.filter((w) => w.isPrimary).map((w) => w.id)).toEqual([first.bindings["workspace/beta"]]);
+  expect(rows.find((w) => w.id === first.bindings["workspace/alpha"])?.name).toBe("Renamed");
+  await expect(db.update(projectWorkspaces).set({ name: "UI drift" }).where(eq(projectWorkspaces.id, first.bindings["workspace/alpha"]))).rejects.toThrow();
+  await expect(db.update(projectWorkspaces).set({ metadata: {} }).where(eq(projectWorkspaces.id, first.bindings["workspace/alpha"]))).rejects.toThrow();
+  await expect(db.delete(projectWorkspaces).where(eq(projectWorkspaces.id, first.bindings["workspace/beta"]))).rejects.toThrow();
+  await expect(reconcile({ ...changed, projectWorkspaces: {} })).rejects.toThrow("Workspace removal");
+  expect(await read()).toEqual(rows);
+});
+
+it("rejects implicit primary takeover and wrong-project adoption before writes", async () => {
+  const declaration = {
+    version: 1, owner: "workspace-adoption",
+    companies: { example: { fields: { name: "Adoption company" } } },
+    projects: {
+      main: { company: "example", fields: { name: "Adoption main" } },
+      other: { company: "example", fields: { name: "Adoption other" } },
+    },
+  };
+  const first = await reconcile(declaration);
+  const svc = projectService(db);
+  const existing = await svc.createWorkspace(first.bindings["project/main"], { name: "Existing", cwd: "/fixture/existing" });
+  const workspace = { project: "main", fields: { name: "Managed", cwd: "/fixture/managed", isPrimary: true } };
+  await expect(reconcile({ ...declaration, projectWorkspaces: { main: workspace } })).rejects.toThrow("primary");
+  await expect(reconcile({ ...declaration, projectWorkspaces: { main: { ...workspace, project: "other", adopt: existing!.id } } })).rejects.toThrow("project");
+  expect(await svc.listWorkspaces(first.bindings["project/other"])).toHaveLength(0);
+  const adopted = { ...declaration, projectWorkspaces: { main: { ...workspace, adopt: existing!.id } } };
+  expect((await reconcile(adopted)).bindings["workspace/main"]).toBe(existing!.id);
+  expect((await reconcile(adopted, false)).differences).toEqual([]);
+  await expect(reconcile({ ...adopted, projectWorkspaces: {
+    ...adopted.projectWorkspaces,
+    alias: { ...adopted.projectWorkspaces.main, fields: { ...workspace.fields, isPrimary: false } },
+  } }, false)).rejects.toThrow("ownership");
+  // A native primary switch also mutates the previously primary row. The trigger
+  // must protect that indirect path, not just direct updates to owned resources.
+  await expect(svc.createWorkspace(first.bindings["project/main"], {
+    name: "UI primary", cwd: "/fixture/ui-primary", isPrimary: true,
+  })).rejects.toThrow();
+  expect(await svc.listWorkspaces(first.bindings["project/main"])).toHaveLength(1);
+  const otherOwner = { version: 1, owner: "workspace-thief", companies: { example: { fields: { name: "Thief" } } }, projects: { main: { company: "example", fields: { name: "Thief project" } } }, projectWorkspaces: adopted.projectWorkspaces };
+  await expect(reconcile(otherOwner)).rejects.toThrow();
+  expect(await db.select().from(companies).where(eq(companies.name, "Thief"))).toHaveLength(0);
 });
 
 it("reconciles structured native adapter configuration and resolves process credentials", async () => {

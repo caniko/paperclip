@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { createCompanySchema } from "./validators/company.js";
 import { createAgentSchema } from "./validators/agent.js";
-import { createProjectSchema } from "./validators/project.js";
+import { createProjectSchema, createProjectWorkspaceSchema } from "./validators/project.js";
 import { createRoutineSchema, createRoutineTriggerSchema } from "./validators/routine.js";
 
 const key = z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/);
@@ -11,7 +11,7 @@ const company = identity.extend({
 }).strict();
 const project = identity.extend({
   company: key,
-  fields: createProjectSchema.pick({ name: true, description: true }).strict(),
+  fields: createProjectSchema.pick({ name: true, description: true, executionWorkspacePolicy: true }).strict(),
 }).strict();
 const agent = identity.extend({
   company: key,
@@ -44,6 +44,10 @@ export const deploymentManifestSchema = z.object({
   owner: key,
   companies: z.record(key, company),
   projects: z.record(key, project).default({}),
+  projectWorkspaces: z.record(key, identity.extend({
+    project: key,
+    fields: createProjectWorkspaceSchema.strict(),
+  }).strict()).default({}),
   agents: z.record(key, agent).default({}),
   routines: z.record(key, routine).default({}),
   taskBridges: z.record(key, z.object({
@@ -52,6 +56,21 @@ export const deploymentManifestSchema = z.object({
   }).strict()).default({}),
 }).strict().superRefine((m, ctx) => {
   const issue = (path: string[], message: string) => ctx.addIssue({ code: "custom", path, message });
+  const workspacePrimaries = new Map<string, number>();
+  for (const [name, workspace] of Object.entries(m.projectWorkspaces)) {
+    if (!m.projects[workspace.project]) issue(["projectWorkspaces", name, "project"], "Unknown project key");
+    workspacePrimaries.set(workspace.project, (workspacePrimaries.get(workspace.project) ?? 0) + Number(workspace.fields.isPrimary));
+  }
+  for (const [project, count] of workspacePrimaries) {
+    if (count !== 1) issue(["projectWorkspaces"], `Project ${project} requires exactly one declared primary workspace`);
+  }
+  for (const [name, project] of Object.entries(m.projects)) {
+    for (const field of ["defaultProjectWorkspaceId", "environmentId"] as const) {
+      if (project.fields.executionWorkspacePolicy?.[field] != null) {
+        issue(["projects", name, "fields", "executionWorkspacePolicy", field], "Deployment policies cannot reference unmanaged database IDs; use the project primary workspace");
+      }
+    }
+  }
   for (const kind of ["projects", "agents", "routines"] as const) {
     for (const [name, resource] of Object.entries(m[kind])) {
       if (!m.companies[resource.company]) issue([kind, name, "company"], "Unknown company key");
