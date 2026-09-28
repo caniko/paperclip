@@ -41,6 +41,17 @@ in
       );
     };
     programs.paperclip = {
+      deployments = lib.mkOption {
+        type = lib.types.attrsOf (pkgs.formats.json { }).type;
+        default = { };
+        description = ''
+          Nonsecret native deployment manifests owned by this person. Written to
+          XDG configuration for inspection; never applied by Home Manager activation.
+          The optional NixOS Home Manager bridge selects a declaration for a system
+          controller. Native validation and resource ownership checks still apply.
+          Credential references name system-provisioned credentials, not their values.
+        '';
+      };
       enable = lib.mkEnableOption "Paperclip CLI client (no local server required)";
       package = lib.mkOption {
         type = lib.types.package;
@@ -76,6 +87,15 @@ in
       }
     ];
     home.packages = lib.optional client.enable clientPackage;
+    xdg.configFile = lib.mapAttrs' (
+      name: manifest:
+      assert lib.assertMsg (
+        builtins.match "[a-z][a-z0-9_-]{0,62}" name != null
+      ) "Paperclip deployment names must be native resource keys";
+      lib.nameValuePair "paperclip/deployments/${name}.json" {
+        source = (pkgs.formats.json { }).generate "paperclip-${name}-manifest.json" manifest;
+      }
+    ) client.deployments;
     systemd.user.services = lib.mapAttrs' (
       name: c:
       let

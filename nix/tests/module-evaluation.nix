@@ -118,7 +118,73 @@ let
       }
     ];
   };
+  personalManifest = owner: {
+    version = 1;
+    inherit owner;
+    companies.${owner}.fields.name = "${owner}'s company";
+  };
+  integrated =
+    extra:
+    system {
+      imports = [
+        home-manager.nixosModules.home-manager
+        self.nixosModules.home-manager
+        extra
+      ];
+      home-manager.useGlobalPkgs = true;
+      users.users = lib.genAttrs [ "alice" "bob" ] (_: {
+        isNormalUser = true;
+      });
+      home-manager.users = lib.genAttrs [ "alice" "bob" ] (user: {
+        home.username = user;
+        home.homeDirectory = "/home/${user}";
+        home.stateVersion = "26.05";
+        programs.paperclip.deployments.work = personalManifest user;
+      });
+      services.paperclip.homeManager.deployments = {
+        one = {
+          user = "alice";
+          deployment = "work";
+        };
+        two = {
+          user = "bob";
+          deployment = "work";
+        };
+      };
+    };
+  people = integrated { };
+  extended = integrated {
+    services.paperclip.instances.one.manifest.companies.intruder.fields.name = "Other";
+  };
+  overridden = integrated {
+    services.paperclip.instances.one.manifest = lib.mkForce (personalManifest "other");
+  };
+  missing = integrated {
+    services.paperclip.homeManager.deployments.one.deployment = lib.mkForce "missing";
+  };
+  personalClient = home-manager.lib.homeManagerConfiguration {
+    inherit pkgs;
+    modules = [
+      self.homeManagerModules.default
+      {
+        home.username = "alice";
+        home.homeDirectory = "/home/alice";
+        home.stateVersion = "26.05";
+        programs.paperclip.deployments.work = personalManifest "alice";
+      }
+    ];
+  };
 in
+assert lib.assertMsg (valid people.config) (explain people.config);
+assert people.config.services.paperclip.instances.one.manifest == personalManifest "alice";
+assert people.config.services.paperclip.instances.two.manifest == personalManifest "bob";
+assert people.config.home-manager.users.alice.systemd.user.services == { };
+assert personalClient.config.services.paperclip.instances == { };
+assert personalClient.config.xdg.configFile ? "paperclip/deployments/work.json";
+assert builtins.deepSeq personalClient.activationPackage.drvPath true;
+assert !(valid extended.config);
+assert !(valid overridden.config);
+assert !(builtins.tryEval missing.config.services.paperclip.instances.one.manifest).success;
 assert lib.assertMsg (valid machine.config) (explain machine.config);
 assert lib.assertMsg (valid home.config) (explain home.config);
 assert lib.assertMsg (valid splitController.config) (explain splitController.config);

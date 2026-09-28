@@ -15,6 +15,42 @@ application provisioning.
 
 ## Exported interfaces
 
+### Personal declarations and system infrastructure
+
+`programs.paperclip.deployments.<name>` is a nonsecret native deployment
+manifest. Home Manager renders it under
+`$XDG_CONFIG_HOME/paperclip/deployments/<name>.json` without applying it or
+starting a controller. This works in standalone Home Manager as well as the
+NixOS integration. The CLI connection and personal credential-file reference
+remain in `programs.paperclip`.
+
+Import the optional `nixosModules.home-manager` alongside Home Manager's NixOS
+module and Paperclip's NixOS module to select a declaration:
+
+```nix
+services.paperclip.homeManager.deployments.work = {
+  user = "operator";
+  deployment = "work";
+};
+```
+
+The bridge imports the user module and supplies that declaration as
+`services.paperclip.instances.work.manifest`. It does not enable the instance.
+Each instance has one selected declaration and one reconciler. Different users
+can use the same declaration key for separate controllers. Missing selections
+and host extensions/overrides of selected manifests fail evaluation. Preserve
+the manifest's `owner` and resource keys when moving an existing declaration
+between files; changing its owner requires an explicit application handoff.
+
+Unix accounts, database access, worker permissions, service lifecycle and
+server credentials stay in NixOS. A Home Manager declaration is trusted
+operator configuration, not an application authorization boundary: its owner
+key does not grant membership and its workspace paths do not grant filesystem
+access. Personal client secrets never need to become controller credentials.
+See `nix/examples/personal-declaration.nix` for the composition.
+
+### Outputs
+
 | Flake output | Contract |
 | --- | --- |
 | `packages.x86_64-linux.paperclip` / `default` | Immutable native application, UI, CLI, adapters and runner |
@@ -22,6 +58,7 @@ application provisioning.
 | `apps.x86_64-linux.paperclip-server` | Conventional imperative server entry point |
 | `nixosModules.default` / `paperclip` | Legacy singleton plus `services.paperclip.instances.<name>` |
 | `homeManagerModules.default` / `paperclip` | Linux user services and client-only `programs.paperclip` |
+| `nixosModules.home-manager` | Optional explicit selection of Home Manager declarations for system controllers |
 | `lib.configuration` | Shared option definitions, configuration rendering and assertions; takes `{ lib, pkgs }` |
 | `overlays.default` / `paperclip` | Adds `pkgs.paperclip` |
 | `checks.x86_64-linux.package` | Builds the actual package |

@@ -25,7 +25,11 @@
       };
 
       nixosModule =
-        { lib, pkgs, ... }:
+        {
+          lib,
+          pkgs,
+          ...
+        }:
         {
           imports = [
             paperclipModule
@@ -43,6 +47,7 @@
       nixosModules = {
         default = nixosModule;
         paperclip = nixosModule;
+        home-manager = import ./nix/modules/nixos/home-manager.nix;
       };
 
       homeManagerModules.default = { ... }: {
