@@ -55,8 +55,10 @@ beforeEach(async (context) => {
   ].join("\n"));
   // Replace only the transport. Real sh, tar and git execute the exact last
   // SSH argument with tools unavailable until the remote profile runs.
-  await writeFile(path.join(localBin, "ssh"), [
-    `#!${process.execPath}`,
+  const nodePath = path.join(root, "node 'with spaces'");
+  await symlink(process.execPath, nodePath);
+  const launcher = path.join(localBin, "ssh.cjs");
+  await writeFile(launcher, [
     'const { spawn } = require("node:child_process");',
     `const child = spawn(${JSON.stringify(tools.get("sh"))}, ["-c", process.argv.at(-1)], {`,
     `  env: { ...process.env, HOME: ${JSON.stringify(home)}, PATH: ${JSON.stringify(bootstrapBin)} },`,
@@ -64,6 +66,13 @@ beforeEach(async (context) => {
     '});',
     'child.on("error", (error) => { console.error(error); process.exitCode = 1; });',
     'child.on("close", (code) => { process.exitCode = code ?? 1; });',
+    "",
+  ].join("\n"), { mode: 0o600 });
+  // A shebang cannot quote an interpreter path. Use a shell wrapper so Node
+  // installations in paths with spaces work, and exercise quoting on every run.
+  await writeFile(path.join(localBin, "ssh"), [
+    "#!/bin/sh",
+    `exec ${quote(nodePath)} ${quote(launcher)} "$@"`,
     "",
   ].join("\n"), { mode: 0o700 });
   vi.stubEnv("PATH", `${localBin}${path.delimiter}${process.env.PATH ?? ""}`);
