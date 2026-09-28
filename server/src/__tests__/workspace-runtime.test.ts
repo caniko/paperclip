@@ -1683,14 +1683,16 @@ describe("realizeExecutionWorkspace", () => {
     const sharedConfigPath = path.join(sharedConfigDir, "config.json");
     const sharedEnvPath = path.join(sharedConfigDir, ".env");
 
-    process.env.PAPERCLIP_HOME = paperclipHome;
-    process.env.PAPERCLIP_INSTANCE_ID = instanceId;
-    process.env.PAPERCLIP_WORKTREES_DIR = isolatedWorktreeHome;
-    delete process.env.PAPERCLIP_CONFIG;
     // Keep this server-side fixture on provision-worktree.sh's config writer path;
-    // CLI/database seeding is covered by the CLI worktree tests.
+    // CLI/database seeding is covered by the CLI worktree tests. Include only
+    // required tools, so pnpm/paperclipai stay absent even on non-FHS hosts.
     await fs.symlink(process.execPath, path.join(isolatedBin, "node"));
-    process.env.PATH = `${isolatedBin}${path.delimiter}/usr/bin${path.delimiter}/bin`;
+    for (const command of ["bash", "sh", "git", "env", "dirname", "basename", "mkdir"]) {
+      const { stdout } = await execFileAsync("/bin/sh", ["-c", 'command -v "$1"', "sh", command]);
+      const executable = stdout.trim();
+      expect(path.isAbsolute(executable)).toBe(true);
+      await fs.symlink(executable, path.join(isolatedBin, command));
+    }
 
     await fs.mkdir(sharedConfigDir, { recursive: true });
     await fs.writeFile(
@@ -1765,6 +1767,11 @@ describe("realizeExecutionWorkspace", () => {
     await runGit(repoRoot, ["commit", "-m", "Add worktree provision script"]);
 
     try {
+      process.env.PAPERCLIP_HOME = paperclipHome;
+      process.env.PAPERCLIP_INSTANCE_ID = instanceId;
+      process.env.PAPERCLIP_WORKTREES_DIR = isolatedWorktreeHome;
+      delete process.env.PAPERCLIP_CONFIG;
+      process.env.PATH = isolatedBin;
       const workspaceInput = {
         base: {
           baseCwd: repoRoot,
