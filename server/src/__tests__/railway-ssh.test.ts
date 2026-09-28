@@ -4,8 +4,12 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { instanceId } from "./fixtures/railway/provider.js";
-const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
+const { spawnMock, accessMock } = vi.hoisted(() => ({ spawnMock: vi.fn(), accessMock: vi.fn() }));
 vi.mock("node:child_process", async (original) => ({ ...await original<typeof import("node:child_process")>(), spawn: spawnMock }));
+vi.mock("node:fs/promises", async (original) => {
+  const actual = await original<typeof import("node:fs/promises")>();
+  return { ...actual, access: accessMock.mockImplementation(actual.access) };
+});
 import { generateRailwaySshKey, railwaySshArguments, runRailwaySshCommand, validateRailwayKnownHosts } from "../services/railway-ssh.js";
 
 const host = "ssh.railway.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixture";
@@ -19,13 +23,45 @@ function fakeProcess(action: (child: EventEmitter & { stdout: PassThrough; stder
     return child;
   });
 }
-afterEach(() => { vi.clearAllMocks(); });
+afterEach(async () => {
+  vi.clearAllMocks();
+  vi.unstubAllEnvs();
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  accessMock.mockImplementation(actual.access);
+});
 
 describe("Railway isolated container command runner", () => {
   it("generates a fresh real key without retaining files", async () => {
+    vi.stubEnv("PATH", "/nonexistent/ambient-openssh");
     const key = await generateRailwaySshKey();
     expect(key.publicKey).toMatch(/^ssh-ed25519 /);
     expect(key.privateKey).toMatch(/^-----BEGIN OPENSSH PRIVATE KEY-----/);
+  });
+  it.each(["/usr/bin", "/bin", "/run/current-system/sw/bin"])("uses OpenSSH from the trusted %s directory", async (directory) => {
+    accessMock.mockImplementation(async (file) => {
+      if (file !== path.join(directory, "ssh")) throw Object.assign(new Error("absent"), { code: "ENOENT" });
+    });
+    vi.stubEnv("PATH", "/workspace/bin:/nix/store/00000000000000000000000000000000-untrusted/bin");
+    fakeProcess((child, script) => {
+      const marker = script.match(/paperclip_railway_completed_[a-f0-9]+/)![0];
+      child.stdout.write(`\n${marker}:0\n`);
+      child.emit("close", 0);
+    });
+    await expect(runRailwaySshCommand(input())).resolves.toMatchObject({ exitCode: 0 });
+    expect(spawnMock.mock.calls[0][0]).toBe(path.join(directory, "ssh"));
+    expect(spawnMock.mock.calls[0][2].env).toEqual({ PATH: "/usr/bin:/bin", LANG: "C.UTF-8" });
+  });
+  it("fails closed when only ambient OpenSSH paths could be available", async () => {
+    const ambient = "/nix/store/00000000000000000000000000000000-untrusted/bin";
+    vi.stubEnv("PATH", ambient);
+    accessMock.mockImplementation(async (file) => {
+      if (file !== path.join(ambient, "ssh")) throw Object.assign(new Error("absent"), { code: "ENOENT" });
+    });
+    await expect(runRailwaySshCommand(input())).rejects.toMatchObject({ code: "railway_ssh_unavailable" });
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(accessMock.mock.calls.map(([file]) => file)).toEqual([
+      "/usr/bin/ssh", "/bin/ssh", "/run/current-system/sw/bin/ssh",
+    ]);
   });
   it("rejects untrusted aliases and ambient SSH state", () => {
     for (const line of ["* ssh-ed25519 AAAA", "evil.test ssh-ed25519 AAAA", `${host}\nHost *`, "@cert-authority " + host]) expect(() => validateRailwayKnownHosts(line)).toThrow();
