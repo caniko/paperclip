@@ -1790,6 +1790,29 @@ it("denies the isolated Codex home without denying a remote execution workspace"
   expect(serialized).toContain('\":workspace_roots\"={\".\"=\"write\"}');
 });
 
+it("keeps long native command environment values out of bounded launch arguments", () => {
+  const commandPath = Array.from({ length: 600 }, (_, i) => `/tools/toolchain-${i}/bin`).join(":");
+  const args = createRunnerdCodexAppServerArgs({
+    environment: { PATH: commandPath, LANG: "C.UTF-8" },
+    codexHome: "/isolated/codex-home",
+  });
+  expect(Buffer.byteLength(commandPath)).toBeGreaterThan(4096);
+  expect(args.length).toBeLessThanOrEqual(64);
+  for (const argument of args) expect(Buffer.byteLength(argument)).toBeLessThanOrEqual(4096);
+  expect(args.join("\n")).not.toContain(commandPath);
+  expect(args).toContain('shell_environment_policy.inherit="none"');
+  expect(args).toContain('shell_environment_policy.include_only=["LANG","PATH"]');
+});
+
+it("retains explicit argv values for legacy native session profiles", () => {
+  const args = createRunnerdCodexAppServerArgs({
+    environment: { PATH: "/tools/bin", LANG: "C.UTF-8" },
+    codexHome: "/isolated/codex-home",
+    commandEnvironmentTransport: "argv",
+  });
+  expect(args).toContain('shell_environment_policy.set={PATH="/tools/bin",LANG="C.UTF-8"}');
+});
+
 it("rejects remote OpenCode before spawn when provider-pack paths are absent", async () => {
   const root = await mkdtemp(join(tmpdir(), "paperclip-runner-remote-pack-"));
   const { transport } = createCapabilityRunnerdCodexTransport({

@@ -169,6 +169,9 @@ function tomlString(value: string): string {
 export function createIsolatedCodexAppServerArgs(
   source: NodeJS.ProcessEnv = process.env,
   readOnlyRoots: string[] = [],
+  // Native runner profiles persist these values and supply them on each
+  // thread/start and thread/resume instead of exceeding the runner's argv cap.
+  commandEnvironmentTransport: "argv" | "thread" = "argv",
 ): string[] {
   const gitRoots = gitFilesystemRoots(source);
   readOnlyRoots = [...new Set([...readOnlyRoots, ...codexNetworkReadOnlyRoots(source)])];
@@ -248,7 +251,7 @@ export function createIsolatedCodexAppServerArgs(
     // Keep values in the process environment, never in argv/config diagnostics.
     "-c",
     `shell_environment_policy.include_only=${JSON.stringify(shellEnvironmentKeys)}`,
-    ...(commandEnv.length > 0
+    ...(commandEnvironmentTransport === "argv" && commandEnv.length > 0
       ? ["-c", `shell_environment_policy.set={${commandEnv}}`]
       : []),
     "--disable",
