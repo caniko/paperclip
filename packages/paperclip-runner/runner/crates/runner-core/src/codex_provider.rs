@@ -415,10 +415,23 @@ impl CodexProviderConfig {
     pub fn validate(&self) -> Result<(), LocalRunnerError> {
         if !matches!(
             (self.provider.as_str(), self.driver.as_str()),
-            ("codex", "codex_app_server") | ("opencode", "opencode_server")
+            (
+                "codex",
+                "codex_app_server" | "codex_app_server_command_environment_v1"
+            ) | ("opencode", "opencode_server")
         ) {
             return Err(LocalRunnerError::invalid(
-                "local runner provider must be codex through codex_app_server or opencode through opencode_server",
+                "local runner provider must use a supported Codex or OpenCode launch driver",
+            ));
+        }
+        // The discriminator is checked by older runners even when serde ignores
+        // unknown fields. Persist it with the environment so neither fresh
+        // preparation nor durable recovery can silently downgrade to argv mode.
+        if (self.driver == "codex_app_server_command_environment_v1")
+            != self.command_environment.is_some()
+        {
+            return Err(LocalRunnerError::invalid(
+                "commandEnvironment requires the codex_app_server_command_environment_v1 launch driver and a non-null map",
             ));
         }
         if self.provider_version.trim().is_empty() || self.provider_version.len() > 120 {

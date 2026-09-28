@@ -4577,7 +4577,9 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
                   driver:
                     provider === "opencode"
                       ? "opencode_server"
-                      : "codex_app_server",
+                      : this.options.codexArgs === undefined
+                        ? "codex_app_server_command_environment_v1"
+                        : "codex_app_server",
                   providerVersion:
                     provider === "opencode" ? "1.18.32" : "codex-app-server-v1",
                   command:

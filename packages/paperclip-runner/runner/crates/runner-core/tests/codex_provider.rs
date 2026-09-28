@@ -96,6 +96,7 @@ fn command_environment_survives_durable_provider_recovery() {
         "HOME": "/isolated/command-home"
     });
     let mut wire_config = serde_json::to_value(&config).unwrap();
+    wire_config["driver"] = json!("codex_app_server_command_environment_v1");
     wire_config["commandEnvironment"] = environment.clone();
     wire_config["includeSkillInstructions"] = json!(true);
     let mut first = CodexCommandExecutor::new(&directory);
@@ -169,6 +170,7 @@ fn command_environment_is_bounded_without_weakening_argument_limits() {
         json!({"PATH": "p".repeat(40 * 1024), "HOME": "h".repeat(40 * 1024)}),
     ] {
         let mut wire_config = base.clone();
+        wire_config["driver"] = json!("codex_app_server_command_environment_v1");
         wire_config["commandEnvironment"] = environment;
         let config: CodexProviderConfig = serde_json::from_value(wire_config).unwrap();
         assert!(config.validate().is_err());
@@ -182,6 +184,7 @@ fn command_environment_is_bounded_without_weakening_argument_limits() {
     assert!(legacy.validate().is_ok());
     assert!(legacy.command_environment.is_none());
     let mut boundary = legacy.clone();
+    boundary.driver = "codex_app_server_command_environment_v1".to_owned();
     boundary.command_environment = Some(std::collections::BTreeMap::from([(
         "PATH".to_owned(),
         "p".repeat(64 * 1024 - 4),
@@ -190,6 +193,35 @@ fn command_environment_is_bounded_without_weakening_argument_limits() {
     boundary.provider = "opencode".to_owned();
     boundary.driver = "opencode_server".to_owned();
     assert!(boundary.validate().is_err());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn command_environment_requires_a_supported_launch_profile_before_provider_start() {
+    let directory = temporary_directory("command-environment-profile");
+    let requests = directory.join("requests.jsonl");
+    let config = provider_config(&directory, &["--request-log", requests.to_str().unwrap()]);
+    let base = serde_json::to_value(config).unwrap();
+    for (driver, environment) in [
+        ("codex_app_server", json!({"PATH": "/explicit/tools"})),
+        ("codex_app_server_command_environment_v1", Value::Null),
+        ("codex_app_server_command_environment_v2", json!({})),
+    ] {
+        let mut wire_config = base.clone();
+        wire_config["driver"] = json!(driver);
+        wire_config["commandEnvironment"] = environment;
+        let mut executor = CodexCommandExecutor::new(&directory);
+        assert!(executor
+            .execute(&command(
+                "prepare",
+                1,
+                "run.prepare",
+                json!({"provider": wire_config})
+            ))
+            .is_err());
+        assert!(!directory.join("codex-provider-state.json").exists());
+        assert!(!requests.exists());
+    }
     fs::remove_dir_all(directory).unwrap();
 }
 

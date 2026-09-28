@@ -1113,7 +1113,14 @@ login shell can still change its environment through the host's profiles.
 The map is immutable within the durable provider profile. Recovery reuses it;
 changing it requires a fresh session. Older sessions keep their argv-based
 configuration, and explicitly supplied `codexArgs` keep control of that channel.
-Controller and runner artifacts must come from the same qualified build.
+New profiles use the versioned launch driver
+`codex_app_server_command_environment_v1`. The runner validates this discriminator
+before preparing or recovering a provider: older binaries reject it instead of
+silently ignoring the environment field. This works for remote artifacts without
+executing a target-architecture binary on the controller. Legacy argv profiles
+retain `codex_app_server`; the new driver requires a command-environment map and
+the legacy driver rejects one. Controller and runner artifacts must come from the
+same qualified build.
 
 ### Preinstalled remote runner runtime
 
