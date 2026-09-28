@@ -465,7 +465,7 @@ describeEmbeddedPostgres("shared-workspace run serialization", () => {
     { driver: "local", policySource: "project" },
     { driver: "ssh", policySource: "issue" },
     { driver: "ssh", policySource: "project" },
-  ] as const)("dispatches on $driver despite a $policySource serialize policy", async ({ driver, policySource }) => {
+  ] as const)("defers on $driver for an explicit $policySource serialize policy", async ({ driver, policySource }) => {
     const fixture = await seedWorkspaceFixture({
       agentEnvironmentDriver: driver,
       issueWorkspaceSettings: policySource === "issue" ? { sharedWorkspaceConcurrency: "serialize" } : null,
@@ -483,17 +483,16 @@ describeEmbeddedPostgres("shared-workspace run serialization", () => {
     expect(run).not.toBeNull();
 
     const finishedRun = await waitForRunToLeaveActiveStates(run!.id);
-    expect(finishedRun?.status).toBe("succeeded");
-    expect(finishedRun?.errorCode).not.toBe(WORKSPACE_BUSY_ERROR_CODE);
-    expect(executedRunIds).toContain(run!.id);
-    expect(executedInputs.get(run!.id)?.context.paperclipTaskMarkdown).toContain(
-      `shared workspace is concurrently held by run ${fixture.holderRunId}`,
-    );
+    expect(finishedRun?.errorCode).toBe(WORKSPACE_BUSY_ERROR_CODE);
+    expect(executedRunIds).not.toContain(run!.id);
     expect((await heartbeat.getRun(fixture.holderRunId))?.status).toBe("running");
+    expect(await waitForRetryRun(run!.id)).toMatchObject({
+      status: "scheduled_retry", scheduledRetryReason: WORKSPACE_BUSY_RETRY_REASON,
+    });
     const retryRuns = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(
       and(eq(heartbeatRuns.companyId, fixture.companyId), eq(heartbeatRuns.scheduledRetryReason, WORKSPACE_BUSY_RETRY_REASON)),
     );
-    expect(retryRuns).toHaveLength(0);
+    expect(retryRuns).toHaveLength(1);
   });
 
   it("allow passes the busy gate for a sandbox environment and adds coordination context", async () => {
