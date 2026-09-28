@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -75,9 +76,17 @@ describe("createBufferedTextFileWriter", () => {
 });
 
 describeEmbeddedPostgres("runDatabaseBackup", () => {
-  it.skipIf(process.platform === "win32").each(["javascript", "auto"] as const)(
+  it.skipIf(process.platform === "win32").for(["javascript", "auto", "pg_dump"] as const)(
     "backs up and restores over a Unix socket with the %s engine",
-    async (backupEngine) => {
+    { timeout: 60_000 },
+    async (backupEngine, context) => {
+      if (backupEngine === "pg_dump") {
+        for (const command of [process.env.PAPERCLIP_PG_DUMP_PATH || "pg_dump", process.env.PAPERCLIP_PSQL_PATH || "psql"]) {
+          if (spawnSync(command, ["--version"], { timeout: 5_000 }).status !== 0) {
+            context.skip("Native socket round trip requires both pg_dump and psql");
+          }
+        }
+      }
       const tcpUrl = await createTempDatabase();
       const probe = postgres(tcpUrl, { max: 1 });
       let socketDir: string;
@@ -96,8 +105,16 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
       const targetUrl = await createSiblingDatabase(sourceUrl, "socket_restore_target");
       const source = createDb(sourceUrl, { connectTimeoutSeconds: 2 }).$client;
       const target = createDb(targetUrl, { connectTimeoutSeconds: 2 }).$client;
+      const originalPgDumpPath = process.env.PAPERCLIP_PG_DUMP_PATH;
       const originalPsqlPath = process.env.PAPERCLIP_PSQL_PATH;
       try {
+        if (backupEngine !== "pg_dump") {
+          // Exercise both the direct JavaScript engine and automatic fallback,
+          // independently of which native utilities happen to be installed.
+          const missingTools = createTempDir("paperclip-no-native-tools-");
+          process.env.PAPERCLIP_PG_DUMP_PATH = path.join(missingTools, "pg_dump");
+          process.env.PAPERCLIP_PSQL_PATH = path.join(missingTools, "psql");
+        }
         const [connection] = await source`SELECT inet_server_addr() AS address`;
         expect(connection.address).toBeNull();
         expect(await getPostgresDataDirectory(sourceUrl)).toBe(await getPostgresDataDirectory(tcpUrl));
@@ -109,14 +126,15 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
           retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 2 },
           backupEngine,
         });
-        if (backupEngine === "javascript") {
-          // Exercise the postgres.js restore path when the native utility is absent.
-          process.env.PAPERCLIP_PSQL_PATH = path.join(createTempDir("paperclip-no-psql-"), "psql");
-        }
         await runDatabaseRestore({ connectionString: targetUrl, backupFile: backup.backupFile });
         const [restored] = await target`SELECT value FROM socket_probe`;
         expect(restored.value).toBe("socket-backup-fixture");
       } finally {
+        if (originalPgDumpPath === undefined) {
+          delete process.env.PAPERCLIP_PG_DUMP_PATH;
+        } else {
+          process.env.PAPERCLIP_PG_DUMP_PATH = originalPgDumpPath;
+        }
         if (originalPsqlPath === undefined) {
           delete process.env.PAPERCLIP_PSQL_PATH;
         } else {
@@ -125,7 +143,6 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
         await closeRegisteredClients(sourceUrl);
       }
     },
-    60_000,
   );
 
   it(
