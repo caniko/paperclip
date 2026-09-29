@@ -7453,8 +7453,10 @@ it.each([true, false])("preserves prepared OpenCode cleanup errors (primary fail
   expect((failure as Error).message).not.toContain("fixture-secret");
 });
 
-it("preserves prepared input through runnerd and the real OpenCode proxy boundary", async () => {
+it("preserves prepared input through runnerd and the real OpenCode proxy boundary", async ({ onTestFinished }) => {
   const root = await mkdtemp(join(tmpdir(), "runnerd-prepared-opencode-"));
+  // Setup can fail before the transport/session cleanup boundary exists.
+  onTestFinished(() => rm(root, { recursive: true, force: true }));
   // CI's Node installation may be group-writable. Qualify a private copy
   // without changing the shared toolchain or weakening launch validation.
   const node = join(root, "node");
