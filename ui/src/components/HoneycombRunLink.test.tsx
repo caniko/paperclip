@@ -41,11 +41,25 @@ describe("HoneycombRunLink", () => {
     expect(container.textContent).not.toContain("View in Honeycomb");
   });
 
-  it("links the run hash query when Paperclip developer mode is on", async () => {
+  it.each([0, 50])("links the run hash query when Paperclip developer mode is on (digest delay %i ms)", async (digestDelayMs) => {
+    if (digestDelayMs > 0) {
+      vi.stubGlobal("crypto", {
+        subtle: {
+          digest: async (...args: Parameters<typeof webcrypto.subtle.digest>) => {
+            await new Promise((resolve) => window.setTimeout(resolve, digestDelayMs));
+            return webcrypto.subtle.digest(...args);
+          },
+        },
+      });
+    }
     flushSync(() => {
       root.render(<HoneycombRunLink runId="abc" enabled />);
     });
-    await flushReact();
+    // WebCrypto finishes off the JS event loop. A fixed number of timer turns
+    // does not prove that its result has reached React.
+    await vi.waitFor(() => {
+      expect(container.querySelector("a")?.textContent).toContain("View in Honeycomb");
+    });
 
     const link = container.querySelector<HTMLAnchorElement>("a");
     expect(link?.textContent).toContain("View in Honeycomb");
