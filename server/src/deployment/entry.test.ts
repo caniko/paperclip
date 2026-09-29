@@ -6,13 +6,14 @@ import { createServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { createDb, startEmbeddedPostgresTestDatabase } from "@paperclipai/db";
+import { authUsers, companies, companyMemberships, createDb, startEmbeddedPostgresTestDatabase } from "@paperclipai/db";
 import { sql } from "drizzle-orm";
 import { paperclipConfigSchema } from "@paperclipai/shared";
 
 const root = mkdtempSync(join(tmpdir(), "paperclip-deployment-entry-"));
 const descriptorFile = join(root, "deployment.json");
 let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
+let adoptedCompanyId: string;
 let port: number;
 let child: ChildProcess | undefined;
 let output = "";
@@ -39,6 +40,9 @@ beforeAll(async () => {
   const address = socket.address(); if (!address || typeof address === "string") throw new Error("Missing port");
   port = address.port; await new Promise<void>((resolve) => socket.close(() => resolve()));
   database = await startEmbeddedPostgresTestDatabase("paperclip-deployment-entry-db-");
+  const db = createDb(database.connectionString);
+  const [adopted] = await db.insert(companies).values({ name: "Existing company", issuePrefix: "EXIST" }).returning();
+  adoptedCompanyId = adopted.id;
   const config = paperclipConfigSchema.parse({
     $meta: { version: 1, updatedAt: new Date().toISOString(), source: "configure" },
     server: { deploymentMode: "authenticated", exposure: "private", host: "127.0.0.1", port, serveUi: false },
@@ -49,7 +53,8 @@ beforeAll(async () => {
   });
   writeFileSync(join(root, "config.json"), JSON.stringify(config));
   writeFileSync(join(root, "manifest.json"), JSON.stringify({ version: 1, owner: "entry-owner",
-    companies: { example: { fields: { name: "Entry test" } }, other: { fields: { name: "Other company" } } },
+    companies: { example: { fields: { name: "Entry test" } }, other: { fields: { name: "Other company" } },
+      adopted: { adopt: adoptedCompanyId, fields: { name: "Existing company" } } },
     projects: { main: { company: "example", fields: { name: "Main" } }, outside: { company: "example", fields: { name: "Outside bridge" } } },
     agents: { worker: { company: "example", fields: { name: "Bridge worker", adapterType: "hermes_gateway", adapterConfig: { apiBaseUrl: "http://127.0.0.1:1" } }, credentials: { apiKey: "gateway" } } },
     taskBridges: { ingress: { agent: "worker", project: "main", allowedAssignees: ["worker"], credential: "bridge" } },
@@ -67,6 +72,14 @@ beforeAll(async () => {
 afterAll(async () => { await stop(); await database?.cleanup(); rmSync(root, { recursive: true, force: true }); });
 
 it("runs the real launcher, authenticates, plans read-only and fences online apply", async () => {
+  const db = createDb(database.connectionString);
+  const initialPlan = await command("plan");
+  expect(initialPlan.code, initialPlan.stderr).toBe(0);
+  expect(JSON.parse(initialPlan.stdout).differences).toContainEqual(expect.objectContaining({
+    kind: "company", key: "adopted", action: "adopt",
+  }));
+  expect(await db.select().from(authUsers)).toHaveLength(0);
+  expect(await db.select().from(companyMemberships)).toHaveLength(0);
   child = launch("serve");
   child.stdout!.on("data", (chunk) => { output += chunk; });
   child.stderr!.on("data", (chunk) => { output += chunk; });
@@ -80,6 +93,14 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
   });
   expect(response.status, await response.text()).toBe(200);
   const bindings = JSON.parse(readFileSync(join(root, "instances/entry/deployment-bindings.json"), "utf8")).bindings as Record<string, string>;
+  expect(bindings["company/adopted"]).toBe(adoptedCompanyId);
+  const cookie = response.headers.getSetCookie().map((value) => value.split(";")[0]).join("; ");
+  const listed = await fetch(`http://localhost:${port}/api/companies?scope=accessible`, { headers: { cookie } });
+  expect(listed.status).toBe(200);
+  expect((await listed.json() as { id: string }[]).map((company) => company.id).sort()).toEqual([
+    bindings["company/example"], bindings["company/other"], adoptedCompanyId,
+  ].sort());
+  expect((await fetch(`http://localhost:${port}/api/companies/${adoptedCompanyId}`, { headers: { cookie } })).status).toBe(200);
   const createIssue = (company: string, project: string) => fetch(`http://localhost:${port}/api/companies/${company}/issues`, {
     method: "POST", headers: { "content-type": "application/json", authorization: "Bearer entry-test-bridge-token-at-least-32-characters" },
     body: JSON.stringify({ title: "Bridge request", status: "backlog", projectId: project, assigneeAgentId: bindings["agent/worker"] }),

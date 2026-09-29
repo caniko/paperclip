@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
-import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companySecrets, companySecretVersions, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
+import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
 import { reconcileDeployment } from "./reconcile.js";
 import { loadConfig } from "../config.js";
 import { secretService } from "../services/secrets.js";
@@ -115,6 +115,25 @@ it("plans without writes, bootstraps once and preserves identities, pauses and s
   expect((await db.select().from(agentApiKeys).where(eq(agentApiKeys.id, first.bindings["taskBridge/tasks"])))[0].revokedAt).not.toBeNull();
   expect(JSON.stringify(plan)).not.toContain("fixture-only");
 }, 90000);
+
+it("preserves existing and later operator membership decisions for adopted companies", async () => {
+  await reconcile({ version: 1, owner: "adopt-membership", companies: {} });
+  const [account] = await db.select().from(authAccounts);
+  const [company] = await db.insert(companies).values({ name: "Existing access", issuePrefix: "ACCESS" }).returning();
+  const [membership] = await db.insert(companyMemberships).values({ companyId: company.id,
+    principalType: "user", principalId: account.userId, status: "suspended", membershipRole: "member" }).returning();
+  const declaration = { version: 1, owner: "adopt-membership",
+    companies: { existing: { adopt: company.id, fields: { name: company.name } } } };
+  const first = await reconcile(declaration);
+  const memberships = () => db.select().from(companyMemberships).where(eq(companyMemberships.companyId, company.id));
+  expect(await memberships()).toEqual([membership]);
+  expect((await reconcile(declaration)).differences).toEqual([]);
+  await db.delete(companyMemberships).where(eq(companyMemberships.id, membership.id));
+  expect((await reconcile({ ...declaration, companies: { existing: {
+    ...declaration.companies.existing, fields: { name: "Updated adopted company" },
+  } } })).bindings).toEqual(first.bindings);
+  expect(await memberships()).toEqual([]);
+});
 
 it("rejects invalid references and ownership conflicts without partial writes", async () => {
   const before = await db.select().from(deploymentResources);
