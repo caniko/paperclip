@@ -51,6 +51,7 @@ const payload = {
   argv: process.argv.slice(2),
   prompt: fs.readFileSync(0, "utf8"),
   path: process.env.PATH || "",
+  skill: fs.readFileSync(require("node:path").join(process.env.HOME, ".cursor", "skills", "fixture-skill", "SKILL.md"), "utf8"),
 };
 fs.writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify(payload), "utf8");
 console.log(JSON.stringify({
@@ -334,6 +335,8 @@ describe("cursor execute", () => {
     const remoteWorkspace = path.join(root, "remote-workspace");
     const capturePath = path.join(root, "capture.json");
     const cursorAgentPath = path.join(homeDir, ".local", "bin", "cursor-agent");
+    const skillDir = await createSkillDir(root, "fixture-skill");
+    const logs: string[] = [];
     await fs.mkdir(workspace, { recursive: true });
     await fs.mkdir(remoteWorkspace, { recursive: true });
     await writeFakeSandboxCursorAgent(cursorAgentPath, capturePath);
@@ -369,23 +372,28 @@ describe("cursor execute", () => {
           command: "agent",
           cwd: workspace,
           env: { PATH: sandboxPath },
+          paperclipRuntimeSkills: [{ name: "fixture-skill", source: skillDir }],
+          paperclipSkillSync: { desiredSkills: ["fixture-skill"] },
           promptTemplate: "Follow the paperclip heartbeat.",
         },
         context: {},
         authToken: "run-jwt-token",
-        onLog: async () => {},
+        onLog: async (_stream, chunk) => { logs.push(chunk); },
       });
 
-      expect(result.exitCode).toBe(0);
+      expect(result.exitCode, logs.join("")).toBe(0);
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as {
         command: string;
         argv: string[];
         prompt: string;
         path: string;
+        skill: string;
       };
       expect(capture.command).toBe(cursorAgentPath);
       expect(capture.path.split(":")[0]).toBe(path.join(homeDir, ".local", "bin"));
       expect(capture.prompt).toContain("Follow the paperclip heartbeat.");
+      expect(capture.skill).toBe(await fs.readFile(path.join(skillDir, "SKILL.md"), "utf8"));
+      expect(logs.join("")).not.toMatch(/not found|Failed to .*skill/);
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;
@@ -401,6 +409,8 @@ describe("cursor execute", () => {
     const capturePath = path.join(root, "capture.json");
     const cursorAgentPath = path.join(homeDir, ".local", "bin", "cursor-agent");
     const customCommandPath = path.join(root, "bin", "custom-cursor");
+    const skillDir = await createSkillDir(root, "fixture-skill");
+    const logs: string[] = [];
     await fs.mkdir(workspace, { recursive: true });
     await fs.mkdir(remoteWorkspace, { recursive: true });
     await writeFakeSandboxCursorAgent(cursorAgentPath, path.join(root, "unused.json"));
@@ -437,16 +447,20 @@ describe("cursor execute", () => {
           command: customCommandPath,
           cwd: workspace,
           env: { PATH: sandboxPath },
+          paperclipRuntimeSkills: [{ name: "fixture-skill", source: skillDir }],
+          paperclipSkillSync: { desiredSkills: ["fixture-skill"] },
           promptTemplate: "Follow the paperclip heartbeat.",
         },
         context: {},
         authToken: "run-jwt-token",
-        onLog: async () => {},
+        onLog: async (_stream, chunk) => { logs.push(chunk); },
       });
 
-      expect(result.exitCode).toBe(0);
-      const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as { command: string };
+      expect(result.exitCode, logs.join("")).toBe(0);
+      const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as { command: string; skill: string };
       expect(capture.command).toBe(customCommandPath);
+      expect(capture.skill).toBe(await fs.readFile(path.join(skillDir, "SKILL.md"), "utf8"));
+      expect(logs.join("")).not.toMatch(/not found|Failed to .*skill/);
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;

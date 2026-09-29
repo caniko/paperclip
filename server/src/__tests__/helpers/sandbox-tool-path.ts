@@ -11,8 +11,8 @@ export async function createSandboxToolPath(root: string): Promise<string> {
   const bin = path.join(root, "sandbox-tools");
   await mkdir(bin);
   for (const tool of [
-    "sh", "mkdir", "rm", "mv", "cat", "base64", "sleep", "find", "tar", "chmod",
-    "nohup", "basename", "wc", "head", "dd",
+    "sh", "mkdir", "rm", "mv", "cp", "cat", "base64", "sleep", "find", "tar", "chmod",
+    "nohup", "basename", "wc", "head", "dd", "tee",
   ]) {
     const { stdout } = await execFileAsync("sh", ["-c", 'command -v "$1"', "fixture-tool", tool]);
     await symlink(stdout.trim(), path.join(bin, tool));
