@@ -88,7 +88,9 @@ it("keeps anonymous wrappers usable after run cleanup and excludes sandbox image
     await writeFile(path.join(bin, "gh"), `#!${process.execPath}
 const fs = require('node:fs');
 process.stdout.write(JSON.stringify({token:process.env.GH_TOKEN || '', githubToken:process.env.GITHUB_TOKEN || '', ssh:process.env.SSH_AUTH_SOCK, global:process.env.GIT_CONFIG_GLOBAL, imageConfig:fs.existsSync(process.env.GH_CONFIG_DIR + '/hosts.yml')}));`, { mode: 0o700 });
-    const imageEnv = { HOME: root, PATH: `${bin}:${path.dirname(process.execPath)}:/usr/bin:/bin`, GH_TOKEN: "ambient-token", GITHUB_TOKEN: "ambient-other-token", SSH_AUTH_SOCK: "/ambient/socket" };
+    // Keep the fake gh first, but resolve shell utilities from the test toolchain
+    // too: Nix and other non-FHS hosts do not install them in /usr/bin or /bin.
+    const imageEnv = { HOME: root, PATH: `${bin}:${path.dirname(process.execPath)}:${process.env.PATH ?? ""}:/usr/bin:/bin`, GH_TOKEN: "ambient-token", GITHUB_TOKEN: "ambient-other-token", SSH_AUTH_SOCK: "/ambient/socket" };
     const execute: CommandManagedRuntimeRunner["execute"] = async (input) => {
       const startedAt = new Date().toISOString();
       const child = promisify(execFile)(input.command, input.args ?? [], { cwd: input.cwd ?? root, env: { ...imageEnv, ...input.env }, timeout: 15_000 });

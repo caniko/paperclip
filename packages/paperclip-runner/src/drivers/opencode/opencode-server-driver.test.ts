@@ -1,5 +1,6 @@
 import {
   chmod,
+  copyFile,
   lstat,
   mkdir,
   mkdtemp,
@@ -11,7 +12,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import {
   NATIVE_RUNTIME_ASSET_SCHEMA,
@@ -29,7 +30,15 @@ import {
 } from "./opencode-server-driver.js";
 
 const roots: string[] = [];
-const fixture = resolve("test/fixtures/fake-opencode-server.mjs");
+let fixtureRoot: string | undefined;
+let fixture: string;
+
+beforeAll(async () => {
+  fixtureRoot = await mkdtemp(join(tmpdir(), "paperclip-opencode-fixture-"));
+  fixture = join(fixtureRoot, "fake-opencode-server.mjs");
+  // Other suites execute this fixture concurrently. Never chmod their source.
+  await copyFile(resolve("test/fixtures/fake-opencode-server.mjs"), fixture);
+});
 
 function runtimeContext(
   skillRoot: string,
@@ -98,7 +107,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
-  await chmod(fixture, 0o644);
+  if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true });
 });
 
 describe("OpenCodeServerDriver", () => {
