@@ -1,5 +1,7 @@
 export {
   createDb,
+  acquireDeploymentLease,
+  assertDeploymentSchemaCompatible,
   withDedicatedDbConnection,
   livenessDb,
   closeLivenessDb,
