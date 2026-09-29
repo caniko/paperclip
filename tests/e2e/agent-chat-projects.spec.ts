@@ -452,6 +452,17 @@ test("plan approval hands the preserved revision to an assigned project task", a
     const replies = await json(
       await request.get(`/api/issues/${chat.id}/comments`),
     );
+    const reportingReplies = replies.filter(
+      (reply: any) => reply.createdByRunId === completionRuns[0].id,
+    );
+    expect(reportingReplies).toHaveLength(1);
+    const reportingRun = await json(
+      await request.get(`/api/heartbeat-runs/${completionRuns[0].id}`),
+    );
+    expect(reportingRun.resultJson.presentationDecision).toMatchObject({
+      commentAction: "reuse",
+      commentId: reportingReplies[0].id,
+    });
     expect(replies).toEqual(expect.arrayContaining([
       expect.objectContaining({
         authorAgentId: f.agent.id,
