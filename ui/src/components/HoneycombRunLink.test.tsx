@@ -29,6 +29,7 @@ describe("HoneycombRunLink", () => {
   afterEach(() => {
     flushSync(() => root.unmount());
     container.remove();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -43,13 +44,10 @@ describe("HoneycombRunLink", () => {
 
   it.each([0, 50])("links the run hash query when Paperclip developer mode is on (digest delay %i ms)", async (digestDelayMs) => {
     if (digestDelayMs > 0) {
-      vi.stubGlobal("crypto", {
-        subtle: {
-          digest: async (...args: Parameters<typeof webcrypto.subtle.digest>) => {
-            await new Promise((resolve) => window.setTimeout(resolve, digestDelayMs));
-            return webcrypto.subtle.digest(...args);
-          },
-        },
+      const digest = webcrypto.subtle.digest.bind(webcrypto.subtle);
+      vi.spyOn(webcrypto.subtle, "digest").mockImplementation(async (...args) => {
+        await new Promise((resolve) => window.setTimeout(resolve, digestDelayMs));
+        return digest(...args);
       });
     }
     flushSync(() => {
