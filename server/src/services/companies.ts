@@ -283,10 +283,10 @@ export function companyService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
       return enrichCompany(hydrated);
     },
 
-    create: async (data: typeof companies.$inferInsert) => {
+    create: async (data: typeof companies.$inferInsert, options?: { provisionBundledAgents?: boolean }) => {
       const created = await createCompanyWithUniquePrefix(data);
       await environmentsSvc.ensureLocalEnvironment(created.id);
-      await builtInAgents.autoProvisionBundledAgents(created.id);
+      if (options?.provisionBundledAgents !== false) await builtInAgents.autoProvisionBundledAgents(created.id);
       const row = await getCompanyQuery(db)
         .where(eq(companies.id, created.id))
         .then((rows) => rows[0] ?? null);
