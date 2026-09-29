@@ -4726,6 +4726,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
                           ? {
                               commandEnvironment: codexCommandEnvironment(
                                 this.options.environment ?? {},
+                                runtimeContext?.instructions.workingCopy?.rootPath,
                               ),
                             }
                           : {}),

@@ -494,6 +494,7 @@ impl CodexProviderConfig {
                         | "HOME"
                         | "ZDOTDIR"
                         | "BASH_ENV"
+                        | "AGENT_HOME"
                 ) || value.contains('\0')
                 {
                     return Err(LocalRunnerError::invalid(

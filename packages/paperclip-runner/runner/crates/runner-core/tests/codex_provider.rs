@@ -94,7 +94,8 @@ fn command_environment_survives_durable_provider_recovery() {
     let environment = json!({
         "PATH": format!("/tools/{}", "toolchain/bin:".repeat(700)),
         "LANG": "C.UTF-8",
-        "HOME": "/isolated/command-home"
+        "HOME": "/isolated/command-home",
+        "AGENT_HOME": "/agent-files/run-1"
     });
     let mut wire_config = serde_json::to_value(&config).unwrap();
     wire_config["driver"] = json!("codex_app_server_command_environment_v1");
