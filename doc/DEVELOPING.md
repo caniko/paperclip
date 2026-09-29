@@ -1121,6 +1121,31 @@ agent workspace. The host `HOME` itself, a directory that contains it, a
 filesystem root, a `CODEX_HOME` overlap, or a canonical path outside the
 assigned workspace is rejected before provider startup.
 
+### Native Codex command environment
+
+New native Codex sessions persist the explicit command environment with the
+provider profile. The runner sends it through `thread/start` and `thread/resume`
+configuration, so long PATH values do not exceed the 4096-byte argument limit.
+The 64-argument limit also remains in force. The environment projection accepts
+only executable-path, locale, and derived command-home/profile settings, with
+a combined 64-KiB key/value limit. Provider credentials use their existing path.
+
+Explicit values override stale Codex configuration for those keys. Inheritance
+and the generated command allowlist keep their existing semantics. A command's
+login shell can still change its environment through the host's profiles.
+
+The map is immutable within the durable provider profile. Recovery reuses it;
+changing it requires a fresh session. Older sessions keep their argv-based
+configuration, and explicitly supplied `codexArgs` keep control of that channel.
+New profiles use the versioned launch driver
+`codex_app_server_command_environment_v1`. The runner validates this discriminator
+before preparing or recovering a provider: older binaries reject it instead of
+silently ignoring the environment field. This works for remote artifacts without
+executing a target-architecture binary on the controller. Legacy argv profiles
+retain `codex_app_server`; the new driver requires a command-environment map and
+the legacy driver rejects one. Controller and runner artifacts must come from the
+same qualified build.
+
 ### Sandbox ACP input delivery
 
 The legacy sandbox process bridge retries recognized Daytona and Cloudflare

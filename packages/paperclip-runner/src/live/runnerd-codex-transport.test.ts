@@ -1826,6 +1826,29 @@ it("denies the isolated Codex home without denying a remote execution workspace"
   expect(serialized).toContain('\":workspace_roots\"={\".\"=\"write\"}');
 });
 
+it("keeps long native command environment values out of bounded launch arguments", () => {
+  const commandPath = Array.from({ length: 600 }, (_, i) => `/tools/toolchain-${i}/bin`).join(":");
+  const args = createRunnerdCodexAppServerArgs({
+    environment: { PATH: commandPath, LANG: "C.UTF-8" },
+    codexHome: "/isolated/codex-home",
+  });
+  expect(Buffer.byteLength(commandPath)).toBeGreaterThan(4096);
+  expect(args.length).toBeLessThanOrEqual(64);
+  for (const argument of args) expect(Buffer.byteLength(argument)).toBeLessThanOrEqual(4096);
+  expect(args.join("\n")).not.toContain(commandPath);
+  expect(args).toContain('shell_environment_policy.inherit="none"');
+  expect(args).toContain('shell_environment_policy.include_only=["LANG","PATH"]');
+});
+
+it("retains explicit argv values for legacy native session profiles", () => {
+  const args = createRunnerdCodexAppServerArgs({
+    environment: { PATH: "/tools/bin", LANG: "C.UTF-8" },
+    codexHome: "/isolated/codex-home",
+    commandEnvironmentTransport: "argv",
+  });
+  expect(args).toContain('shell_environment_policy.set={PATH="/tools/bin",LANG="C.UTF-8"}');
+});
+
 it("rejects remote OpenCode before spawn when provider-pack paths are absent", async () => {
   const root = await mkdtemp(join(tmpdir(), "paperclip-runner-remote-pack-"));
   const { transport } = createCapabilityRunnerdCodexTransport({
@@ -6410,6 +6433,45 @@ it("still fails closed when a real close grace period cannot fit a durable suspe
     await rm(stateDirectory, { recursive: true, force: true });
   }
 }, 30_000);
+
+it.each([false, true])("retains the versioned command-environment profile across recovery (rotated: %s)", async (rotated) => {
+  const directory = await mkdtemp(join(tmpdir(), "runnerd-environment-recovery-"));
+  const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+  const codexCommand = join(directory, "codex");
+  await writeFile(codexCommand, `#!/bin/sh\nexec ${quote(fakeCodex)} --state-file ${quote(join(directory, "fake-state.json"))} "$@"\n`, { mode: 0o700 });
+  const identity = {
+    runnerInstanceId: "runner-env-capability", environmentLeaseId: "lease-env-capability",
+    runId: "run-env-capability", normalizedSessionId: "session-env-capability",
+    turnId: "turn-env-capability", itemId: "item-env-capability",
+  };
+  const options = {
+    stateDirectory: directory, codexCommand,
+    runnerBinary: defaultCapabilityRunnerdBinary(),
+    prpIdentity: identity, environment: { PATH: "/explicit/tools" },
+    lifecyclePolicy: { mode: "per_turn" as const, idleTimeoutMs: null },
+  };
+  const first = createCapabilityRunnerdCodexTransport(options);
+  try {
+    await first.transport.request("thread/start", { cwd: directory });
+    await first.transport.close();
+    const provider = JSON.parse(await readFile(join(directory, "runner", "codex-provider-state.json"), "utf8"));
+    expect(provider.config.driver).toBe("codex_app_server_command_environment_v1");
+    expect(provider.config.commandEnvironment.PATH).toBe("/explicit/tools");
+    const nextIdentity = rotated ? { ...identity, runId: "run-env-second", turnId: "turn-env-second", itemId: "item-env-second" } : identity;
+    const compatible = createCapabilityRunnerdCodexTransport({ ...options, prpIdentity: nextIdentity });
+    try {
+      await expect(compatible.transport.request("thread/read", {})).resolves.toHaveProperty("thread.id", provider.threadId);
+      const resumed = JSON.parse(await readFile(join(directory, "runner", "codex-provider-state.json"), "utf8"));
+      expect(resumed.config.driver).toBe("codex_app_server_command_environment_v1");
+      expect(resumed.config.commandEnvironment).toEqual(provider.config.commandEnvironment);
+    } finally {
+      await compatible.transport.close();
+    }
+  } finally {
+    await first.transport.close().catch(() => undefined);
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 15_000);
 
 it("cold-restores a suspended provider session under its durable run binding", async () => {
   const stateDirectory = await mkdtemp(join(tmpdir(), "runnerd-cold-attach-"));
