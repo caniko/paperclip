@@ -1,4 +1,5 @@
 import {
+  chmod,
   cp,
   mkdir,
   lstat,
@@ -7263,16 +7264,23 @@ it("resolves explicit skills to the remote provider home and rejects unassigned 
 });
 
 
-it("preserves prepared input through runnerd and the real OpenCode proxy boundary", async () => {
+it("preserves prepared input through runnerd and the real OpenCode proxy boundary", async ({ onTestFailed }) => {
   const root = await mkdtemp(join(tmpdir(), "runnerd-prepared-opencode-"));
+  // CI's Node installation may be group-writable. Qualify a private copy
+  // without changing the shared toolchain or weakening launch validation.
+  const node = join(root, "node");
+  await cp(process.execPath, node);
+  await chmod(node, 0o755);
   // The qualified launch boundary unlinks its executable after exec. Use a
   // native wrapper, like the real OpenCode binary; a shebang script would need
   // to reopen the now-unlinked path in its interpreter.
   const executable = join(root, "fake-opencode");
   const fixture = resolve("test/fixtures/fake-opencode-server.mjs");
   execFileSync("cc", ["-x", "c", "-o", executable, "-"], {
-    input: `#include <unistd.h>\n#include <stdlib.h>\nint main(int argc, char **argv) { char **args = calloc(argc + 2, sizeof(char *)); args[0] = ${JSON.stringify(process.execPath)}; args[1] = ${JSON.stringify(fixture)}; for (int i = 1; i < argc; i++) args[i + 1] = argv[i]; execv(args[0], args); return 127; }`,
+    input: `#include <unistd.h>\n#include <stdlib.h>\nint main(int argc, char **argv) { char **args = calloc(argc + 2, sizeof(char *)); args[0] = ${JSON.stringify(node)}; args[1] = ${JSON.stringify(fixture)}; for (int i = 1; i < argc; i++) args[i + 1] = argv[i]; execv(args[0], args); return 127; }`,
   });
+  // Compiler output permissions inherit umask; the fixture owns this artifact.
+  await chmod(executable, 0o755);
   // Use the production bundler without depending on (or mutating) shared dist
   // artifacts. The Vitest CI lane builds Rust but does not build TypeScript.
   const proxy = join(root, "opencode-app-server-proxy.cjs");
@@ -7294,9 +7302,12 @@ it("preserves prepared input through runnerd and the real OpenCode proxy boundar
     opencodeCommandSha256: digest(executable),
     opencodeProxyPath: proxy,
     opencodeProxySha256: digest(proxy),
-    providerNodeCommand: process.execPath,
-    providerNodeCommandSha256: digest(process.execPath),
+    providerNodeCommand: node,
+    providerNodeCommandSha256: digest(node),
     environment: { PATH: process.env.PATH, OPENROUTER_API_KEY: "fixture-key" },
+  });
+  onTestFailed(() => {
+    console.error("Prepared OpenCode boundary diagnostics:", bundle.evidence());
   });
   const task = createCodexTaskEnvelope({
     objective: "Preserve the prepared task.", contractRevision: "prepared-v1",
@@ -7316,6 +7327,7 @@ it("preserves prepared input through runnerd and the real OpenCode proxy boundar
     task: { prompt: "Keep this request unchanged." },
     completionContract: { revision: "prepared-v1", criteria: task.completionContract.criteria },
   });
+  const failures: unknown[] = [];
   try {
     session = await driver.openSession({ runId: "prepared-opencode", normalizedSessionId: "prepared-opencode", workingDirectory: root });
     await session.startTurn({ message: { role: "user", text: prepared } });
@@ -7326,9 +7338,28 @@ it("preserves prepared input through runnerd and the real OpenCode proxy boundar
     expect(sessionRoots).toHaveLength(1);
     const requests = (await readFile(join(runtime, sessionRoots[0]!.name, "data/fake-prompt-requests.ndjson"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     expect(requests.map((request) => request.parts)).toEqual([[{ type: "text", text: prepared }]]);
+  } catch (error) {
+    failures.push(error);
   } finally {
-    await session?.close();
-    await bundle.transport.close();
-    await rm(root, { recursive: true, force: true });
+    // close() memoizes its failure. A second close must not hide the original
+    // bootstrap/assertion error or prevent the rest of the fixture cleanup.
+    for (const cleanup of [
+      () => session?.close(),
+      () => bundle.transport.close(),
+      () => rm(root, { recursive: true, force: true }),
+    ]) {
+      try {
+        await cleanup();
+      } catch (error) {
+        if (!failures.includes(error)) failures.push(error);
+      }
+    }
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) {
+    throw new AggregateError(
+      failures,
+      "Prepared OpenCode boundary failed, including cleanup",
+    );
   }
 }, 30_000);
