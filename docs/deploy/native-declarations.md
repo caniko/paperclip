@@ -70,6 +70,11 @@ session. Reapply preserves the account and password. It refuses to adopt a
 non-admin account or replace another administrator. Its temporary signup-enabled
 auth handler is process-local and never registered on the listener.
 
+When a company is first created or explicitly adopted, reconciliation adds an
+active owner membership for the bootstrap operator if no membership exists.
+Existing membership roles and statuses are preserved. Later reconciliation does
+not restore a removed membership; company access remains application-managed.
+
 `remote-only` is reserved and refuses every command before credentials, adapter
 loading, or database changes. The supported profile is `trusted-local`.
 
