@@ -1044,16 +1044,17 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
   // after its assertions so another case (or shard order) cannot claim them.
   const fixtureCompanies = new Set<string>();
   const fixtureServices = new Set<ChatChannelService>();
-  const reclaimedLeaseEndpointIds = new Set<string>();
+  type ReclaimedLease = { endpointId: string; token: string };
+  const reclaimedLeases: ReclaimedLease[] = [];
   afterEach(async () => {
     try {
       await Promise.all([...fixtureServices].map((service) => service.shutdown()));
     } finally {
       await retireFixtureState([...fixtureCompanies]);
-      await releaseReclaimedLeases([...reclaimedLeaseEndpointIds]);
+      await releaseReclaimedLeases(reclaimedLeases);
       fixtureServices.clear();
       fixtureCompanies.clear();
-      reclaimedLeaseEndpointIds.clear();
+      reclaimedLeases.length = 0;
     }
   });
 
@@ -1062,22 +1063,33 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
   // rows and the row outlives the case by its full TTL, failing every later
   // acquirer with 409 until then. The rewritten row is whichever one that
   // service was renewing, and a global sweep can hand it a *foreign* company's
-  // endpoint, which `retireFixtureState` cannot reach — so record the row by
-  // endpoint as it is orphaned and release it here.
+  // endpoint, which `retireFixtureState` cannot reach — so record its synthetic
+  // owner. Cleanup must preserve other lease kinds and any successor owner.
   function reclaimedLeaseTakeover(endpointId: string) {
-    reclaimedLeaseEndpointIds.add(endpointId);
+    const token = `reclaimed-${randomUUID()}`;
+    reclaimedLeases.push({ endpointId, token });
     return {
-      token: `reclaimed-${randomUUID()}`,
+      token,
       expiresAt: new Date(Date.now() + 90_000),
       updatedAt: new Date(),
     };
   }
 
-  async function releaseReclaimedLeases(endpointIds: string[]) {
-    if (endpointIds.length === 0) return;
+  async function releaseReclaimedLeases(leases: ReclaimedLease[]) {
+    if (leases.length === 0) return;
     await db
       .delete(chatEndpointLeases)
-      .where(inArray(chatEndpointLeases.endpointId, endpointIds));
+      .where(
+        and(
+          eq(chatEndpointLeases.leaseKey, "credentials"),
+          or(...leases.map(({ endpointId, token }) =>
+            and(
+              eq(chatEndpointLeases.endpointId, endpointId),
+              eq(chatEndpointLeases.token, token),
+            ),
+          )),
+        ),
+      );
   }
 
   async function retireFixtureState(companyIds: string[]) {
@@ -72271,5 +72283,40 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         }
       },
     );
+  });
+
+  it("releases only the exact synthetic credentials lease after a takeover", async () => {
+    const fixture = await seedCompany();
+    const { service } = createService();
+    const endpoints = [];
+    for (let index = 0; index < 3; index++) {
+      endpoints.push(await service.create(
+        fixture.companyId,
+        { provider: "slack", assignedAgentId: fixture.assignedAgentId },
+        "owner-user",
+      ));
+    }
+    const [owned, superseded, unrelated] = endpoints;
+    const takeover = reclaimedLeaseTakeover(owned!.id);
+    const replaced = reclaimedLeaseTakeover(superseded!.id);
+    const lease = { companyId: fixture.companyId, endpointId: owned!.id, ...takeover };
+    const rows = await db.insert(chatEndpointLeases).values([
+      { ...lease, leaseKey: "credentials" },
+      { ...lease, leaseKey: "inbound" },
+      { ...lease, leaseKey: "publication:live", token: "publication-owner" },
+      { ...lease, endpointId: superseded!.id, leaseKey: "credentials", ...replaced, token: "successor-owner" },
+      { ...lease, endpointId: unrelated!.id, leaseKey: "credentials" },
+    ]).returning();
+    const retained = rows.slice(1).map((row) => row.id).sort();
+
+    await releaseReclaimedLeases(reclaimedLeases);
+    await releaseReclaimedLeases(reclaimedLeases);
+
+    const remaining = await db.select().from(chatEndpointLeases)
+      .where(inArray(chatEndpointLeases.id, rows.map((row) => row.id)));
+    expect(remaining.map((row) => row.id).sort()).toEqual(retained);
+    for (const row of remaining) {
+      expect(row).toEqual(rows.find((original) => original.id === row.id));
+    }
   });
 });
