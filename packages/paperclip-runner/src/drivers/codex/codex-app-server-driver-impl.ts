@@ -660,7 +660,7 @@ export class CodexAppServerDriver implements HarnessDriver {
       this.#options.transportFactory?.(context) ??
       new ProcessCodexAppServerTransport({
         workingDirectory,
-        args: createIsolatedCodexAppServerArgs(this.#options.environment, codexExecutableReadOnlyRoots(this.#options.environment ?? process.env)),
+        args: createIsolatedCodexAppServerArgs(this.#options.environment, codexExecutableReadOnlyRoots(this.#options.environment ?? process.env), this.#options.instructionWorkingCopyRoot),
         environment: createSanitizedCodexEnvironment(this.#options.environment),
         onDiagnostic: this.#options.onDiagnostic,
         processGroup: true,
@@ -873,7 +873,7 @@ export class CodexAppServerDriver implements HarnessDriver {
             this.#options.includeCollaborationModeInstructions ?? true,
         },
         environmentKeys: Object.keys(
-          codexCommandEnvironment(this.#options.environment),
+          codexCommandEnvironment(this.#options.environment, this.#options.instructionWorkingCopyRoot),
         ).sort(),
         dynamicToolNames: this.#providerDynamicTools().map((tool) =>
           text(tool.name),
@@ -930,6 +930,7 @@ export class CodexAppServerDriver implements HarnessDriver {
       goalCapability: this.#goalCapability,
       dynamicTools: this.#providerDynamicTools(),
       skillInputs: this.#options.skillInputs,
+      reasoningEffort: this.#options.reasoningEffort,
       dynamicToolHandler: this.#options.dynamicToolHandler,
       completionFeedback: this.#options.completionFeedback,
     });

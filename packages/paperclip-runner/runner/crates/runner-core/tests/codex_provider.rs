@@ -94,7 +94,8 @@ fn command_environment_survives_durable_provider_recovery() {
     let environment = json!({
         "PATH": format!("/tools/{}", "toolchain/bin:".repeat(700)),
         "LANG": "C.UTF-8",
-        "HOME": "/isolated/command-home"
+        "HOME": "/isolated/command-home",
+        "AGENT_HOME": "/agent-files/run-1"
     });
     let mut wire_config = serde_json::to_value(&config).unwrap();
     wire_config["driver"] = json!("codex_app_server_command_environment_v1");
@@ -992,16 +993,21 @@ fn codex_rejects_replay_of_a_completed_tool_call_id_in_the_same_turn() {
         .start_turn("Inspect the fake task once.", &config.cwd)
         .expect("start provider turn");
 
-    let first_call = (0..32)
-        .find_map(|_| match provider.poll().expect("poll first tool call") {
-            Some(CodexProviderEvent::ToolCall {
-                call_id,
-                operation_id,
-                ..
-            }) => Some((call_id, operation_id)),
-            _ => None,
-        })
-        .expect("observe the first semantic tool call");
+    let first_call_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let first_call =
+        std::iter::from_fn(|| (std::time::Instant::now() < first_call_deadline).then_some(()))
+            .find_map(|_| match provider.poll().expect("poll first tool call") {
+                Some(CodexProviderEvent::ToolCall {
+                    call_id,
+                    operation_id,
+                    ..
+                }) => Some((call_id, operation_id)),
+                _ => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    None
+                }
+            })
+            .expect("observe the first semantic tool call");
     provider
         .deliver_tool_result(&ToolResult {
             call_id: first_call.0,
@@ -1011,9 +1017,17 @@ fn codex_rejects_replay_of_a_completed_tool_call_id_in_the_same_turn() {
         })
         .expect("deliver the first semantic result");
 
-    let replay_error = (0..32)
-        .find_map(|_| provider.poll().err())
-        .expect("same-turn replay of the completed call id is rejected");
+    let replay_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let replay_error =
+        std::iter::from_fn(|| (std::time::Instant::now() < replay_deadline).then_some(()))
+            .find_map(|_| {
+                let error = provider.poll().err();
+                if error.is_none() {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                error
+            })
+            .expect("same-turn replay of the completed call id is rejected");
     assert!(
         replay_error
             .to_string()
