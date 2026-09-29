@@ -105,7 +105,8 @@ process.stdout.write(JSON.stringify({token:process.env.GH_TOKEN || '', githubTok
       const result = await child;
       return { ...result, exitCode: 0, signal: null, timedOut: false, pid: null, startedAt };
     };
-    await expect(execute({ command: "sh", args: ["-c", "command -v paperclip-controller-only-fixture"] })).rejects.toMatchObject({ code: 1 });
+    const lookup = await execute({ command: "sh", args: ["-c", "if command -v paperclip-controller-only-fixture >/dev/null 2>&1; then printf found; else printf absent; fi"] });
+    expect(lookup).toMatchObject({ exitCode: 0, stdout: "absent", stderr: "" });
     const sandboxTarget = { ...target, remoteCwd: root, runner: { execute } };
     const base = { native: true, githubConfigured: false, agentId: "agent-a", target: sandboxTarget,
       cwd: root, env: imageEnv, brokerUrl: "https://unused.invalid", createBrokerToken: () => { throw new Error("must not mint a capability"); } };
