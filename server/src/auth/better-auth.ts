@@ -238,7 +238,12 @@ export function resolveWorkspaceHandoffIdentity(
   };
 }
 
-export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins: string[]): BetterAuthInstance {
+export function createBetterAuthInstance(
+  db: Db,
+  config: Config,
+  trustedOrigins: string[],
+  options: { autoSignIn?: boolean } = {},
+): BetterAuthInstance {
   const baseUrl = config.authBaseUrlMode === "explicit" ? config.authPublicBaseUrl : undefined;
   const publicUrl = process.env.PAPERCLIP_PUBLIC_URL?.trim() || baseUrl;
   const managedRuntimePublicUrl = process.env.PAPERCLIP_MANAGED_RUNTIME_PUBLIC_URL?.trim() || undefined;
@@ -274,6 +279,7 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
       enabled: true,
       requireEmailVerification: false,
       disableSignUp: config.authDisableSignUp,
+      autoSignIn: options.autoSignIn ?? true,
     },
     rateLimit: buildBetterAuthRateLimitOptions({
       deploymentMode: config.deploymentMode,
