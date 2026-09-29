@@ -366,6 +366,8 @@ describe("cursor execute", () => {
         config: {
           command: "agent",
           cwd: workspace,
+          // This sandbox executes on the test host, including non-FHS hosts.
+          env: { PATH: process.env.PATH ?? "" },
           promptTemplate: "Follow the paperclip heartbeat.",
         },
         context: {},
@@ -432,6 +434,7 @@ describe("cursor execute", () => {
         config: {
           command: customCommandPath,
           cwd: workspace,
+          env: { PATH: process.env.PATH ?? "" },
           promptTemplate: "Follow the paperclip heartbeat.",
         },
         context: {},

@@ -212,6 +212,8 @@ describe("cursor environment diagnostics", () => {
           env: {
             CURSOR_API_KEY: "test-key",
             PAPERCLIP_TEST_ARGS_PATH: argsCapturePath,
+            // This sandbox executes on the test host, including non-FHS hosts.
+            PATH: process.env.PATH ?? "",
           },
         },
       });
