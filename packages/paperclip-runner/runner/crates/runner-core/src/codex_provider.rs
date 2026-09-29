@@ -360,6 +360,9 @@ pub struct CodexProviderConfig {
     // provider profile so every thread/start and thread/resume uses the same map.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_environment: Option<BTreeMap<String, String>>,
+    // Controller-registered AGENT_HOME binding; rotates with run authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_working_copy_root: Option<String>,
     // Older sessions retain their standalone task envelope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_mode: Option<String>,
@@ -407,6 +410,13 @@ impl CodexProviderConfig {
             config.insert("skills.include_instructions".to_owned(), json!(include));
         }
         if let Some(environment) = &self.command_environment {
+            let mut environment = environment.clone();
+            if self.driver == "codex_app_server_command_environment_v2" {
+                environment.remove("AGENT_HOME");
+                if let Some(root) = &self.instruction_working_copy_root {
+                    environment.insert("AGENT_HOME".to_owned(), root.clone());
+                }
+            }
             config.insert(
                 "shell_environment_policy.set".to_owned(),
                 json!(environment),
@@ -428,7 +438,9 @@ impl CodexProviderConfig {
             (self.provider.as_str(), self.driver.as_str()),
             (
                 "codex",
-                "codex_app_server" | "codex_app_server_command_environment_v1"
+                "codex_app_server"
+                    | "codex_app_server_command_environment_v1"
+                    | "codex_app_server_command_environment_v2"
             ) | ("opencode", "opencode_server")
         ) {
             return Err(LocalRunnerError::invalid(
@@ -438,12 +450,25 @@ impl CodexProviderConfig {
         // The discriminator is checked by older runners even when serde ignores
         // unknown fields. Persist it with the environment so neither fresh
         // preparation nor durable recovery can silently downgrade to argv mode.
-        if (self.driver == "codex_app_server_command_environment_v1")
-            != self.command_environment.is_some()
+        if matches!(
+            self.driver.as_str(),
+            "codex_app_server_command_environment_v1" | "codex_app_server_command_environment_v2"
+        ) != self.command_environment.is_some()
         {
             return Err(LocalRunnerError::invalid(
-                "commandEnvironment requires the codex_app_server_command_environment_v1 launch driver and a non-null map",
+                "commandEnvironment requires a versioned command-environment launch driver and a non-null map",
             ));
+        }
+        if let Some(root) = &self.instruction_working_copy_root {
+            if self.driver != "codex_app_server_command_environment_v2"
+                || !Path::new(root).is_absolute()
+                || root.len() > 4096
+                || root.contains('\0')
+            {
+                return Err(LocalRunnerError::invalid(
+                    "invalid Codex instruction working-copy root",
+                ));
+            }
         }
         if self.provider_version.trim().is_empty() || self.provider_version.len() > 120 {
             return Err(LocalRunnerError::invalid(
@@ -502,6 +527,17 @@ impl CodexProviderConfig {
                     ));
                 }
                 bytes = bytes.saturating_add(key.len()).saturating_add(value.len());
+            }
+            // Bound both the immutable map and the effective run projection.
+            if let Some(root) = &self.instruction_working_copy_root {
+                let prior_bytes = environment
+                    .get("AGENT_HOME")
+                    .map_or(0, |value| "AGENT_HOME".len() + value.len());
+                if bytes.saturating_sub(prior_bytes) + "AGENT_HOME".len() + root.len() > 64 * 1024 {
+                    return Err(LocalRunnerError::invalid(
+                        "Codex command environment exceeds the bounded launch contract",
+                    ));
+                }
             }
             if self.provider != "codex" || bytes > 64 * 1024 {
                 return Err(LocalRunnerError::invalid(
@@ -4107,6 +4143,7 @@ done
             approval_policy: "never".to_owned(),
             externally_sandboxed: false,
             command_environment: None,
+            instruction_working_copy_root: None,
             include_skill_instructions: None,
             conversation_mode: None,
         };
@@ -4495,6 +4532,7 @@ done
             approval_policy: "never".to_owned(),
             externally_sandboxed: false,
             command_environment: None,
+            instruction_working_copy_root: None,
             include_skill_instructions: None,
             conversation_mode: None,
         };
@@ -4616,6 +4654,7 @@ done
             approval_policy: "never".to_owned(),
             externally_sandboxed: false,
             command_environment: None,
+            instruction_working_copy_root: None,
             include_skill_instructions: None,
             conversation_mode: None,
         };

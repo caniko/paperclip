@@ -4660,7 +4660,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
                     provider === "opencode"
                       ? "opencode_server"
                       : this.options.codexArgs === undefined
-                        ? "codex_app_server_command_environment_v1"
+                        ? "codex_app_server_command_environment_v2"
                         : "codex_app_server",
                   providerVersion:
                     provider === "opencode" ? "1.18.32" : "codex-app-server-v1",
@@ -4726,8 +4726,11 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
                           ? {
                               commandEnvironment: codexCommandEnvironment(
                                 this.options.environment ?? {},
-                                runtimeContext?.instructions.workingCopy?.rootPath,
                               ),
+                              instructionWorkingCopyRoot: codexCommandEnvironment(
+                                this.options.environment ?? {},
+                                runtimeContext?.instructions.workingCopy?.rootPath,
+                              ).AGENT_HOME ?? null,
                             }
                           : {}),
                       }
@@ -5159,6 +5162,14 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       if (provider === "codex") {
         // These controller-owned, token-free paths belong to the new run.
         // Keep the durable provider profile and thread identity unchanged.
+        const providerConfig = record(runAttachTemplate.provider);
+        if (providerConfig.commandEnvironment != null) {
+          providerConfig.driver = "codex_app_server_command_environment_v2";
+          providerConfig.instructionWorkingCopyRoot = codexCommandEnvironment(
+            this.options.environment ?? {},
+            runtimeContext?.instructions.workingCopy?.rootPath,
+          ).AGENT_HOME ?? null;
+        }
         runAttachTemplate.runtimeLaunchArgs =
           this.options.codexArgs ??
           createRunnerdCodexAppServerArgs({
