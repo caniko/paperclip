@@ -1595,6 +1595,11 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     await service.processPendingPublications();
     const providerRuntime = fakeRuntime.endpoints.get(endpointId);
     if (providerRuntime) providerRuntime.posts.length = 0;
+    return {
+      threadId: conversation.externalThreadId,
+      messageId: setupFollowUpMessageId,
+      emoji: "eyes",
+    };
   }
 
   async function configuredSlackEndpoint(
@@ -27498,7 +27503,13 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         }),
         trigger: "direct_message",
       });
-      await qualifySetupRoundTrip(service, endpoint.id, userId);
+      const setupReceipt = await qualifySetupRoundTrip(service, endpoint.id, userId);
+      if (provider !== "microsoft-teams") {
+        // Setup publishes its own final and schedules non-critical receipt I/O.
+        // Finish that exact receipt before close tests capture their baseline.
+        await service.processPendingReceiptReactions();
+        await waitForProcessedReceiptRemoval(endpoint.id, setupReceipt);
+      }
       await service.test(endpoint.id, "owner-user");
       const [conversation] = await service.listConversations(endpoint.id);
       const runId = randomUUID();
