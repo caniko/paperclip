@@ -301,7 +301,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         const next = { owner: m.owner, kind: spec.kind, key: spec.key, resourceId: spec.id, companyId: spec.companyId, fields: spec.fields(), enabled: spec.enabled };
         await tx.insert(deploymentResources).values(next).onConflictDoUpdate({ target: [deploymentResources.owner, deploymentResources.kind, deploymentResources.key], set: next });
         const companyId = spec.companyId ?? spec.id;
-        if (spec.kind === "company" && actor.userId && !binding && !spec.adopt) {
+        if (spec.kind === "company" && actor.userId && !binding) {
           await tx.insert(companyMemberships).values({ companyId, principalType: "user", principalId: actor.userId, status: "active", membershipRole: "owner" }).onConflictDoNothing();
         }
         await logActivity(tx, { companyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.reconciled", entityType: spec.kind, entityId: spec.id, details: { key: spec.key, fields: actions.get(spec)!.fields } });
