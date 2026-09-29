@@ -433,6 +433,17 @@ Migration `0274_agent_chat.sql` adds conversation identity/state and session gen
 
 ## Legacy controller ownership
 
+Managed deployment startup can use `acquireDeploymentLease` to reserve a
+dedicated PostgreSQL connection for its whole controller or offline-apply
+lifetime. Competing managed owners of the same database fail acquisition. The
+caller must stop on connection loss; the lease never reconnects to regain
+ownership. Release is idempotent and does not report expected shutdown as loss.
+
+Before managed migrations, `assertDeploymentSchemaCompatible` checks every
+stored migration hash against the installed SQL files. Unknown hashes refuse
+startup without changing the journal. Use the matching application or a verified
+compatible backup; renumbering a fork's applied migrations is not an upgrade.
+
 Legacy run claims atomically record `controller_boot_id`, a database-clock
 `controller_lease_expires_at`, and `execution_stage` before workspace provisioning.
 The lease renews independently of output. A different container must not infer
