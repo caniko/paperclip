@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import { execute } from "@paperclipai/adapter-cursor-local/server";
+import { createSandboxToolPath } from "./helpers/sandbox-tool-path.js";
 
 async function writeFakeCursorCommand(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
@@ -74,7 +75,7 @@ console.log(JSON.stringify({
   await fs.chmod(commandPath, 0o755);
 }
 
-function createLocalSandboxRunner() {
+function createLocalSandboxRunner(sandboxPath: string) {
   let counter = 0;
   return {
     execute: async (input: {
@@ -90,7 +91,7 @@ function createLocalSandboxRunner() {
       counter += 1;
       return await runChildProcess(`cursor-sandbox-execute-${counter}`, input.command, input.args ?? [], {
         cwd: input.cwd ?? process.cwd(),
-        env: input.env ?? {},
+        env: { PATH: sandboxPath, ...input.env },
         stdin: input.stdin,
         timeoutSec: Math.max(1, Math.ceil((input.timeoutMs ?? 30_000) / 1000)),
         graceSec: 5,
@@ -336,6 +337,7 @@ describe("cursor execute", () => {
     await fs.mkdir(workspace, { recursive: true });
     await fs.mkdir(remoteWorkspace, { recursive: true });
     await writeFakeSandboxCursorAgent(cursorAgentPath, capturePath);
+    const sandboxPath = await createSandboxToolPath(root);
 
     const previousHome = process.env.HOME;
     process.env.HOME = homeDir;
@@ -360,14 +362,13 @@ describe("cursor execute", () => {
           kind: "remote",
           transport: "sandbox",
           remoteCwd: remoteWorkspace,
-          runner: createLocalSandboxRunner(),
+          runner: createLocalSandboxRunner(sandboxPath),
           timeoutMs: 30_000,
         },
         config: {
           command: "agent",
           cwd: workspace,
-          // This sandbox executes on the test host, including non-FHS hosts.
-          env: { PATH: process.env.PATH ?? "" },
+          env: { PATH: sandboxPath },
           promptTemplate: "Follow the paperclip heartbeat.",
         },
         context: {},
@@ -404,6 +405,7 @@ describe("cursor execute", () => {
     await fs.mkdir(remoteWorkspace, { recursive: true });
     await writeFakeSandboxCursorAgent(cursorAgentPath, path.join(root, "unused.json"));
     await writeFakeSandboxCursorAgent(customCommandPath, capturePath);
+    const sandboxPath = await createSandboxToolPath(root);
 
     const previousHome = process.env.HOME;
     process.env.HOME = homeDir;
@@ -428,13 +430,13 @@ describe("cursor execute", () => {
           kind: "remote",
           transport: "sandbox",
           remoteCwd: remoteWorkspace,
-          runner: createLocalSandboxRunner(),
+          runner: createLocalSandboxRunner(sandboxPath),
           timeoutMs: 30_000,
         },
         config: {
           command: customCommandPath,
           cwd: workspace,
-          env: { PATH: process.env.PATH ?? "" },
+          env: { PATH: sandboxPath },
           promptTemplate: "Follow the paperclip heartbeat.",
         },
         context: {},
