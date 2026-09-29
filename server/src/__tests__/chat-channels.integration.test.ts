@@ -27414,6 +27414,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
   async function waitForProcessedReceiptRemoval(
     endpointId: string,
     receipt: { threadId: string; messageId: string; emoji: string },
+    processRemoval?: (actionId: string) => Promise<unknown>,
   ) {
     // Publication settlement only schedules this non-critical provider I/O.
     // A sweep skips an action already owned by a fresh processing worker.
@@ -27440,6 +27441,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     expect(removal.providerActionId).toBe(
       `receipt_reaction_remove:${removal.deliveryId}`,
     );
+    await processRemoval?.(removal.id);
     await vi.waitFor(async () => {
       await expect(
         db
@@ -27507,8 +27509,9 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       if (provider !== "microsoft-teams") {
         // Setup publishes its own final and schedules non-critical receipt I/O.
         // Finish that exact receipt before close tests capture their baseline.
-        await service.processPendingReceiptReactions();
-        await waitForProcessedReceiptRemoval(endpoint.id, setupReceipt);
+        await waitForProcessedReceiptRemoval(endpoint.id, setupReceipt, (actionId) =>
+          service.processPendingReceiptReactions(1, actionId),
+        );
       }
       await service.test(endpoint.id, "owner-user");
       const [conversation] = await service.listConversations(endpoint.id);
