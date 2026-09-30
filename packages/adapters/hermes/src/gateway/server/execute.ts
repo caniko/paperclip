@@ -793,6 +793,38 @@ function cancelledBeforeDispatch(): AdapterExecutionResult {
   };
 }
 
+function createUnverified(cancelled: boolean, err?: unknown, redactText: TextRedactor = sanitizeSensitiveText): AdapterExecutionResult {
+  const detail = err === undefined ? "" : ` Last request error: ${redactErrorMessage(err, redactText).slice(0, 500)}`;
+  return {
+    exitCode: 1,
+    signal: null,
+    timedOut: false,
+    errorCode: cancelled ? "hermes_gateway_cancel_unverified" : "hermes_gateway_create_unverified",
+    errorFamily: null,
+    errorMessage: `Hermes run creation may have succeeded, but its run ID could not be recovered. Inspect the gateway before retrying this Paperclip run.${detail}`,
+    resultJson: {
+      status: "unverified",
+      ...(cancelled ? { executionCancellation: { state: "requested" } } : {}),
+    },
+  };
+}
+
+async function hasDurableRunIdempotency(baseUrl: URL, headers: Record<string, string>): Promise<boolean> {
+  try {
+    const capabilities = asRecord(await fetchJson(apiUrl(baseUrl, "/v1/capabilities"), {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(STOP_GRACE_MS),
+    }));
+    const idempotency = asRecord(asRecord(capabilities?.features)?.runs_idempotency);
+    return idempotency?.supported === true && idempotency?.durable === true;
+  } catch {
+    // Older gateways can still accept ordinary runs. An ambiguous create on
+    // those gateways must remain unverified rather than being dispatched twice.
+    return false;
+  }
+}
+
 async function cancelCreatedRun(input: {
   ctx: AdapterExecutionContext;
   baseUrl: URL;
@@ -925,6 +957,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   await ctx.onLog("stdout", `[hermes-gateway] creating run at ${createRunUrl} (timeout=${timeoutSec}s, session=${strategy})\n`);
   await ctx.onLog("stdout", `[hermes-gateway] request headers (redacted): ${stringifyForLog(redactForLog(runHeaders, [], 0, redactText), 3_000)}\n`);
 
+  const durableCreate = await hasDurableRunIdempotency(baseUrl, runHeaders);
   let runId: string | null = null;
   try {
     // This adapter has no local child process, so crossing into the first
@@ -933,21 +966,37 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (ctx.signal?.aborted) return cancelledBeforeDispatch();
     ctx.onDispatch?.();
     if (ctx.signal?.aborted) return cancelledBeforeDispatch();
-    const created = await fetchJson(createRunUrl, {
+    const createRequest: RequestInit = {
       method: "POST",
       headers: runHeaders,
       body: JSON.stringify(body),
-    });
+    };
+    let created: unknown;
+    try {
+      created = await fetchJson(createRunUrl, createRequest);
+    } catch (err) {
+      const status = (err as HermesHttpError).status;
+      if (status && status < 500) return errorResult(err, redactText);
+      if (!durableCreate) return createUnverified(ctx.signal?.aborted ?? false, err, redactText);
+      // The first request may already have been committed. Only a gateway
+      // that advertised durable reservations before dispatch may resolve the
+      // lost response by replaying the *same* body and idempotency key.
+      try {
+        created = await fetchJson(createRunUrl, createRequest);
+      } catch (replayError) {
+        return createUnverified(ctx.signal?.aborted ?? false, replayError, redactText);
+      }
+    }
     runId = extractRunId(created);
+    if (!runId && durableCreate) {
+      try {
+        runId = extractRunId(await fetchJson(createRunUrl, createRequest));
+      } catch (replayError) {
+        return createUnverified(ctx.signal?.aborted ?? false, replayError, redactText);
+      }
+    }
     if (!runId) {
-      return {
-        exitCode: 1,
-        signal: null,
-        timedOut: false,
-        errorCode: "hermes_gateway_protocol_error",
-        errorMessage: "Hermes /v1/runs response did not include run_id.",
-        errorMeta: { response: redactForLog(created, [], 0, redactText) as Record<string, unknown> },
-      };
+      return createUnverified(ctx.signal?.aborted ?? false);
     }
   } catch (err) {
     if (ctx.signal?.aborted) {

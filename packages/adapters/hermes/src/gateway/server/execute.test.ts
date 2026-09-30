@@ -175,6 +175,87 @@ describe("execute", () => {
     expect(body.session_id).toBe("paperclip:company:company-1:agent:agent-1:issue:issue-1");
   });
 
+  it("recovers a lost create response only through the durable idempotency reservation", async () => {
+    const creates: RequestInit[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/capabilities")) {
+        return Response.json({ features: { runs_idempotency: { supported: true, durable: true } } });
+      }
+      if (url.endsWith("/v1/runs") && init?.method === "POST") {
+        creates.push(init);
+        if (creates.length === 1) throw new TypeError("connection closed after acceptance");
+        return Response.json({ run_id: "run-recovered", status: "started", replayed: true });
+      }
+      if (url.endsWith("/events")) {
+        return new Response(sseStream("event: run.completed\ndata: {\"status\":\"completed\",\"output\":\"done\"}\n\n"));
+      }
+      return Response.json({ status: "completed", output: "done" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key" }));
+
+    expect(result.exitCode).toBe(0);
+    expect(result.resultJson?.run_id).toBe("run-recovered");
+    expect(creates).toHaveLength(2);
+    expect(creates[1]?.headers).toEqual(creates[0]?.headers);
+    expect(creates[1]?.body).toBe(creates[0]?.body);
+    expect((creates[1]?.headers as Record<string, string>)["Idempotency-Key"]).toBe("pc-run-1");
+  });
+
+  it("fails closed without replay when run idempotency is not durable", async () => {
+    let attempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/v1/capabilities")) {
+        return Response.json({ features: { runs_idempotency: { supported: true, durable: false } } });
+      }
+      attempts++;
+      throw new TypeError("connection closed after acceptance");
+    }));
+
+    const result = await execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key" }));
+
+    expect(attempts).toBe(1);
+    expect(result.errorCode).toBe("hermes_gateway_create_unverified");
+    expect(result.errorFamily).toBeNull();
+    expect(result.resultJson?.status).toBe("unverified");
+  });
+
+  it("recovers the remote ID after cancellation races with a lost create response, then verifies stop", async () => {
+    const abort = new AbortController();
+    const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key" });
+    ctx.signal = abort.signal;
+    let creates = 0;
+    let stops = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/capabilities")) {
+        return Response.json({ features: { runs_idempotency: { supported: true, durable: true } } });
+      }
+      if (url.endsWith("/v1/runs") && init?.method === "POST") {
+        creates++;
+        if (creates === 1) {
+          abort.abort();
+          throw new TypeError("lost accepted response");
+        }
+        return Response.json({ run_id: "run-to-stop", replayed: true });
+      }
+      if (url.endsWith("/stop")) {
+        stops++;
+        return Response.json({ status: "stopping" });
+      }
+      return Response.json({ status: "cancelled" });
+    }));
+
+    const result = await execute(ctx);
+
+    expect(creates).toBe(2);
+    expect(stops).toBe(1);
+    expect(result.resultJson?.run_id).toBe("run-to-stop");
+    expect(result.resultJson?.executionCancellation).toMatchObject({ state: "acknowledged", proof: "gateway_terminal_status" });
+  });
+
   it.each([false, true])("preserves chat handoff policy on gateway turns (resumed=%s)", async (resumed) => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(
       String(input).endsWith("/v1/runs")
@@ -602,7 +683,8 @@ describe("execute", () => {
     }));
 
     expect(result.exitCode).toBe(1);
-    expect(result.errorCode).toBe("hermes_gateway_connect_failed");
+    expect(result.errorCode).toBe("hermes_gateway_create_unverified");
+    expect(result.errorFamily).toBeNull();
     expect(result.errorMessage).toContain("ENOTFOUND");
     expect(result.errorMessage).toContain("host.docker.internal");
   });
@@ -730,6 +812,7 @@ describe("execute", () => {
         stopRequested = true;
         return new Response(JSON.stringify({ status: "stopping" }), { status: 200 });
       }
+      if (url.endsWith("/v1/capabilities")) return new Response("{}", { status: 200 });
       if (init?.method === "GET") {
         if (!stopRequested) abort.abort();
         return new Response(JSON.stringify({ status: stopRequested ? "cancelled" : "running" }), { status: 200 });
@@ -774,7 +857,8 @@ describe("execute", () => {
     const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key" });
     ctx.signal = abort.signal;
     ctx.onCancellationReady = vi.fn(async () => undefined);
-    vi.stubGlobal("fetch", vi.fn(async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/v1/capabilities")) return new Response("{}", { status: 200 });
       abort.abort();
       throw new Error("connection lost after send");
     }));

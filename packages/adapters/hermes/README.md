@@ -144,6 +144,14 @@ This mode does not start Hermes. It creates runs with `POST /v1/runs`, streams
 Hermes events with SSE, polls run status as a fallback, and stops timed-out runs
 with `POST /v1/runs/{run_id}/stop`.
 
+Before dispatch, the adapter checks whether the gateway advertises durable run
+idempotency. If a create response is lost, it replays the identical request and
+`Idempotency-Key` once only when durable reservations were advertised, recovering
+the original run ID for observation or cancellation. Older gateways still accept
+normal requests, but an ambiguous create fails closed as unverified; it must not
+be retried blindly. The gateway's persisted run state must survive restarts for
+this recovery to hold.
+
 ### Compatibility with the old gateway package
 
 `@paperclipai/adapter-hermes-gateway` remains as a deprecated compatibility shim
