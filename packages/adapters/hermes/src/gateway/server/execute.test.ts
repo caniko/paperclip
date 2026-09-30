@@ -771,6 +771,25 @@ describe("execute", () => {
     expect(result.resultJson?.executionCancellation).toMatchObject({ state: "acknowledged", proof: "no_remote_request" });
   });
 
+  it("does not dispatch if cancelled while probing durable recovery", async () => {
+    const abort = new AbortController();
+    const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key" });
+    ctx.signal = abort.signal;
+    ctx.onDispatch = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toContain("/v1/capabilities");
+      abort.abort();
+      throw new Error("probe cancelled");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute(ctx);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(ctx.onDispatch).not.toHaveBeenCalled();
+    expect(result.resultJson?.executionCancellation).toMatchObject({ state: "acknowledged", proof: "no_remote_request" });
+  });
+
   it("stops a created Hermes run and acknowledges only its verified terminal status", async () => {
     const abort = new AbortController();
     const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key", timeoutSec: 5 });

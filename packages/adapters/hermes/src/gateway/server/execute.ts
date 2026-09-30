@@ -809,12 +809,16 @@ function createUnverified(cancelled: boolean, err?: unknown, redactText: TextRed
   };
 }
 
-async function hasDurableRunIdempotency(baseUrl: URL, headers: Record<string, string>): Promise<boolean> {
+async function hasDurableRunIdempotency(
+  baseUrl: URL,
+  headers: Record<string, string>,
+  signal?: AbortSignal,
+): Promise<boolean> {
   try {
     const capabilities = asRecord(await fetchJson(apiUrl(baseUrl, "/v1/capabilities"), {
       method: "GET",
       headers,
-      signal: AbortSignal.timeout(STOP_GRACE_MS),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(STOP_GRACE_MS)]) : AbortSignal.timeout(STOP_GRACE_MS),
     }));
     const idempotency = asRecord(asRecord(capabilities?.features)?.runs_idempotency);
     return idempotency?.supported === true && idempotency?.durable === true;
@@ -957,7 +961,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   await ctx.onLog("stdout", `[hermes-gateway] creating run at ${createRunUrl} (timeout=${timeoutSec}s, session=${strategy})\n`);
   await ctx.onLog("stdout", `[hermes-gateway] request headers (redacted): ${stringifyForLog(redactForLog(runHeaders, [], 0, redactText), 3_000)}\n`);
 
-  const durableCreate = await hasDurableRunIdempotency(baseUrl, runHeaders);
+  const durableCreate = await hasDurableRunIdempotency(baseUrl, runHeaders, ctx.signal);
   let runId: string | null = null;
   try {
     // This adapter has no local child process, so crossing into the first
@@ -971,9 +975,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       headers: runHeaders,
       body: JSON.stringify(body),
     };
+    // A hung create must not prevent cancellation indefinitely. Each replay
+    // gets a fresh deadline while retaining the exact idempotency identity.
+    const postRun = () => fetchJson(createRunUrl, { ...createRequest, signal: AbortSignal.timeout(STOP_GRACE_MS) });
     let created: unknown;
     try {
-      created = await fetchJson(createRunUrl, createRequest);
+      created = await postRun();
     } catch (err) {
       const status = (err as HermesHttpError).status;
       if (status && status < 500) return errorResult(err, redactText);
@@ -982,7 +989,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       // that advertised durable reservations before dispatch may resolve the
       // lost response by replaying the *same* body and idempotency key.
       try {
-        created = await fetchJson(createRunUrl, createRequest);
+        created = await postRun();
       } catch (replayError) {
         return createUnverified(ctx.signal?.aborted ?? false, replayError, redactText);
       }
@@ -990,7 +997,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     runId = extractRunId(created);
     if (!runId && durableCreate) {
       try {
-        runId = extractRunId(await fetchJson(createRunUrl, createRequest));
+        runId = extractRunId(await postRun());
       } catch (replayError) {
         return createUnverified(ctx.signal?.aborted ?? false, replayError, redactText);
       }
