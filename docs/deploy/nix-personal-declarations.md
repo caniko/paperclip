@@ -9,6 +9,9 @@ This integration requires the native deployment entry point from
 `services.paperclip.instances` module from
 [nixpkgs #567242](https://github.com/NixOS/nixpkgs/pull/567242). Both contributions
 are under review. Select compatible, immutable package and module revisions.
+The package must also include #14616's CLI support for `PAPERCLIP_API_KEY_FILE`;
+the module-only source does not add that application behavior. An older CLI that
+reads only `PAPERCLIP_API_KEY` is incompatible with `apiKeyFile`.
 
 ## Personal configuration
 
@@ -39,6 +42,8 @@ The declaration is available at
 of CLI enablement. `companyId` can set the CLI's default company after native
 startup exports its resource bindings. `apiKeyFile` is a runtime path; its
 contents are never read during evaluation or copied to the Nix store.
+Company defaults apply to commands that support them, such as `issue list`.
+Commands such as `agent list` still require an explicit `--company-id`.
 
 Manifest fields must be nonsecret. Use credential references such as
 `agents.hermes.credentials.apiKey = "gateway"`, then provision the matching
@@ -103,3 +108,28 @@ forwarding, disabled-controller behavior, runtime credential references, missing
 selections, and conflicting system definitions. It evaluates only; it starts no
 services and needs no credentials. Runtime reconciliation and package/VM tests
 remain the responsibility of the native startup and NixOS service contributions.
+
+## CLI execution test
+
+`nix/tests/personal-cli.nix` builds and runs the actual Home Manager wrapper on
+Linux. It uses a loopback fixture API and a disposable runtime key to verify
+authentication, API URL and company selection, and refusal of missing or publicly
+readable keys even when an ambient API key is present. It fails with a package
+that lacks the required CLI credential-file support.
+It checks the company default with `issue list` and authenticated agent listing
+with the required explicit company flag.
+
+Build this expression with the same immutable nixpkgs and Home Manager inputs:
+
+```sh
+nix build --impure --expr '
+  import ./nix/tests/personal-cli.nix {
+    nixpkgsPath = /absolute/path/to/nixpkgs;
+    homeManagerPath = /absolute/path/to/home-manager;
+  }
+'
+```
+
+To check an already-built compatible package, pass its store path as
+`paperclipPackage`. The test performs no controller reconciliation or worker
+dispatch.
