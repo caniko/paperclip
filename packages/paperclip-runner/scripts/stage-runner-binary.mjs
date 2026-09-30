@@ -8,7 +8,16 @@ const execFileAsync = promisify(execFile);
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const executable = process.platform === "win32" ? "paperclip-runnerd.exe" : "paperclip-runnerd";
-const source = path.join(packageRoot, "runner", "target", "release", executable);
+// Resolve the same target directory Cargo used, including environment and config overrides.
+const { stdout } = await execFileAsync("cargo", [
+  "metadata",
+  "--format-version=1",
+  "--no-deps",
+  "--manifest-path", "runner/Cargo.toml",
+  "--locked",
+  "--offline",
+], { cwd: packageRoot });
+const source = path.join(JSON.parse(stdout).target_directory, "release", executable);
 const destinationDirectory = path.join(packageRoot, "dist", "bin");
 const destination = path.join(destinationDirectory, executable);
 
