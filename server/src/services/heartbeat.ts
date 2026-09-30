@@ -15076,6 +15076,42 @@ export function heartbeatService(
     };
   }
 
+  function isDispatchedHermesRun(
+    run: typeof heartbeatRuns.$inferSelect,
+    currentAdapterType: string | null,
+  ): boolean {
+    return run.runtimeMode === "legacy" && run.executionStage === "dispatching" &&
+      (claimedAdapterType(run) ?? currentAdapterType) === "hermes_gateway";
+  }
+
+  async function holdUnverifiedHermesRun(
+    run: typeof heartbeatRuns.$inferSelect,
+    message: string,
+    evidence?: { errorCode?: string | null; resultJson?: Record<string, unknown> | null },
+  ) {
+    const code = evidence?.errorCode ?? "remote_owner_unverified";
+    const [held] = await db.update(heartbeatRuns).set({
+      error: message,
+      errorCode: code,
+      ...(evidence?.resultJson ? {
+        resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify(evidence.resultJson)}::jsonb`,
+      } : {}),
+      updatedAt: new Date(),
+    }).where(and(
+      eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+      eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.executionStage, "dispatching"),
+      // A repeated reaper sweep should not create an unbounded event stream.
+      sql`${heartbeatRuns.errorCode} is distinct from ${code}`,
+      code === "remote_owner_unverified"
+        ? sql`coalesce(${heartbeatRuns.errorCode}, '') not in ('hermes_gateway_create_unverified', 'hermes_gateway_cancel_unverified')`
+        : undefined,
+    )).returning();
+    if (held) await appendRunEvent(held, {
+      eventType: "lifecycle", stream: "system", level: "warn", message,
+      payload: { errorCode: code, remoteTerminationVerified: false },
+    });
+  }
+
   async function drainRunningRunsForShutdown(
     signal: "SIGINT" | "SIGTERM",
     now = new Date(),
@@ -15179,6 +15215,25 @@ export function heartbeatService(
         continue;
       }
       const message = `Interrupted by graceful server shutdown (${signal})`;
+      // A remote Hermes run has no local process to kill. Its owner must
+      // acknowledge termination before shutdown may release the issue or the
+      // agent's next queued run. A missing control is not evidence of a stop.
+      if (isDispatchedHermesRun(run, agent.adapterType)) {
+        const control = adapterExecutionControls.get(run.id);
+        if (control) {
+          control.controller.abort(new Error(message));
+          try {
+            await waitForAdapterStop(control.settled, 20_000);
+          } catch (error) {
+            logger.warn({ err: error, runId: run.id }, "Hermes stop is still unverified during shutdown");
+          }
+        }
+        const latest = await getRun(run.id);
+        if (latest?.status === "running") {
+          await holdUnverifiedHermesRun(latest, message);
+        }
+        continue;
+      }
       const running = runningProcesses.get(run.id);
       try {
         if (run.runtimeMode === "native") {
@@ -19258,6 +19313,11 @@ export function heartbeatService(
       if (staleThresholdMs > 0) {
         const refTime = run.updatedAt ? new Date(run.updatedAt).getTime() : 0;
         if (now.getTime() - refTime < staleThresholdMs) continue;
+      }
+
+      if (isDispatchedHermesRun(run, adapterType)) {
+        await holdUnverifiedHermesRun(run, "Controller ownership expired before Hermes termination was verified");
+        continue;
       }
 
       const currentAdapterTracksLocalChild =
@@ -25020,6 +25080,17 @@ export function heartbeatService(
             }
           }
         }
+        if (agent.adapterType === "hermes_gateway" && [
+          "hermes_gateway_create_unverified", "hermes_gateway_cancel_unverified",
+        ].includes(adapterResult.errorCode ?? "")) {
+          // The gateway may still be executing. Keeping the run running retains
+          // the agent slot and issue lock across controller loss; a terminal
+          // failure would release both and allow overlapping remote work.
+          await holdUnverifiedHermesRun(run,
+            adapterResult.errorMessage ?? "Hermes remote execution is unverified",
+            { errorCode: adapterResult.errorCode, resultJson: parseObject(adapterResult.resultJson) });
+          return;
+        }
         const processCancellation =
           processRunCancellationSettlements.get(run.id) ??
           failedProcessRunCancellations.get(run.id);
@@ -29177,6 +29248,10 @@ export function heartbeatService(
       return getRun(run.id);
     }
     const running = runningProcesses.get(run.id);
+    if (isDispatchedHermesRun(run, agent?.adapterType ?? null) &&
+        !adapterExecutionControls.has(run.id)) {
+      throw conflict("Hermes remote owner is unverified. Verify and reconcile the gateway run before releasing this execution.");
+    }
     const stopOwnership =
       run.runtimeMode !== "native"
         ? captureAdapterStopOwnership(run.id)
