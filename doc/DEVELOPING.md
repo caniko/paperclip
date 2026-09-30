@@ -15,6 +15,39 @@ Current implementation status:
 - Node.js 24.11+
 - pnpm 9+
 
+### Harbor development shell
+
+The Nix development shell consumes `harbor-js` for Node and the exact pnpm
+version declared by `package.json`. The version's fixed-output hash is project
+policy; the reusable package builder and shell live in Harbor. `flake.lock`
+records the immutable Harbor and toolchain inputs.
+
+Review and allow the repository's `.envrc`, then install dependencies explicitly:
+
+```sh
+direnv exec . pnpm install --frozen-lockfile
+direnv exec . pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+direnv exec . pnpm test
+```
+
+Entering the shell does not install dependencies, modify lockfiles, start the
+application, or select a Paperclip instance. Use separate cache and runtime state
+when qualifying an isolated checkout. The npm dependency lockfile policy below
+still applies.
+
+The shell includes process/listener inspection tools used by runtime and SSH
+fixtures. The explicit SDK build supplies workspace package exports needed by
+server tests. When changed manifests or patches make the committed dependency
+lock stale, use the resolution-only command from the lock-refresh workflow
+before the frozen install:
+
+```sh
+direnv exec . pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
+```
+
+Keep this local generated lock separate from implementation commits, as required
+by the dependency lockfile policy below.
+
 ## Dependency Lockfile Policy
 
 GitHub Actions owns `pnpm-lock.yaml`.
