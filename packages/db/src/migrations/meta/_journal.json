@@ -2014,8 +2014,22 @@
     {
       "idx": 289,
       "version": "7",
-      "when": 1790713813737,
-      "tag": "0289_messy_vivisector",
+      "when": 1790727655506,
+      "tag": "0289_drop_user_keyboard_shortcuts",
+      "breakpoints": true
+    },
+    {
+      "idx": 290,
+      "version": "7",
+      "when": 1790768845200,
+      "tag": "0290_browser_use_cloud",
+      "breakpoints": true
+    },
+    {
+      "idx": 291,
+      "version": "7",
+      "when": 1790778004251,
+      "tag": "0291_deployment_resources",
       "breakpoints": true
     }
   ]

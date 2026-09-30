@@ -142,6 +142,17 @@ pnpm build-storybook
 
 These run the `@paperclipai/ui` Storybook on port `6006` and build the static output to `ui/storybook-static/`.
 
+Use **Design explorations → Agent chat sidebar** to review the production secondary
+agent navigation. **Components** covers selection, search, loading, empty results,
+and larger teams. **Pages** puts it beside the production agent chat inside the
+real app shell, including landing, conversation, plan panel, light, and mobile
+views. The plus button opens the existing agent picker; adding an agent creates
+one sidebar entry, and choosing them again reopens the same conversation. The
+**Add and reopen** component story exercises that constraint. Agent selection
+and sending use local fixtures. The live `/chats` and `/chats/:agentRef` routes
+use the same sidebar, picker, landing page, and existing chat surface when the
+Agent Chat experimental setting is enabled.
+
 Use **Chat & Comments → Issue Thread Interactions → Composer Questions Auto Advance**
 to try the paged composer form. A single selection shows a brief checked-state animation before advancing to the
 next question. Reduced-motion mode advances without animation.
@@ -163,6 +174,13 @@ Claude Code uses model-specific effort levels; Haiku has no effort slider.
 Grok uses its adapter's reasoning levels, including for its default model.
 Kimi shows effort only when its agent uses the CLI engine, including with its
 default model, because the default ACP engine ignores effort.
+
+Mobile entity picker sheets use a modal popover so touch scrolling stays inside
+the sheet even when it is portalled outside the new-task dialog. Run
+`pnpm exec playwright test --config tests/e2e/playwright.config.ts tests/e2e/new-task-picker-touch.spec.ts`
+to verify native touch scrolling and selection in both assignee and model lists.
+The test uses a fixed model catalog and a reduced viewport to cover limited
+space while the phone keyboard is open; it does not require a provider login.
 
 The Storybook visual regression suite uses external PNG baselines instead of
 committed screenshots:

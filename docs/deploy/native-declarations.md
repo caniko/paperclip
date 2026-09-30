@@ -153,7 +153,7 @@ local encrypted material without recording secret-access timestamps. Preserve
 that key, runtime credentials, storage, and the migration journal in backups.
 Application generation rollback is not database rollback.
 
-Migration `0289_messy_vivisector` follows the selected upstream history. Older
+Migration `0291_deployment_resources` follows upstream `0290`. Older
 fork-only `0284_bizarre_mastermind` / `0285_deployment_workspaces` databases are
 not upgrade-qualified; unknown hashes fail closed. Use a separate verified
 migration or restore procedure. Fresh disposable staging does not prove

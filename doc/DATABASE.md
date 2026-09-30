@@ -468,14 +468,14 @@ stored migration hash against the installed SQL files. Unknown hashes refuse
 startup without changing the journal. Use the matching application or a verified
 compatible backup; renumbering a fork's applied migrations is not an upgrade.
 
-Migration `0289_messy_vivisector.sql` adds the `deployment_resources` ownership
+Migration `0291_deployment_resources.sql` adds the `deployment_resources` ownership
 ledger and guards owned resource fields and secret versions. Resource identities
 use owner, kind, and key; no cascading foreign key can silently erase ownership.
 Operational pauses and spending remain mutable. The reconciler uses a
 transaction-local setting for its own writes. This guard controls application
 writes, not arbitrary SQL access by the database owner.
 
-This migration is generated from the upstream `0288` schema for fresh staging
+This migration is generated from the upstream `0290` schema for fresh staging
 and upstream-history databases. A database with the older fork-only
 `0284_bizarre_mastermind` / `0285_deployment_workspaces` history needs a separate
 verified migration/restore procedure. The compatibility check refuses that

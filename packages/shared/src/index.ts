@@ -2332,10 +2332,6 @@ export {
   resolveCliAuthChallengeSchema,
   createBoardApiKeySchema,
   currentUserProfileSchema,
-  currentUserPreferencesSchema,
-  updateCurrentUserPreferencesSchema,
-  type CurrentUserPreferences,
-  type UpdateCurrentUserPreferences,
   authSessionSchema,
   updateCurrentUserProfileSchema,
   updateCompanyMemberSchema,
@@ -2801,3 +2797,4 @@ export { resolveAgentInstructionCandidateSchema, type ResolveAgentInstructionCan
 
 export { isHeartbeatRunVisibleInMine } from "./heartbeat-inbox.js";
 export { deploymentManifestSchema, type DeploymentManifest } from "./deployment-manifest.js";
+export * from "./browser-use.js";
