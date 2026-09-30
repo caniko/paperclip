@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { access, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { instanceId } from "./fixtures/railway/provider.js";
@@ -96,6 +96,10 @@ describe("Railway isolated container command runner", () => {
     expect(args.slice(-3)).toEqual(["--", `${instanceId}@ssh.railway.com`, "sh -s"]);
   });
   it("requires remote completion and cleans its isolated directory", async () => {
+    const trustedSsh = "/run/current-system/sw/bin/ssh";
+    accessMock.mockImplementation(async (file) => {
+      if (file !== trustedSsh) throw Object.assign(new Error("absent"), { code: "ENOENT" });
+    });
     fakeProcess((child, script) => {
       expect(script).toContain("</dev/null");
       const marker = script.match(/paperclip_railway_completed_[a-f0-9]+/)![0];
@@ -105,7 +109,9 @@ describe("Railway isolated container command runner", () => {
     await expect(runRailwaySshCommand(input())).resolves.toMatchObject({ exitCode: 7, stdout: "hello", timedOut: false, truncated: false });
     const args = spawnMock.mock.calls[0][1] as string[];
     const keyPath = args[args.indexOf("-i") + 1];
-    await expect(access(path.dirname(keyPath))).rejects.toThrow();
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    await expect(actual.access(path.dirname(keyPath))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(spawnMock.mock.calls[0][0]).toBe(trustedSsh);
     expect(spawnMock.mock.calls[0][2].env).toEqual({ PATH: "/usr/bin:/bin", LANG: "C.UTF-8" });
   });
   it("never treats local success or stdin failure as confirmed remote success", async () => {
