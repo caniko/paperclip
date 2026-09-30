@@ -3633,6 +3633,8 @@ export async function realizeExecutionWorkspace(input: {
 export async function ensurePersistedExecutionWorkspaceAvailable(input: {
   db?: Db | null;
   base: ExecutionWorkspaceInput;
+  /** Validated on the execution host; never restore or repair an authoritative directory. */
+  inPlaceCwd?: string;
   workspace: {
     id?: string | null;
     mode: string | null | undefined;
@@ -3658,7 +3660,8 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
   recorder?: WorkspaceOperationRecorder | null;
   resolveGitAuth?: GitRemoteAuthProvider | null;
 }): Promise<RealizedExecutionWorkspace | null> {
-  const cwd = asString(input.workspace.cwd ?? input.workspace.providerRef, "").trim();
+  const recordedCwd = asString(input.workspace.cwd ?? input.workspace.providerRef, "");
+  const cwd = input.inPlaceCwd === undefined ? recordedCwd.trim() : recordedCwd;
   if (!cwd) return null;
 
   const strategy = input.workspace.strategyType === "git_worktree" ? "git_worktree" : "project_primary";
@@ -3684,6 +3687,13 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
     baseRefSha: readRecordedBaseRefSha(input.workspace.metadata),
   };
   const provisionCommand = asString(input.workspace.config?.provisionCommand, "").trim();
+
+  if (input.inPlaceCwd !== undefined) {
+    if (strategy === "git_worktree" || cwd !== input.inPlaceCwd) {
+      throw new Error("In-place workspace cannot restore a different directory or a managed Git worktree.");
+    }
+    return realized;
+  }
 
   if (strategy !== "git_worktree") {
     if (!await directoryExists(cwd)) {

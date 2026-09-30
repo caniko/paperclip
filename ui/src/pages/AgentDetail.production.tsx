@@ -119,6 +119,7 @@ import {
 } from "@paperclipai/shared";
 import { ResponsibleUserDenialNotice } from "../components/ResponsibleUserDenialNotice";
 import { RunWorkspaceRecoverySurface } from "../components/RunWorkspaceRecoverySurface";
+import { FilesystemOwnershipNotice } from "../components/FilesystemOwnershipNotice";
 import { buildPermissionsForTrustPreset, getTrustPreset } from "../lib/trust-policy-ui";
 import { redactHomePathUserSegments, redactHomePathUserSegmentsInValue } from "@paperclipai/adapter-utils";
 import { agentRouteRef } from "../lib/utils";
@@ -3388,6 +3389,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
           git workspace it could not validate, wired to the same reconcile / repair / re-issue /
           break-glass handlers as the task detail page. */}
       <RunWorkspaceRecoverySurface run={run} />
+      <FilesystemOwnershipNotice run={run} />
       {/* Run summary card */}
       <div className="border border-border rounded-lg overflow-hidden">
         <div className="flex flex-col sm:flex-row">
@@ -3461,6 +3463,11 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
                 <span className="text-foreground">
                   {responsibleUserName ?? responsibleUserLabel(null)}
                 </span>
+              </div>
+            )}
+            {cancelRun.isError && (
+              <div role="alert" className="text-xs text-destructive">
+                {cancelRun.error instanceof Error ? cancelRun.error.message : "Failed to cancel run"}
               </div>
             )}
             {resumeRun.isError && (

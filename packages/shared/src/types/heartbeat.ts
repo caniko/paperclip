@@ -223,11 +223,11 @@ export interface HeartbeatRun {
   createdAt: Date;
   updatedAt: Date;
   outputSilence?: HeartbeatRunOutputSilence;
+  /** Public, durable preparation state. Authority identities and grants stay private. */
+  filesystemOwnershipState?: "waiting" | "acquired" | null;
   /**
-   * Ephemeral, process-local current status message for an active run. Resolved
-   * from the in-memory runtime status store (never persisted to the database)
-   * and only populated for active/live run reads. Disappears on TTL expiry,
-   * terminal run status, or server restart.
+   * Current progress for an active run. Normally process-local with a TTL;
+   * an ownership wait is projected from durable preparation state until handoff.
    */
   currentStatusMessage?: string | null;
   currentStatusUpdatedAt?: Date | string | null;

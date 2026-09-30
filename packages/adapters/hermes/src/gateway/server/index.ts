@@ -1,8 +1,10 @@
 import type { AdapterSessionCodec } from "@paperclipai/adapter-utils";
 
-export { execute, resolveSessionKey, parseSseFramesForTest, mapFinalResultForTest } from "./execute.js";
+export { execute, normalizeBaseUrl, resolveSessionKey, parseSseFramesForTest, mapFinalResultForTest } from "./execute.js";
 export { testEnvironment } from "./test.js";
 export { getConfigSchema } from "./config-schema.js";
+export { reconcileExecution } from "./recovery.js";
+export { prepareWorkspaceOwnership, reconcileWorkspaceOwnership } from "./ownership.js";
 
 function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -16,12 +18,14 @@ export const sessionCodec: AdapterSessionCodec = {
     const sessionKey = readString(record.sessionKey);
     const hermesRunId = readString(record.hermesRunId);
     const strategy = readString(record.strategy);
+    const executionContextFingerprint = readString(record.executionContextFingerprint);
     if (!hermesSessionId && !sessionKey && !hermesRunId) return null;
     return {
       ...(hermesRunId ? { hermesRunId } : {}),
       ...(hermesSessionId ? { hermesSessionId } : {}),
       ...(sessionKey ? { sessionKey } : {}),
       ...(strategy ? { strategy } : {}),
+      ...(executionContextFingerprint ? { executionContextFingerprint } : {}),
     };
   },
   serialize(params) {
@@ -30,12 +34,14 @@ export const sessionCodec: AdapterSessionCodec = {
     const sessionKey = readString(params.sessionKey);
     const hermesRunId = readString(params.hermesRunId);
     const strategy = readString(params.strategy);
+    const executionContextFingerprint = readString(params.executionContextFingerprint);
     if (!hermesSessionId && !sessionKey && !hermesRunId) return null;
     return {
       ...(hermesRunId ? { hermesRunId } : {}),
       ...(hermesSessionId ? { hermesSessionId } : {}),
       ...(sessionKey ? { sessionKey } : {}),
       ...(strategy ? { strategy } : {}),
+      ...(executionContextFingerprint ? { executionContextFingerprint } : {}),
     };
   },
   getDisplayId(params) {

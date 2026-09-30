@@ -7,7 +7,16 @@ import type {
 } from "../constants.js";
 import type { AgentEnvConfig, EnvSecretRefBinding } from "./secrets.js";
 
+/** Explicit coordination with the directory's host-local authority. */
+export interface FilesystemOwnershipPolicy {
+  authority: string;
+  principal: string;
+  roots: string[];
+}
+
 export interface LocalEnvironmentConfig {
+  workspaceRealizationMode?: "copy" | "in_place";
+  filesystemOwnership?: FilesystemOwnershipPolicy;
   [key: string]: unknown;
 }
 
@@ -16,6 +25,9 @@ export interface SshEnvironmentConfig {
   port: number;
   username: string;
   remoteWorkspacePath: string;
+  /** Maintain this existing directory without workspace upload or restore. */
+  workspaceRealizationMode?: "copy" | "in_place";
+  filesystemOwnership?: FilesystemOwnershipPolicy;
   privateKey: string | null;
   privateKeySecretRef: EnvSecretRefBinding | null;
   knownHosts: string | null;

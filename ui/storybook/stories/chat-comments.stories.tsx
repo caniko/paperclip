@@ -1051,6 +1051,21 @@ export const LiveRunChat: Story = {
   ),
 };
 
+export const FilesystemOwnershipWaiting: Story = {
+  render: () => (
+    <div className="paperclip-story">
+      <main className="paperclip-story__inner">
+        <RunChatSurface
+          run={{ ...liveRun, filesystemOwnershipState: "waiting" }}
+          transcript={[]}
+          hasOutput={false}
+          companyId={companyId}
+        />
+      </main>
+    </div>
+  ),
+};
+
 export const IssueChatWithTimeline: Story = {
   render: () => (
     <div className="paperclip-story">

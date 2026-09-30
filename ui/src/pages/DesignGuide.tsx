@@ -51,6 +51,7 @@ import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Badge } from "@/components/ui/badge";
 import { InlineBanner } from "@/components/InlineBanner";
+import { FilesystemOwnershipNotice } from "@/components/FilesystemOwnershipNotice";
 import { BuiltInLifecycleChip } from "@/components/BuiltInAgentBadges";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -2372,6 +2373,7 @@ export function DesignGuide() {
           <InlineBanner tone="info" compact>
             Compact variant for embedding inside dialogs and modals.
           </InlineBanner>
+          <FilesystemOwnershipNotice run={{ status: "running", filesystemOwnershipState: "waiting" }} />
         </div>
       </Section>
 

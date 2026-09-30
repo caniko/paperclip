@@ -1,13 +1,19 @@
 import * as executionContinuation from "../services/execution-continuation.js";
 import { legacyDispositionFingerprint, LEGACY_DISPOSITION_REPAIR_INSTRUCTION } from "../services/recovery/legacy-continuation.js";
 import * as controllerLeases from "../services/legacy-controller-lease.js";
+import { prepareAdapterExecution, prepareWorkspaceOwnershipCheckpoint, recordWorkspaceOwnershipGrant, reconcileAdapterExecution, settleAdapterExecution } from "../services/adapter-execution-ownership.js";
+import { environmentService } from "../services/environments.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
+import { workspaceOperationService } from "../services/workspace-operations.js";
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
+import { once } from "node:events";
+import type { AddressInfo } from "node:net";
 import { terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
 import { issueService } from "../services/issues.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
 import { adapterExecutionControls, createAdapterExecutionControl } from "../services/adapter-execution-control.js";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -85,6 +91,7 @@ import {
 import { runningProcesses } from "../adapters/index.ts";
 import {
   resolveDefaultAgentWorkspaceDir,
+  resolveManagedProjectWorkspaceDir,
   resolvePaperclipInstanceRoot,
 } from "../home-paths.js";
 import { buildNativeExecutionInput } from "../services/native-runtime/native-execution-input.js";
@@ -201,7 +208,8 @@ vi.mock("../adapters/index.ts", async () => {
   );
   return {
     ...actual,
-    getServerAdapter: vi.fn(() => ({
+    getServerAdapter: vi.fn((type: string) => ({
+      ...(type === "hermes_gateway" ? actual.getServerAdapter(type) : {}),
       supportsLocalAgentJwt: false,
       execute: mockAdapterExecute,
     })),
@@ -2527,6 +2535,570 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     );
     // Terminal run cleanup releases the checkout lock so future checkout 409s only mean a live owner exists.
     expect(checkoutReleasedIssue?.checkoutRunId).toBeNull();
+  });
+
+  it("retains a controller-lost run and its lease while adapter settlement is unknown", async () => {
+    const { companyId, runId, issueId } = await seedRunFixture({
+      adapterType: "hermes_gateway", processPid: null, processGroupId: null,
+    });
+    const environment = await environmentService(db).ensureLocalEnvironment();
+    const [lease] = await db.insert(environmentLeases).values({ companyId, environmentId: environment.id,
+      heartbeatRunId: runId, issueId, status: "active",
+      metadata: { adapterExecution: { version: 1, adapterType: "hermes_gateway", state: "pending", material: {} } },
+    }).returning();
+    const heartbeat = heartbeatService(db);
+    try {
+      expect(await heartbeat.reapOrphanedRuns()).toEqual({ reaped: 0, runIds: [] });
+      expect((await heartbeat.getRun(runId))?.status).toBe("running");
+      expect((await db.select().from(environmentLeases).where(eq(environmentLeases.id, lease.id)))[0].status).toBe("active");
+      const issue = (await db.select().from(issues).where(eq(issues.id, issueId)))[0];
+      expect(issue.executionRunId).toBe(runId);
+      await heartbeat.cancelRun(runId);
+      expect((await heartbeat.getRun(runId))?.status).toBe("running");
+    } finally {
+      await db.update(environmentLeases).set({ metadata: {} }).where(eq(environmentLeases.id, lease.id));
+      await heartbeat.cancelRun(runId);
+    }
+  });
+
+  it.each(["metadata", "commit-race"])("keeps private execution ownership through %s", async (scenario) => {
+    const { companyId, runId, issueId } = await seedRunFixture({ adapterType: "hermes_gateway" });
+    const environment = await environmentService(db).ensureLocalEnvironment();
+    const [lease] = await db.insert(environmentLeases).values({ companyId, environmentId: environment.id,
+      heartbeatRunId: runId, issueId, status: "active" }).returning();
+    const [run] = await db.update(heartbeatRuns).set(controllerLeases.legacyControllerClaim("legacy"))
+      .where(eq(heartbeatRuns.id, runId)).returning();
+    const identity = { companyId, runId, leaseId: lease.id };
+    const prepare = (database: typeof db) => prepareAdapterExecution(database, { ...identity,
+      adapterType: "hermes_gateway", checkpoint: { secret: "execution-checkpoint-credential" } });
+    try {
+      if (scenario === "metadata") {
+        await prepare(db);
+        const stored = (await db.select().from(environmentLeases).where(eq(environmentLeases.id, lease.id)))[0];
+        expect(JSON.stringify(stored.metadata)).not.toContain("execution-checkpoint-credential");
+        expect(stored.metadata?.adapterExecution).toHaveProperty("material");
+        const service = environmentService(db);
+        const publicLease = await service.getLeaseById(lease.id);
+        expect(publicLease?.metadata?.adapterExecution).not.toHaveProperty("material");
+        await service.updateLeaseMetadata(lease.id, { unrelated: "retained", adapterExecution: { state: "settled" } });
+        expect(await service.releaseLease(lease.id)).toBeNull();
+        expect(await service.releaseLeasesForRun(runId)).toEqual([]);
+        expect((await service.getLeaseById(lease.id))?.metadata).toMatchObject({
+          unrelated: "retained", adapterExecution: { state: "pending" },
+        });
+      } else {
+        const ready = Promise.withResolvers<number>();
+        const release = Promise.withResolvers<void>();
+        const lock = db.transaction(async (tx) => {
+          await prepare(tx as unknown as typeof db);
+          const [{ pid }] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+          ready.resolve(pid);
+          await release.promise;
+        });
+        const pid = await ready.promise;
+        const finalize = terminalizeLegacyExecution({ db, run, status: "failed" });
+        try {
+          await vi.waitFor(async () => {
+            const waiters = await db.execute<{ count: number }>(sql`select count(*)::int as count from pg_stat_activity
+              where datname = current_database() and ${pid} = any(pg_blocking_pids(pid))`);
+            expect(waiters[0].count).toBeGreaterThan(0);
+          });
+        } finally { release.resolve(); }
+        await lock;
+        expect(await finalize).toBeNull();
+        expect((await heartbeatService(db).getRun(runId))?.status).toBe("running");
+      }
+    } finally {
+      await settleAdapterExecution(db, identity);
+      await heartbeatService(db).cancelRun(runId);
+    }
+  });
+
+  it.each(["complete", "cancel"] as const)("parks protected heartbeat preparation and settles %s without premature dispatch or release", async (outcome) => {
+    const { companyId, agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    const fixture = await fs.mkdtemp(path.join(os.tmpdir(), "owned-existing-"));
+    const cwd = path.join(fixture, "existing data ");
+    await fs.mkdir(cwd);
+    const source = path.join(fixture, "reference-source.git");
+    execFileSync("git", ["init", "--bare", source], { stdio: "ignore" });
+    const [project] = await db.insert(projects).values({ companyId, name: "Maintenance" }).returning();
+    const [workspace] = await db.insert(projectWorkspaces).values({ companyId, projectId: project.id,
+      name: "Existing data", sourceType: "non_git_path", cwd, isPrimary: true }).returning();
+    const [referenced] = await db.insert(projects).values({ companyId, name: "Referenced repository" }).returning();
+    await db.insert(projectWorkspaces).values({ companyId, projectId: referenced.id,
+      name: "Clone source", repoUrl: source, isPrimary: true });
+    await db.update(issues).set({ projectId: project.id, projectWorkspaceId: workspace.id,
+      description: `[Referenced repository](project://${referenced.id})`,
+    }).where(eq(issues.id, issueId));
+    vi.stubEnv("PAPERCLIP_MULTI_PROJECT_WORKSPACE_SYNC", "true");
+    const operations: string[] = [];
+    let allowGrant = false;
+    const gateway = createServer(async (request, response) => {
+      response.setHeader("Content-Type", "application/json");
+      if (request.url === "/v1/capabilities") {
+        response.end(JSON.stringify({ features: { runs_execution_context: { version: 1, mode: "precondition", backends: ["local"],
+          lifetimes: ["wait_for_jobs"], stop_admission: true, filesystem_ownership: {
+            version: 1, early_intent: true, target_authority: true, controller_release: true,
+          } } } }));
+        return;
+      }
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      const operation = JSON.parse(body).operation;
+      if (operation === "release" && operations.includes("provider_stopped")) {
+        const finalizations = await db.select().from(workspaceOperations).where(and(
+          eq(workspaceOperations.heartbeatRunId, runId), eq(workspaceOperations.phase, "workspace_finalize"),
+        ));
+        operations.push(finalizations.some(row => row.status === "succeeded") ? "finalized" : "released_before_finalization");
+      }
+      operations.push(operation);
+      response.end(JSON.stringify({ state: operation === "reserve" ? (allowGrant ? "active" : "pending")
+        : operation === "release" ? "settled" : "stopping", claim: "claim-1" }));
+    });
+    gateway.listen(0, "127.0.0.1");
+    await once(gateway, "listening");
+    const baseUrl = `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`;
+    const environment = await environmentService(db).ensureLocalEnvironment();
+    await db.update(environments).set({
+      config: { workspaceRealizationMode: "in_place", filesystemOwnership: { authority: "test-host", principal: "controller", roots: [cwd] } },
+    }).where(eq(environments.id, environment.id));
+    await db.update(agents).set({ adapterType: "hermes_gateway", defaultEnvironmentId: environment.id,
+      adapterConfig: { cwd, apiBaseUrl: baseUrl, apiKey: "fixture", pollIntervalMs: 250 } }).where(eq(agents.id, agentId));
+    mockAdapterExecute.mockImplementationOnce(async (input: unknown) => {
+      const ctx = input as import("@paperclipai/adapter-utils").AdapterExecutionContext;
+      expect(ctx.workspaceOwnership).toMatchObject({ request: runId, roots: [cwd] });
+      expect(operations).not.toContain("release");
+      expect(await fs.readdir(cwd)).toEqual([]);
+      expect((ctx.context.paperclipWorkspaces as unknown[])).toHaveLength(1);
+      await ctx.onExecutionCheckpoint!({ version: 1, baseUrl, headers: { "Idempotency-Key": runId },
+        body: JSON.stringify({ execution_context: { version: 1, lifetime: "wait_for_jobs" } }) });
+      operations.push("provider_stopped");
+      await ctx.onProviderStopped!();
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Complete", provider: "test", model: "test" };
+    });
+    const heartbeat = heartbeatService(db);
+    try {
+      await heartbeat.resumeQueuedRuns();
+      await vi.waitFor(async () => {
+        const observed = await heartbeat.getRun(runId);
+        expect({ operations, error: observed?.error }).toMatchObject({ operations: expect.arrayContaining(["reserve"]) });
+      }, { timeout: 5_000 });
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      const [lease] = await db.select().from(environmentLeases).where(eq(environmentLeases.heartbeatRunId, runId));
+      expect(lease.metadata?.workspaceOwnership).toHaveProperty("material");
+      expect((await heartbeat.getRun(runId))?.status).toBe("running");
+      expect(await fs.readdir(cwd)).toEqual([]);
+      await expect(fs.stat(path.dirname(resolveManagedProjectWorkspaceDir({ companyId, projectId: referenced.id }))))
+        .rejects.toMatchObject({ code: "ENOENT" });
+      if (outcome === "cancel") {
+        await heartbeat.cancelRun(runId);
+        await heartbeat.waitForRunExecutionDrain(runId);
+        expect(mockAdapterExecute).not.toHaveBeenCalled();
+        expect(operations).toContain("stop");
+        expect(operations).toContain("release");
+        expect((await heartbeat.getRun(runId))?.status).toBe("cancelled");
+        return;
+      }
+      allowGrant = true;
+      await waitForRunToSettle(heartbeat, runId);
+      await heartbeat.waitForRunExecutionDrain(runId);
+      expect((await heartbeat.getRun(runId))?.status).toBe("succeeded");
+      expect((await heartbeat.getRun(runId))?.stdoutExcerpt)
+        .toContain("In-place workspaces use existing target directories; referenced projects are not materialized.");
+      expect(operations.indexOf("release")).toBeGreaterThan(operations.indexOf("provider_stopped"));
+      expect(operations).not.toContain("released_before_finalization");
+      expect(operations.indexOf("release")).toBeGreaterThan(operations.indexOf("finalized"));
+      expect((await environmentService(db).getLeaseById(lease.id))?.status).toBe("released");
+    } finally {
+      allowGrant = true;
+      await heartbeat.cancelRun(runId).catch(() => {});
+      await heartbeat.waitForRunExecutionDrain(runId);
+      gateway.closeAllConnections();
+      await new Promise<void>(resolve => gateway.close(() => resolve()));
+      await db.update(environments).set({ config: environment.config }).where(eq(environments.id, environment.id));
+      vi.unstubAllEnvs();
+      await fs.rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves both ownership checkpoints through metadata replacement and ordered recovery", async () => {
+    const { companyId, runId, issueId } = await seedRunFixture({
+      adapterType: "hermes_gateway", processPid: null, processGroupId: null,
+    });
+    await db.update(heartbeatRuns).set(controllerLeases.legacyControllerClaim("legacy")).where(eq(heartbeatRuns.id, runId));
+    const service = environmentService(db);
+    const environment = await service.ensureLocalEnvironment();
+    const lease = await service.acquireLease({ companyId, environmentId: environment.id, heartbeatRunId: runId, issueId });
+    const identity = { companyId, runId, leaseId: lease.id };
+    const checkpoint = { version: 1, baseUrl: "http://127.0.0.1:1", headers: { Authorization: "Bearer private-owner" },
+      executionContext: { version: 1, backend: "local", cwd: "/existing", lifetime: "wait_for_jobs",
+        ownership: { authority: randomUUID(), principal: "controller", request: runId, fingerprint: "f".repeat(64), roots: ["/existing"] } } };
+    await prepareWorkspaceOwnershipCheckpoint(db, { ...identity, adapterType: "hermes_gateway", checkpoint });
+    const stored = () => db.select().from(environmentLeases).where(eq(environmentLeases.id, lease.id)).then(rows => rows[0]);
+    const sealedIntent = (await stored()).metadata?.workspaceOwnership;
+    await service.updateLeaseMetadata(lease.id, null);
+    expect((await stored()).metadata?.workspaceOwnership).toEqual(sealedIntent);
+    const grant = { authority: checkpoint.executionContext.ownership.authority, claim: randomUUID() };
+    await recordWorkspaceOwnershipGrant(db, { ...identity, grant });
+    await recordWorkspaceOwnershipGrant(db, { ...identity, grant: { claim: grant.claim, authority: grant.authority } });
+    await expect(recordWorkspaceOwnershipGrant(db, { ...identity, grant: { ...grant, claim: randomUUID() } })).rejects.toThrow("immutable");
+    await expect(recordWorkspaceOwnershipGrant(db, { ...identity, companyId: randomUUID(), grant })).rejects.toThrow();
+    await expect(prepareWorkspaceOwnershipCheckpoint(db, { ...identity, adapterType: "hermes_gateway", checkpoint: { ...checkpoint, baseUrl: "http://changed" } })).rejects.toThrow("cannot replace");
+    await prepareAdapterExecution(db, { ...identity, adapterType: "hermes_gateway", checkpoint: {
+      version: 1, baseUrl: checkpoint.baseUrl, headers: { ...checkpoint.headers, "Idempotency-Key": runId },
+      body: JSON.stringify({ execution_context: checkpoint.executionContext }),
+    } });
+    await service.updateLeaseMetadata(lease.id, { workspaceOwnership: { state: "settled" }, adapterExecution: { state: "settled" }, preserved: true });
+    expect((await stored()).metadata).toMatchObject({ preserved: true,
+      workspaceOwnership: { state: "pending", grant }, adapterExecution: { state: "pending" } });
+    const publicLease = await service.getLeaseById(lease.id);
+    expect(JSON.stringify(publicLease)).not.toContain("private-owner");
+    expect(publicLease?.metadata?.workspaceOwnership).not.toHaveProperty("material");
+    expect(publicLease?.metadata?.workspaceOwnership).not.toHaveProperty("grant");
+    await settleAdapterExecution(db, identity);
+    await expect(service.releaseLease(lease.id)).resolves.toBeNull();
+    expect((await stored()).status).toBe("active");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ state: "settled" }));
+    try {
+      // Provider settlement is not the workspace-finalization boundary. A new
+      // controller must retain the grant until that separate work has completed.
+      expect(await reconcileAdapterExecution(db, { companyId, runId })).toBe("pending");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect((await stored()).metadata?.workspaceOwnership).toHaveProperty("material");
+      expect((await stored()).status).toBe("active");
+      expect(await reconcileAdapterExecution(db, { companyId, runId,
+        finalizeWorkspace: async () => { throw new Error("instruction teardown is unavailable"); },
+      })).toBe("pending");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(await reconcileAdapterExecution(db, { companyId, runId, finalizeWorkspace: async () => {} })).toBe("pending");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(await reconcileAdapterExecution(db, { companyId, runId, finalizeWorkspace: async () => {
+        await db.insert(workspaceOperations).values({ companyId, heartbeatRunId: runId,
+          phase: "workspace_finalize", status: "failed", finishedAt: new Date() });
+      } })).toBe("settled");
+      expect(fetchMock).toHaveBeenCalledWith(`${checkpoint.baseUrl}/v1/filesystem-ownership`, expect.objectContaining({
+        body: JSON.stringify({ operation: "stop", execution_context: checkpoint.executionContext }),
+      }));
+      expect((await stored()).metadata?.workspaceOwnership).not.toHaveProperty("material");
+      await expect(service.releaseLease(lease.id)).resolves.toMatchObject({ status: "released" });
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  it.each([
+    ["reap", "retained"], ["cancel", "retained"],
+    ["reap", "deleted"], ["cancel", "deleted"],
+  ] as const)("finalizes the protected workspace before %s releases a controller-lost grant for a %s task", async (recovery, task) => {
+    const { companyId, runId, issueId } = await seedRunFixture({
+      adapterType: "hermes_gateway", processPid: null, processGroupId: null,
+    });
+    await db.update(heartbeatRuns).set(controllerLeases.legacyControllerClaim("legacy")).where(eq(heartbeatRuns.id, runId));
+    const service = environmentService(db);
+    const environment = await service.ensureLocalEnvironment();
+    const lease = await service.acquireLease({ companyId, environmentId: environment.id, heartbeatRunId: runId, issueId });
+    const identity = { companyId, runId, leaseId: lease.id };
+    const baseUrl = "http://127.0.0.1:1";
+    const executionContext = { version: 1, backend: "local", cwd: "/existing", lifetime: "wait_for_jobs",
+      ownership: { authority: randomUUID(), principal: "controller", request: runId, fingerprint: "f".repeat(64), roots: ["/existing"] } };
+    await prepareWorkspaceOwnershipCheckpoint(db, { ...identity, adapterType: "hermes_gateway", checkpoint: {
+      version: 1, baseUrl, headers: { Authorization: "Bearer ownership-key" }, executionContext,
+    } });
+    await recordWorkspaceOwnershipGrant(db, { ...identity, grant: { authority: executionContext.ownership.authority, claim: randomUUID() } });
+    await prepareAdapterExecution(db, { ...identity, adapterType: "hermes_gateway", checkpoint: {
+      version: 1, baseUrl, headers: { Authorization: "Bearer execution-key", "Idempotency-Key": runId },
+      body: JSON.stringify({ execution_context: executionContext }),
+    } });
+    if (task === "deleted") {
+      await issueService(db).remove(issueId);
+      expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0].contextSnapshot?.issueId).toBe(issueId);
+    }
+    await db.update(heartbeatRuns).set({ controllerBootId: randomUUID(), controllerLeaseExpiresAt: new Date(0) })
+      .where(eq(heartbeatRuns.id, runId));
+    const releases: string[] = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/v1/capabilities")) return Response.json({ features: { runs_execution_context: { version: 1, stop_admission: true } } });
+      if (String(url).endsWith("/v1/runs/stop")) return Response.json({ run_id: "provider-owned", status: "cancelled" });
+      if (String(url).endsWith("/v1/filesystem-ownership")) {
+        const operation = JSON.parse(String(init?.body)).operation;
+        if (operation === "release") {
+          const finalized = await db.select().from(workspaceOperations).where(and(
+            eq(workspaceOperations.companyId, companyId), eq(workspaceOperations.heartbeatRunId, runId),
+            eq(workspaceOperations.phase, "workspace_finalize"),
+          ));
+          // Controller loss cannot promote an unrecorded result to success.
+          expect(finalized).toHaveLength(1);
+          expect(finalized[0]).toMatchObject({ status: "failed", issueId: task === "deleted" ? null : issueId,
+            metadata: { recovery: "protected_in_place" } });
+          expect(finalized[0].finishedAt).not.toBeNull();
+          const [stored] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, lease.id));
+          expect(stored.metadata?.workspaceOwnership).toMatchObject({ finalization: { operationId: finalized[0].id } });
+          releases.push(operation);
+        }
+        return Response.json({ state: operation === "release" ? "settled" : "stopping" });
+      }
+      throw new Error(`Unexpected recovery endpoint ${url}`);
+    });
+    try {
+      const heartbeat = heartbeatService(db);
+      if (recovery === "reap") expect((await heartbeat.reapOrphanedRuns()).runIds).toContain(runId);
+      else await heartbeat.cancelRun(runId);
+      expect(releases).toEqual(["release"]);
+      expect((await heartbeat.getRun(runId))?.status).toBe(recovery === "reap" ? "failed" : "cancelled");
+      // Recovery records the run's failure/cancellation disposition on the local
+      // lease; the authority grant is released before that terminal write.
+      const [closedLease] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, lease.id));
+      expect(closedLease).toMatchObject({ status: recovery === "reap" ? "failed" : "expired",
+        metadata: { workspaceOwnership: { state: "settled" }, adapterExecution: { state: "settled" } } });
+      expect(closedLease.releasedAt).not.toBeNull();
+      expect(closedLease.metadata?.workspaceOwnership).not.toHaveProperty("material");
+      expect(closedLease.metadata?.adapterExecution).not.toHaveProperty("material");
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  it.each([
+    { pause: "before_record", recovery: "reap" },
+    { pause: "before_commit", recovery: "reap" },
+    { pause: "before_commit", recovery: "pending_cancel" },
+    { pause: "before_record", recovery: "receipt_gap_cancel" },
+  ] as const)("fences a paused protected live finalizer at $pause after $recovery without reopening readiness", async ({ pause, recovery }) => {
+    const { companyId, runId, issueId } = await seedRunFixture({
+      runtimeMode: "legacy", adapterType: "hermes_gateway", processPid: null, processGroupId: null,
+    });
+    const originalControllerBootId = controllerLeases.legacyControllerBootId;
+    await db.update(heartbeatRuns).set({ controllerBootId: originalControllerBootId,
+      controllerLeaseExpiresAt: new Date(Date.now() + 60_000), executionStage: "dispatching",
+    }).where(eq(heartbeatRuns.id, runId));
+    const [project] = await db.insert(projects).values({ companyId, name: "Protected finalizer race" }).returning();
+    const [workspace] = await db.insert(executionWorkspaces).values({ companyId, projectId: project.id,
+      sourceIssueId: issueId, mode: "shared", strategyType: "project_primary", name: "Existing data", cwd: "/existing",
+    }).returning();
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, executionWorkspaceId: workspace.id } })
+      .where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ status: "done", executionWorkspaceId: workspace.id }).where(eq(issues.id, issueId));
+    const [dependent] = await db.insert(issues).values({ companyId, title: "Read finalized data", status: "todo" }).returning();
+    await db.insert(issueRelations).values({ companyId, issueId, relatedIssueId: dependent.id, type: "blocks" });
+    await db.insert(workspaceOperations).values({ companyId, heartbeatRunId: runId, issueId,
+      executionWorkspaceId: workspace.id, phase: "workspace_provision", status: "succeeded", startedAt: new Date(Date.now() - 1_000),
+    });
+    const environment = await environmentService(db).ensureLocalEnvironment();
+    const [lease] = await db.insert(environmentLeases).values({ companyId, environmentId: environment.id,
+      heartbeatRunId: runId, issueId, status: "active",
+    }).returning();
+    const identity = { companyId, runId, leaseId: lease.id };
+    const executionContext = { version: 1, cwd: "/existing", lifetime: "wait_for_jobs",
+      ownership: { authority: randomUUID(), principal: "controller", request: runId, fingerprint: "f".repeat(64), roots: ["/existing"] } };
+    const baseUrl = "http://127.0.0.1:1";
+    await prepareWorkspaceOwnershipCheckpoint(db, { ...identity, adapterType: "hermes_gateway", checkpoint: {
+      version: 1, baseUrl, headers: {}, executionContext,
+    } });
+    await recordWorkspaceOwnershipGrant(db, { ...identity, grant: { authority: executionContext.ownership.authority, claim: randomUUID() } });
+    await prepareAdapterExecution(db, { ...identity, adapterType: "hermes_gateway", checkpoint: {
+      version: 1, baseUrl, headers: { "Idempotency-Key": runId }, body: JSON.stringify({ execution_context: executionContext }),
+    } });
+    await settleAdapterExecution(db, identity);
+    const recorder = workspaceOperationService(db).createRecorder({ companyId, heartbeatRunId: runId, issueId,
+      executionWorkspaceId: workspace.id, protectedFinalization: { leaseId: lease.id, controllerBootId: originalControllerBootId },
+    });
+    let resume!: () => void;
+    let paused = false;
+    const held = new Promise<void>(resolve => { resume = resolve; });
+    const pauseFinalizer = async () => { paused = true; await held; };
+    // The previous controller retains its real recorder while recovery takes
+    // authority. Pause before insertion and after the running row exists.
+    const finalizing = (async () => {
+      if (pause === "before_record") await pauseFinalizer();
+      return recorder.recordOperation({ phase: "workspace_finalize", cwd: "/existing", run: async () => {
+        if (pause === "before_commit") await pauseFinalizer();
+        return { status: "succeeded" };
+      } });
+    })();
+    const outcome = finalizing.then(() => null, (error: unknown) => error);
+    const receiptGap = recovery === "receipt_gap_cancel";
+    let releasePending = recovery === "pending_cancel" || receiptGap;
+    let resumeRecovery!: () => void;
+    const recoveryHeld = new Promise<void>(resolve => { resumeRecovery = resolve; });
+    let pausedAfterReceipt = false;
+    let recovering: Promise<unknown> | null = null;
+    const originalTransaction = db.transaction.bind(db);
+    const transactionSpy = vi.spyOn(db, "transaction").mockImplementation(
+      (async (...args: Parameters<typeof db.transaction>) => {
+        const result = await originalTransaction(...args);
+        if (receiptGap && !pausedAfterReceipt) {
+          const [receipt] = await db.select().from(workspaceOperations).where(and(
+            eq(workspaceOperations.heartbeatRunId, runId), eq(workspaceOperations.phase, "workspace_finalize"),
+            sql`${workspaceOperations.metadata}->>'recovery' = 'protected_in_place'`,
+          ));
+          if (receipt) {
+            // Real recovery committed its failed receipt, but has not completed
+            // the marker transaction. Resume the old real recorder in this gap.
+            pausedAfterReceipt = true;
+            await recoveryHeld;
+          }
+        }
+        return result;
+      }) as typeof db.transaction,
+    );
+    let releases = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      expect(String(url)).toBe(`${baseUrl}/v1/filesystem-ownership`);
+      const operation = JSON.parse(String(init?.body)).operation;
+      if (operation === "release") {
+        releases++;
+        const [stored] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, lease.id));
+        expect(stored.metadata?.workspaceOwnership).toHaveProperty("finalization.operationId");
+      }
+      return Response.json({ state: operation === "release" && releasePending ? "pending" : "settled" });
+    });
+    const heartbeat = heartbeatService(db);
+    const readiness = () => issueService(db).getDependencyReadiness(dependent.id);
+    try {
+      await vi.waitFor(() => expect(paused).toBe(true), { timeout: 5_000 });
+      expect(await readiness()).toMatchObject({ isDependencyReady: false, pendingFinalizeBlockerIssueIds: [issueId] });
+      if (recovery === "reap") {
+        await db.update(heartbeatRuns).set({ controllerLeaseExpiresAt: new Date(Date.now() - 1_000) }).where(eq(heartbeatRuns.id, runId));
+        expect(await heartbeat.reapOrphanedRuns()).toEqual({ reaped: 1, runIds: [runId] });
+        expect((await heartbeat.getRun(runId))?.controllerBootId).not.toBe(originalControllerBootId);
+      } else if (receiptGap) {
+        recovering = heartbeat.cancelRun(runId);
+        await vi.waitFor(() => expect(pausedAfterReceipt).toBe(true), { timeout: 5_000 });
+        const [pending] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, lease.id));
+        expect(pending.metadata?.workspaceOwnership).toMatchObject({ finalization: { state: "pending" } });
+        expect(pending.metadata?.workspaceOwnership).not.toHaveProperty("finalization.operationId");
+        expect((await heartbeat.getRun(runId))?.controllerBootId).toBe(originalControllerBootId);
+        resume();
+        expect(await outcome).toMatchObject({ message: expect.stringMatching(/Protected workspace finalization no longer owns/) });
+        expect(await readiness()).toMatchObject({ isDependencyReady: false, pendingFinalizeBlockerIssueIds: [issueId] });
+        resumeRecovery();
+        await recovering;
+      } else {
+        await heartbeat.cancelRun(runId);
+        expect((await heartbeat.getRun(runId))?.status).toBe("running");
+        expect((await heartbeat.getRun(runId))?.controllerBootId).toBe(originalControllerBootId);
+      }
+      expect(releases).toBe(1);
+      const [stored] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, lease.id));
+      const marker = (stored.metadata?.workspaceOwnership as Record<string, unknown>).finalization;
+      const [recovered] = await db.select().from(workspaceOperations).where(and(
+        eq(workspaceOperations.heartbeatRunId, runId), eq(workspaceOperations.phase, "workspace_finalize"),
+        sql`${workspaceOperations.metadata}->>'recovery' = 'protected_in_place'`,
+      ));
+      expect(recovered).toMatchObject({ status: "failed", executionWorkspaceId: workspace.id });
+      expect(marker).toMatchObject({ operationId: recovered.id });
+      if (releasePending) expect(stored.metadata?.workspaceOwnership).toHaveProperty("material");
+      resume();
+      const failure = await outcome;
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).toMatchObject({ message: expect.stringMatching(/Protected workspace finalization no longer owns/) });
+      expect(await db.select().from(workspaceOperations).where(and(
+        eq(workspaceOperations.heartbeatRunId, runId), eq(workspaceOperations.phase, "workspace_finalize"),
+        eq(workspaceOperations.status, "succeeded"),
+      ))).toEqual([]);
+      expect(await readiness()).toMatchObject({ isDependencyReady: false, pendingFinalizeBlockerIssueIds: [issueId] });
+      const [after] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, lease.id));
+      expect((after.metadata?.workspaceOwnership as Record<string, unknown>).finalization).toEqual(marker);
+    } finally {
+      resume();
+      resumeRecovery();
+      await outcome;
+      await recovering?.catch(() => {});
+      transactionSpy.mockRestore();
+      releasePending = false;
+      await heartbeat.cancelRun(runId).catch(() => {});
+      fetchMock.mockRestore();
+    }
+  });
+
+  it("does not accept reserved ownership metadata when creating an ordinary lease", async () => {
+    const { companyId, runId, issueId } = await seedRunFixture({ adapterType: "hermes_gateway", processPid: null, processGroupId: null });
+    const service = environmentService(db);
+    const environment = await service.ensureLocalEnvironment();
+    const lease = await service.acquireLease({ companyId, environmentId: environment.id, heartbeatRunId: runId, issueId,
+      metadata: { workspaceOwnership: { state: "settled" }, adapterExecution: { state: "settled" }, ordinary: true } });
+    expect(lease.metadata).toEqual({ ordinary: true });
+  });
+
+  it("recovers the sealed admission after controller loss and releases ownership only after settlement", async () => {
+    const { companyId, agentId, runId, issueId } = await seedRunFixture({ adapterType: "hermes_gateway" });
+    const environment = await environmentService(db).ensureLocalEnvironment();
+    const [lease] = await db.insert(environmentLeases).values({ companyId, environmentId: environment.id,
+      heartbeatRunId: runId, issueId, status: "active", provider: "local" }).returning();
+    const identity = { companyId, runId, leaseId: lease.id };
+    let state: "unavailable" | "pending" | "settled" = "unavailable";
+    const requests: { path: string; body: string; key: string | undefined; authorization: string | undefined }[] = [];
+    const server = createServer(async (request, response) => {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      requests.push({ path: request.url!, body, key: request.headers["idempotency-key"] as string | undefined,
+        authorization: request.headers.authorization });
+      if (state === "unavailable") { response.writeHead(503).end(); return; }
+      if (request.url === "/v1/capabilities") {
+        response.end(JSON.stringify({ features: { runs_execution_context: { version: 1, stop_admission: true } } }));
+      } else if (request.url === "/v1/runs/stop" || request.url === "/v1/runs/provider-owned") {
+        response.end(JSON.stringify({ run_id: "provider-owned", status: state === "settled" ? "cancelled" : "stopping" }));
+      } else { response.writeHead(404).end(); }
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const checkpoint = { version: 1, baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      headers: { Authorization: "Bearer checkpoint-fixture-credential", "Idempotency-Key": runId },
+      body: JSON.stringify({ input: "the original instruction", execution_context: {
+        version: 1, backend: "local", cwd: "/original-target", lifetime: "wait_for_jobs",
+      } }),
+    };
+    const heartbeat = heartbeatService(db);
+    try {
+      await db.update(heartbeatRuns).set(controllerLeases.legacyControllerClaim("legacy"))
+        .where(eq(heartbeatRuns.id, runId));
+      await prepareAdapterExecution(db, { ...identity, adapterType: "hermes_gateway", checkpoint });
+      await prepareAdapterExecution(db, { ...identity, adapterType: "hermes_gateway", checkpoint });
+      await expect(prepareAdapterExecution(db, { ...identity, adapterType: "hermes_gateway",
+        checkpoint: { ...checkpoint, body: "a different instruction" } })).rejects.toThrow("cannot replace");
+      // A copied recovery envelope cannot control another company's run.
+      const foreign = await seedRunFixture({ adapterType: "hermes_gateway" });
+      const stored = (await db.select().from(environmentLeases).where(eq(environmentLeases.id, lease.id)))[0];
+      const [foreignLease] = await db.insert(environmentLeases).values({ companyId: foreign.companyId,
+        heartbeatRunId: foreign.runId, environmentId: environment.id, metadata: stored.metadata }).returning();
+      expect(await reconcileAdapterExecution(db, { companyId: foreign.companyId, runId: foreign.runId })).toBe("pending");
+      expect(requests).toHaveLength(0);
+      await settleAdapterExecution(db, { companyId: foreign.companyId, runId: foreign.runId, leaseId: foreignLease.id });
+      await heartbeat.cancelRun(foreign.runId);
+
+      await db.update(heartbeatRuns).set({ controllerBootId: randomUUID(), controllerLeaseExpiresAt: new Date(0) })
+        .where(eq(heartbeatRuns.id, runId));
+      await db.update(agents).set({ adapterConfig: { apiBaseUrl: "http://invalid.example", apiKey: "changed" } })
+        .where(eq(agents.id, agentId));
+      expect(await heartbeat.reapOrphanedRuns()).toEqual({ reaped: 0, runIds: [] });
+      state = "pending";
+      await heartbeat.cancelRun(runId);
+      expect((await heartbeat.getRun(runId))?.status).toBe("running");
+      expect((await environmentService(db).getLeaseById(lease.id))?.status).toBe("active");
+      expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].executionRunId).toBe(runId);
+
+      state = "settled";
+      await heartbeat.cancelRun(runId);
+      expect((await heartbeat.getRun(runId))?.status).toBe("cancelled");
+      const releasedLease = await environmentService(db).getLeaseById(lease.id);
+      expect(releasedLease?.status).toBe("expired");
+      expect(releasedLease?.releasedAt).toBeInstanceOf(Date);
+      expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].executionRunId).toBeNull();
+      const stops = requests.filter((request) => request.path === "/v1/runs/stop");
+      expect(stops.length).toBeGreaterThanOrEqual(2);
+      expect(stops.every((request) => request.body === checkpoint.body && request.key === runId
+        && request.authorization === checkpoint.headers.Authorization)).toBe(true);
+      expect(requests.some((request) => request.path === "/v1/runs")).toBe(false);
+      const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, runId));
+      expect(JSON.stringify([await heartbeat.getRun(runId), events])).not.toContain("checkpoint-fixture-credential");
+      expect((await db.select().from(environmentLeases).where(eq(environmentLeases.id, lease.id)))[0]
+        .metadata?.adapterExecution).not.toHaveProperty("material");
+    } finally {
+      await settleAdapterExecution(db, identity);
+      await heartbeat.cancelRun(runId);
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   });
 
   it("requires reconciliation for a lost monitor whose provider outcomes are unknown", async () => {
@@ -5151,6 +5723,38 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     mockAdapterExecute.mockClear();
   });
 
+  it("never substitutes a fallback directory for a missing in-place workspace", async () => {
+    mockAdapterExecute.mockClear();
+    const { companyId, agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    const projectId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const missing = path.join(os.tmpdir(), `missing-authoritative-${randomUUID()}`);
+    await db.insert(projects).values({ id: projectId, companyId, name: "Maintenance" });
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId, companyId, projectId, name: "Existing data",
+      sourceType: "non_git_path", cwd: missing, isPrimary: true,
+    });
+    const [local] = await db.insert(environments).values({
+      name: "In-place maintenance", driver: "local", config: { workspaceRealizationMode: "in_place" },
+    }).returning();
+    await db.update(agents).set({ defaultEnvironmentId: local.id, adapterType: "hermes_gateway" }).where(eq(agents.id, agentId));
+    await db.update(issues).set({ projectId, projectWorkspaceId }).where(eq(issues.id, issueId));
+    const heartbeat = heartbeatService(db);
+    try {
+      await heartbeat.resumeQueuedRuns();
+      await waitForRunToSettle(heartbeat, runId, 5_000);
+      await heartbeat.waitForRunExecutionDrain(runId);
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      const run = await heartbeat.getRun(runId);
+      expect(run).toMatchObject({ status: "failed" });
+      expect(run?.error).toContain("In-place");
+      await expect(fs.stat(missing)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(fs.stat(resolveDefaultAgentWorkspaceDir(agentId))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await db.update(agents).set({ defaultEnvironmentId: null }).where(eq(agents.id, agentId));
+    }
+  });
+
   it("blocks a git-sensitive local adapter before launch when a project-workspace-linked issue is missing its project id", async () => {
     mockAdapterExecute.mockClear();
     const { companyId, agentId, runId, issueId } =
@@ -7538,7 +8142,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
           const [row] = await db.execute<{ count: number }>(sql`
           select count(*)::int as count from pg_stat_activity
           where datname = current_database() and ${pid} = any(pg_blocking_pids(pid))
-            and query ilike '%update%heartbeat_runs%'
+            and query ilike '%heartbeat_runs%'
+            and (query ilike '%for update%' or query ilike '%update%heartbeat_runs%')
         `);
           expect(row!.count).toBeGreaterThan(0);
         });
@@ -7809,9 +8414,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         expect(duplicateSettled).toBe(false);
         if (failure === "write") {
           const error = new Error("owned cancellation write unavailable");
-          writeSpy = adapterType === "codex_local"
-            ? vi.spyOn(db, "update").mockImplementationOnce(() => { throw error; })
-            : vi.spyOn(db, "transaction").mockRejectedValueOnce(error);
+          writeSpy = vi.spyOn(db, "transaction").mockRejectedValueOnce(error);
         }
       } finally {
         releaseTermination();
@@ -8182,7 +8785,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     expect(mockTerminateLocalService).toHaveBeenCalledWith(
       expect.objectContaining({ pid: 81_501, processGroupId: 81_502 }),
-      { forceAfterMs: 3000 },
+      { forceAfterMs: 3000, signal: "SIGINT" },
     );
     expect(runningProcesses.has(runId)).toBe(false);
   });

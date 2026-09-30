@@ -509,8 +509,8 @@ export function overrideAdapterExecutionTargetRemoteCwd(
   target: AdapterExecutionTarget | null | undefined,
   remoteCwd: string | null | undefined,
 ): AdapterExecutionTarget | null | undefined {
-  const nextRemoteCwd = remoteCwd?.trim();
-  if (!target || target.kind !== "remote" || !nextRemoteCwd) {
+  const nextRemoteCwd = remoteCwd;
+  if (!target || target.kind !== "remote" || !nextRemoteCwd?.trim()) {
     return target;
   }
   if (target.remoteCwd === nextRemoteCwd) {

@@ -25,6 +25,7 @@ import {
 } from "@/components/transcript/useLiveRunTranscripts";
 import { useNativeRunTranscripts } from "@/components/transcript/useNativeRunTranscripts";
 import { TaskChatLiveTail } from "@/components/task-chat/TaskChatLiveTail";
+import { FilesystemOwnershipNotice } from "@/components/FilesystemOwnershipNotice";
 import { TaskChatRunnerTurn } from "@/components/task-chat/TaskChatRunnerTurn";
 import {
   TaskChatTurnStatusIsland,
@@ -2902,6 +2903,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
                         <>
                           {tailRunId || optimisticRunnerStartup ? (
                             <div data-testid="task-chat-live-transcript">
+                              {liveRun?.id === tailRunId ? <FilesystemOwnershipNotice run={liveRun} /> : null}
                               {paperclipRunnerTail ||
                               optimisticRunnerStartup ? (
                                 <TaskChatRunnerTurn

@@ -33,6 +33,7 @@ import {
 import { conflict, forbidden } from "../errors.js";
 import { logActivity } from "./activity-log.js";
 import { isCloudManagedInstance } from "./cloud-instance.js";
+import { leaseAdapterExecutionNotHeldCondition, preserveAdapterExecutionMetadata, publicAdapterExecutionMetadata } from "./adapter-execution-ownership.js";
 import {
   resourceStatus,
   stockHash,
@@ -232,7 +233,7 @@ function toEnvironmentLease(row: EnvironmentLeaseRow): EnvironmentLease {
       ENVIRONMENT_LEASE_CLEANUP_STATUSES,
       "environment lease cleanup status",
     ),
-    metadata: cloneRecord(row.metadata),
+    metadata: publicAdapterExecutionMetadata(cloneRecord(row.metadata)),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -1421,6 +1422,11 @@ export function environmentService(db: Db) {
       assertCompanyBinding?: boolean;
     }): Promise<EnvironmentLease> => {
       const now = new Date();
+      const metadata = cloneRecord(input.metadata);
+      if (metadata) {
+        delete metadata.adapterExecution;
+        delete metadata.workspaceOwnership;
+      }
       const values = {
         companyId: input.companyId,
         environmentId: input.environmentId,
@@ -1437,7 +1443,7 @@ export function environmentService(db: Db) {
         releasedAt: null,
         failureReason: null,
         cleanupStatus: null,
-        metadata: input.metadata ?? null,
+        metadata,
         createdAt: now,
         updatedAt: now,
       };
@@ -1521,6 +1527,7 @@ export function environmentService(db: Db) {
                   .where(
                     and(
                       eq(environmentLeases.id, input.replacesReusableLeaseId),
+                      leaseAdapterExecutionNotHeldCondition(),
                       eq(environmentLeases.companyId, input.companyId),
                       eq(environmentLeases.environmentId, input.environmentId),
                       input.executionWorkspaceId
@@ -1558,12 +1565,13 @@ export function environmentService(db: Db) {
                     expiresAt: input.expiresAt ?? null,
                     failureReason: null,
                     cleanupStatus: null,
-                    metadata: input.metadata ?? null,
+                    metadata: preserveAdapterExecutionMetadata(metadata),
                     updatedAt: now,
                   })
                   .where(
                     and(
                       eq(environmentLeases.id, input.reusesReusableLeaseId),
+                      leaseAdapterExecutionNotHeldCondition(),
                       eq(environmentLeases.companyId, input.companyId),
                       eq(environmentLeases.environmentId, input.environmentId),
                       input.executionWorkspaceId
@@ -1641,7 +1649,9 @@ export function environmentService(db: Db) {
             ? sql`coalesce(${environmentLeases.metadata}, '{}'::jsonb) || ${JSON.stringify({ remoteExecutionTermination: options.remoteExecutionTermination })}::jsonb`
             : sql`${environmentLeases.metadata} - 'remoteExecutionTermination'`,
         })
-        .where(and(eq(environmentLeases.id, id), options?.expectedPendingCleanupAttemptId
+        .where(and(eq(environmentLeases.id, id),
+          leaseAdapterExecutionNotHeldCondition(),
+          options?.expectedPendingCleanupAttemptId
           ? and(eq(environmentLeases.status, "pending_cleanup"),
               sql`${environmentLeases.metadata}->>'pendingCleanupAttemptId' = ${options.expectedPendingCleanupAttemptId}`)
           : undefined))
@@ -1733,7 +1743,7 @@ export function environmentService(db: Db) {
       const row = await db
         .update(environmentLeases)
         .set({
-          metadata,
+          metadata: preserveAdapterExecutionMetadata(metadata),
           lastUsedAt: new Date(),
           updatedAt: new Date(),
         })
@@ -1760,6 +1770,7 @@ export function environmentService(db: Db) {
           and(
             eq(environmentLeases.heartbeatRunId, heartbeatRunId),
             eq(environmentLeases.status, "active"),
+            leaseAdapterExecutionNotHeldCondition(),
           ),
         )
         .returning();

@@ -301,7 +301,7 @@ describe("environmentRunOrchestrator — realizeForRun", () => {
     expect(mockResolveEnvironmentExecutionTarget).toHaveBeenCalledOnce();
   });
 
-  it("uses an in-place authoritative root on the adapter execution target", async () => {
+  it.each(["/app", "/app/link/../data "])("preserves the in-place authoritative root %j on the adapter target", async (root) => {
     mockResolveEnvironmentExecutionTarget.mockResolvedValue({
       kind: "remote",
       transport: "sandbox",
@@ -309,12 +309,12 @@ describe("environmentRunOrchestrator — realizeForRun", () => {
     });
     const runtime = makeMockRuntime({
       realizeWorkspace: vi.fn().mockResolvedValue({
-        cwd: "/app",
+        cwd: root,
         metadata: {
           workspaceRealization: {
             version: 1,
             mode: "in_place",
-            authoritativeRoot: "/app",
+            authoritativeRoot: root,
             pathAliases: [],
             outboundRestorePaths: [],
           },
@@ -330,10 +330,10 @@ describe("environmentRunOrchestrator — realizeForRun", () => {
     expect(result.executionTarget).toEqual(expect.objectContaining({
       kind: "remote",
       transport: "sandbox",
-      remoteCwd: "/app",
+      remoteCwd: root,
       workspaceRealization: {
         mode: "in_place",
-        authoritativeRoot: "/app",
+        authoritativeRoot: root,
         pathAliases: [],
         outboundRestorePaths: [],
       },

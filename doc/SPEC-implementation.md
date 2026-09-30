@@ -1767,3 +1767,19 @@ omit the already-rejected export, clear stale repair notices, and finalize the
 accepted result without another provider turn, even when its old sandbox is
 unavailable. Preserve current ownership and newer-work fences. See
 `native-workspace-finalization-recovery.md`.
+
+### Opt-in existing filesystem workspaces (2026-09-30)
+
+Local and SSH environments can explicitly realize an existing directory in place.
+The owning computer remains authoritative; controller-side copies, replacement
+roots and destructive workspace cleanup are incompatible with this mode. Hermes
+gateway execution binds the exact target and requires descendant-aware lifetime.
+
+Exclusive filesystem ownership is separately opt-in. A single host-local authority
+coordinates overlapping roots and aliases across enrolled controllers, independently
+of their databases. Company-bound encrypted recovery intent precedes acquisition;
+immutable grants precede protected preparation. Unknown execution retains ownership.
+Cancellation fences and drains work before explicit release, which follows workspace
+finalization and tool/instruction teardown. Waiting is durable and states that no
+agent work has started. See [Existing filesystem workspaces](filesystem-workspaces.md)
+for supported preparation paths and remaining host/isolation qualification gates.

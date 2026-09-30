@@ -649,3 +649,15 @@ omit the already-rejected export, clear stale repair notices, and finalize the
 accepted result without another provider turn, even when its old sandbox is
 unavailable. Preserve current ownership and newer-work fences. See
 `native-workspace-finalization-recovery.md`.
+
+### Existing filesystem maintenance
+
+Companies can explicitly select existing homes, data directories and canonical
+repositories on their owning computer, locally or through a fixed SSH worker.
+In-place realization preserves that directory. Separate opt-in exclusive ownership
+coordinates overlapping directories and aliases across controllers and follows
+preparation, descendant execution and cleanup rather than an expiring controller
+lease. Runtime state and worker credentials stay separate from maintained files;
+uncertain execution remains visibly owned. See
+[Existing filesystem workspaces](filesystem-workspaces.md) for the current supported
+paths and production qualification status.

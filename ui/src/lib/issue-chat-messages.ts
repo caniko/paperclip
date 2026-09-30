@@ -1083,6 +1083,7 @@ function normalizeLiveRuns(
       lastUsefulActionAt: activeRun.lastUsefulActionAt ? toDate(activeRun.lastUsefulActionAt).toISOString() : null,
       nextAction: activeRun.nextAction,
       outputSilence: activeRun.outputSilence,
+      filesystemOwnershipState: activeRun.filesystemOwnershipState ?? null,
       currentStatusMessage: activeRun.currentStatusMessage ?? null,
       currentStatusUpdatedAt: activeRun.currentStatusUpdatedAt
         ? toDate(activeRun.currentStatusUpdatedAt).toISOString()
@@ -1126,6 +1127,7 @@ function createLiveRunMessage(args: {
       runAgentName: run.agentName,
       runStatus: run.status,
       execution: run.execution,
+      filesystemOwnershipState: run.filesystemOwnershipState ?? null,
       adapterType: run.adapterType,
       notices,
       waitingText,

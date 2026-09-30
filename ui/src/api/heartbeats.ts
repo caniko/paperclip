@@ -44,6 +44,7 @@ export interface ActiveRunForIssue {
   lastUsefulActionAt?: string | Date | null;
   nextAction?: string | null;
   outputSilence?: HeartbeatRun["outputSilence"];
+  filesystemOwnershipState?: HeartbeatRun["filesystemOwnershipState"];
   currentStatusMessage?: string | null;
   currentStatusUpdatedAt?: string | Date | null;
   currentToolName?: string | null;
@@ -77,6 +78,7 @@ export interface LiveRunForIssue {
   lastUsefulActionAt?: string | null;
   nextAction?: string | null;
   outputSilence?: HeartbeatRun["outputSilence"];
+  filesystemOwnershipState?: HeartbeatRun["filesystemOwnershipState"];
   currentStatusMessage?: string | null;
   currentStatusUpdatedAt?: string | null;
   currentToolName?: string | null;

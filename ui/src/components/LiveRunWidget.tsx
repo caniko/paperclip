@@ -10,6 +10,7 @@ import { ExternalLink, Square } from "lucide-react";
 import { Identity } from "./Identity";
 import { RunChatSurface } from "./RunChatSurface";
 import { StatusBadge } from "./StatusBadge";
+import { InlineBanner } from "./InlineBanner";
 import { useLiveRunTranscripts } from "./transcript/useLiveRunTranscripts";
 
 interface LiveRunWidgetProps {
@@ -29,6 +30,7 @@ function isRunActive(status: string): boolean {
 export function LiveRunWidget({ issueId, companyId }: LiveRunWidgetProps) {
   const queryClient = useQueryClient();
   const [cancellingRunIds, setCancellingRunIds] = useState(new Set<string>());
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
   // Live-run polling slows/stops for hidden tabs so a restored window doesn't
   // hammer the live-run endpoints (PAP-12556).
@@ -67,6 +69,7 @@ export function LiveRunWidget({ issueId, companyId }: LiveRunWidgetProps) {
         adapterType: activeRun.adapterType,
         logBytes: activeRun.logBytes,
         lastOutputBytes: activeRun.lastOutputBytes,
+        filesystemOwnershipState: activeRun.filesystemOwnershipState,
         issueId,
       });
     }
@@ -78,11 +81,14 @@ export function LiveRunWidget({ issueId, companyId }: LiveRunWidgetProps) {
   const { transcriptByRun, hasOutputForRun } = useLiveRunTranscripts({ runs, companyId });
 
   const handleCancelRun = async (runId: string) => {
+    setCancelError(null);
     setCancellingRunIds((prev) => new Set(prev).add(runId));
     try {
       await heartbeatsApi.cancel(runId);
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.liveRuns(issueId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.activeRun(issueId) });
+    } catch (error) {
+      setCancelError(error instanceof Error ? error.message : "Could not stop the run. Try again.");
     } finally {
       setCancellingRunIds((prev) => {
         const next = new Set(prev);
@@ -105,6 +111,11 @@ export function LiveRunWidget({ issueId, companyId }: LiveRunWidgetProps) {
         </div>
       </div>
 
+      {cancelError && (
+        <div role="alert" className="px-4 py-3">
+          <InlineBanner tone="danger" compact title="Could not stop the run">{cancelError}</InlineBanner>
+        </div>
+      )}
       <div className="divide-y divide-border/60">
         {runs.map((run) => {
           const isActive = isRunActive(run.status);

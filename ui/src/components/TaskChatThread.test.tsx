@@ -2618,6 +2618,25 @@ describe("TaskChatThread runtime transcript selection", () => {
     },
   );
 
+  it("announces a durable ownership wait on the task tail and removes it at handoff", () => {
+    const activeRun = {
+      id: "ownership-wait", runtimeMode: "legacy" as const, status: "running",
+      invocationSource: "issue", triggerDetail: null, startedAt: "2026-09-30T12:00:00.000Z",
+      finishedAt: null, createdAt: "2026-09-30T12:00:00.000Z", agentId: "agent-1",
+      agentName: "Filesystem worker", adapterType: "hermes_gateway",
+    };
+    const show = (state: "waiting" | "acquired") => render(
+      <TaskChatThread comments={[]} onAdd={async () => {}} issueStatus="in_progress"
+        activeRun={{ ...activeRun, filesystemOwnershipState: state }} />,
+    );
+    show("waiting");
+    const wait = container.querySelector('[role="status"]');
+    expect(wait?.textContent).toContain("Waiting for exclusive filesystem ownership");
+    expect(wait?.textContent).toContain("No agent work has started");
+    show("acquired");
+    expect(container.textContent).not.toContain("No agent work has started");
+  });
+
   it.each(DIRECT_ADAPTER_TYPES)(
     "keeps durable questions usable for an active %s run without runner controls",
     (adapterType) => {

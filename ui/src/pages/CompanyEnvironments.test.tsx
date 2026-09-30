@@ -773,6 +773,101 @@ describe("CompanyEnvironments — test provider button", () => {
     expect(getEnvironmentFormPage()).toBeNull();
   });
 
+  it.each([true, false])("round-trips SSH in-place policy through the edit form (enabled=%s)", async (enabled) => {
+    mockEnvironmentsApi.list.mockResolvedValue([{
+      id: "env-ssh", name: "Workstation", driver: "ssh", description: null,
+      config: { host: "worker.example", port: 2222, username: "alice", remoteWorkspacePath: "/srv/link/../data ",
+        workspaceRealizationMode: "in_place", strictHostKeyChecking: true },
+    }]);
+    root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => root!.render(renderCompanyEnvironments(queryClient)));
+    await openEnvironmentEditPage(container);
+    const page = getEnvironmentFormPage()!;
+    const toggle = page.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Maintain existing directory in place"]');
+    expect(toggle?.getAttribute("aria-checked")).toBe("true");
+    if (!enabled) await act(async () => click(toggle));
+    await act(async () => click(findButton(page, "Save environment")));
+    await waitForAssertion(() => expect(mockEnvironmentsApi.update).toHaveBeenCalled());
+    const config = mockEnvironmentsApi.update.mock.calls[0]![1].config;
+    expect(config.workspaceRealizationMode).toBe(enabled ? "in_place" : "copy");
+    expect(config.remoteWorkspacePath).toBe("/srv/link/../data ");
+  });
+
+  it.each([
+    ["local", "ownership"], ["ssh", "ownership"],
+    ["local", "realization"], ["ssh", "realization"],
+  ] as const)("persists disabling %s %s policy after saving and reloading", async (driver, disabledPolicy) => {
+    const policy = { authority: "host-authority", principal: "controller-a", roots: ["/srv/link/../data ", "/srv/other"] };
+    const unrelatedConfig = driver === "ssh" ? {
+      host: "worker.example", port: 2222, username: "alice", remoteWorkspacePath: policy.roots[0],
+      knownHosts: "worker.example ssh-ed25519 known-key", strictHostKeyChecking: true,
+      privateKey: null, privateKeySecretRef: null,
+    } : { shell: "zsh", extension: { retain: true } };
+    let savedEnvironment = {
+      id: "env-owned", name: "Maintained directory", driver, description: null,
+      config: { ...unrelatedConfig, workspaceRealizationMode: "in_place", filesystemOwnership: policy } as Record<string, unknown>,
+    };
+    mockEnvironmentsApi.list.mockImplementation(async () => [{ ...savedEnvironment, config: { ...savedEnvironment.config } }]);
+    // Model the API's partial config merge so an omitted disabled field would
+    // remain enabled on reload. Real HTTP PATCH normalization is covered by the
+    // environment-routes suite; this fake is only the component's API boundary.
+    mockEnvironmentsApi.update.mockImplementation(async (_id: string, body: { config: Record<string, unknown> }) => {
+      const config = { ...savedEnvironment.config, ...body.config };
+      if (config.filesystemOwnership === null) delete config.filesystemOwnership;
+      if (config.filesystemOwnership !== undefined && config.workspaceRealizationMode !== "in_place") {
+        throw new Error("Filesystem ownership requires an in-place workspace.");
+      }
+      savedEnvironment = { ...savedEnvironment, config };
+      return savedEnvironment;
+    });
+    root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => root!.render(renderCompanyEnvironments(queryClient)));
+    await openEnvironmentEditPage(container);
+    let page = getEnvironmentFormPage()!;
+    expect(page.querySelector<HTMLInputElement>('input[aria-label="Ownership root 1"]')?.value).toBe(policy.roots[0]);
+    await act(async () => click(findButton(page, "Save environment")));
+    await waitForAssertion(() => expect(getEnvironmentFormPage()).toBeNull());
+    expect(mockEnvironmentsApi.update.mock.calls[0]![1].config.filesystemOwnership).toEqual(policy);
+    expect(savedEnvironment.config).toEqual({ ...unrelatedConfig, workspaceRealizationMode: "in_place", filesystemOwnership: policy });
+
+    await openEnvironmentEditPage(container);
+    page = getEnvironmentFormPage()!;
+    const toggleLabel = disabledPolicy === "ownership" ? "Exclusive filesystem ownership" : "Maintain existing directory in place";
+    const toggle = page.querySelector(`[role="switch"][aria-label="${toggleLabel}"]`);
+    expect(toggle?.getAttribute("aria-checked")).toBe("true");
+    await act(async () => click(toggle));
+    expect(findButton(page, "Save environment")?.disabled).toBe(false);
+    if (disabledPolicy === "realization") {
+      expect(page.querySelector('[role="switch"][aria-label="Exclusive filesystem ownership"]')).toBeNull();
+    }
+    await act(async () => click(findButton(page, "Save environment")));
+    await waitForAssertion(() => expect(getEnvironmentFormPage()).toBeNull());
+    expect(mockEnvironmentsApi.update).toHaveBeenCalledTimes(2);
+    const workspaceRealizationMode = disabledPolicy === "ownership" ? "in_place" : "copy";
+    expect(mockEnvironmentsApi.update.mock.calls[1]![1].config).toMatchObject({ workspaceRealizationMode, filesystemOwnership: null });
+    expect(savedEnvironment.config).toEqual({ ...unrelatedConfig, workspaceRealizationMode });
+
+    // Remount with a fresh query cache, then re-enable realization if necessary:
+    // saved ownership must remain off rather than being resurrected from a draft.
+    await act(async () => root!.unmount());
+    queryClient.clear();
+    root = createRoot(container);
+    const reloadedQueryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => root!.render(renderCompanyEnvironments(reloadedQueryClient, `${ENVIRONMENTS_PATH}/env-owned/edit`)));
+    await waitForAssertion(() => {
+      expect(getEnvironmentFormPage()?.querySelector('[role="switch"][aria-label="Maintain existing directory in place"]')?.getAttribute("aria-checked"))
+        .toBe(disabledPolicy === "ownership" ? "true" : "false");
+    });
+    page = getEnvironmentFormPage()!;
+    if (disabledPolicy === "realization") {
+      await act(async () => click(page.querySelector('[role="switch"][aria-label="Maintain existing directory in place"]')));
+    }
+    expect(page.querySelector('[role="switch"][aria-label="Exclusive filesystem ownership"]')?.getAttribute("aria-checked")).toBe("false");
+    expect(page.querySelector('input[aria-label="Ownership root 1"]')).toBeNull();
+  });
+
   it("confirms before cancelling the edit page with unsaved environment variable drafts", async () => {
     root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });

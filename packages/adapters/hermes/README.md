@@ -144,6 +144,99 @@ This mode does not start Hermes. It creates runs with `POST /v1/runs`, streams
 Hermes events with SSE, polls run status as a fallback, and stops timed-out runs
 with `POST /v1/runs/{run_id}/stop`.
 
+#### Maintain an existing directory
+
+The gateway adapter supports a configured worker whose terminal backend is
+`local` or `ssh`. Select a `non_git_path` project workspace and use `in_place`
+workspace realization (`environment.config.workspaceRealizationMode: "in_place"`,
+or **Maintain existing directory in place** in environment settings).
+Configure the served Hermes profile's `terminal.cwd`
+to that directory; for SSH, also configure `ssh_host`, `ssh_port`, and `ssh_user`
+to match the selected environment. The worker keeps its own SSH credentials.
+
+In-place and remote targets automatically require binding. For another selected
+local workspace, set `adapterConfig.bindWorkspace: true`. The adapter derives
+`execution_context` from the core-resolved target, checks authenticated
+`GET /v1/capabilities` for version 1 support, and then submits the precondition
+to `/v1/runs`. A missing capability or mismatched worker fails explicitly. The
+gateway does not copy a workspace or provision a sandbox.
+
+The endpoint (including `/p/<profile>`), environment, directory, and SSH identity
+scope the conversation. Changing them starts a different conversation; returning
+to the same target can resume its conversation. A payload template cannot replace
+the execution context, session identity, prior response, conversation history, or
+hosted-room routing of a bound run. Keys and host-key material stay out of the
+request and session fingerprint.
+
+`local` describes the worker's terminal backend. Deploy the worker on the host
+that owns the selected local directory. Paperclip does not discover a gateway's
+host from its URL. Each company must use an appropriately authorized worker
+credential/profile and operating-system identity. A path match is not filesystem
+confinement or an exclusive lock; existing local/SSH concurrency is preserved.
+
+Hermes `terminal.ssh_hermes_home` can keep synchronized worker state separate from
+the remote account's personal Hermes installation. It does not change the login
+`HOME`; configure separate worker home/cache/temp/build paths and permissions in
+the service or SSH execution environment. Newly created files belong to the
+executing Unix user. An ACL alone does not give a service account the target
+user's file ownership.
+
+Before granting access to a real home or live application data, qualify the
+deployment's cancellation, restart, and descendant-process lifetime on a
+disposable directory. The binding protocol itself provides initial-target
+agreement, not proof of complete worker teardown.
+
+For opt-in exclusivity across controllers, configure the environment's
+`filesystemOwnership: { authority, principal, roots }` and enroll the fixed
+worker with the host-local Hermes authority. Paperclip persists encrypted recovery
+intent before reservation and holds the immutable grant through descendants and
+cleanup. Waiting runs announce that no agent work has started. Controller-side
+provisioners, worktrees, runtime services and instruction-bundle staging are
+incompatible with this protected mode. See
+[`doc/filesystem-workspaces.md`](../../../doc/filesystem-workspaces.md) for the
+configuration, isolation, recovery and qualification contract.
+
+### Run-isolated managed MCP
+
+Controller-delivered MCP credentials require an explicit instance-operator
+`PAPERCLIP_RUNTIME_MCP_ADMISSION` policy and a matching Hermes `runtime_mcp`
+endpoint/host policy. The controller policy is nonsecret JSON; it is never read
+from agent configuration or a run's payload template:
+
+```json
+{
+  "version": 1,
+  "servers": {
+    "paperclip-runtime-tools": {
+      "url": "https://paperclip.example/api/mcp/runtime-tools",
+      "gatewayUrl": "https://hermes.example",
+      "serverHostId": "controller-host",
+      "executionHostIds": ["selected-environment-id"]
+    }
+  }
+}
+```
+
+List each exact connection ID and endpoint assembled by the controller, including
+assigned gateways and project tools when present. `executionHostIds` contains
+the selected Paperclip environment IDs. Different execution/server host identities
+require authorization in both policies. Missing or mismatched policy blocks
+dispatch before credentials are sent to the worker. No wildcard or arbitrary
+agent-supplied endpoint is admitted.
+
+`gatewayUrl` approves the exact HTTPS (or loopback HTTP) gateway recipient, not
+just its reported host label. Repointing the agent at another gateway is rejected
+before any network request. Managed delivery also requires `bindWorkspace` and
+`waitForJobs`, a selected workspace, and the controller's durable execution
+checkpoint. Lost admission acknowledgements and cancellation retain that ownership
+until the provider reports terminal parent-run and managed-tool settlement.
+
+Hermes must advertise authenticated version-1 `runs_managed_mcp` with
+`mode: "run_isolated"` on the admitted server host. Each invocation uses a fresh
+conversation, even after an A/B/A agent sequence. Credential files, profiles, and
+shared session history are not used for delivery; run tokens are redacted from
+adapter logs. Qualify the actual worker connector and teardown before rollout.
+
 ### Compatibility with the old gateway package
 
 `@paperclipai/adapter-hermes-gateway` remains as a deprecated compatibility shim

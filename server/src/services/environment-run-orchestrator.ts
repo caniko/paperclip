@@ -46,6 +46,7 @@ import {
   type AdapterWorkspaceRealization,
 } from "@paperclipai/adapter-utils/execution-target";
 import type { DuplexObservabilityRecorder } from "@paperclipai/adapter-utils/duplex-observability";
+import type { WorkspaceOwnershipIntent } from "@paperclipai/adapter-utils";
 import { buildWorkspaceRealizationRequest } from "./workspace-realization.js";
 import { executionWorkspaceService } from "./execution-workspaces.js";
 import { logActivity } from "./activity-log.js";
@@ -213,7 +214,7 @@ export function environmentRunOrchestrator(
     adapterType: string | null;
   }): Promise<EnvironmentRuntimeLeaseRecord> {
     try {
-      return await environmentRuntime.acquireRunLease(input);
+      return await environmentRuntime.acquireRunLease({ ...input, assertCompanyBinding: true });
     } catch (err) {
       throw new EnvironmentRunError(
         "lease_acquire_failed",
@@ -348,6 +349,7 @@ export function environmentRunOrchestrator(
    * target spec that the adapter needs to run.
    */
   async function realizeForRun(input: {
+    workspaceOwnership?: WorkspaceOwnershipIntent;
     environment: Environment;
     lease: EnvironmentLease;
     adapterType: string;
@@ -391,7 +393,11 @@ export function environmentRunOrchestrator(
     // Step 2: Realize workspace in the environment via the runtime driver
     let workspaceRealization: Record<string, unknown> = {};
     let realizedWorkspaceCwd: string | null = null;
-    if (ENVIRONMENT_DRIVER_TRAITS[environment.driver].realizesWorkspace) {
+    if (input.workspaceOwnership) {
+      workspaceRealization = { mode: "in_place", authoritativeRoot: executionWorkspace.cwd,
+        pathAliases: [], outboundRestorePaths: [] };
+      realizedWorkspaceCwd = executionWorkspace.cwd;
+    } else if (ENVIRONMENT_DRIVER_TRAITS[environment.driver].realizesWorkspace) {
       try {
         const remoteCwd =
           typeof lease.metadata?.remoteCwd === "string" && lease.metadata.remoteCwd.trim().length > 0
@@ -410,8 +416,8 @@ export function environmentRunOrchestrator(
           },
         });
         realizedWorkspaceCwd =
-          typeof workspaceRealizationResult.cwd === "string" && workspaceRealizationResult.cwd.trim().length > 0
-            ? workspaceRealizationResult.cwd.trim()
+          typeof workspaceRealizationResult.cwd === "string" && workspaceRealizationResult.cwd.length > 0
+            ? workspaceRealizationResult.cwd
             : null;
         workspaceRealization = parseObject(workspaceRealizationResult.metadata?.workspaceRealization);
       } catch (err) {
@@ -428,10 +434,13 @@ export function environmentRunOrchestrator(
     }
 
     const provisionCommand = workspaceRealizationRequest.runtimeOverlay.provisionCommand?.trim() ?? "";
+    if (input.workspaceOwnership && provisionCommand) {
+      throw new Error("Protected workspace provisioning must run through the target supervisor.");
+    }
     const realizedCwd =
       realizedWorkspaceCwd ??
-      (typeof lease.metadata?.remoteCwd === "string" && lease.metadata.remoteCwd.trim().length > 0
-        ? lease.metadata.remoteCwd.trim()
+      (typeof lease.metadata?.remoteCwd === "string" && lease.metadata.remoteCwd.length > 0
+        ? lease.metadata.remoteCwd
         : executionWorkspace.cwd);
     // The host `provisionCommand` runs on the host worktree during the
     // `workspace_provision` step, before the run reaches the environment.
@@ -531,8 +540,8 @@ export function environmentRunOrchestrator(
       });
       const realizationMode = workspaceRealization.mode === "in_place" ? "in_place" : "copy";
       const authoritativeRoot =
-        typeof workspaceRealization.authoritativeRoot === "string" && workspaceRealization.authoritativeRoot.trim().length > 0
-          ? workspaceRealization.authoritativeRoot.trim()
+        typeof workspaceRealization.authoritativeRoot === "string" && workspaceRealization.authoritativeRoot.length > 0
+          ? workspaceRealization.authoritativeRoot
           : realizedCwd;
       const workspaceTargetMetadata: AdapterWorkspaceRealization = {
         mode: realizationMode,

@@ -6,6 +6,20 @@ export function getConfigSchema(): AdapterConfigSchema {
   return {
     fields: [
       {
+        key: "waitForJobs",
+        label: "Wait for owned jobs",
+        type: "toggle",
+        default: false,
+        hint: "Keep the run active until execution-host jobs and descendants settle. Requires a supervised Hermes worker and a selected target. Always enabled for in-place workspaces.",
+      },
+      {
+        key: "bindWorkspace",
+        label: "Bind selected workspace",
+        type: "toggle",
+        default: false,
+        hint: "Require the configured Hermes worker to match the selected local or SSH directory. Requires execution-context API support. In-place and remote execution targets always require binding.",
+      },
+      {
         key: "apiBaseUrl",
         label: "API base URL",
         type: "text",

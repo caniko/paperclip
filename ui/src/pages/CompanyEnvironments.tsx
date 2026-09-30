@@ -11,6 +11,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal as XTermTerminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import {
+  filesystemOwnershipSchema,
+  type FilesystemOwnershipPolicy,
   type EnvBinding,
   type Environment,
   type EnvironmentDeleteBlastRadius,
@@ -42,6 +44,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { FilesystemOwnershipFields } from "@/components/FilesystemOwnershipFields";
 import {
   EnvironmentVariablesEditor,
   type EnvironmentVariablesEditorHandle,
@@ -72,6 +75,8 @@ type EnvironmentFormState = {
   sshPort: string;
   sshUsername: string;
   sshRemoteWorkspacePath: string;
+  workspaceInPlace: boolean;
+  filesystemOwnership: FilesystemOwnershipPolicy | null;
   sshPrivateKey: string;
   sshPrivateKeySecretId: string;
   sshKnownHosts: string;
@@ -113,6 +118,11 @@ function environmentDeleteBlockMessage(impact: EnvironmentDeleteBlastRadius): st
 }
 
 function buildEnvironmentPayload(form: EnvironmentFormState) {
+  const workspacePolicy = {
+    // PATCH merges config keys, so disabling either policy needs an explicit value.
+    workspaceRealizationMode: form.workspaceInPlace ? "in_place" as const : "copy" as const,
+    filesystemOwnership: form.workspaceInPlace ? form.filesystemOwnership : null,
+  };
   return {
     name: form.name.trim(),
     description: form.description.trim() || null,
@@ -124,7 +134,8 @@ function buildEnvironmentPayload(form: EnvironmentFormState) {
             host: form.sshHost.trim(),
             port: Number.parseInt(form.sshPort || "22", 10) || 22,
             username: form.sshUsername.trim(),
-            remoteWorkspacePath: form.sshRemoteWorkspacePath.trim(),
+            remoteWorkspacePath: form.sshRemoteWorkspacePath,
+            ...workspacePolicy,
             privateKey: form.sshPrivateKey.trim() || null,
             privateKeySecretRef:
               form.sshPrivateKey.trim().length > 0 || !form.sshPrivateKeySecretId
@@ -138,7 +149,7 @@ function buildEnvironmentPayload(form: EnvironmentFormState) {
               provider: form.sandboxProvider.trim(),
               ...form.sandboxConfig,
             }
-          : {},
+        : workspacePolicy,
   } as const;
 }
 
@@ -151,6 +162,8 @@ function createEmptyEnvironmentForm(): EnvironmentFormState {
     sshPort: "22",
     sshUsername: "",
     sshRemoteWorkspacePath: "",
+    workspaceInPlace: false,
+    filesystemOwnership: null,
     sshPrivateKey: "",
     sshPrivateKeySecretId: "",
     sshKnownHosts: "",
@@ -215,6 +228,9 @@ function readSandboxConfig(environment: Environment) {
 }
 
 function createEnvironmentFormFromEnvironment(environment: Environment): EnvironmentFormState {
+  const parsedOwnership = filesystemOwnershipSchema.safeParse(environment.config?.filesystemOwnership);
+  const filesystemOwnership = environment.config?.filesystemOwnership === undefined ? null
+    : parsedOwnership.success ? parsedOwnership.data : { authority: "", principal: "", roots: [""] };
   if (environment.driver === "ssh") {
     const ssh = readSshConfig(environment);
     return {
@@ -226,6 +242,8 @@ function createEnvironmentFormFromEnvironment(environment: Environment): Environ
       sshPort: ssh.port,
       sshUsername: ssh.username,
       sshRemoteWorkspacePath: ssh.remoteWorkspacePath,
+      workspaceInPlace: environment.config?.workspaceRealizationMode === "in_place",
+      filesystemOwnership,
       sshPrivateKey: ssh.privateKey,
       sshPrivateKeySecretId: ssh.privateKeySecretId,
       sshKnownHosts: ssh.knownHosts,
@@ -252,6 +270,8 @@ function createEnvironmentFormFromEnvironment(environment: Environment): Environ
     name: environment.name,
     description: environment.description ?? "",
     driver: "local",
+    workspaceInPlace: environment.config?.workspaceRealizationMode === "in_place",
+    filesystemOwnership,
     envVars: environment.envVars ?? {},
   };
 }
@@ -1832,7 +1852,12 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
     ));
   }, [discoveredPluginSandboxProviders, environmentForm.driver, environmentForm.sandboxProvider]);
 
+  const ownershipError = environmentForm.driver === "sandbox" || !environmentForm.filesystemOwnership ? null
+    : !environmentForm.workspaceInPlace ? "Exclusive ownership requires an in-place workspace. Enable in-place maintenance or explicitly turn off exclusive ownership."
+    : !filesystemOwnershipSchema.safeParse(environmentForm.filesystemOwnership).success
+      ? "Enter valid authority and principal IDs and 1–32 absolute ownership roots." : null;
   const environmentFormValid =
+    !ownershipError &&
     environmentForm.name.trim().length > 0 &&
     (environmentForm.driver !== "ssh" ||
       (
@@ -2265,6 +2290,24 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
                 </select>
               </Field>
 
+              {environmentForm.driver === "local" || environmentForm.driver === "ssh" ? (
+                <>
+                  <ToggleField
+                  label="Maintain existing directory in place"
+                  hint="Use the authoritative directory without workspace copy or restore. SSH requires an existing path and a Hermes gateway or Codex adapter. This does not reserve exclusive access."
+                  checked={environmentForm.workspaceInPlace}
+                  onChange={(checked) => setEnvironmentForm((current) => ({
+                    ...current,
+                    workspaceInPlace: checked,
+                    filesystemOwnership: checked ? current.filesystemOwnership : null,
+                  }))}
+                  />
+                  {(environmentForm.workspaceInPlace || environmentForm.filesystemOwnership) && (
+                    <FilesystemOwnershipFields value={environmentForm.filesystemOwnership} error={ownershipError}
+                      onChange={(filesystemOwnership) => setEnvironmentForm((current) => ({ ...current, filesystemOwnership }))} />
+                  )}
+                </>
+              ) : null}
               {environmentForm.driver === "ssh" ? (
                 <div className="grid gap-3 md:grid-cols-2">
                   <Field label="Host" hint="DNS name or IP address for the remote machine.">

@@ -7,11 +7,15 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
   buildSshSpawnTarget,
   buildSshEnvLabFixtureConfig,
+  createSshCommandManagedRuntimeRunner,
+  ensureSshWorkspaceReady,
   getSshEnvLabSupport,
   prepareWorkspaceForSshExecution,
+  parseSshRemoteExecutionSpec,
   readSshEnvLabFixtureStatus,
   restoreWorkspaceFromSshExecution,
   runSshCommand,
+  shellQuote,
   syncDirectoryFromSsh,
   syncDirectoryToSsh,
   startSshEnvLabFixture,
@@ -83,13 +87,51 @@ async function git(cwd: string, args: string[]): Promise<string> {
   });
 }
 
+async function configureFixtureGitIdentity(cwd: string) {
+  // Read the caller's effective config before writing fixture-local identity.
+  // Managed hooks and signing must keep using the operator's identity.
+  const callerCwd = process.cwd();
+  const readConfig = (key: string) => new Promise<string | null>((resolve, reject) => {
+    execFile("git", ["-C", callerCwd, "config", "--get", key], (error, stdout) => {
+      if (error) {
+        if (error.code === 1) resolve(null); // Git uses 1 for an absent config key.
+        else reject(error);
+        return;
+      }
+      resolve(stdout.replace(/\r?\n$/, ""));
+    });
+  });
+  let [name, email] = await Promise.all([readConfig("user.name"), readConfig("user.email")]);
+  if (name === null && email === null) {
+    // Identity-free CI still needs an identity for its disposable repositories.
+    name = "Paperclip Test";
+    email = "test@paperclip.dev";
+  }
+  if (!name || !email) {
+    throw new Error("Git fixtures require both user.name and user.email when a caller identity is configured.");
+  }
+  await git(cwd, ["config", "--local", "user.name", name]);
+  await git(cwd, ["config", "--local", "user.email", email]);
+  return { name, email };
+}
+
 // Finds the pid of a running sshd process by its config file path, the same
 // way isSshEnvLabFixtureProcess identifies a fixture internally. Used by the
 // readiness-failure regression test, which needs the pid of a fixture that
 // startSshEnvLabFixture never returns because it throws before returning it.
 async function findSshdPidByConfigPath(sshdConfigPath: string): Promise<number | null> {
+  // Read arguments only for sshd, not every process's potentially enormous or
+  // credential-bearing command line (which can also overflow execFile's buffer).
+  const processes = await new Promise<string>((resolve) => {
+    execFile("ps", ["-eo", "pid=,comm="], (error, out) => resolve(error ? "" : out));
+  });
+  const pids = processes.split("\n").flatMap((line) => {
+    const match = line.trim().match(/^(\d+)\s+(.*)$/);
+    return match && path.basename(match[2]!) === "sshd" ? [match[1]!] : [];
+  });
+  if (pids.length === 0) return null;
   const stdout = await new Promise<string>((resolve) => {
-    execFile("ps", ["-eo", "pid=,args="], (error, out) => resolve(error ? "" : out));
+    execFile("ps", ["-p", pids.join(","), "-o", "pid=,args="], (error, out) => resolve(error ? "" : out));
   });
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
@@ -170,6 +212,36 @@ describe("ssh env-lab fixture", () => {
   // Backstop: if a throw inside afterEach ever leaves an entry on the stack,
   // this drains it too instead of stranding a listener until the process exits.
   afterAll(drainFixtureTeardowns);
+
+  it("requires an existing in-place directory and preserves symlink spelling and contents", async (ctx) => {
+    const support = await getSshEnvLabSupport();
+    if (!support.supported) ctx.skip(support.reason ?? "OpenSSH unavailable");
+    const rootDir = await createFixtureRootDir();
+    const started = await startSshEnvLabFixture({ statePath: path.join(rootDir, "state.json") });
+    fixtureTeardowns.find((entry) => entry.rootDir === rootDir)!.state = started;
+    const config = await buildSshEnvLabFixtureConfig(started);
+    const remoteWorkspacePath = path.join(started.workspaceDir, "existing alias ");
+    const home = await runSshCommand(config, 'printf "%s" "$HOME"');
+    expect(home.stdout).toBe(path.join(rootDir, "home"));
+    const target = { ...config, remoteWorkspacePath, workspaceRealizationMode: "in_place" as const };
+    await expect(ensureSshWorkspaceReady(target)).rejects.toThrow();
+    await expect(stat(remoteWorkspacePath)).rejects.toMatchObject({ code: "ENOENT" });
+    const actual = path.join(started.workspaceDir, "data");
+    await mkdir(actual);
+    await writeFile(path.join(actual, "personal.txt"), "keep me");
+    await symlink(actual, remoteWorkspacePath);
+    expect(await ensureSshWorkspaceReady(target)).toEqual({ remoteCwd: remoteWorkspacePath });
+    const spec = parseSshRemoteExecutionSpec({ ...target, remoteCwd: remoteWorkspacePath });
+    expect(spec?.remoteCwd).toBe(remoteWorkspacePath);
+    expect(spec?.remoteWorkspacePath).toBe(remoteWorkspacePath);
+    const runner = createSshCommandManagedRuntimeRunner({ spec: spec! });
+    const read = await runner.execute({ command: "cat", args: ["personal.txt"], cwd: remoteWorkspacePath });
+    expect(read.exitCode).toBe(0);
+    expect(read.stdout).toBe("keep me");
+    expect(await readFile(path.join(actual, "personal.txt"), "utf8")).toBe("keep me");
+    await ensureSshWorkspaceReady({ ...config, remoteWorkspacePath: path.join(started.workspaceDir, "new-copy") });
+    expect((await stat(path.join(started.workspaceDir, "new-copy"))).isDirectory()).toBe(true);
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("starts an isolated sshd fixture and executes commands through it", async () => {
     const rootDir = await createFixtureRootDir();
@@ -712,8 +784,7 @@ describe("ssh env-lab fixture", () => {
     await mkdir(localRepo, { recursive: true });
     await git(localRepo, ["init"]);
     await git(localRepo, ["checkout", "-b", "main"]);
-    await git(localRepo, ["config", "user.name", "Paperclip Test"]);
-    await git(localRepo, ["config", "user.email", "test@paperclip.dev"]);
+    await configureFixtureGitIdentity(localRepo);
     await writeFile(path.join(localRepo, "tracked.bin"), Buffer.alloc(256 * 1024, 7));
     await git(localRepo, ["add", "tracked.bin"]);
     await git(localRepo, ["commit", "-m", "initial"]);
@@ -810,8 +881,7 @@ describe("ssh env-lab fixture", () => {
     await mkdir(localRepo, { recursive: true });
     await git(localRepo, ["init"]);
     await git(localRepo, ["checkout", "-b", "main"]);
-    await git(localRepo, ["config", "user.name", "Paperclip Test"]);
-    await git(localRepo, ["config", "user.email", "test@paperclip.dev"]);
+    const gitIdentity = await configureFixtureGitIdentity(localRepo);
     await writeFile(path.join(localRepo, "tracked.txt"), "base\n", "utf8");
     await writeFile(path.join(localRepo, "._tracked.txt"), "should stay local only\n", "utf8");
     await git(localRepo, ["add", "tracked.txt"]);
@@ -844,7 +914,7 @@ describe("ssh env-lab fixture", () => {
 
     await runSshCommand(
       config,
-      `cd ${JSON.stringify(started.workspaceDir)} && git config user.name "Paperclip SSH" && git config user.email "ssh@paperclip.dev" && git add tracked.txt untracked.txt && git commit -m "remote update" >/dev/null && printf "remote dirty\\n" > tracked.txt && printf "remote extra\\n" > remote-only.txt`,
+      `cd ${JSON.stringify(started.workspaceDir)} && git config --local user.name ${shellQuote(gitIdentity.name)} && git config --local user.email ${shellQuote(gitIdentity.email)} && git add tracked.txt untracked.txt && git commit -m "remote update" >/dev/null && printf "remote dirty\\n" > tracked.txt && printf "remote extra\\n" > remote-only.txt`,
       { timeoutMs: 30_000, maxBuffer: 256 * 1024 },
     );
 
@@ -869,8 +939,7 @@ describe("ssh env-lab fixture", () => {
     await mkdir(localRepo, { recursive: true });
     await git(localRepo, ["init"]);
     await git(localRepo, ["checkout", "-b", "main"]);
-    await git(localRepo, ["config", "user.name", "Paperclip Test"]);
-    await git(localRepo, ["config", "user.email", "test@paperclip.dev"]);
+    await configureFixtureGitIdentity(localRepo);
     await writeFile(path.join(localRepo, "tracked.txt"), "base\n", "utf8");
     await git(localRepo, ["add", "tracked.txt"]);
     await git(localRepo, ["commit", "-m", "initial"]);
@@ -926,8 +995,7 @@ describe("ssh env-lab fixture", () => {
     await mkdir(localRepo, { recursive: true });
     await git(localRepo, ["init"]);
     await git(localRepo, ["checkout", "-b", "main"]);
-    await git(localRepo, ["config", "user.name", "Paperclip Test"]);
-    await git(localRepo, ["config", "user.email", "test@paperclip.dev"]);
+    await configureFixtureGitIdentity(localRepo);
     await writeFile(path.join(localRepo, "tracked.txt"), "base\n", "utf8");
     await git(localRepo, ["add", "tracked.txt"]);
     await git(localRepo, ["commit", "-m", "initial"]);
@@ -981,8 +1049,7 @@ describe("ssh env-lab fixture", () => {
     await mkdir(localRepo, { recursive: true });
     await git(localRepo, ["init"]);
     await git(localRepo, ["checkout", "-b", "main"]);
-    await git(localRepo, ["config", "user.name", "Paperclip Test"]);
-    await git(localRepo, ["config", "user.email", "test@paperclip.dev"]);
+    const gitIdentity = await configureFixtureGitIdentity(localRepo);
     await writeFile(path.join(localRepo, "tracked.txt"), "base\n", "utf8");
     await git(localRepo, ["add", "tracked.txt"]);
     await git(localRepo, ["commit", "-m", "initial"]);
@@ -1004,7 +1071,7 @@ describe("ssh env-lab fixture", () => {
 
     await runSshCommand(
       config,
-      `cd ${JSON.stringify(prepared.workspaceRemoteDir)} && git config user.name "Paperclip SSH" && git config user.email "ssh@paperclip.dev" && printf "committed\\n" > tracked.txt && git add tracked.txt && git commit -m "remote update" >/dev/null && printf "dirty remote\\n" > tracked.txt`,
+      `cd ${JSON.stringify(prepared.workspaceRemoteDir)} && git config --local user.name ${shellQuote(gitIdentity.name)} && git config --local user.email ${shellQuote(gitIdentity.email)} && printf "committed\\n" > tracked.txt && git add tracked.txt && git commit -m "remote update" >/dev/null && printf "dirty remote\\n" > tracked.txt`,
       { timeoutMs: 30_000, maxBuffer: 256 * 1024 },
     );
 
@@ -1026,8 +1093,7 @@ describe("ssh env-lab fixture", () => {
     await mkdir(localRepo, { recursive: true });
     await git(localRepo, ["init"]);
     await git(localRepo, ["checkout", "-b", "main"]);
-    await git(localRepo, ["config", "user.name", "Paperclip Test"]);
-    await git(localRepo, ["config", "user.email", "test@paperclip.dev"]);
+    const gitIdentity = await configureFixtureGitIdentity(localRepo);
     await writeFile(path.join(localRepo, "tracked.txt"), "base\n", "utf8");
     await git(localRepo, ["add", "tracked.txt"]);
     await git(localRepo, ["commit", "-m", "initial"]);
@@ -1059,7 +1125,7 @@ describe("ssh env-lab fixture", () => {
     // sync-back alone — no `git push`, no fetch from any origin.
     await runSshCommand(
       config,
-      `cd ${JSON.stringify(prepared.workspaceRemoteDir)} && git config user.name "Paperclip SSH" && git config user.email "ssh@paperclip.dev" && printf "deliverable\\n" > tracked.txt && git add tracked.txt && git commit -m "remote-only commit" >/dev/null`,
+      `cd ${JSON.stringify(prepared.workspaceRemoteDir)} && git config --local user.name ${shellQuote(gitIdentity.name)} && git config --local user.email ${shellQuote(gitIdentity.email)} && printf "deliverable\\n" > tracked.txt && git add tracked.txt && git commit -m "remote-only commit" >/dev/null`,
       { timeoutMs: 30_000, maxBuffer: 256 * 1024 },
     );
 
@@ -1083,8 +1149,7 @@ describe("ssh env-lab fixture", () => {
     await mkdir(localRepo, { recursive: true });
     await git(localRepo, ["init"]);
     await git(localRepo, ["checkout", "-b", "main"]);
-    await git(localRepo, ["config", "user.name", "Paperclip Test"]);
-    await git(localRepo, ["config", "user.email", "test@paperclip.dev"]);
+    const gitIdentity = await configureFixtureGitIdentity(localRepo);
     await writeFile(path.join(localRepo, "tracked.txt"), "base\n", "utf8");
     await git(localRepo, ["add", "tracked.txt"]);
     await git(localRepo, ["commit", "-m", "initial"]);
@@ -1112,12 +1177,12 @@ describe("ssh env-lab fixture", () => {
 
     await runSshCommand(
       config,
-      `cd ${JSON.stringify(preparedA.workspaceRemoteDir)} && git config user.name "Paperclip SSH" && git config user.email "ssh@paperclip.dev" && printf "from run a\\n" > run-a.txt && git add run-a.txt && git commit -m "remote update a" >/dev/null`,
+      `cd ${JSON.stringify(preparedA.workspaceRemoteDir)} && git config --local user.name ${shellQuote(gitIdentity.name)} && git config --local user.email ${shellQuote(gitIdentity.email)} && printf "from run a\\n" > run-a.txt && git add run-a.txt && git commit -m "remote update a" >/dev/null`,
       { timeoutMs: 30_000, maxBuffer: 256 * 1024 },
     );
     await runSshCommand(
       config,
-      `cd ${JSON.stringify(preparedB.workspaceRemoteDir)} && git config user.name "Paperclip SSH" && git config user.email "ssh@paperclip.dev" && printf "from run b\\n" > run-b.txt && git add run-b.txt && git commit -m "remote update b" >/dev/null`,
+      `cd ${JSON.stringify(preparedB.workspaceRemoteDir)} && git config --local user.name ${shellQuote(gitIdentity.name)} && git config --local user.email ${shellQuote(gitIdentity.email)} && printf "from run b\\n" > run-b.txt && git add run-b.txt && git commit -m "remote update b" >/dev/null`,
       { timeoutMs: 30_000, maxBuffer: 256 * 1024 },
     );
 

@@ -96,6 +96,22 @@ function recordParentContext() {
 }
 
 describe("resolveEnvironmentExecutionTarget", () => {
+  it("resolves Hermes gateway SSH with company-scoped credentials and rejects sandbox targets", async () => {
+    mockResolveEnvironmentDriverConfigForRuntime.mockResolvedValue({
+      driver: "ssh", config: { host: "worker.example", port: 2222, username: "alice",
+        workspaceRealizationMode: "in_place", remoteWorkspacePath: "/srv/link/../data ",
+        privateKey: "company-key", knownHosts: "host-key", strictHostKeyChecking: true },
+    });
+    const input = { db: {} as never, companyId: "company-1", adapterType: "hermes_gateway",
+      environment: { id: "env-ssh", driver: "ssh", config: {} }, leaseMetadata: { remoteCwd: "/srv/link/../data " } };
+    expect(await resolveEnvironmentExecutionTarget(input)).toMatchObject({
+      kind: "remote", transport: "ssh", remoteCwd: "/srv/link/../data ",
+      spec: { username: "alice", workspaceRealizationMode: "in_place", remoteCwd: "/srv/link/../data " },
+    });
+    expect(mockResolveEnvironmentDriverConfigForRuntime).toHaveBeenCalledWith(input.db, input.companyId, input.environment);
+    expect(await resolveEnvironmentExecutionTarget({ ...input, environment: { ...input.environment, driver: "sandbox" } })).toBeNull();
+    expect(mockResolveEnvironmentDriverConfigForRuntime).toHaveBeenCalledTimes(1);
+  });
   beforeEach(() => {
     mockResolveEnvironmentDriverConfigForRuntime.mockReset();
     delete process.env.PAPERCLIP_API_URL;

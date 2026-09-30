@@ -1,8 +1,56 @@
 import { describe, expect, it } from "vitest";
 import { HttpError } from "../errors.js";
-import { normalizeEnvironmentConfig, parseEnvironmentDriverConfig } from "../services/environment-config.ts";
+import {
+  normalizeEnvironmentConfig,
+  normalizeEnvironmentConfigForPersistence,
+  normalizeEnvironmentConfigForProbe,
+  parseEnvironmentDriverConfig,
+} from "../services/environment-config.ts";
+import type { Db } from "@paperclipai/db";
 
 describe("environment config helpers", () => {
+  it.each(["local", "ssh"] as const)("requires explicit, complete in-place ownership for %s", (driver) => {
+    const config = driver === "ssh" ? { host: "worker", username: "alice", remoteWorkspacePath: "/data/link/../work " } : {};
+    const filesystemOwnership = { authority: "authority-1", principal: "controller-1", roots: ["/data/link/../work ", "/data/shared"] };
+    const normalize = (extra: Record<string, unknown>) => normalizeEnvironmentConfig({ driver, config: { ...config, ...extra } });
+    expect(normalize({})).not.toHaveProperty("filesystemOwnership");
+    expect(normalize({ workspaceRealizationMode: "in_place", filesystemOwnership })).toMatchObject({ filesystemOwnership });
+    for (const invalid of [{}, { ...filesystemOwnership, roots: [] }, { ...filesystemOwnership, roots: ["relative"] },
+      { ...filesystemOwnership, roots: ["/data/\0"] }, { ...filesystemOwnership, principal: "" }, { ...filesystemOwnership, unknown: true }]) {
+      expect(() => normalize({ workspaceRealizationMode: "in_place", filesystemOwnership: invalid })).toThrow();
+    }
+    expect(() => normalize({ filesystemOwnership })).toThrow("in-place");
+    expect(() => normalize({ workspaceRealizationMode: "copy", filesystemOwnership })).toThrow("in-place");
+  });
+  it.each(["local", "ssh"] as const)("normalizes %s ownership clearing to omission across config entry points", async (driver) => {
+    const config = {
+      ...(driver === "ssh" ? { host: "worker", username: "alice", remoteWorkspacePath: "/data/link/../work " } : {}),
+      workspaceRealizationMode: "copy",
+      filesystemOwnership: null,
+    };
+    const context = { db: {} as Db, companyId: "company-1", driver, config };
+    const normalizedConfigs = [
+      normalizeEnvironmentConfig({ driver, config }),
+      await normalizeEnvironmentConfigForProbe(context),
+      await normalizeEnvironmentConfigForPersistence({
+        ...context, environmentName: "Worker", secretProvider: "local_encrypted",
+      }),
+      parseEnvironmentDriverConfig({ driver, config }).config,
+    ];
+    for (const normalized of normalizedConfigs) {
+      expect(normalized).toMatchObject({ workspaceRealizationMode: "copy" });
+      expect(normalized).not.toHaveProperty("filesystemOwnership");
+    }
+  });
+  it.each(["local", "ssh"] as const)("preserves an explicit %s in-place policy and rejects invalid modes", (driver) => {
+    const config = driver === "ssh"
+      ? { host: "worker.example", username: "alice", remoteWorkspacePath: "/srv/link/../data " }
+      : {};
+    expect(normalizeEnvironmentConfig({ driver, config: { ...config, workspaceRealizationMode: "in_place" } }))
+      .toMatchObject({ ...config, workspaceRealizationMode: "in_place" });
+    expect(() => normalizeEnvironmentConfig({ driver, config: { ...config, workspaceRealizationMode: "typo" } }))
+      .toThrow(HttpError);
+  });
   it("normalizes SSH config into its canonical stored shape", () => {
     const config = normalizeEnvironmentConfig({
       driver: "ssh",

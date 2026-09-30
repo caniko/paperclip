@@ -102,6 +102,22 @@ describeEmbeddedPostgres("heartbeat runtime state deduplication", () => {
     });
   });
 
+  it("projects durable ownership waits after volatile progress expires and never carries a wait past acquisition or termination", () => {
+    const heartbeat = heartbeatService(db);
+    const run = { id: randomUUID(), companyId: randomUUID(), agentId: randomUUID(), status: "running",
+      contextSnapshot: { filesystemOwnership: { state: "waiting", principal: "private", roots: ["/private"] } },
+    };
+    expect(heartbeat.decorateActiveRunStatus(run)).toMatchObject({
+      filesystemOwnershipState: "waiting",
+      currentStatusMessage: "Waiting for exclusive filesystem ownership",
+      currentToolName: null,
+    });
+    expect(heartbeat.decorateActiveRunStatus({ ...run, contextSnapshot: { filesystemOwnership: { state: "acquired" } } }))
+      .toMatchObject({ filesystemOwnershipState: "acquired", currentStatusMessage: null });
+    expect(heartbeat.decorateActiveRunStatus({ ...run, status: "cancelled" }))
+      .toMatchObject({ filesystemOwnershipState: null, currentStatusMessage: null });
+  });
+
   it("publishes runtime progress without persisting heartbeat run events", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

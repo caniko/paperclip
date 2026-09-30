@@ -27,6 +27,7 @@ export interface SshConnectionConfig {
   port: number;
   username: string;
   remoteWorkspacePath: string;
+  workspaceRealizationMode?: "copy" | "in_place";
   privateKey: string | null;
   knownHosts: string | null;
   strictHostKeyChecking: boolean;
@@ -46,7 +47,7 @@ export function createSshCommandManagedRuntimeRunner(input: {
   defaultCwd?: string | null;
   maxBufferBytes?: number | null;
 }): CommandManagedRuntimeRunner {
-  const defaultCwd = input.defaultCwd?.trim() || input.spec.remoteCwd;
+  const defaultCwd = input.defaultCwd || input.spec.remoteCwd;
   const maxBufferBytes =
     typeof input.maxBufferBytes === "number" && Number.isFinite(input.maxBufferBytes) && input.maxBufferBytes > 0
       ? Math.trunc(input.maxBufferBytes)
@@ -57,7 +58,7 @@ export function createSshCommandManagedRuntimeRunner(input: {
       const startedAt = new Date().toISOString();
       const command = commandInput.command.trim();
       const args = commandInput.args ?? [];
-      const cwd = commandInput.cwd?.trim() || defaultCwd;
+      const cwd = commandInput.cwd || defaultCwd;
       const envEntries = Object.entries(commandInput.env ?? {})
         .filter((entry): entry is [string, string] => typeof entry[1] === "string");
       const envPrefix = envEntries.length > 0
@@ -168,9 +169,11 @@ export function parseSshRemoteExecutionSpec(value: unknown): SshRemoteExecutionS
   const parsed = value as Record<string, unknown>;
   const host = typeof parsed.host === "string" ? parsed.host.trim() : "";
   const username = typeof parsed.username === "string" ? parsed.username.trim() : "";
-  const remoteCwd = typeof parsed.remoteCwd === "string" ? parsed.remoteCwd.trim() : "";
+  const remoteCwd = typeof parsed.remoteCwd === "string" ? parsed.remoteCwd : "";
   const portValue = typeof parsed.port === "number" ? parsed.port : Number(parsed.port);
-  if (!host || !username || !remoteCwd || !Number.isInteger(portValue) || portValue < 1 || portValue > 65535) {
+  if (!host || !username || !remoteCwd.trim() || remoteCwd.includes("\0")
+    || !Number.isInteger(portValue) || portValue < 1 || portValue > 65535
+    || (parsed.workspaceRealizationMode !== undefined && parsed.workspaceRealizationMode !== "copy" && parsed.workspaceRealizationMode !== "in_place")) {
     return null;
   }
 
@@ -181,8 +184,9 @@ export function parseSshRemoteExecutionSpec(value: unknown): SshRemoteExecutionS
     remoteCwd,
     remoteWorkspacePath:
       typeof parsed.remoteWorkspacePath === "string" && parsed.remoteWorkspacePath.trim().length > 0
-        ? parsed.remoteWorkspacePath.trim()
+        ? parsed.remoteWorkspacePath
         : remoteCwd,
+    ...(parsed.workspaceRealizationMode ? { workspaceRealizationMode: parsed.workspaceRealizationMode as "copy" | "in_place" } : {}),
     privateKey: typeof parsed.privateKey === "string" && parsed.privateKey.length > 0 ? parsed.privateKey : null,
     knownHosts: typeof parsed.knownHosts === "string" && parsed.knownHosts.length > 0 ? parsed.knownHosts : null,
     strictHostKeyChecking:
@@ -1789,12 +1793,14 @@ export async function restoreWorkspaceFromSshExecution(input: {
 export async function ensureSshWorkspaceReady(
   config: SshConnectionConfig,
 ): Promise<{ remoteCwd: string }> {
+  const inPlace = config.workspaceRealizationMode === "in_place";
   const result = await runSshCommand(
     config,
-    `mkdir -p ${shellQuote(config.remoteWorkspacePath)} && cd ${shellQuote(config.remoteWorkspacePath)} && pwd`,
+    `${inPlace ? "test -d" : "mkdir -p"} ${shellQuote(config.remoteWorkspacePath)} && cd ${shellQuote(config.remoteWorkspacePath)} && pwd`,
   );
   return {
-    remoteCwd: result.stdout.trim(),
+    // Keep the declared spelling (including symlinks) for target preconditions.
+    remoteCwd: inPlace ? config.remoteWorkspacePath : result.stdout.trim(),
   };
 }
 
@@ -1998,6 +2004,8 @@ export async function startSshEnvLabFixture(input: {
   const sshdPidPath = path.join(rootDir, "sshd.pid");
 
   await fs.mkdir(workspaceDir, { recursive: true });
+  const fixtureHome = path.join(rootDir, "home");
+  await fs.mkdir(fixtureHome, { recursive: true, mode: 0o700 });
   await execFileText("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", clientPrivateKeyPath], {
     timeout: 15_000,
   });
@@ -2030,6 +2038,9 @@ export async function startSshEnvLabFixture(input: {
       "UsePAM no",
       "StrictModes no",
       `AllowUsers ${username}`,
+      // Loopback commands use the fixture's home and the same toolchain as its
+      // parent, including systems without tools in /usr/bin (such as NixOS).
+      `SetEnv ${JSON.stringify(`HOME=${fixtureHome}`)} ${JSON.stringify(`PATH=${process.env.PATH ?? "/usr/bin:/bin"}`)}`,
       "LogLevel VERBOSE",
       "PrintMotd no",
       "UseDNS no",

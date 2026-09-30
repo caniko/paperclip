@@ -1,6 +1,6 @@
 import type { Db } from "@paperclipai/db";
 import type { Environment, EnvironmentLease } from "@paperclipai/shared";
-import { adapterSupportsRemoteManagedEnvironments } from "@paperclipai/shared";
+import { adapterSupportsRemoteManagedEnvironments, isEnvironmentDriverSupportedForAdapter } from "@paperclipai/shared";
 import {
   adapterExecutionTargetToRemoteSpec,
   type AdapterExecutionTarget,
@@ -628,7 +628,7 @@ export async function resolveEnvironmentExecutionTarget(input: {
   }
 
   if (
-    !adapterSupportsRemoteManagedEnvironments(input.adapterType) ||
+    !isEnvironmentDriverSupportedForAdapter(input.adapterType, "ssh") ||
     input.environment.driver !== "ssh"
   ) {
     return null;
@@ -645,7 +645,7 @@ export async function resolveEnvironmentExecutionTarget(input: {
 
   const remoteCwd =
     typeof input.leaseMetadata?.remoteCwd === "string" && input.leaseMetadata.remoteCwd.trim().length > 0
-      ? input.leaseMetadata.remoteCwd.trim()
+      ? input.leaseMetadata.remoteCwd
       : parsed.config.remoteWorkspacePath;
 
   return {
@@ -659,6 +659,7 @@ export async function resolveEnvironmentExecutionTarget(input: {
       port: parsed.config.port,
       username: parsed.config.username,
       remoteWorkspacePath: parsed.config.remoteWorkspacePath,
+      ...(parsed.config.workspaceRealizationMode ? { workspaceRealizationMode: parsed.config.workspaceRealizationMode } : {}),
       privateKey: parsed.config.privateKey,
       knownHosts: parsed.config.knownHosts,
       strictHostKeyChecking: parsed.config.strictHostKeyChecking,

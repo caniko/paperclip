@@ -5,7 +5,7 @@
 import type { SshRemoteExecutionSpec } from "./ssh.js";
 import type { AdapterExecutionTarget } from "./execution-target.js";
 import type { RuntimeStatusSink } from "./runtime-progress.js";
-import type { ExecutionContinuationEnvelope, NativeFinalizationResult } from "@paperclipai/shared";
+import type { ExecutionContinuationEnvelope, FilesystemOwnershipPolicy, NativeFinalizationResult } from "@paperclipai/shared";
 
 export interface AdapterAgent {
   id: string;
@@ -163,6 +163,15 @@ export interface AdapterRuntimeMcpServer {
   url: string;
   token: string;
   connectionId: string;
+  /** Core-resolved admission binding. Adapters must not infer this from agent config. */
+  runBinding?: {
+    runId: string;
+    executionHostId: string;
+    serverHostId: string;
+    /** Exact normalized recipient approved by the instance operator. */
+    gatewayUrl: string;
+    authorizedCrossHost?: boolean;
+  };
 }
 
 export interface AdapterRuntimeMcpAccess {
@@ -195,10 +204,16 @@ export interface AdapterRuntimeEvent {
 }
 
 export interface AdapterExecutionContext {
+  /** Immutable intent acquired by core before preparing a protected workspace. */
+  workspaceOwnership?: WorkspaceOwnershipIntent;
   /** Run-scoped operator cancellation; adapters must settle before returning. */
   signal?: AbortSignal;
   /** Opt in to signal-based cancellation before starting provider work. */
   onCancellationReady?: () => Promise<void>;
+  /** Persist an immutable recovery checkpoint before provider admission. May contain
+   * credentials: the host must encrypt it and must not publish it in events/logs.
+   * Rejection means no provider work may start. */
+  onExecutionCheckpoint?: (checkpoint: Record<string, unknown>) => Promise<void>;
   /** Host-owned stop of this run's sandbox during setup or direct CLI execution. Resolves only after
    * provider termination is verified; never accepts an agent-selected lease. */
   stopRemoteStartup?: () => Promise<void>;
@@ -453,9 +468,30 @@ export interface AcpTargetDescriptor {
   };
 }
 
+export type WorkspaceOwnershipPolicy = FilesystemOwnershipPolicy;
+
+export interface WorkspaceOwnershipIntent extends WorkspaceOwnershipPolicy {
+  request: string;
+  fingerprint: string;
+}
+
+export interface WorkspaceOwnershipContext extends Pick<AdapterExecutionContext,
+  "runId" | "agent" | "config" | "context" | "executionTarget" | "signal"> {
+  policy: WorkspaceOwnershipPolicy;
+  onCheckpoint(checkpoint: Record<string, unknown>): Promise<void>;
+  onGranted(grant: Record<string, unknown>): Promise<void>;
+  onWaiting?(): Promise<void>;
+  assertActive(): Promise<void>;
+}
+
 export interface ServerAdapterModule {
   type: string;
   execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult>;
+  /** One bounded stop/reconcile attempt using the exact persisted admission.
+   * A missing/failed control channel is pending, never proof of settlement. */
+  reconcileExecution?: (checkpoint: Record<string, unknown>) => Promise<"pending" | "settled">;
+  prepareWorkspaceOwnership?: (ctx: WorkspaceOwnershipContext) => Promise<WorkspaceOwnershipIntent>;
+  reconcileWorkspaceOwnership?: (checkpoint: Record<string, unknown>) => Promise<"pending" | "settled">;
   testEnvironment(ctx: AdapterEnvironmentTestContext): Promise<AdapterEnvironmentTestResult>;
   acp?: AcpTargetDescriptor;
   listSkills?: (ctx: AdapterSkillContext) => Promise<AdapterSkillSnapshot>;

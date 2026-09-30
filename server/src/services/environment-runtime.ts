@@ -3,6 +3,7 @@ import { readEnvironmentCreationCleanupError } from "@paperclipai/plugin-sdk";
 import { remoteTerminationReceipt } from "./remote-execution-termination.js";
 import { hasNativeWorkspaceExportResume, releaseCompletedNativeWorkspaceExportRetention } from "./native-runtime/native-workspace-export-resume.js";
 import { createHash, randomUUID } from "node:crypto";
+import path from "node:path";
 import { and, eq, inArray, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { companySecrets, companySecretVersions, environmentLeases, heartbeatRuns } from "@paperclipai/db";
@@ -32,12 +33,14 @@ import type {
   PluginSyncOperation,
 } from "@paperclipai/plugin-sdk";
 import { ensureSshWorkspaceReady } from "@paperclipai/adapter-utils/ssh";
+import { resolveInPlaceWorkspacePath } from "./in-place-workspace.js";
 import {
   getActiveStepContext,
   runWithRuntimeParent,
   type StartupSpanContext,
 } from "@paperclipai/adapter-utils/acpx-engine/startup-timing";
 import { environmentService } from "./environments.js";
+import { publicAdapterExecutionMetadata } from "./adapter-execution-ownership.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { verifyNativeHarnessBackupStamp } from "./native-runtime/native-harness-backup-stamp.js";
 import {
@@ -826,7 +829,7 @@ function toEnvironmentLeaseSnapshot(row: typeof environmentLeases.$inferSelect):
     releasedAt: row.releasedAt ?? null,
     failureReason: row.failureReason ?? null,
     cleanupStatus: row.cleanupStatus as EnvironmentLease["cleanupStatus"],
-    metadata: (row.metadata as Record<string, unknown> | null) ?? null,
+    metadata: publicAdapterExecutionMetadata(row.metadata ?? null),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -1122,6 +1125,7 @@ function createLocalEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
       return await environmentsSvc.acquireLease({
         companyId: input.companyId,
         environmentId: input.environment.id,
+        assertCompanyBinding: input.assertCompanyBinding,
         executionWorkspaceId: input.executionWorkspaceId,
         issueId: input.issueId,
         heartbeatRunId: input.heartbeatRunId,
@@ -1150,11 +1154,13 @@ function createLocalEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
     },
 
     async realizeWorkspace(input) {
+      const cwd = input.workspace.localPath ?? input.workspace.remotePath ?? null;
+      await resolveInPlaceWorkspacePath({ driver: "local", environmentConfig: input.environment.config, cwd });
       const record = buildWorkspaceRealizationRecordFromDriverInput({
         environment: input.environment,
         lease: input.lease,
         workspace: input.workspace,
-        cwd: input.workspace.localPath ?? input.workspace.remotePath ?? null,
+        cwd,
       });
       return {
         cwd: input.workspace.localPath ?? input.workspace.remotePath ?? "/",
@@ -1192,10 +1198,22 @@ function createSshEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
         throw new Error(`Expected SSH environment config for driver "${input.environment.driver}".`);
       }
 
-      const { remoteCwd } = await ensureSshWorkspaceReady(parsed.config);
+      if (parsed.config.workspaceRealizationMode === "in_place"
+        && input.adapterType !== "hermes_gateway" && input.adapterType !== "codex_local") {
+        throw new Error(`Adapter "${input.adapterType}" does not support in-place SSH workspaces.`);
+      }
+      if (input.adapterType === "hermes_gateway" && parsed.config.workspaceRealizationMode !== "in_place") {
+        throw new Error("Hermes gateway requires in-place SSH workspaces; select an existing remote directory.");
+      }
+      // A protected worker validates the directory through its enrolled authority.
+      // Lease acquisition is controller bookkeeping, before that grant exists.
+      const { remoteCwd } = parsed.config.filesystemOwnership
+        ? { remoteCwd: parsed.config.remoteWorkspacePath }
+        : await ensureSshWorkspaceReady(parsed.config);
       return await environmentsSvc.acquireLease({
         companyId: input.companyId,
         environmentId: input.environment.id,
+        assertCompanyBinding: input.assertCompanyBinding,
         executionWorkspaceId: input.executionWorkspaceId,
         issueId: input.issueId,
         heartbeatRunId: input.heartbeatRunId,
@@ -1226,7 +1244,7 @@ function createSshEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
         workspace: input.workspace,
         cwd:
           typeof input.lease.metadata?.remoteCwd === "string" && input.lease.metadata.remoteCwd.trim().length > 0
-            ? input.lease.metadata.remoteCwd.trim()
+            ? input.lease.metadata.remoteCwd
             : input.workspace.remotePath ?? input.workspace.localPath ?? null,
       });
       return {
@@ -2832,7 +2850,7 @@ function createSandboxEnvironmentDriver(
         cwd:
           pluginRealizedCwd ??
           (typeof input.lease.metadata?.remoteCwd === "string" && input.lease.metadata.remoteCwd.trim().length > 0
-            ? input.lease.metadata.remoteCwd.trim()
+            ? input.lease.metadata.remoteCwd
             : input.workspace.remotePath ?? input.workspace.localPath ?? null),
         providerMetadata,
       });

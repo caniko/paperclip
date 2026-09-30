@@ -81,6 +81,8 @@ export function adapterSupportsRemoteManagedEnvironments(adapterType: string): b
 }
 
 export function supportedEnvironmentDriversForAdapter(adapterType: string): EnvironmentDriver[] {
+  // Gateway workers validate an existing SSH target; they do not provision a sandbox.
+  if (adapterType === "hermes_gateway") return ["local", "ssh"];
   return adapterSupportsRemoteManagedEnvironments(adapterType)
     ? ["local", "ssh", "sandbox"]
     : ["local"];

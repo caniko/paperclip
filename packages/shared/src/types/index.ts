@@ -81,6 +81,7 @@ export type {
   EnvironmentProbeResult,
   FakeSandboxEnvironmentConfig,
   LocalEnvironmentConfig,
+  FilesystemOwnershipPolicy,
   PluginSandboxEnvironmentConfig,
   PluginEnvironmentConfig,
   SandboxEnvironmentConfig,

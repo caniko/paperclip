@@ -447,12 +447,14 @@ function IssueChatLiveRunStatusLine({
 
   if (!active) return null;
 
-  const primary = currentToolName
+  const waitingForOwnership = custom.filesystemOwnershipState === "waiting";
+  const primary = waitingForOwnership ? "Waiting for exclusive filesystem ownership — no agent work has started"
+    : currentToolName
     ? `Using ${currentToolName}`
     : lastAssistantSnippet
       ? lastAssistantSnippet
       : currentStatusMessage;
-  const activityText = lastActivityElapsed
+  const activityText = !waitingForOwnership && lastActivityElapsed
     ? lastActivityAgeMs !== null && lastActivityAgeMs >= 15_000
       ? `no output for ${lastActivityElapsed} - still running`
       : `${lastActivityElapsed} ago`
@@ -5897,6 +5899,7 @@ export function IssueChatThread({
         nextAction: activeRun.nextAction,
         outputSilence: activeRun.outputSilence,
         currentStatusMessage: activeRun.currentStatusMessage ?? null,
+        filesystemOwnershipState: activeRun.filesystemOwnershipState ?? null,
         currentStatusUpdatedAt: toIsoString(activeRun.currentStatusUpdatedAt),
         currentToolName: activeRun.currentToolName ?? null,
         lastAssistantSnippet: activeRun.lastAssistantSnippet ?? null,

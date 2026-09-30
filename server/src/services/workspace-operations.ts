@@ -7,6 +7,7 @@ import { conflict, notFound } from "../errors.js";
 import { redactCurrentUserText, redactCurrentUserValue } from "../log-redaction.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { getWorkspaceOperationLogStore } from "./workspace-operation-log-store.js";
+import { withProtectedWorkspaceFinalizationWrite } from "./adapter-execution-ownership.js";
 
 type WorkspaceOperationRow = typeof workspaceOperations.$inferSelect;
 
@@ -458,6 +459,7 @@ export function workspaceOperationService(db: Db) {
       heartbeatRunId?: string | null;
       executionWorkspaceId?: string | null;
       issueId?: string | null;
+      protectedFinalization?: { leaseId: string; controllerBootId: string | null };
     }): WorkspaceOperationRecorder {
       let executionWorkspaceId = input.executionWorkspaceId ?? null;
       const createdIds: string[] = [];
@@ -476,6 +478,13 @@ export function workspaceOperationService(db: Db) {
         },
 
         async recordOperation(recordInput) {
+          const writeOperation = async <T>(write: (connection: Pick<Db, "insert" | "update">) => Promise<T>): Promise<T> => {
+            if (recordInput.phase !== "workspace_finalize" || !input.protectedFinalization) return write(db);
+            if (!input.heartbeatRunId) throw new Error("Protected workspace finalization requires a run.");
+            return withProtectedWorkspaceFinalizationWrite(db, {
+              companyId: input.companyId, runId: input.heartbeatRunId, ...input.protectedFinalization,
+            }, write);
+          };
           const currentUserRedactionOptions = {
             enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
           };
@@ -521,24 +530,26 @@ export function workspaceOperationService(db: Db) {
           if (runtimeControlAction) liveRuntimeControlOperationIds.add(id);
 
           try {
-            await db.insert(workspaceOperations).values({
-              id,
-              companyId: input.companyId,
-              executionWorkspaceId,
-              heartbeatRunId: input.heartbeatRunId ?? null,
-              issueId: input.issueId ?? null,
-              phase: recordInput.phase,
-              command: recordInput.command ?? null,
-              cwd: recordInput.cwd ?? null,
-              status: "running",
-              logStore: handle.store,
-              logRef: handle.logRef,
-              metadata: redactCurrentUserValue(
-                currentMetadata,
-                currentUserRedactionOptions,
-              ) as Record<string, unknown> | null,
-              startedAt,
-              updatedAt: startedAt,
+            await writeOperation(async (connection) => {
+              await connection.insert(workspaceOperations).values({
+                id,
+                companyId: input.companyId,
+                executionWorkspaceId,
+                heartbeatRunId: input.heartbeatRunId ?? null,
+                issueId: input.issueId ?? null,
+                phase: recordInput.phase,
+                command: recordInput.command ?? null,
+                cwd: recordInput.cwd ?? null,
+                status: "running",
+                logStore: handle.store,
+                logRef: handle.logRef,
+                metadata: redactCurrentUserValue(
+                  currentMetadata,
+                  currentUserRedactionOptions,
+                ) as Record<string, unknown> | null,
+                startedAt,
+                updatedAt: startedAt,
+              });
             });
           } catch (insertError) {
             liveRuntimeControlOperationIds.delete(id);
@@ -630,7 +641,7 @@ export function workspaceOperationService(db: Db) {
             await append("stderr", result.stderr ?? null);
             const finalized = await logStore.finalize(handle);
             const finishedAt = new Date();
-            const row = await db
+            const row = await writeOperation(async (connection) => connection
               .update(workspaceOperations)
               .set({
                 executionWorkspaceId,
@@ -650,7 +661,7 @@ export function workspaceOperationService(db: Db) {
               })
               .where(eq(workspaceOperations.id, id))
               .returning()
-              .then((rows) => rows[0] ?? null);
+              .then((rows) => rows[0] ?? null));
             if (!row) throw notFound("Workspace operation not found");
             return toWorkspaceOperation(row);
           } catch (error) {
@@ -684,7 +695,11 @@ export function workspaceOperationService(db: Db) {
                 finishedAt,
                 updatedAt: finishedAt,
               })
-              .where(eq(workspaceOperations.id, id));
+              // A stale protected writer may fail its still-running operation,
+              // but must not overwrite a terminal receipt observed by recovery.
+              .where(and(eq(workspaceOperations.id, id),
+                recordInput.phase === "workspace_finalize" && input.protectedFinalization
+                  ? eq(workspaceOperations.status, "running") : undefined));
             throw error;
           } finally {
             // Releasing the in-process claim before the request unwinds is what lets the very

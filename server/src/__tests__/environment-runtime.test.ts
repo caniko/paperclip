@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -38,9 +38,11 @@ import {
 } from "../services/environment-runtime.ts";
 import * as sandboxProviderRuntime from "../services/sandbox-provider-runtime.ts";
 import * as environmentsModule from "../services/environments.ts";
+import * as sshModule from "@paperclipai/adapter-utils/ssh";
 import { logger } from "../middleware/logger.ts";
 import { resolveRunnerEnvironmentForRun } from "../services/runner-environment-lifecycle.js";
 import { environmentService } from "../services/environments.ts";
+import { environmentRunOrchestrator } from "../services/environment-run-orchestrator.ts";
 import { remoteExecutionHasStopped } from "../services/remote-execution-termination.ts";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { secretService } from "../services/secrets.ts";
@@ -1288,6 +1290,98 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
       expect(released[0]?.lease.status).toBe("released");
     } finally {
     }
+  });
+
+  it.each(["local", "ssh"] as const)("keeps protected %s lease and realization bookkeeping free of controller-side path probes", async (driver) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-owned-target-"));
+    fixtureRoots.push(root);
+    const cwd = path.join(root, "authority-private-directory");
+    const probe = vi.spyOn(sshModule, "ensureSshWorkspaceReady")
+      .mockRejectedValue(new Error("The enrolled authority owns path validation"));
+    const config = {
+      workspaceRealizationMode: "in_place",
+      filesystemOwnership: { authority: "host-authority", principal: "controller", roots: [cwd] },
+      ...(driver === "ssh" ? { host: "worker.invalid", username: "control", remoteWorkspacePath: cwd } : {}),
+    };
+    const { companyId, environment: seeded, runId } = await seedEnvironment({ driver, config });
+    // The built-in local row can be reused by seedEnvironment.
+    await environmentService(db).update(seeded.id, { config });
+    const environment = { ...seeded, config };
+    try {
+      const acquired = await runtime.acquireRunLease({ companyId, environment, issueId: null,
+        heartbeatRunId: runId, persistedExecutionWorkspace: null, adapterType: "hermes_gateway" });
+      const realized = await runtime.realizeWorkspace({ environment, lease: acquired.lease,
+        workspace: { localPath: cwd, remotePath: cwd } });
+      expect(realized).toMatchObject({ cwd, metadata: { workspaceRealization: {
+        mode: "in_place", authoritativeRoot: cwd, outboundRestorePaths: [],
+      } } });
+      expect(probe).not.toHaveBeenCalled();
+      await expect(stat(cwd)).rejects.toMatchObject({ code: "ENOENT" });
+      await runtime.releaseRunLeases(runId);
+    } finally {
+      probe.mockRestore();
+    }
+  });
+
+  it.each(["local", "ssh"] as const)("realizes an existing %s directory through the run orchestrator without copying or deleting it", async (driver, ctx) => {
+    if (driver === "ssh" && !sshFixtureSupport.supported) ctx.skip(sshFixtureSupport.reason);
+    const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-in-place-"));
+    fixtureRoots.push(root);
+    const actual = path.join(root, "data");
+    const cwd = path.join(root, "existing alias");
+    await mkdir(actual);
+    await symlink(actual, cwd);
+    await writeFile(path.join(actual, "personal.txt"), "original");
+    const config = driver === "ssh"
+      ? await buildSshEnvLabFixtureConfig(await startSshEnvLabFixture({ statePath: path.join(root, "state.json") }))
+      : {};
+    const { companyId, environment, runId } = await seedEnvironment({
+      driver, config: { ...config, remoteWorkspacePath: cwd, workspaceRealizationMode: "in_place" },
+    });
+    if (driver === "local") {
+      environment.config = { workspaceRealizationMode: "in_place" };
+      await environmentService(db).update(environment.id, { config: environment.config });
+    }
+    const acquired = await runtime.acquireRunLease({
+      companyId, environment, issueId: null, heartbeatRunId: runId,
+      persistedExecutionWorkspace: null, adapterType: "hermes_gateway",
+    });
+    const workspace = {
+      baseCwd: cwd, cwd, source: "project_primary" as const,
+      projectId: null, workspaceId: null, repoUrl: null, repoRef: null,
+      strategy: "project_primary" as const, branchName: null, worktreePath: null,
+      warnings: [], created: false, branchCreatedByRuntime: false,
+    };
+    const orchestrator = environmentRunOrchestrator(db, { environmentRuntime: runtime });
+    const input = {
+      environment, lease: acquired.lease, adapterType: "hermes_gateway", companyId,
+      issueId: null, heartbeatRunId: runId, executionWorkspace: workspace,
+      effectiveExecutionWorkspaceMode: null, persistedExecutionWorkspace: null,
+    };
+    const realized = await orchestrator.realizeForRun(input);
+    expect(realized.executionTarget).toMatchObject({
+      kind: driver === "local" ? "local" : "remote",
+      workspaceRealization: { mode: "in_place", authoritativeRoot: cwd, outboundRestorePaths: [] },
+      ...(driver === "ssh" ? { transport: "ssh", remoteCwd: cwd } : {}),
+    });
+    expect(await readdir(actual)).toEqual(["personal.txt"]);
+    await runtime.releaseRunLeases(runId);
+    expect(await readFile(path.join(actual, "personal.txt"), "utf8")).toBe("original");
+
+    const missing = path.join(root, "missing");
+    if (driver === "local") {
+      await expect(orchestrator.realizeForRun({ ...input, executionWorkspace: { ...workspace, cwd: missing } }))
+        .rejects.toMatchObject({ name: "EnvironmentRunError", code: "workspace_realization_failed",
+          environmentId: environment.id, driver: "local",
+          message: expect.stringContaining(`In-place workspace directory is unavailable: ${missing}`),
+        });
+    } else {
+      await expect(runtime.acquireRunLease({
+        companyId, environment: { ...environment, config: { ...environment.config, remoteWorkspacePath: missing } },
+        issueId: null, heartbeatRunId: runId, persistedExecutionWorkspace: null, adapterType: "hermes_gateway",
+      })).rejects.toThrow();
+    }
+    await expect(stat(missing)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("acquires and releases a fake sandbox run lease through the runtime seam", async () => {

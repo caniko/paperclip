@@ -10,6 +10,7 @@ import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { logActivity } from "./activity-log.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
 import { issueService } from "./issues.js";
+import { adapterExecutionOwnershipNotHeldCondition, lockRunForAdapterSettlement } from "./adapter-execution-ownership.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 export const LEGACY_RECOVERY_CAUSE = "legacy_execution_requires_reconciliation";
@@ -80,6 +81,7 @@ export async function terminalizeLegacyExecution(input: {
           )
           .for("update")
       : [];
+    await lockRunForAdapterSettlement(tx, run.id);
     const [updated] = await tx
       .update(heartbeatRuns)
       .set({
@@ -93,6 +95,7 @@ export async function terminalizeLegacyExecution(input: {
           eq(heartbeatRuns.id, run.id),
           eq(heartbeatRuns.companyId, run.companyId),
           inArray(heartbeatRuns.status, input.fromStatuses ?? [run.status]),
+          adapterExecutionOwnershipNotHeldCondition(),
         ),
       )
       .returning();

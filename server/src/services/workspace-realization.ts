@@ -18,13 +18,19 @@ function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+// Paths are filesystem identities. Whitespace and symlink/.. spelling must
+// survive storage and dispatch; only the execution host can resolve them.
+function readPath(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 function readNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function readStringArray(value: unknown): string[] {
   return Array.isArray(value)
-    ? value.map(readString).filter((entry): entry is string => entry !== null)
+    ? value.map(readPath).filter((entry): entry is string => entry !== null)
     : [];
 }
 
@@ -32,8 +38,8 @@ function readPathAliases(value: unknown): Array<{ path: string; target: string }
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry) => {
     const parsed = parseObject(entry);
-    const aliasPath = readString(parsed.path);
-    const target = readString(parsed.target);
+    const aliasPath = readPath(parsed.path);
+    const target = readPath(parsed.target);
     return aliasPath && target ? [{ path: aliasPath, target }] : [];
   });
 }
@@ -46,7 +52,7 @@ function readAdditionalSources(
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry) => {
     const parsed = parseObject(entry);
-    const localPath = readString(parsed.localPath);
+    const localPath = readPath(parsed.localPath);
     if (!localPath) return [];
     return [
       {
@@ -65,7 +71,7 @@ export function readWorkspaceRealizationRequest(value: unknown): WorkspaceRealiz
   if (parsed.version !== 1) return null;
   const source = parseObject(parsed.source);
   const runtimeOverlay = parseObject(parsed.runtimeOverlay);
-  const localPath = readString(source.localPath);
+  const localPath = readPath(source.localPath);
   const companyId = readString(parsed.companyId);
   const environmentId = readString(parsed.environmentId);
   const heartbeatRunId = readString(parsed.heartbeatRunId);
@@ -93,7 +99,7 @@ export function readWorkspaceRealizationRequest(value: unknown): WorkspaceRealiz
       repoRef: readString(source.repoRef),
       strategy: source.strategy === "git_worktree" ? "git_worktree" : "project_primary",
       branchName: readString(source.branchName),
-      worktreePath: readString(source.worktreePath),
+      worktreePath: readPath(source.worktreePath),
     },
     additionalSources: readAdditionalSources(parsed.additionalSources),
     runtimeOverlay: {
@@ -175,15 +181,18 @@ export function buildWorkspaceRealizationRecord(input: {
   const traits = getEnvironmentDriverTraits(input.environment.driver) ?? ENVIRONMENT_DRIVER_TRAITS.local;
   const transport = traits.driver;
   const remotePath =
-    readString(providerMetadata.remoteCwd) ??
-    readString(leaseMetadata.remoteCwd) ??
-    readString(providerMetadata.remotePath) ??
+    readPath(providerMetadata.remoteCwd) ??
+    readPath(leaseMetadata.remoteCwd) ??
+    readPath(providerMetadata.remotePath) ??
     null;
   const host = readString(leaseMetadata.host);
   const port = readNumber(leaseMetadata.port);
   const username = readString(leaseMetadata.username);
   const sandboxId = readString(leaseMetadata.sandboxId) ?? readString(providerMetadata.sandboxId);
-  const realizationMetadata = {
+  const realizationMetadata: Record<string, unknown> = {
+    ...((transport === "local" || transport === "ssh")
+      ? { realizationMode: input.environment.config?.workspaceRealizationMode }
+      : {}),
     ...parseObject(leaseMetadata.workspaceRealization),
     ...parseObject(providerMetadata.workspaceRealization),
     ...providerMetadata,
@@ -192,7 +201,7 @@ export function buildWorkspaceRealizationRecord(input: {
     ? "in_place" as const
     : "copy" as const;
   const authoritativeRoot =
-    readString(realizationMetadata.authoritativeRoot) ??
+    readPath(realizationMetadata.authoritativeRoot) ??
     (mode === "in_place" ? remotePath : null) ??
     input.request.source.localPath;
   const pathAliases = readPathAliases(realizationMetadata.pathAliases ?? realizationMetadata.workspaceAliases);

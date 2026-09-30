@@ -326,6 +326,23 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     });
   });
 
+  it("updates cached ownership waiting and handoff from run events without exposing grants", () => {
+    const client = new QueryClient();
+    client.setQueryData(queryKeys.liveRuns("company-1"), [{ id: "run-1", status: "running" }]);
+    for (const state of ["waiting", "acquired"] as const) {
+      const patch = __liveUpdatesTestUtils.readRunLiveStatusPatchFromPayload({
+        runId: "run-1", agentId: "agent-1", eventType: `workspace.ownership.${state}`,
+        payload: { grant: "private" },
+      }, "2026-09-30T12:00:00.000Z", "heartbeat.run.event");
+      expect(patch).not.toBeNull();
+      __liveUpdatesTestUtils.applyRunLiveStatusPatchToCaches(client, "company-1", "/", patch!);
+      expect(client.getQueryData(queryKeys.liveRuns("company-1")))
+        .toMatchObject([{ filesystemOwnershipState: state }]);
+      expect(JSON.stringify(patch)).not.toContain("private");
+    }
+    client.clear();
+  });
+
   it("does not clear run tool context from null heartbeat event fields", () => {
     const patch = __liveUpdatesTestUtils.readRunLiveStatusPatchFromPayload(
       {

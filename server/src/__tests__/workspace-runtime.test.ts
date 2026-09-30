@@ -148,6 +148,31 @@ async function readGit(cwd: string, args: string[]) {
   return (await execFileAsync("git", args, { cwd })).stdout.trim();
 }
 
+async function configureFixtureGitIdentity(cwd: string) {
+  // Read the caller's effective config before writing fixture-local identity.
+  // Managed hooks and signing must keep using the operator's identity.
+  const callerCwd = process.cwd();
+  const readConfig = async (key: string): Promise<string | null> => {
+    try {
+      return (await execFileAsync("git", ["config", "--get", key], { cwd: callerCwd })).stdout.replace(/\r?\n$/, "");
+    } catch (error) {
+      if ((error as { code?: unknown }).code === 1) return null; // Absent config key.
+      throw error;
+    }
+  };
+  let [name, email] = await Promise.all([readConfig("user.name"), readConfig("user.email")]);
+  if (name === null && email === null) {
+    // Identity-free CI still needs an identity for its disposable repositories.
+    name = "Paperclip Test";
+    email = "paperclip@example.com";
+  }
+  if (!name || !email) {
+    throw new Error("Git fixtures require both user.name and user.email when a caller identity is configured.");
+  }
+  await runGit(cwd, ["config", "--local", "user.name", name]);
+  await runGit(cwd, ["config", "--local", "user.email", email]);
+}
+
 async function runPnpm(cwd: string, args: string[]) {
   await execFileAsync("pnpm", args, { cwd });
 }
@@ -166,8 +191,7 @@ async function writeRegisteredSourceConfig(baseCwd: string, instanceId = "source
 async function createTempRepo(defaultBranch = "main") {
   const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-worktree-repo-"));
   await runGit(repoRoot, ["init"]);
-  await runGit(repoRoot, ["config", "user.email", "paperclip@example.com"]);
-  await runGit(repoRoot, ["config", "user.name", "Paperclip Test"]);
+  await configureFixtureGitIdentity(repoRoot);
   await fs.writeFile(path.join(repoRoot, "README.md"), "hello\n", "utf8");
   await runGit(repoRoot, ["add", "README.md"]);
   await runGit(repoRoot, ["commit", "-m", "Initial commit"]);
@@ -257,8 +281,7 @@ async function createClonedRepoWithRemote() {
   const cloneRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-worktree-clone-"));
   const repoRoot = path.join(cloneRoot, "paperclip");
   await execFileAsync("git", ["clone", remotePath, repoRoot]);
-  await runGit(repoRoot, ["config", "user.email", "paperclip@example.com"]);
-  await runGit(repoRoot, ["config", "user.name", "Paperclip Test"]);
+  await configureFixtureGitIdentity(repoRoot);
   return { sourceRepo, remotePath, repoRoot };
 }
 
@@ -780,8 +803,7 @@ describe("realizeExecutionWorkspace", () => {
     const cloneRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-worktree-clone-"));
     const repoRoot = path.join(cloneRoot, "paperclip");
     await execFileAsync("git", ["clone", remotePath, repoRoot]);
-    await runGit(repoRoot, ["config", "user.email", "paperclip@example.com"]);
-    await runGit(repoRoot, ["config", "user.name", "Paperclip Test"]);
+    await configureFixtureGitIdentity(repoRoot);
 
     await fs.writeFile(path.join(sourceRepo, "auth-fix.txt"), "cookie fix\n", "utf8");
     await runGit(sourceRepo, ["add", "auth-fix.txt"]);
@@ -1737,10 +1759,11 @@ describe("realizeExecutionWorkspace", () => {
 
     // Keep this server-side fixture on provision-worktree.sh's config writer path;
     // CLI/database seeding is covered by the CLI worktree tests. Include only
-    // required tools, so pnpm/paperclipai stay absent even on non-FHS hosts.
+    // required tools (including Git hook stdin/temporary-file handling), so
+    // pnpm/paperclipai stay absent even on non-FHS hosts.
     await fs.symlink(process.execPath, path.join(isolatedBin, "node"));
-    for (const command of ["bash", "sh", "git", "env", "dirname", "basename", "mkdir", "find", "sed", "ln"]) {
-      const { stdout } = await execFileAsync("/bin/sh", ["-c", 'command -v "$1"', "sh", command]);
+    for (const command of ["bash", "sh", "git", "env", "dirname", "basename", "mkdir", "find", "sed", "ln", "rm", "mktemp", "cat"]) {
+      const { stdout } = await execFileAsync("sh", ["-c", 'command -v "$1"', "sh", command]);
       const executable = stdout.trim();
       expect(path.isAbsolute(executable)).toBe(true);
       await fs.symlink(executable, path.join(isolatedBin, command));
@@ -9502,9 +9525,9 @@ describe("workspace realization request additionalSources", () => {
     }
   });
 
-  it("reads the in_place mode from the lease metadata", () => {
+  it.each(["local", "ssh", "sandbox"] as const)("reads the in_place mode from %s policy", (driver) => {
     const now = new Date(0);
-    const workspace = buildRealizedWorkspace();
+    const workspace = buildRealizedWorkspace({ cwd: "/selected/link/../data " });
     const request = buildWorkspaceRealizationRequest({
       adapterType: "codex",
       companyId: "company-1",
@@ -9533,7 +9556,9 @@ describe("workspace realization request additionalSources", () => {
       releasedAt: null,
       failureReason: null,
       cleanupStatus: null,
-      metadata: { workspaceRealization: { mode: "in_place" } },
+      metadata: driver === "sandbox"
+        ? { workspaceRealization: { mode: "in_place" } }
+        : { remoteCwd: driver === "ssh" ? "/remote/link/../existing " : undefined },
       createdAt: now,
       updatedAt: now,
     };
@@ -9541,18 +9566,22 @@ describe("workspace realization request additionalSources", () => {
       id: "environment-1",
       name: "env",
       description: null,
-      driver: "sandbox",
+      driver,
       status: "active",
-      config: {},
+      config: driver === "sandbox" ? {} : { workspaceRealizationMode: "in_place" },
       envVars: {},
       metadata: null,
       createdAt: now,
       updatedAt: now,
     };
 
-    const record = buildWorkspaceRealizationRecord({ environment, lease, request });
+    const roundTripped = readWorkspaceRealizationRequest(JSON.parse(JSON.stringify(request)));
+    expect(roundTripped?.source.localPath).toBe(workspace.cwd);
+    const record = buildWorkspaceRealizationRecord({ environment, lease, request: roundTripped! });
 
     expect(record.mode).toBe("in_place");
+    expect(record.authoritativeRoot).toBe(driver === "ssh" ? "/remote/link/../existing " : workspace.cwd);
+    expect(record.outboundRestorePaths).toEqual([]);
   });
 
   it("reads a legacy request without additionalSources as an empty array", () => {

@@ -178,6 +178,11 @@ Use in property rows, comment headers, assignee displays, and anywhere a user/ag
 **File:** `CommentThread.tsx`
 **Usage:** Comment list with add-comment form. Used on issue and entity detail views.
 
+### FilesystemOwnershipNotice
+
+**File:** `FilesystemOwnershipNotice.tsx`
+**Usage:** Announces a durable filesystem-ownership wait in live-run and run-detail surfaces. Uses InlineBanner and disappears on acquisition or terminal status; it exposes no authority or directory details.
+
 ### GoalTree
 
 **File:** `GoalTree.tsx`

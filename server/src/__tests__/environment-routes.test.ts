@@ -2715,6 +2715,86 @@ describe("environment routes", () => {
     expect(JSON.stringify(mockLogActivity.mock.calls[0][1].details)).not.toContain("do-not-log");
   });
 
+  describe.each(["local", "ssh"] as const)("%s workspace policy PATCH clearing", (driver) => {
+    const filesystemOwnership = {
+      authority: "host-authority", principal: "controller-a", roots: ["/srv/link/../data ", "/srv/other"],
+    };
+    const unrelatedConfig = driver === "ssh" ? {
+      host: "worker.example", port: 2222, username: "alice", remoteWorkspacePath: filesystemOwnership.roots[0],
+      privateKey: null,
+      privateKeySecretRef: { type: "secret_ref", secretId: "11111111-1111-1111-1111-111111111111", version: "latest" },
+      knownHosts: "worker.example ssh-ed25519 known-key", strictHostKeyChecking: false,
+    } : { shell: "zsh", extension: { retain: true } };
+    let stored: Omit<ReturnType<typeof createEnvironment>, "driver" | "config"> & {
+      driver: "local" | "ssh";
+      config: Record<string, unknown>;
+    };
+
+    beforeEach(() => {
+      stored = {
+        ...createEnvironment(), driver,
+        config: { ...unrelatedConfig, workspaceRealizationMode: "in_place", filesystemOwnership },
+      };
+      mockEnvironmentService.getById.mockImplementation(async () => stored);
+      mockEnvironmentService.list.mockImplementation(async () => [stored]);
+      // Only persistence is faked. The real route merges and validates the PATCH;
+      // store exactly its normalized result, including JSON's omission semantics.
+      mockEnvironmentService.update.mockImplementation(async (_id, patch) => {
+        stored = { ...stored, ...JSON.parse(JSON.stringify(patch)) };
+        return stored;
+      });
+    });
+
+    it.each(["in_place", "copy"])("clears ownership through PATCH and reload with realization=%s", async (workspaceRealizationMode) => {
+      const app = createApp({ type: "board", userId: "user-1", source: "local_implicit" });
+      const res = await request(app).patch("/api/environments/env-1?companyId=company-1").send({
+        config: workspaceRealizationMode === "in_place"
+          ? { filesystemOwnership: null }
+          : { workspaceRealizationMode, filesystemOwnership: null },
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body.config).toEqual({ ...unrelatedConfig, workspaceRealizationMode });
+      expect(mockEnvironmentService.update.mock.calls[0][1].config).not.toHaveProperty("filesystemOwnership");
+      const detail = await request(app).get("/api/environments/env-1");
+      const list = await request(app).get("/api/companies/company-1/environments");
+      expect(detail.status).toBe(200);
+      expect(list.status).toBe(200);
+      expect(detail.body.config).toEqual(res.body.config);
+      expect(list.body[0].config).toEqual(res.body.config);
+      expect(detail.body.envVars).toEqual({});
+      expect(detail.body.metadata).toEqual({ source: "manual" });
+      expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "environment.updated" }));
+    });
+
+    it("preserves omitted workspace policy fields on unrelated config patches", async () => {
+      const app = createApp({ type: "board", userId: "user-1", source: "local_implicit" });
+      const res = await request(app).patch("/api/environments/env-1?companyId=company-1").send({
+        config: driver === "ssh" ? { port: 2022 } : { shell: "bash" },
+      });
+      expect(res.status).toBe(200);
+      const reload = await request(app).get("/api/environments/env-1");
+      expect(reload.status).toBe(200);
+      expect(reload.body.config).toEqual({
+        ...unrelatedConfig, ...(driver === "ssh" ? { port: 2022 } : { shell: "bash" }),
+        workspaceRealizationMode: "in_place", filesystemOwnership,
+      });
+    });
+
+    it("rejects copy realization without explicitly clearing existing ownership", async () => {
+      const app = createApp({ type: "board", userId: "user-1", source: "local_implicit" });
+      const res = await request(app).patch("/api/environments/env-1?companyId=company-1").send({
+        config: { workspaceRealizationMode: "copy" },
+      });
+      expect(res.status).toBe(422);
+      expect(res.body.error).toContain("in-place");
+      expect(mockEnvironmentService.update).not.toHaveBeenCalled();
+      const reload = await request(app).get("/api/environments/env-1");
+      expect(reload.status).toBe(200);
+      expect(reload.body.config).toEqual({ ...unrelatedConfig, workspaceRealizationMode: "in_place", filesystemOwnership });
+    });
+  });
+
   it("resets config instead of inheriting SSH secrets when switching to local without an explicit config", async () => {
     const environment = {
       ...createEnvironment(),

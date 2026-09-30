@@ -171,6 +171,17 @@ function installStorybookApiFixtures() {
       return Response.json({});
     }
 
+    if (url.pathname === "/api/instance/settings/general") {
+      return Response.json({
+        censorUsernameInLogs: false, keyboardShortcuts: true,
+        feedbackDataSharingPreference: "prompt", backupRetention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
+      });
+    }
+
+    if (/^\/api\/companies\/company-storybook\/(skills|routines)$/.test(url.pathname)) {
+      return Response.json([]);
+    }
+
     // The connect step's provider sign-in is gated on a *sandbox* environment
     // resolving, its provider supporting a login PTY, and the auth signal coming
     // back absent. These three answers decide whether that panel renders at all,

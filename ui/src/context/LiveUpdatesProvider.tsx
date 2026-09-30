@@ -548,6 +548,7 @@ interface RunLiveStatusPatch {
   currentToolName?: string | null;
   lastAssistantSnippet?: string | null;
   lastEventAt?: string | null;
+  filesystemOwnershipState?: HeartbeatRun["filesystemOwnershipState"];
 }
 
 function hasPatchKey<K extends keyof RunLiveStatusPatch>(
@@ -578,6 +579,9 @@ function applyRunLiveStatusPatch<T extends ActiveRunForIssue | LiveRunForIssue>(
       : {}),
     ...(hasPatchKey(patch, "lastEventAt")
       ? { lastEventAt: patch.lastEventAt }
+      : {}),
+    ...(hasPatchKey(patch, "filesystemOwnershipState")
+      ? { filesystemOwnershipState: patch.filesystemOwnershipState }
       : {}),
   };
 }
@@ -625,6 +629,8 @@ function readRunLiveStatusPatchFromPayload(
   }
 
   if (eventType === "heartbeat.run.event") {
+    if (payload.eventType === "workspace.ownership.waiting") patch.filesystemOwnershipState = "waiting";
+    if (payload.eventType === "workspace.ownership.acquired") patch.filesystemOwnershipState = "acquired";
     const message = readString(payload.message);
     if (message) patch.message = message;
     patch.updatedAt = readString(payload.updatedAt) ?? eventCreatedAt;
@@ -1713,6 +1719,10 @@ function handleLiveEvent(
   }
 
   if (event.type === "heartbeat.run.event") {
+    if (payload.eventType === "workspace.ownership.waiting" || payload.eventType === "workspace.ownership.acquired") {
+      const runId = readString(payload.runId);
+      if (runId) queryClient.invalidateQueries({ queryKey: queryKeys.runDetail(runId) });
+    }
     return;
   }
 

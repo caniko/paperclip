@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { filesystemOwnershipSchema } from "@paperclipai/shared";
 import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import type {
@@ -37,14 +38,36 @@ const secretRefSchema = z.object({
   version: z.union([z.literal("latest"), z.number().int().positive()]).optional().default("latest"),
 }).strict();
 
-const sshEnvironmentConfigSchema = z.object({
+const inPlacePolicyFields = {
+  workspaceRealizationMode: z.enum(["copy", "in_place"]).optional(),
+  // Config PATCHes merge with the saved config. Null explicitly clears ownership;
+  // omission preserves it. Parsed/persisted configs keep the nonnullable shape.
+  filesystemOwnership: filesystemOwnershipSchema.nullish().transform((value) => value ?? undefined),
+};
+
+function omitClearedFilesystemOwnership<T extends { filesystemOwnership?: unknown }>(config: T): T {
+  if (config.filesystemOwnership === undefined) delete config.filesystemOwnership;
+  return config;
+}
+
+function ownershipRequiresInPlace(config: { workspaceRealizationMode?: string; filesystemOwnership?: unknown }) {
+  return config.filesystemOwnership === undefined || config.workspaceRealizationMode === "in_place";
+}
+
+const ownershipRequiresInPlaceMessage = "Filesystem ownership requires an in-place workspace.";
+const localEnvironmentConfigSchema = z.object(inPlacePolicyFields).passthrough()
+  .refine(ownershipRequiresInPlace, ownershipRequiresInPlaceMessage)
+  .transform(omitClearedFilesystemOwnership);
+
+const sshEnvironmentConfigBaseSchema = z.object({
+  ...inPlacePolicyFields,
   host: z.string({ error: "SSH environments require a host." }).trim().min(1, "SSH environments require a host."),
   port: z.coerce.number().int().min(1).max(65535).default(22),
   username: z.string({ error: "SSH environments require a username." }).trim().min(1, "SSH environments require a username."),
   remoteWorkspacePath: z
     .string({ error: "SSH environments require a remote workspace path." })
-    .trim()
     .min(1, "SSH environments require a remote workspace path.")
+    .refine((value) => !value.includes("\0"), "SSH remote workspace path must not contain NUL.")
     .refine((value) => value.startsWith("/"), "SSH remote workspace path must be absolute."),
   privateKey: z.null().optional().default(null),
   privateKeySecretRef: secretRefSchema.optional().nullable().default(null),
@@ -57,14 +80,19 @@ const sshEnvironmentConfigSchema = z.object({
   strictHostKeyChecking: z.boolean().optional().default(true),
 }).strict();
 
-const sshEnvironmentConfigProbeSchema = sshEnvironmentConfigSchema.extend({
+const sshEnvironmentConfigSchema = sshEnvironmentConfigBaseSchema
+  .refine(ownershipRequiresInPlace, ownershipRequiresInPlaceMessage)
+  .transform(omitClearedFilesystemOwnership);
+
+const sshEnvironmentConfigProbeSchema = sshEnvironmentConfigBaseSchema.extend({
   privateKey: z
     .string()
     .trim()
     .optional()
     .nullable()
     .transform((value) => (value && value.length > 0 ? value : null)),
-}).strict();
+}).refine(ownershipRequiresInPlace, ownershipRequiresInPlaceMessage)
+  .transform(omitClearedFilesystemOwnership);
 
 const sshEnvironmentConfigPersistenceSchema = sshEnvironmentConfigProbeSchema;
 
@@ -438,7 +466,9 @@ export function normalizeEnvironmentConfig(input: {
   config: Record<string, unknown> | null | undefined;
 }): Record<string, unknown> {
   if (input.driver === "local") {
-    return { ...parseObject(input.config) };
+    const parsed = localEnvironmentConfigSchema.safeParse(parseObject(input.config));
+    if (!parsed.success) throw unprocessable(toErrorMessage(parsed.error), { issues: parsed.error.issues });
+    return parsed.data;
   }
 
   if (input.driver === "ssh") {
@@ -791,7 +821,7 @@ export function parseEnvironmentDriverConfig(
   if (environment.driver === "local") {
     return {
       driver: "local",
-      config: { ...parseObject(environment.config) },
+      config: localEnvironmentConfigSchema.parse(parseObject(environment.config)),
     };
   }
 

@@ -1025,6 +1025,77 @@ describe("buildIssueChatMessages", () => {
     expect(ids).not.toContain("system:interaction:interaction-degenerate");
   });
 
+  it.each(["live-runs", "active-run", "overlapping-snapshots"] as const)(
+    "updates durable ownership metadata from waiting to acquired through %s without progress output",
+    (source) => {
+      const run: LiveRunForIssue = {
+        id: "run-ownership-1",
+        status: "running",
+        invocationSource: "manual",
+        triggerDetail: null,
+        startedAt: "2026-04-06T12:03:00.000Z",
+        finishedAt: null,
+        createdAt: "2026-04-06T12:03:00.000Z",
+        agentId: "agent-1",
+        agentName: "HermesWorker",
+        adapterType: "hermes_gateway",
+        currentStatusMessage: null,
+        currentStatusUpdatedAt: null,
+        currentToolName: null,
+        lastAssistantSnippet: null,
+        lastEventAt: null,
+      };
+      const buildSnapshot = (filesystemOwnershipState: LiveRunForIssue["filesystemOwnershipState"]) => {
+        const updatedRun = { ...run, filesystemOwnershipState };
+        return buildIssueChatMessages({
+          comments: [],
+          timelineEvents: [],
+          linkedRuns: [],
+          liveRuns: source === "live-runs" ? [updatedRun]
+            : source === "overlapping-snapshots" ? [{ ...run, filesystemOwnershipState: "waiting" }] : [],
+          activeRun: source === "live-runs" ? null : {
+            ...updatedRun,
+            startedAt: new Date(run.startedAt!),
+            createdAt: new Date(run.createdAt),
+          },
+          issueId: "issue-1",
+          issueStatus: "in_progress",
+        });
+      };
+
+      const waiting = stabilizeThreadMessages(buildSnapshot("waiting"), [], new Map());
+      expect(waiting.messages).toHaveLength(1);
+      expect(waiting.messages[0]).toMatchObject({
+        id: "run-assistant:run-ownership-1",
+        role: "assistant",
+        content: [],
+        status: { type: "running" },
+        metadata: { custom: {
+          kind: "live-run", runId: run.id, filesystemOwnershipState: "waiting",
+          currentStatusMessage: null, lastEventAt: null,
+        } },
+      });
+
+      // In the overlap case the live-runs list still says waiting. The selected
+      // active-run snapshot must update the existing message, not duplicate it
+      // or leave the durable waiting notice in the stabilized message cache.
+      const acquired = stabilizeThreadMessages(buildSnapshot("acquired"), waiting.messages, waiting.cache);
+      expect(acquired.messages).toHaveLength(1);
+      expect(acquired.messages[0]).toMatchObject({
+        id: waiting.messages[0].id,
+        metadata: { custom: { filesystemOwnershipState: "acquired" } },
+      });
+      expect(acquired.messages[0]).not.toBe(waiting.messages[0]);
+
+      const cleared = stabilizeThreadMessages(buildSnapshot(null), acquired.messages, acquired.cache);
+      expect(cleared.messages).toHaveLength(1);
+      expect(cleared.messages[0]).toMatchObject({
+        id: waiting.messages[0].id,
+        metadata: { custom: { filesystemOwnershipState: null } },
+      });
+    },
+  );
+
   it("preserves ephemeral active-run status metadata for rendering", () => {
     const activeRun: ActiveRunForIssue = {
       id: "run-active-1",

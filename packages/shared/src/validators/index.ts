@@ -84,6 +84,7 @@ export {
 } from "./company.js";
 export {
   environmentDriverSchema,
+  filesystemOwnershipSchema,
   environmentStatusSchema,
   environmentLeaseStatusSchema,
   environmentLeaseCleanupStatusSchema,

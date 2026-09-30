@@ -25,6 +25,10 @@ import {
   isRemotePlainHttp,
   remotePlainHttpDeniedMessage,
 } from "./transport-security.js";
+import { bindSessionKey, requireWorkspaceCapability, resolveWorkspaceBinding, type WorkspaceBinding } from "./execution-context.js";
+import { admitOwnedRun, waitForOwnedRun } from "./run-lifetime.js";
+import { executionCheckpoint, settleOwnedAdmission } from "./recovery.js";
+import { requireManagedMcpCapability, resolveManagedMcp, type ManagedMcpManifest } from "./managed-mcp.js";
 
 type SessionKeyStrategy = "issue" | "agent" | "run" | "none";
 
@@ -118,7 +122,7 @@ function normalizeSessionKeyStrategy(value: unknown): SessionKeyStrategy {
   return "issue";
 }
 
-function normalizeBaseUrl(value: string): URL | null {
+export function normalizeBaseUrl(value: string): URL | null {
   try {
     const url = new URL(value);
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
@@ -224,7 +228,7 @@ function redactForLog(value: unknown, keyPath: string[] = [], depth = 0, redactT
   return redactText(String(value));
 }
 
-function parseHeaders(value: unknown): Record<string, string> {
+export function parseHeaders(value: unknown): Record<string, string> {
   const source =
     typeof value === "string" && value.trim().length > 0
       ? (() => {
@@ -245,7 +249,7 @@ function parseHeaders(value: unknown): Record<string, string> {
   return headers;
 }
 
-function buildHeaders(input: {
+export function buildHeaders(input: {
   apiKey: string;
   sessionKey: string | null;
   runId: string;
@@ -474,6 +478,20 @@ function extractOutput(value: unknown): string | null {
   return nested ? extractOutput(nested) : null;
 }
 
+function terminalReceiptForRun(runId: string, value: unknown, fallbackEventName: string | null = null): TerminalState | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const receiptRunId = extractRunId(record);
+  if (receiptRunId && receiptRunId !== runId) return null;
+  const eventName = eventNameFromData(record, fallbackEventName);
+  // A child or tool's terminal status does not settle the parent run. Receipts
+  // without an explicit identity are scoped by the parent HTTP/SSE endpoint.
+  if (eventName && !eventName.startsWith("run.")) return null;
+  const status = extractStatus(record) ?? (eventName?.startsWith("run.") ? eventName.slice(4) : null);
+  if (!status || !TERMINAL_STATUSES.has(status)) return null;
+  return { runId, status, eventName, payload: record, output: extractOutput(record) };
+}
+
 async function handleEvent(
   ctx: AdapterExecutionContext,
   state: ExecutionState,
@@ -496,30 +514,20 @@ async function handleEvent(
     await ctx.onLog("stdout", sanitizedDelta);
   }
 
-  const status = extractStatus(parsed) ?? (eventName?.startsWith("run.") ? eventName.slice(4) : null);
-  if (status && TERMINAL_STATUSES.has(status)) {
-    markTerminal(state, {
-      runId: state.runId,
-      status,
-      eventName,
-      payload: record,
-      output: extractOutput(parsed),
-    });
-  }
+  const terminal = terminalReceiptForRun(state.runId, parsed, eventName);
+  if (terminal) markTerminal(state, terminal);
 }
 
 async function delay(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return;
   await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal.addEventListener("abort", finish, { once: true });
   });
 }
 
@@ -530,6 +538,7 @@ async function pollStatus(input: {
   state: ExecutionState;
   signal: AbortSignal;
   intervalMs: number;
+  supervised?: boolean;
   redactText?: TextRedactor;
 }): Promise<void> {
   while (!input.signal.aborted && !input.state.terminal) {
@@ -539,17 +548,10 @@ async function pollStatus(input: {
       const status = await fetchJson(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.state.runId)}`), {
         method: "GET",
         headers: input.headers,
-        signal: input.signal,
+        signal: input.supervised ? AbortSignal.any([input.signal, AbortSignal.timeout(30_000)]) : input.signal,
       });
-      const normalized = extractStatus(status);
-      if (normalized && TERMINAL_STATUSES.has(normalized)) {
-        markTerminal(input.state, {
-          runId: input.state.runId,
-          status: normalized,
-          payload: asRecord(status),
-          output: extractOutput(status),
-        });
-      }
+      const terminal = terminalReceiptForRun(input.state.runId, status);
+      if (terminal) markTerminal(input.state, terminal);
     } catch (err) {
       if (input.signal.aborted) return;
       await input.ctx.onLog("stderr", `[hermes-gateway] status poll failed: ${redactErrorMessage(err, input.redactText)}\n`);
@@ -720,6 +722,7 @@ async function stopRun(input: {
     const stopped = await fetchJson(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.runId)}/stop`), {
       method: "POST",
       headers: input.headers,
+      signal: AbortSignal.timeout(30_000),
     });
     await input.ctx.onLog("stdout", `[hermes-gateway] stop requested for run ${input.runId}\n`);
     return asRecord(stopped);
@@ -824,17 +827,34 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   const timeoutSec = parseNonNegativeNumber(ctx.config.timeoutSec, DEFAULT_TIMEOUT_SEC);
+  let binding: WorkspaceBinding | null;
+  let managedMcp: ManagedMcpManifest | null;
+  try {
+    managedMcp = resolveManagedMcp(ctx, baseUrl.toString());
+    binding = resolveWorkspaceBinding(ctx, baseUrl.toString());
+    if (managedMcp && (binding?.context.lifetime !== "wait_for_jobs" || !ctx.onExecutionCheckpoint)) {
+      throw Object.assign(new Error("Managed MCP requires a supervised workspace and host-owned durable execution checkpoints."), {
+        code: "hermes_gateway_managed_mcp_blocked",
+      });
+    }
+  } catch (err) {
+    return errorResult(err);
+  }
+  // A stored session from another target must receive the full brief.
+  if (managedMcp || (binding && ctx.runtime.sessionParams?.executionContextFingerprint !== binding.fingerprint)) {
+    ctx = { ...ctx, runtime: { ...ctx.runtime, sessionId: null, sessionParams: null, sessionDisplayId: null } };
+  }
   const timeoutMs = timeoutSec > 0 ? Math.ceil(timeoutSec * 1000) : 0;
   const reconnectMs = Math.floor(clamp(parseNonNegativeNumber(ctx.config.eventReconnectMs, DEFAULT_EVENT_RECONNECT_MS), 250, 30_000));
   const pollIntervalMs = Math.floor(clamp(parseNonNegativeNumber(ctx.config.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS), 250, 10_000));
   const strategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
-  const sessionKey = resolveSessionKey({
+  const sessionKey = managedMcp ? null : bindSessionKey(resolveSessionKey({
     strategy,
     companyId: ctx.agent.companyId,
     agentId: ctx.agent.id,
     runId: ctx.runId,
     issueId: issueIdFromContext(ctx),
-  });
+  }), binding);
   const extraHeaders = parseHeaders(ctx.config.headers);
   const runHeaders = buildHeaders({
     apiKey,
@@ -856,8 +876,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     sessionKey,
     runHeaders.Authorization,
     runHeaders["X-Hermes-Session-Key"],
+    ...(managedMcp?.servers.map((server) => server.token) ?? []),
   ]);
   const body = buildRunBody(ctx, sessionKey);
+  if (binding) body.execution_context = binding.context;
+  if (managedMcp) body.runtime_mcp = managedMcp;
+  const requestBody = JSON.stringify(body);
   const createRunUrl = apiUrl(baseUrl, "/v1/runs");
 
   await ctx.onMeta?.({
@@ -876,16 +900,47 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   await ctx.onLog("stdout", `[hermes-gateway] request headers (redacted): ${stringifyForLog(redactForLog(runHeaders, [], 0, redactText), 3_000)}\n`);
 
   let runId: string | null = null;
+  const supervised = binding?.context.lifetime === "wait_for_jobs";
+  const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : null;
+  const deadlineExpired = () => deadline !== null && Date.now() >= deadline;
+  const checkpoint = executionCheckpoint(baseUrl, runHeaders, requestBody);
+  let checkpointPrepared = false;
   try {
+    if (supervised) await ctx.onCancellationReady?.();
+    if (binding || managedMcp) {
+      const capabilities = await fetchJson(apiUrl(baseUrl, "/v1/capabilities"), {
+        method: "GET", headers: runHeaders,
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (binding) requireWorkspaceCapability(capabilities, binding);
+      if (managedMcp) requireManagedMcpCapability(capabilities, managedMcp);
+    }
+    if (supervised && ctx.signal?.aborted) {
+      return { exitCode: 1, signal: "SIGTERM", timedOut: false, errorCode: "hermes_gateway_cancelled" };
+    }
+    if (supervised) {
+      if (!ctx.onExecutionCheckpoint) throw new Error("wait_for_jobs requires host-owned durable execution checkpoints");
+      await ctx.onExecutionCheckpoint(checkpoint);
+      checkpointPrepared = true;
+    }
     // This adapter has no local child process, so crossing into the first
     // remote create request is its dispatch boundary. Report it before the
     // request can block so continuation gates may release their issue lock.
     ctx.onDispatch?.();
-    const created = await fetchJson(createRunUrl, {
-      method: "POST",
-      headers: runHeaders,
-      body: JSON.stringify(body),
-    });
+    const create = async (url = createRunUrl) => {
+      const receipt = await fetchJson(url, {
+        method: "POST", headers: runHeaders, body: requestBody,
+        ...(supervised || managedMcp ? { signal: AbortSignal.timeout(30_000), redirect: "error" } : {}),
+      });
+      if (supervised && !extractRunId(receipt)) throw new Error("Hermes admission acknowledgement has no run_id; retaining ownership.");
+      return receipt;
+    };
+    const created = supervised ? await admitOwnedRun({
+      create, retryMs: reconnectMs,
+      stopAdmission: () => create(apiUrl(baseUrl, "/v1/runs/stop")),
+      shouldStop: () => Boolean(ctx.signal?.aborted) || deadlineExpired(),
+      onUncertain: (err) => ctx.onLog("stderr", `[hermes-gateway] admission uncertain; replaying original idempotency key: ${redactErrorMessage(err, redactText)}\n`),
+    }) : await create();
     runId = extractRunId(created);
     if (!runId) {
       return {
@@ -898,15 +953,29 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       };
     }
   } catch (err) {
+    // Recovery may already be using the persisted checkpoint. Even a definitive
+    // rejection here needs a provider-side fence before ownership is released.
+    if (checkpointPrepared) {
+      await settleOwnedAdmission(checkpoint, reconnectMs);
+      await ctx.onProviderStopped?.();
+    }
     return errorResult(err, redactText);
   }
 
-  await ctx.onLog("stdout", `[hermes-gateway] run created: ${runId}\n`);
+  // After admission, a broken log sink must not stop lifecycle observation.
+  // Both synchronous throws and rejected log writes leave ownership intact.
+  const observer = supervised ? {
+    ...ctx,
+    onLog: async (...args: Parameters<AdapterExecutionContext["onLog"]>) => {
+      try { await ctx.onLog(...args); } catch { /* keep observing the owned run */ }
+    },
+  } : ctx;
+  await observer.onLog("stdout", `[hermes-gateway] run created: ${runId}\n`);
 
   const state = createExecutionState(runId);
   const controller = new AbortController();
-  void consumeEvents({
-    ctx,
+  const events = consumeEvents({
+    ctx: observer,
     baseUrl,
     headers: eventHeaders,
     state,
@@ -914,15 +983,41 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     reconnectMs,
     redactText,
   }).catch(() => undefined);
-  void pollStatus({
-    ctx,
+  const polling = pollStatus({
+    ctx: observer,
     baseUrl,
     headers: eventHeaders,
     state,
     signal: controller.signal,
     intervalMs: pollIntervalMs,
+    supervised,
     redactText,
   }).catch(() => undefined);
+
+  if (supervised && binding) {
+    const timedOutBeforeObservation = deadlineExpired();
+    const owned = await waitForOwnedRun({
+      terminal: state.terminalPromise.then(terminal => { controller.abort(); return terminal; }), signal: ctx.signal,
+      timeoutMs: deadline === null ? 0 : Math.max(1, deadline - Date.now()), retryMs: reconnectMs,
+      stop: () => stopRun({ ctx: observer, baseUrl, headers: eventHeaders, runId, redactText }),
+      onStopReceipt: receipt => {
+        const terminal = terminalReceiptForRun(state.runId, receipt);
+        if (terminal) markTerminal(state, terminal);
+      },
+    });
+    controller.abort();
+    await Promise.all([events, polling]);
+    await ctx.onProviderStopped?.();
+    const result = mapFinalResultForTest({ terminal: owned.terminal, outputChunks: state.outputChunks,
+      sessionKey, strategy, redactText });
+    result.sessionParams = { ...result.sessionParams, executionContextFingerprint: binding.fingerprint };
+    if (owned.timedOut || timedOutBeforeObservation) {
+      result.timedOut = true;
+      result.errorCode = "hermes_gateway_timeout";
+      result.errorMessage = `Hermes gateway run timed out after ${timeoutSec}s; owned jobs have settled.`;
+    }
+    return result;
+  }
 
   let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   const timeoutPromise = new Promise<"timeout">((resolve) => {
@@ -953,16 +1048,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       sessionParams: {
         hermesRunId: runId,
         strategy,
+        ...(binding ? { executionContextFingerprint: binding.fingerprint } : {}),
       },
       sessionDisplayId: sessionKey ? redactText(sessionKey) : null,
     };
   }
 
-  return mapFinalResultForTest({
+  const result = mapFinalResultForTest({
     terminal: outcome,
     outputChunks: state.outputChunks,
     sessionKey,
     strategy,
     redactText,
   });
+  if (binding) result.sessionParams = { ...result.sessionParams, executionContextFingerprint: binding.fingerprint };
+  return result;
 }

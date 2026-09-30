@@ -22,6 +22,10 @@ import { AGENT_CHAT_DIRECTIVE, conversationReplay, isConversation, isConversatio
 import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
 import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
+import { adapterExecutionOwnershipNotHeldCondition, lockRunForAdapterSettlement, prepareAdapterExecution, reconcileAdapterExecution, settleAdapterExecution } from "./adapter-execution-ownership.js";
+import { assertOwnedWorkspacePreparation, filesystemOwnershipPolicy, filesystemOwnershipStateColumn, readFilesystemOwnershipState, prepareRunWorkspaceOwnership } from "./workspace-ownership.js";
+import { bindRuntimeMcpServersToRun } from "./runtime-mcp-admission.js";
+import type { WorkspaceOwnershipIntent } from "@paperclipai/adapter-utils";
 import { completeTerminatedRemoteNativeSessionCleanup } from "../vendor/paperclip-runner/index.js";
 import { hasRemoteTerminationReceipt, remoteExecutionHasStopped, remoteTerminationReceipt, stoppedRemoteCleanupScopes } from "./remote-execution-termination.js";
 import { applyConnectorSkills, prepareConnectorSkillDelivery, resolveConnectorAssignments } from "./connector-runtime.js";
@@ -600,6 +604,7 @@ import {
 import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
 import { environmentRunOrchestrator } from "./environment-run-orchestrator.js";
 import { isUnsafeSessionWorkspaceCwd } from "./session-workspace-cwd.js";
+import { resolveInPlaceWorkspacePath } from "./in-place-workspace.js";
 import {
   clearHeartbeatRunRuntimeStatus,
   getHeartbeatRunRuntimeStatus,
@@ -3316,6 +3321,7 @@ const heartbeatRunProcessGroupIdColumn =
 
 const heartbeatRunListColumns = {
   id: heartbeatRuns.id,
+  filesystemOwnershipState: filesystemOwnershipStateColumn,
   responsibleUserId: heartbeatRuns.responsibleUserId,
   companyId: heartbeatRuns.companyId,
   agentId: heartbeatRuns.agentId,
@@ -3557,6 +3563,7 @@ const heartbeatRunLogAccessColumns = {
 
 const heartbeatRunIssueSummaryColumns = {
   id: heartbeatRuns.id,
+  filesystemOwnershipState: filesystemOwnershipStateColumn,
   runtimeMode: heartbeatRuns.runtimeMode,
   status: heartbeatRuns.status,
   invocationSource: heartbeatRuns.invocationSource,
@@ -8317,6 +8324,7 @@ type HeartbeatRunRuntimeStatusRunLike = {
   agentId?: string | null;
   issueId?: string | null;
   contextSnapshot?: Record<string, unknown> | null;
+  filesystemOwnershipState?: string | null;
 };
 
 function readRuntimeStatusIssueIdCandidate(
@@ -8339,6 +8347,7 @@ function decorateHeartbeatRunRuntimeStatus<
     agentId?: string | null;
   } = {},
 ): T & {
+  filesystemOwnershipState: "waiting" | "acquired" | null;
   currentStatusMessage: string | null;
   currentStatusUpdatedAt: Date | null;
   currentToolName: string | null;
@@ -8363,10 +8372,17 @@ function decorateHeartbeatRunRuntimeStatus<
           ...(issueId !== undefined ? { issueId } : {}),
         })
       : null;
+  const filesystemOwnershipState = isHeartbeatRunRuntimeStatusActive(run.status)
+    ? readFilesystemOwnershipState(run.filesystemOwnershipState
+      ?? parseObject(parseObject(run.contextSnapshot).filesystemOwnership).state)
+    : null;
 
   return {
     ...run,
-    currentStatusMessage: currentStatus?.message ?? null,
+    filesystemOwnershipState,
+    currentStatusMessage: filesystemOwnershipState === "waiting"
+      ? "Waiting for exclusive filesystem ownership"
+      : currentStatus?.message ?? null,
     currentStatusUpdatedAt: currentStatus?.updatedAt ?? null,
     currentToolName: currentStatus?.currentToolName ?? null,
     lastAssistantSnippet: currentStatus?.lastAssistantSnippet ?? null,
@@ -9548,6 +9564,56 @@ export function heartbeatService(
       pluginWorkerManager: options.pluginWorkerManager,
     });
   const instructionCopies = agentInstructionWorkingCopyService(db, { environmentRuntime });
+
+  async function reconcileRunAdapterExecution(run: { companyId: string; id: string }) {
+    return reconcileAdapterExecution(db, { companyId: run.companyId, runId: run.id,
+      finalizeWorkspace: async (checkpoint) => {
+        // The sealed intent was created only for protected in-place work. Its
+        // target owns all writers; recovery never replays user commands or copies
+        // files back using the agent's possibly changed configuration.
+        const executionContext = parseObject(checkpoint.executionContext);
+        const ownership = parseObject(executionContext.ownership);
+        if (executionContext.version !== 1 || executionContext.lifetime !== "wait_for_jobs"
+          || ownership.request !== run.id || typeof executionContext.cwd !== "string") {
+          throw new Error("Protected workspace recovery intent is invalid");
+        }
+        await revokeHeartbeatRunGatewayTokens({ db, companyId: run.companyId, runId: run.id });
+        await instructionCopies.release(run.companyId, run.id);
+        await db.transaction(async (tx) => {
+          await lockRunForAdapterSettlement(tx, run.id);
+          const [current] = await tx.select().from(heartbeatRuns).where(and(
+            eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+          ));
+          if (!current) throw new Error("Protected workspace recovery run is unavailable");
+          const [finalized] = await tx.select({ id: workspaceOperations.id }).from(workspaceOperations).where(and(
+            eq(workspaceOperations.companyId, run.companyId), eq(workspaceOperations.heartbeatRunId, run.id),
+            eq(workspaceOperations.phase, "workspace_finalize"),
+            inArray(workspaceOperations.status, ["succeeded", "failed"]), isNotNull(workspaceOperations.finishedAt),
+          )).limit(1);
+          if (finalized) return;
+          const context = parseObject(current.contextSnapshot);
+          const workspaceId = readNonEmptyString(context.executionWorkspaceId);
+          const [workspace] = workspaceId ? await tx.select({ id: executionWorkspaces.id }).from(executionWorkspaces).where(and(
+            eq(executionWorkspaces.id, workspaceId), eq(executionWorkspaces.companyId, run.companyId),
+          )) : [];
+          if (workspaceId && !workspace) throw new Error("Protected recovery workspace is unavailable");
+          // Retained context outlives task deletion. Keep a surviving optional
+          // FK locked through insertion; deleted tasks have no attribution.
+          const issueId = readNonEmptyString(context.issueId);
+          const [task] = issueId ? await tx.select({ id: issues.id }).from(issues).where(and(
+            eq(issues.id, issueId), eq(issues.companyId, run.companyId),
+          )).for("key share") : [];
+          // A missing result cannot be promoted to successful finalization after
+          // restart. Record a failed boundary to keep dependent readiness gated.
+          await tx.insert(workspaceOperations).values({ companyId: run.companyId, heartbeatRunId: run.id,
+            executionWorkspaceId: workspace?.id ?? null, issueId: task?.id ?? null,
+            phase: "workspace_finalize", cwd: executionContext.cwd as string, status: "failed", finishedAt: new Date(),
+            metadata: { adapterType: "hermes_gateway", recovery: "protected_in_place", reason: "controller_finalization_interrupted" },
+          });
+        });
+      },
+    });
+  }
   const envOrchestrator = environmentRunOrchestrator(db, {
     pluginWorkerManager: options.pluginWorkerManager,
     environmentRuntime,
@@ -12331,7 +12397,11 @@ export function heartbeatService(
     agent: typeof agents.$inferSelect,
     context: Record<string, unknown>,
     previousSessionParams: Record<string, unknown> | null,
-    opts?: { useProjectWorkspace?: boolean | null },
+    opts?: {
+      useProjectWorkspace?: boolean | null;
+      executionEnvironmentDriver?: string | null;
+      executionEnvironmentConfig?: Record<string, unknown> | null;
+    },
   ): Promise<ResolvedAnchorWorkspaceForRun> {
     const issueId =
       readNonEmptyString(context.issueId) ?? readNonEmptyString(context.taskId);
@@ -12389,6 +12459,32 @@ export function heartbeatService(
       repoUrl: readNonEmptyString(workspace.repoUrl),
       repoRef: readNonEmptyString(workspace.repoRef),
     }));
+
+    const selectedWorkspace = preferredProjectWorkspaceId
+      ? projectWorkspaceRows.find((workspace) => workspace.id === preferredProjectWorkspaceId)
+      : projectWorkspaceRows[0];
+    const inPlaceCwd = await resolveInPlaceWorkspacePath({
+      driver: opts?.executionEnvironmentDriver,
+      environmentConfig: opts?.executionEnvironmentConfig,
+      cwd: selectedWorkspace?.cwd,
+    });
+    if (inPlaceCwd !== null) {
+      if (preferredProjectWorkspaceId && !selectedWorkspace) {
+        throw new Error("In-place workspace is not available on this project.");
+      }
+      return {
+        cwd: inPlaceCwd,
+        source: selectedWorkspace ? "project_primary" : "agent_home",
+        projectId: resolvedProjectId,
+        workspaceId: selectedWorkspace?.id ?? null,
+        repoUrl: selectedWorkspace?.repoUrl ?? null,
+        repoRef: selectedWorkspace?.repoRef ?? null,
+        workspaceHints,
+        warnings: [],
+        baseCwdFallback: false,
+        materializationFailures: [],
+      };
+    }
 
     if (projectWorkspaceRows.length > 0) {
       const preferredWorkspace = preferredProjectWorkspaceId
@@ -12574,6 +12670,7 @@ export function heartbeatService(
     opts?: {
       useProjectWorkspace?: boolean | null;
       executionEnvironmentDriver?: string | null;
+      executionEnvironmentConfig?: Record<string, unknown> | null;
     },
   ): Promise<ResolvedWorkspaceForRun> {
     const anchor = await resolveAnchorWorkspaceForRun(
@@ -12587,6 +12684,17 @@ export function heartbeatService(
         ...anchor,
         additionalWorkspaces: [],
         referencedProjectFailures: [],
+      };
+    }
+    // Resolving referenced sources can clone repositories on the controller.
+    // An authoritative target must not gain preparation writers or paths from
+    // that copy-oriented pipeline, even before an ownership grant is acquired.
+    if (opts?.executionEnvironmentConfig?.workspaceRealizationMode === "in_place") {
+      return {
+        ...anchor,
+        additionalWorkspaces: [],
+        referencedProjectFailures: [],
+        warnings: [...anchor.warnings, "In-place workspaces use existing target directories; referenced projects are not materialized."],
       };
     }
 
@@ -12834,7 +12942,9 @@ export function heartbeatService(
             status,
             patch,
           })
-        : await db
+        : await db.transaction(async (tx) => {
+            if (isHeartbeatRunTerminalStatus(status)) await lockRunForAdapterSettlement(tx, runId);
+            return tx
             .update(heartbeatRuns)
             .set({
               status,
@@ -12842,9 +12952,11 @@ export function heartbeatService(
               executionStatusDeliveryId: randomUUID(),
               updatedAt: new Date(),
             })
-            .where(eq(heartbeatRuns.id, runId))
+            .where(and(eq(heartbeatRuns.id, runId),
+              isHeartbeatRunTerminalStatus(status) ? adapterExecutionOwnershipNotHeldCondition() : undefined))
             .returning()
             .then((rows) => rows[0] ?? null);
+          });
 
     if (updated) {
       publishLiveEvent({
@@ -12919,7 +13031,9 @@ export function heartbeatService(
             patch,
             fromStatuses,
           })
-        : await db
+        : await db.transaction(async (tx) => {
+            if (isHeartbeatRunTerminalStatus(status)) await lockRunForAdapterSettlement(tx, runId);
+            return tx
             .update(heartbeatRuns)
             .set({
               status,
@@ -12932,12 +13046,13 @@ export function heartbeatService(
                 eq(heartbeatRuns.id, runId),
                 inArray(heartbeatRuns.status, fromStatuses),
                 ...(isHeartbeatRunTerminalStatus(status)
-                  ? [nativeRunnerOwnershipNotHeldCondition()]
+                  ? [nativeRunnerOwnershipNotHeldCondition(), adapterExecutionOwnershipNotHeldCondition()]
                   : []),
               ),
             )
             .returning()
             .then((rows) => rows[0] ?? null);
+          });
 
     if (updated) {
       publishLiveEvent({
@@ -19325,6 +19440,7 @@ export function heartbeatService(
           (!!run.processPid || !!run.processGroupId)) ||
           monitorDispatchLostWithoutFutureWake);
       if (!(await revokeExpiredLegacyController(db, run))) continue;
+      if (await reconcileRunAdapterExecution(run) === "pending") continue;
       const baseMessage = buildProcessLossMessage(run);
       const conversationContinuationEligible = await runUsedConversationAdapter(db, run);
 
@@ -20241,7 +20357,10 @@ export function heartbeatService(
         run.controllerBootId !== legacyControllerBootId) return;
     activeRunExecutions.add(run.id);
     const executionControl = createAdapterExecutionControl();
+    const claimedControllerBootId = run.controllerBootId;
     const controllerLease = watchLegacyControllerLease(db, run, executionControl.controller);
+    let workspaceOwnership: WorkspaceOwnershipIntent | undefined;
+    let protectedWorkspaceRequested = false;
     let runScratch: HeartbeatRunScratch | null = null;
     let githubLauncherLocation:
       Parameters<typeof cleanupGitHubOperationLaunchers>[0] | null = null;
@@ -21638,6 +21757,11 @@ export function heartbeatService(
             ),
           ),
         );
+      const ownershipPolicy = filesystemOwnershipPolicy(selectedEnvironmentForConfig);
+      if (ownershipPolicy) {
+        protectedWorkspaceRequested = true;
+        assertOwnedWorkspacePreparation(mergedConfig, getServerAdapter(agent.adapterType));
+      }
       const {
         selectedEnvironmentDriver: lowTrustPreflightEnvironmentDriver,
         workspace: resolvedWorkspace,
@@ -21664,6 +21788,11 @@ export function heartbeatService(
           return preflightEnvironment.driver;
         },
         resolveWorkspace: async () => {
+          if (selectedEnvironmentForConfig?.config?.workspaceRealizationMode === "in_place"
+            && (selectedEnvironmentForConfig.driver === "local" || selectedEnvironmentForConfig.driver === "ssh")
+            && (nativeChatWorkspaceScope || parseObject(mergedConfig.workspaceStrategy).type === "git_worktree")) {
+            throw new Error("In-place workspaces require the existing directory; isolated task roots and Git worktree provisioning are incompatible.");
+          }
           if (nativeChatWorkspaceScope && !nativeChatWorkspaceScope.projectId) {
             const cwd = await materializeNativeChatTaskRoot(
               nativeChatWorkspaceScope,
@@ -21696,6 +21825,7 @@ export function heartbeatService(
               // transport with the remote flag on. This never changes the anchor workspace.
               executionEnvironmentDriver:
                 selectedEnvironmentForConfig?.driver ?? null,
+              executionEnvironmentConfig: selectedEnvironmentForConfig?.config ?? null,
             },
           );
           // Additional referenced projects are a separate trusted Board
@@ -21715,6 +21845,37 @@ export function heartbeatService(
           trustPreset,
           selectedEnvironmentDriver: lowTrustPreflightEnvironmentDriver,
         });
+      let ownedEnvironmentAcquisition: Awaited<ReturnType<typeof envOrchestrator.acquireForRun>> | null = null;
+      if (ownershipPolicy) {
+        await registerAdapterExecutionControl(run.id, executionControl);
+        await controllerLease.assertOwned();
+        ownedEnvironmentAcquisition = await envOrchestrator.acquireForRun({
+          companyId: agent.companyId, selectedEnvironmentId, localEnvironmentId: localEnvironment.id,
+          adapterType: agent.adapterType, adapterConfig: parseObject(agent.adapterConfig),
+          issueId: issueId ?? null, heartbeatRunId: run.id, agentId: agent.id,
+          persistedExecutionWorkspace: null, executionWorkspaceSettings: environmentExecutionWorkspaceSettings,
+        });
+        const decision = evaluateExecutionAllowlist(executionPolicy, {
+          driver: ownedEnvironmentAcquisition.environment.driver, provider: null,
+        });
+        if (!decision.allowed) throw new Error(decision.reason);
+        workspaceOwnership = await prepareRunWorkspaceOwnership(db, {
+          acquired: ownedEnvironmentAcquisition, adapter: getServerAdapter(agent.adapterType), cwd: resolvedWorkspace.cwd,
+          context: { runId: run.id, agent, config: runtimeConfig, context, signal: executionControl.controller.signal,
+            assertActive: () => controllerLease.assertOwned(),
+            onWaiting: async () => {
+              context.filesystemOwnership = { state: "waiting" };
+              await db.update(heartbeatRuns).set({ contextSnapshot: context }).where(eq(heartbeatRuns.id, run.id));
+              await appendRunEvent(run, { eventType: "workspace.ownership.waiting", stream: "system", level: "info",
+                message: "Waiting for exclusive filesystem ownership; no agent work has started." });
+            },
+          },
+        });
+        context.filesystemOwnership = { state: "acquired" };
+        await db.update(heartbeatRuns).set({ contextSnapshot: context }).where(eq(heartbeatRuns.id, run.id));
+        await appendRunEvent(run, { eventType: "workspace.ownership.acquired", stream: "system", level: "info",
+          message: "Exclusive filesystem ownership acquired." });
+      }
       const executionWorkspaceBase = {
         baseCwd: resolvedWorkspace.cwd,
         source: resolvedWorkspace.source,
@@ -21840,6 +22001,12 @@ export function heartbeatService(
             ? workspaceReuseRequest.requestedExecutionWorkspaceId
             : null,
         issueId,
+        ...(workspaceOwnership && ownedEnvironmentAcquisition ? {
+          protectedFinalization: {
+            leaseId: ownedEnvironmentAcquisition.lease.id,
+            controllerBootId: claimedControllerBootId,
+          },
+        } : {}),
       });
       // The run-scoped provider resolves the active identity at each Git operation,
       // including base-ref refreshes, workspace realization, and restore.
@@ -21870,6 +22037,9 @@ export function heartbeatService(
                 ensurePersistedExecutionWorkspaceAvailable({
                   db,
                   base: executionWorkspaceBase,
+                  inPlaceCwd: selectedEnvironmentForConfig?.config?.workspaceRealizationMode === "in_place"
+                    && (selectedEnvironmentForConfig.driver === "local" || selectedEnvironmentForConfig.driver === "ssh")
+                    ? resolvedWorkspace.cwd : undefined,
                   workspace: {
                     id: reusableExistingExecutionWorkspace.id,
                     mode: reusableExistingExecutionWorkspace.mode,
@@ -22251,7 +22421,7 @@ export function heartbeatService(
       }
       await bindIssueToPersistedExecutionWorkspace(persistedExecutionWorkspace);
       const projectRepositoryPaths: string[] = [];
-      if (executionWorkspace.projectId && resolvedWorkspace.source === "project_primary" && !resolvedWorkspace.baseCwdFallback) {
+      if (!workspaceOwnership && executionWorkspace.projectId && resolvedWorkspace.source === "project_primary" && !resolvedWorkspace.baseCwdFallback) {
         const repositoryRows = await db.select().from(projectWorkspaces).where(and(
           eq(projectWorkspaces.companyId, agent.companyId),
           eq(projectWorkspaces.projectId, executionWorkspace.projectId),
@@ -22285,7 +22455,7 @@ export function heartbeatService(
       >;
       try {
         await controllerLease.assertOwned();
-        acquiredEnvironment = await envOrchestrator.acquireForRun({
+        acquiredEnvironment = ownedEnvironmentAcquisition ?? await envOrchestrator.acquireForRun({
           companyId: agent.companyId,
           selectedEnvironmentId,
           localEnvironmentId: localEnvironment.id,
@@ -22374,6 +22544,7 @@ export function heartbeatService(
       >;
       try {
         realizationResult = await envOrchestrator.realizeForRun({
+          workspaceOwnership,
           environment: selectedEnvironment,
           lease: activeEnvironmentLease.lease,
           adapterType: agent.adapterType,
@@ -22526,7 +22697,7 @@ export function heartbeatService(
         }
         return { dispatched: false };
       };
-      if (!executionTarget || executionTarget.kind === "local") {
+      if (!workspaceOwnership && (!executionTarget || executionTarget.kind === "local")) {
         try {
           runScratch = await prepareHeartbeatRunScratch({
             companyId: agent.companyId,
@@ -22570,7 +22741,7 @@ export function heartbeatService(
       } else {
         delete context.paperclipScratch;
       }
-      const gitExecutionEnv = await prepareGitHubExecutionEnvironment({
+      const gitExecutionEnv = workspaceOwnership ? parseObject(runtimeConfig.env) as Record<string, string> : await prepareGitHubExecutionEnvironment({
         target: executionTarget,
         cwd: executionWorkspace.cwd,
         env: Object.fromEntries(
@@ -22588,7 +22759,7 @@ export function heartbeatService(
       runtimeConfig = { ...runtimeConfig, env: gitExecutionEnv };
       for (const key of MANAGED_GITHUB_TOKEN_KEYS) secretKeys.add(key);
       context.githubAuthenticationMode = useHostGitHub ? "host" : "managed";
-      if (!useHostGitHub) {
+      if (!workspaceOwnership && !useHostGitHub) {
         const githubLaunchers = await prepareHeartbeatGitHubLaunchers({
           native: agent.adapterType === "paperclip_runner",
           githubConfigured: githubSelection.configured,
@@ -23128,7 +23299,7 @@ export function heartbeatService(
               typeof entry[0] === "string" && typeof entry[1] === "string",
           ),
         );
-        const runtimeServices = await ensureRuntimeServicesForRun({
+        const runtimeServices = workspaceOwnership ? [] : await ensureRuntimeServicesForRun({
           db,
           runId: run.id,
           agent: {
@@ -24597,7 +24768,10 @@ export function heartbeatService(
               runtimeMcpServers.unshift({ name: "Paperclip projects", url: `${paperclipApiBaseUrl()}/api/mcp/project-tools`,
                 token: authToken, connectionId: "paperclip-project-tools" });
             }
-            const runtimeMcp = createAdapterRuntimeMcpAccess(runtimeMcpServers);
+            const runtimeMcp = createAdapterRuntimeMcpAccess(agent.adapterType === "hermes_gateway"
+              ? bindRuntimeMcpServersToRun({ servers: runtimeMcpServers, runId: run.id, executionTarget,
+                  policy: runtimeEnv.PAPERCLIP_RUNTIME_MCP_ADMISSION })
+              : runtimeMcpServers);
             if (runtimeTools && runtimeToolDelivery === "invocation_context") {
               adapterContext.paperclipRuntimeTools = runtimeTools;
             }
@@ -24625,6 +24799,7 @@ export function heartbeatService(
                     executionContinuation: executionContinuation ?? null,
                     runtimeCommandSpec:
                       adapter.getRuntimeCommandSpec?.(runtimeConfig) ?? null,
+                    workspaceOwnership,
                     executionTarget,
                     executionTransport: remoteExecution
                       ? {
@@ -24647,7 +24822,15 @@ export function heartbeatService(
                         issueId,
                       );
                     },
-                    onProviderStopped: collectStoppedInstructions,
+                    onExecutionCheckpoint: async (checkpoint) => {
+                      await prepareAdapterExecution(db, { companyId: run.companyId, runId: run.id,
+                        leaseId: activeEnvironmentLease.lease.id, adapterType: agent.adapterType, checkpoint });
+                    },
+                    onProviderStopped: async () => {
+                      await settleAdapterExecution(db, { companyId: run.companyId, runId: run.id,
+                        leaseId: activeEnvironmentLease.lease.id });
+                      await collectStoppedInstructions();
+                    },
                     onDispatch: markDispatchStarted,
                     signal: executionControl.controller.signal,
                     ...(executionTarget?.kind === "remote" && executionTarget.transport === "sandbox" ? {
@@ -24933,6 +25116,12 @@ export function heartbeatService(
             );
           }
           await instructionCopies.release(agent.companyId, run.id);
+        }
+        // Keep the target grant through the workspace-finalization boundary.
+        // Protected adapters have completed every target writer, including tool
+        // teardown; only controller-owned result/accounting writes follow.
+        if (workspaceOwnership && await reconcileRunAdapterExecution(run) !== "settled") {
+          throw new Error("Filesystem ownership settlement is pending.");
         }
         // Reconcile the referenced-project set against the real remote staging outcome. A referenced
         // project can pass authorization and clone locally at run prep, then fail to stage into the
@@ -25998,6 +26187,13 @@ export function heartbeatService(
         });
       }
     } catch (outerErr) {
+      if (protectedWorkspaceRequested) await reconcileRunAdapterExecution(run).catch(() => "pending");
+      if (protectedWorkspaceRequested && !legacyAdapterEntered && executionControl.controller.signal.aborted &&
+          parseObject((await getRun(run.id))?.resultJson?.executionCancellation).state === "requested") {
+        // The Stop caller waits for this executor's finally block, then verifies
+        // the durable ownership receipts before acknowledging cancellation.
+        return;
+      }
       if (
         nativeOwnershipHeld ||
         outerErr instanceof NativeRunnerOwnershipUnverifiedError
@@ -26251,8 +26447,11 @@ export function heartbeatService(
         }
       }
     } finally {
+      if (protectedWorkspaceRequested) await reconcileRunAdapterExecution(run).catch(() => "pending");
       if (managedAiRuntime) await managedAiRuntime.cleanup().catch(() => logger.warn({ runId: run.id }, "AI connection refresh or cleanup failed"));
       let latestRun = await getRun(run.id).catch(() => null);
+      const preparingOwnedCancellation = protectedWorkspaceRequested && !legacyAdapterEntered &&
+        parseObject(latestRun?.resultJson?.executionCancellation).state === "requested";
       try {
         if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
           await db
@@ -26290,6 +26489,7 @@ export function heartbeatService(
         // released, so the UI never shows a finished task as "Live".
         if (
           latestRun &&
+          !preparingOwnedCancellation &&
           !nativeSessionResumeScheduled &&
           !nativeWorkspaceFinalizeScheduled &&
           !nativeOwnershipHeld
@@ -26316,6 +26516,7 @@ export function heartbeatService(
             latestRun?.status,
           );
         if (
+          !preparingOwnedCancellation &&
           !nativeSessionResumeScheduled &&
           !nativeWorkspaceFinalizeScheduled &&
           !nativeOwnershipHeld
@@ -29240,6 +29441,7 @@ export function heartbeatService(
           processCancellationSettlement,
         );
       }
+      let recoveredAdapterSettlement = false;
       const cancellation = await (async () => {
         try {
           if (control) {
@@ -29319,6 +29521,18 @@ export function heartbeatService(
             }
           }
 
+          {
+            const settlement = await reconcileRunAdapterExecution(run);
+            if (settlement === "pending") {
+              await db.update(heartbeatRuns).set({
+                error: reason, errorCode: "adapter_execution_settlement_pending",
+                resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
+                  ${JSON.stringify({ executionCancellation: { state: "requested", requestedAt: new Date().toISOString() } })}::jsonb`,
+              }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "running")));
+              return { run: await getRun(run.id), updated: false };
+            }
+            recoveredAdapterSettlement = settlement === "settled";
+          }
           const finishedAt = new Date();
           const persistedCancellationResult =
             run.runtimeMode === "native"
@@ -29336,12 +29550,15 @@ export function heartbeatService(
               finishedAt,
               error: reason,
               errorCode,
-              ...(resultJson ||
+              ...(recoveredAdapterSettlement || resultJson ||
               Object.keys(persistedCancellationResult).length > 0
                 ? {
                     resultJson: {
                       ...persistedCancellationResult,
                       ...(resultJson ?? {}),
+                      ...(recoveredAdapterSettlement ? {
+                        executionCancellation: { state: "acknowledged", acknowledgedAt: finishedAt.toISOString() },
+                      } : {}),
                       // A scheduler placeholder has no process to acknowledge.
                       // Preserve its normal release policy instead of treating
                       // it as an operator stop of provider work.
@@ -29405,6 +29622,10 @@ export function heartbeatService(
       const cancelled = cancellation.run;
 
       if (cancellation.updated && cancelled) {
+        if (recoveredAdapterSettlement) {
+          await releaseEnvironmentLeasesForRun({ runId: cancelled.id, companyId: cancelled.companyId,
+            agentId: cancelled.agentId, status: cancelled.status, failureReason: cancelled.error ?? undefined });
+        }
         await setWakeupStatus(run.wakeupRequestId, "cancelled", {
           finishedAt: cancelled.finishedAt ?? new Date(),
           error: reason,
@@ -29452,7 +29673,7 @@ export function heartbeatService(
           ? captureAdapterStopOwnership(run.id)
           : undefined;
       try {
-        if (stopOwnership?.control) {
+        if (run.runtimeMode !== "native") {
           await cancelRunInternal(run.id, reason, { errorCode });
           continue;
         }

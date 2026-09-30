@@ -7,6 +7,15 @@ import {
 } from "./environment-support.js";
 
 describe("isSandboxProviderSupportedForAdapter", () => {
+  it("offers Hermes gateway SSH without offering sandbox provisioning", () => {
+    const capabilities = getEnvironmentCapabilities(["hermes_gateway"], {
+      sandboxProviders: { "fake-plugin": { displayName: "Fake Plugin" } },
+    });
+    expect(capabilities.adapters[0].drivers.ssh).toBe("supported");
+    expect(capabilities.adapters[0].drivers.sandbox).toBe("unsupported");
+    expect(capabilities.adapters[0].sandboxProviders["fake-plugin"]).toBe("unsupported");
+    expect(supportedEnvironmentDriversForAdapter("hermes_local")).not.toContain("ssh");
+  });
   it("treats Paperclip Runner as a remote-managed adapter", () => {
     expect(adapterSupportsRemoteManagedEnvironments("paperclip_runner")).toBe(true);
     expect(supportedEnvironmentDriversForAdapter("paperclip_runner")).toEqual([
