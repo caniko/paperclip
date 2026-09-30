@@ -84,13 +84,16 @@ try:
     credential.chmod(0o644)
     invalid = invoke()
     assert invalid.returncode != 0
+    assert "CLI credential file" in invalid.stderr, invalid.stderr
     assert len(requests) == 2, "Publicly readable credential reached the API"
     assert "personal-cli-file-token" not in invalid.stdout + invalid.stderr
 
     credential.unlink()
     missing = invoke()
     assert missing.returncode != 0
+    assert "CLI credential file" in missing.stderr, missing.stderr
     assert len(requests) == 2, "Missing credential fell back to the ambient key"
+    assert "personal-cli-file-token" not in missing.stdout + missing.stderr
     print("Paperclip personal CLI: authenticated wrapper, company selection and credential failures passed")
 finally:
     server.shutdown()

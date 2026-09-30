@@ -9,9 +9,20 @@ This integration requires the native deployment entry point from
 `services.paperclip.instances` module from
 [nixpkgs #567242](https://github.com/NixOS/nixpkgs/pull/567242). Both contributions
 are under review. Select compatible, immutable package and module revisions.
-The package must also include #14616's CLI support for `PAPERCLIP_API_KEY_FILE`;
-the module-only source does not add that application behavior. An older CLI that
-reads only `PAPERCLIP_API_KEY` is incompatible with `apiKeyFile`.
+CLI credential-file support comes from
+[Paperclip #14466](https://github.com/paperclipai/paperclip/pull/14466), independently
+of #14616's native deployment entry point. An enabled CLI with `apiKeyFile`
+requires a package attribute set declaring `supportsPaperclipApiKeyFile = true`.
+This marker declares #14466's full protected credential-file runtime support:
+protected file validation, credential precedence, fail-closed errors, and sanitized
+diagnostics. Recognizing `PAPERCLIP_API_KEY_FILE` alone is insufficient. The
+module-only source does not add that application behavior.
+
+Packaging owners add the marker only to packages implementing that contract.
+Absent, false, or string-valued markers and plain package path strings are rejected
+when the CLI is enabled with a credential file. CLI enablement without
+`apiKeyFile`, and a disabled CLI with a runtime credential path, do not require
+the marker. Actual marked-package runtime proof remains pending.
 
 ## Personal configuration
 
@@ -22,7 +33,7 @@ Import `nix/modules/home-manager/paperclip.nix` in your Home Manager modules:
   imports = [ "${paperclipSource}/nix/modules/home-manager/paperclip.nix" ];
   programs.paperclip = {
     enable = true;
-    package = pkgs.paperclip;
+    package = pkgs.paperclip; # Must retain supportsPaperclipApiKeyFile = true metadata.
     apiUrl = "https://paperclip.example.org";
     apiKeyFile = "/run/credentials/paperclip-cli/api-key";
     deployments.work = {
@@ -42,6 +53,11 @@ The declaration is available at
 of CLI enablement. `companyId` can set the CLI's default company after native
 startup exports its resource bindings. `apiKeyFile` is a runtime path; its
 contents are never read during evaluation or copied to the Nix store.
+Keep the package derivation with its capability metadata when passing it to the
+module. Converting it to a plain store path loses the marker and is insufficient
+for an enabled client with `apiKeyFile`. Provision a protected credential file
+at runtime; the CLI validates it before making authenticated requests and refuses
+invalid files even when an ambient API key is available.
 Company defaults apply to commands that support them, such as `issue list`.
 Commands such as `agent list` still require an explicit `--company-id`.
 
@@ -105,17 +121,24 @@ nix eval --json --impure --expr '
 
 The expression checks standalone and integrated Home Manager, lossless manifest
 forwarding, disabled-controller behavior, runtime credential references, missing
-selections, and conflicting system definitions. It evaluates only; it starts no
-services and needs no credentials. Runtime reconciliation and package/VM tests
-remain the responsibility of the native startup and NixOS service contributions.
+selections, and conflicting system definitions. Synthetic package fixtures check
+the enabled credential-file capability matrix (true, false, absent, string-valued,
+and plain package path), enabled clients without a credential file, and disabled
+clients with a runtime credential path. Rejections are checked through the
+activation package's `drvPath`. These fixtures test evaluation only and do not
+prove runtime credential-file support. The expression starts no services and
+needs no credentials. Runtime reconciliation and package/VM tests remain the
+responsibility of the native startup and NixOS service contributions.
 
 ## CLI execution test
 
 `nix/tests/personal-cli.nix` builds and runs the actual Home Manager wrapper on
 Linux. It uses a loopback fixture API and a disposable runtime key to verify
 authentication, API URL and company selection, and refusal of missing or publicly
-readable keys even when an ambient API key is present. It fails with a package
-that lacks the required CLI credential-file support.
+readable keys even when an ambient API key is present. Both failure cases must
+emit a `CLI credential file` diagnostic on stderr without exposing the token or
+contacting the API. Use a package with the packaging-owned capability marker and
+the required #14466 runtime support; the test does not add that marker.
 It checks the company default with `issue list` and authenticated agent listing
 with the required explicit company flag.
 
@@ -130,6 +153,9 @@ nix build --impure --expr '
 '
 ```
 
-To check an already-built compatible package, pass its store path as
-`paperclipPackage`. The test performs no controller reconciliation or worker
+To check an already-built compatible package, pass its derivation as
+`paperclipPackage`, retaining `supportsPaperclipApiKeyFile = true` metadata. A plain
+store path is insufficient. Packaging marker addition remains packaging
+owner-controlled; qualification of an actual marked package with this runtime
+test remains pending. The test performs no controller reconciliation or worker
 dispatch.

@@ -64,6 +64,28 @@ let
     };
   assertionsPass = c: lib.all (a: a.assertion) c.assertions;
   evaluates = value: (builtins.tryEval (builtins.deepSeq value true)).success;
+  # Synthetic packages exercise metadata only; none proves CLI runtime support.
+  clientPackage = pkgs.runCommand "paperclip-client-evaluation-fixture" { } ''
+    mkdir -p "$out"
+  '';
+  clientPackages = {
+    supported = clientPackage // { supportsPaperclipApiKeyFile = true; };
+    unsupported = clientPackage // { supportsPaperclipApiKeyFile = false; };
+    absent = clientPackage;
+    stringMarker = clientPackage // { supportsPaperclipApiKeyFile = "true"; };
+    pathString = builtins.toString clientPackage;
+  };
+  credentialClient =
+    package:
+    home {
+      programs.paperclip = {
+        enable = true;
+        inherit package;
+        apiUrl = "https://paperclip.example.org";
+        companyId = "example-company";
+        apiKeyFile = "/run/credentials/paperclip/api-key";
+      };
+    };
   personal = (home { }).config;
   integrated = (machine { }).config;
   extended =
@@ -91,12 +113,29 @@ let
     standaloneHome = assertionsPass personal;
     standaloneActivation = evaluates (home { }).activationPackage.drvPath;
     enabledClient =
+      evaluates (credentialClient clientPackages.supported).activationPackage.drvPath;
+    unsupportedClientRejected =
+      !(evaluates (credentialClient clientPackages.unsupported).activationPackage.drvPath);
+    absentCapabilityRejected =
+      !(evaluates (credentialClient clientPackages.absent).activationPackage.drvPath);
+    stringCapabilityRejected =
+      !(evaluates (credentialClient clientPackages.stringMarker).activationPackage.drvPath);
+    pathStringClientRejected =
+      !(evaluates (credentialClient clientPackages.pathString).activationPackage.drvPath);
+    enabledWithoutCredentialAccepted =
       evaluates
         (home {
           programs.paperclip = {
             enable = true;
-            apiUrl = "https://paperclip.example.org";
-            companyId = "example-company";
+            package = clientPackages.absent;
+          };
+        }).activationPackage.drvPath;
+    disabledWithCredentialAccepted =
+      evaluates
+        (home {
+          programs.paperclip = {
+            enable = false;
+            package = clientPackages.absent;
             apiKeyFile = "/run/credentials/paperclip/api-key";
           };
         }).activationPackage.drvPath;
