@@ -287,6 +287,9 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
         if (req.method() === "POST" && req.url().endsWith(`/heartbeat-runs/${parentRun.id}/cancel`))
           dispatchedAt = Date.now();
       });
+      const providerCallsBeforeStop = adapter === "paperclip_runner"
+        ? (await readFile(process.env.PAPERCLIP_STOP_CODEX_LOG!, "utf8")).split("\n").filter(Boolean).length
+        : 0;
       const clickedAt = Date.now();
       await stop.click();
       await expect(page.getByRole("dialog")).toHaveCount(0);
@@ -315,9 +318,37 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
         expect(finalRun.resultJson?.nativeCancellation?.dispatchState).toBe(
           "acknowledged",
         );
-        expect(
-          await readFile(process.env.PAPERCLIP_STOP_CODEX_LOG!, "utf8"),
-        ).toContain("turn/interrupt");
+        const nativeCancellation = finalRun.resultJson.nativeCancellation;
+        expect(finalRun.id).toBe(parentRun.id);
+        expect(nativeCancellation).toMatchObject({
+          schema: "paperclip.native-cancellation.v1", companyId: company.id,
+          issueId: parent.id, runId: parentRun.id, scope: "run",
+          reasonCode: "cancellation_run_only", dispatched: true,
+        });
+        for (const field of ["intentAuditId", "acknowledgementAuditId"]) {
+          expect(typeof nativeCancellation[field]).toBe("string");
+          expect(nativeCancellation[field].length).toBeGreaterThan(0);
+        }
+        // Keep only protocol method names emitted after this parent's Stop.
+        // Provider output, tokens, tool payloads and raw resultJson are excluded.
+        const callsDuringStop = (await readFile(process.env.PAPERCLIP_STOP_CODEX_LOG!, "utf8"))
+          .split("\n").filter(Boolean).slice(providerCallsBeforeStop)
+          .filter(method => ["turn/start", "turn/interrupt"].includes(method));
+        expect(callsDuringStop).toContain("turn/interrupt");
+        const receipt = Object.fromEntries([
+          "schema", "runId", "companyId", "issueId", "scope", "reasonCode",
+          "dispatchState", "dispatched", "intentAuditId", "acknowledgementAuditId",
+          "recordedAt", "acknowledgedAt",
+        ].map(field => [field, nativeCancellation[field]]));
+        await testInfo.attach("paperclip_runner-cancellation", {
+          body: JSON.stringify({
+            schema: "paperclip.composer-stop-cancellation.v1", companyId: company.id,
+            issueId: parent.id, runId: parentRun.id, status: finalRun.status,
+            nativeCancellation: receipt,
+            provider: { fixture: "fake-codex-app-server", callsDuringStop },
+          }),
+          contentType: "application/json",
+        });
       }
       await testInfo.attach(`${adapter}-timing`, {
         body: JSON.stringify({

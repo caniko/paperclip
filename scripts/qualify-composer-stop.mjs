@@ -5,6 +5,30 @@ import { fileURLToPath } from "node:url";
 const REQUIRED = ["process", "paperclip_runner"].map(adapter =>
   `${adapter}: queue, composer Stop, subtree pause/cancel, and resume`);
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
+const requiredAttachments = title => {
+  const adapter = title.split(":")[0];
+  return [`${adapter}-timing`, "owned-company-status-metadata",
+    ...(adapter === "paperclip_runner" ? ["paperclip_runner-cancellation"] : [])];
+};
+
+function verifyCancellationEvidence(bytes) {
+  let proof;
+  try { proof = JSON.parse(bytes); } catch {
+    throw new Error("Incomplete composer Stop proof: invalid cancellation JSON");
+  }
+  const receipt = proof?.nativeCancellation;
+  const provider = proof?.provider;
+  const bound = ["runId", "companyId", "issueId"].every(field =>
+    typeof proof?.[field] === "string" && proof[field].length > 0 && receipt?.[field] === proof[field]);
+  if (proof?.schema !== "paperclip.composer-stop-cancellation.v1" || proof.status !== "cancelled" || !bound ||
+      receipt?.schema !== "paperclip.native-cancellation.v1" || receipt.scope !== "run" ||
+      receipt.reasonCode !== "cancellation_run_only" || receipt.dispatchState !== "acknowledged" || receipt.dispatched !== true ||
+      !["intentAuditId", "acknowledgementAuditId"].every(field => typeof receipt[field] === "string" && receipt[field].length > 0) ||
+      provider?.fixture !== "fake-codex-app-server" || !Array.isArray(provider.callsDuringStop) ||
+      !provider.callsDuringStop.includes("turn/interrupt") ||
+      !provider.callsDuringStop.every(method => ["turn/start", "turn/interrupt"].includes(method)))
+    throw new Error("Incomplete composer Stop proof: require bound audited parent cancellation and fixture interrupt");
+}
 
 export function qualifyComposerStop(raw, provenance) {
   for (const field of ["revision", "headRevision", "runnerSha256", "providerSha256", "junitSha256", "sourceLockSha256", "effectiveLockSha256"]) {
@@ -34,17 +58,18 @@ export function qualifyComposerStop(raw, provenance) {
     tests.every(({ title, test }) => test.expectedStatus === "passed" && test.status === "expected" &&
       test.results?.length === 1 && test.results[0].status === "passed" && !test.results[0].error &&
       (!test.results[0].errors || test.results[0].errors.length === 0) &&
-      [title.split(":")[0] + "-timing", "owned-company-status-metadata"].every(name =>
+      requiredAttachments(title).every(name =>
         test.results[0].attachments?.some(attachment => attachment.name === name)));
   if (!valid) throw new Error("Incomplete composer Stop proof: require both cases, retained evidence and zero failures, retries or skips");
   const evidence = tests.flatMap(({ title, test }) =>
-    [title.split(":")[0] + "-timing", "owned-company-status-metadata"].map(name => {
+    requiredAttachments(title).map(name => {
       const matches = test.results[0].attachments.filter(attachment => attachment.name === name);
       if (matches.length !== 1) throw new Error("Incomplete composer Stop proof: ambiguous attachment");
       const attachment = matches[0];
       const bytes = attachment.path ? readFileSync(attachment.path) :
         Buffer.from(attachment.body ?? "", "base64");
       if (!bytes.length) throw new Error("Incomplete composer Stop proof: missing attachment bytes");
+      if (name === "paperclip_runner-cancellation") verifyCancellationEvidence(bytes);
       return { case: title, name, sha256: sha256(bytes) };
     }));
   return {

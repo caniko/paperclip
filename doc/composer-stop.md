@@ -174,6 +174,11 @@ The receipt records Node/pnpm versions and hashes both the source and effective
 dependency lockfiles. Both lockfiles are retained. A changed resolution is
 explicitly marked `lockfileRegenerated`; bundle freezing must compare that
 tested dependency graph with the packaged resolution.
+The native case also retains a redacted parent-run cancellation record with its
+intent/acknowledgement audit IDs and deterministic-provider method names observed
+during Stop. Qualification refuses child or mismatched bindings, nonterminal or
+unacknowledged cancellation, missing audits, and missing fixture interrupts.
+Provider output and raw run result payloads are excluded from that record.
 
 For each runner, the journey starts a parent, child, and unrelated task, plus a
 terminal child. It sends while running and verifies the durable queue, clicks

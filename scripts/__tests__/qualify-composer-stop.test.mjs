@@ -14,6 +14,19 @@ const provenance = {
   sourceLockSha256: "f".repeat(64), effectiveLockSha256: "f".repeat(64),
   nodeVersion: "24.20.0", pnpmVersion: "9.15.4",
 };
+function cancellationEvidence() {
+  return {
+    schema: "paperclip.composer-stop-cancellation.v1", runId: "parent-run",
+    companyId: "owned-company", issueId: "parent-issue", status: "cancelled",
+    nativeCancellation: {
+      schema: "paperclip.native-cancellation.v1", runId: "parent-run",
+      companyId: "owned-company", issueId: "parent-issue", scope: "run",
+      reasonCode: "cancellation_run_only", dispatchState: "acknowledged", dispatched: true,
+      intentAuditId: "intent-audit", acknowledgementAuditId: "ack-audit",
+    },
+    provider: { fixture: "fake-codex-app-server", callsDuringStop: ["turn/interrupt"] },
+  };
+}
 function report() {
   return {
     errors: [], stats: { expected: 2, skipped: 0, unexpected: 0, flaky: 0 },
@@ -23,6 +36,8 @@ function report() {
         status: "passed", attachments: [
           { name: `${adapter}-timing`, body: Buffer.from('{"clickToRequestMs":1,"requestToStoppedMs":2}').toString("base64") },
           { name: "owned-company-status-metadata", body: Buffer.from("[]").toString("base64") },
+          ...(adapter === "paperclip_runner" ? [{ name: "paperclip_runner-cancellation",
+            body: Buffer.from(JSON.stringify(cancellationEvidence())).toString("base64") }] : []),
         ],
       }] }],
     })) }] }],
@@ -45,9 +60,29 @@ test("qualification binds both mandatory cases and the exact report and binaries
   assert.equal(receipt.pnpmVersion, provenance.pnpmVersion);
   assert.equal(receipt.lockfileRegenerated, false);
   assert.equal(receipt.cases.length, 2);
-  assert.equal(receipt.evidence.length, 4);
+  assert.equal(receipt.evidence.length, 5);
   assert.equal(receipt.evidence[0].sha256, createHash("sha256")
     .update('{"clickToRequestMs":1,"requestToStoppedMs":2}').digest("hex"));
+});
+
+test("native proof refuses child, mismatched, nonterminal, unaudited or undispatched cancellation", () => {
+  for (const fault of ["missing", "child", "company", "issue", "nonterminal", "pending", "undispatched", "unaudited", "no-interrupt", "wrong-provider", "malformed"]) {
+    const value = report();
+    const attachments = value.suites[0].suites[0].specs[1].tests[0].results[0].attachments;
+    const proof = cancellationEvidence();
+    if (fault === "missing") attachments.pop();
+    if (fault === "child") proof.nativeCancellation.runId = "child-run";
+    if (fault === "company") proof.nativeCancellation.companyId = "other-company";
+    if (fault === "issue") proof.nativeCancellation.issueId = "child-issue";
+    if (fault === "nonterminal") proof.status = "running";
+    if (fault === "pending") proof.nativeCancellation.dispatchState = "pending";
+    if (fault === "undispatched") proof.nativeCancellation.dispatched = false;
+    if (fault === "unaudited") delete proof.nativeCancellation.acknowledgementAuditId;
+    if (fault === "no-interrupt") proof.provider.callsDuringStop = ["turn/start"];
+    if (fault === "wrong-provider") proof.provider.fixture = "live-provider";
+    if (fault !== "missing") attachments.at(-1).body = Buffer.from(fault === "malformed" ? "not JSON" : JSON.stringify(proof)).toString("base64");
+    assert.throws(() => qualifyComposerStop(Buffer.from(JSON.stringify(value)), provenance), /Incomplete composer Stop proof/, fault);
+  }
 });
 
 test("a regenerated dependency lock is explicitly identified in the receipt", () => {
