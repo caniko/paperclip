@@ -33,9 +33,19 @@ export function qualifyComposerStop(raw, provenance) {
       [title.split(":")[0] + "-timing", "owned-company-status-metadata"].every(name =>
         test.results[0].attachments?.some(attachment => attachment.name === name)));
   if (!valid) throw new Error("Incomplete composer Stop proof: require both cases, retained evidence and zero failures, retries or skips");
+  const evidence = tests.flatMap(({ title, test }) =>
+    [title.split(":")[0] + "-timing", "owned-company-status-metadata"].map(name => {
+      const matches = test.results[0].attachments.filter(attachment => attachment.name === name);
+      if (matches.length !== 1) throw new Error("Incomplete composer Stop proof: ambiguous attachment");
+      const attachment = matches[0];
+      const bytes = attachment.path ? readFileSync(attachment.path) :
+        Buffer.from(attachment.body ?? "", "base64");
+      if (!bytes.length) throw new Error("Incomplete composer Stop proof: missing attachment bytes");
+      return { case: title, name, sha256: sha256(bytes) };
+    }));
   return {
     kind: "native-composer-stop-qualification", ...provenance,
-    reportSha256: sha256(raw), cases: REQUIRED, qualified: true,
+    reportSha256: sha256(raw), cases: REQUIRED, evidence, qualified: true,
   };
 }
 

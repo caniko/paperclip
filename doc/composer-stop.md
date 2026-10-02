@@ -167,7 +167,8 @@ It checks out the exact PR head and sets `PAPERCLIP_STOP_REQUIRE_NATIVE=true`.
 Missing or non-executable fixture/runner binaries refuse startup. The required
 `e2e` check includes this lane. Qualification refuses missing cases, failures,
 retries, skips or missing timing/status evidence. The retained receipt binds
-the tested revision, Playwright JSON/JUnit reports and both binaries by SHA-256. Reports,
+the tested revision, Playwright JSON/JUnit reports, attachment bytes and both
+binaries by SHA-256. Reports,
 receipts and test attachments are retained for 30 days.
 
 For each runner, the journey starts a parent, child, and unrelated task, plus a

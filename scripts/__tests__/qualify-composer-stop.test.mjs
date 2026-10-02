@@ -19,7 +19,8 @@ function report() {
       title: `${adapter}: queue, composer Stop, subtree pause/cancel, and resume`,
       tests: [{ expectedStatus: "passed", status: "expected", results: [{
         status: "passed", attachments: [
-          { name: `${adapter}-timing` }, { name: "owned-company-status-metadata" },
+          { name: `${adapter}-timing`, body: Buffer.from('{"clickToRequestMs":1,"requestToStoppedMs":2}').toString("base64") },
+          { name: "owned-company-status-metadata", body: Buffer.from("[]").toString("base64") },
         ],
       }] }],
     })) }] }],
@@ -37,10 +38,13 @@ test("qualification binds both mandatory cases and the exact report and binaries
   assert.equal(receipt.providerSha256, provenance.providerSha256);
   assert.equal(receipt.junitSha256, provenance.junitSha256);
   assert.equal(receipt.cases.length, 2);
+  assert.equal(receipt.evidence.length, 4);
+  assert.equal(receipt.evidence[0].sha256, createHash("sha256")
+    .update('{"clickToRequestMs":1,"requestToStoppedMs":2}').digest("hex"));
 });
 
 test("missing, skipped, failed, retried or incomplete native proof is refused", () => {
-  for (const fault of ["missing", "skipped", "failed", "retried", "expected-failure", "attachment", "error", "stats", "duplicate"]) {
+  for (const fault of ["missing", "skipped", "failed", "retried", "expected-failure", "attachment", "empty-attachment", "duplicate-attachment", "error", "stats", "duplicate"]) {
     const value = report();
     const specs = value.suites[0].suites[0].specs;
     const native = specs[1].tests[0];
@@ -50,11 +54,29 @@ test("missing, skipped, failed, retried or incomplete native proof is refused", 
     if (fault === "retried") native.results.unshift({ status: "failed" });
     if (fault === "expected-failure") native.expectedStatus = "failed";
     if (fault === "attachment") native.results[0].attachments.pop();
+    if (fault === "empty-attachment") delete native.results[0].attachments[0].body;
+    if (fault === "duplicate-attachment") native.results[0].attachments.push(native.results[0].attachments[0]);
     if (fault === "error") value.errors.push({ message: "server failed" });
     if (fault === "stats") value.stats.skipped = 1;
     if (fault === "duplicate") specs[1].title = specs[0].title;
     assert.throws(() => qualifyComposerStop(Buffer.from(JSON.stringify(value)), provenance), /Incomplete composer Stop proof/, fault);
   }
+});
+
+test("file-backed attachments are required and their bytes are bound", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "composer-stop-evidence-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "timing.json");
+  const value = report();
+  const attachment = value.suites[0].suites[0].specs[1].tests[0].results[0].attachments[0];
+  delete attachment.body;
+  attachment.path = path;
+  const raw = Buffer.from(JSON.stringify(value));
+  assert.throws(() => qualifyComposerStop(raw, provenance), /ENOENT/);
+  writeFileSync(path, "first evidence");
+  const first = qualifyComposerStop(raw, provenance).evidence[2].sha256;
+  writeFileSync(path, "changed evidence");
+  assert.notEqual(qualifyComposerStop(raw, provenance).evidence[2].sha256, first);
 });
 
 test("qualification refuses missing source or binary identities", () => {
