@@ -501,21 +501,50 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
       });
     } finally {
       const statusEvidence = JSON.stringify(statusMetadata, null, 2);
-      // The company is disposable and scoped to this test invocation.
-      await request.patch(`/api/companies/${company.id}`, {
-        data: { status: "archived" },
-      });
-      await request.patch("/api/instance/settings/experimental", {
-        data: {
-          enableClassicTaskInterface:
-            originalSettings.enableClassicTaskInterface,
-          enableNativeRunner: originalSettings.enableNativeRunner,
-        },
-      });
-      await testInfo.attach("owned-company-status-metadata", {
-        body: statusEvidence,
-        contentType: "application/json",
-      });
+      // Archiving pauses agents and cancels remaining runs. Preserve admission
+      // state before that cleanup, using only owned scalar routing fields.
+      try {
+        const pick = (row: Record<string, unknown>, fields: string[]) =>
+          Object.fromEntries(fields.filter(field =>
+            row[field] === null || ["string", "number", "boolean"].includes(typeof row[field]),
+          ).map(field => [field, row[field]]));
+        const [issues, agents, runs] = await Promise.all([
+          json(await request.get(`/api/companies/${company.id}/issues`)),
+          json(await request.get(`/api/companies/${company.id}/agents`)),
+          json(await request.get(`/api/companies/${company.id}/heartbeat-runs`)),
+        ]);
+        await testInfo.attach("owned-company-pre-cleanup-admission", {
+          body: JSON.stringify({
+            companyId: company.id,
+            issues: issues.map((row: Record<string, unknown>) => pick(row, [
+              "id", "status", "assigneeAgentId", "parentId", "executionRunId", "checkoutRunId",
+            ])),
+            agents: agents.map((row: Record<string, unknown>) => pick(row, ["id", "status", "pauseReason"])),
+            runs: runs.map((row: Record<string, unknown>) => ({
+              ...pick(row, ["id", "agentId", "status", "runtimeMode", "nativeIssueId", "errorCode", "executionStage"]),
+              context: pick((row.contextSnapshot ?? {}) as Record<string, unknown>, ["issueId", "source", "wakeReason"]),
+              stop: pick((row.resultJson ?? {}) as Record<string, unknown>, ["cancelledByActorType", "finalizationReasonCode"]),
+            })),
+          }),
+          contentType: "application/json",
+        });
+      } finally {
+        // The company is disposable and scoped to this test invocation.
+        await request.patch(`/api/companies/${company.id}`, {
+          data: { status: "archived" },
+        });
+        await request.patch("/api/instance/settings/experimental", {
+          data: {
+            enableClassicTaskInterface:
+              originalSettings.enableClassicTaskInterface,
+            enableNativeRunner: originalSettings.enableNativeRunner,
+          },
+        });
+        await testInfo.attach("owned-company-status-metadata", {
+          body: statusEvidence,
+          contentType: "application/json",
+        });
+      }
     }
   });
 }

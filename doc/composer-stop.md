@@ -179,6 +179,9 @@ intent/acknowledgement audit IDs and deterministic-provider method names observe
 during Stop. Qualification refuses child or mismatched bindings, nonterminal or
 unacknowledged cancellation, missing audits, and missing fixture interrupts.
 Provider output and raw run result payloads are excluded from that record.
+The suite also retains scalar task, agent, and run admission state before
+archiving its disposable company. Archive cleanup pauses agents and cancels
+remaining runs, so post-cleanup screenshots alone cannot diagnose resume failures.
 
 For each runner, the journey starts a parent, child, and unrelated task, plus a
 terminal child. It sends while running and verifies the durable queue, clicks
