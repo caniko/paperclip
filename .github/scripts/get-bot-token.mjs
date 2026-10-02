@@ -158,11 +158,35 @@ export async function getInstallationToken(privateKey, env = process.env, fetchF
         }, null, 2), { mode: 0o600 });
       }
     } catch (error) {
-      await fetchFromGitHub('/installation/token', token, { method: 'DELETE' }).catch(() => {});
+      try {
+        await revokeInstallationToken(token, env, fetchFromGitHub);
+      } catch (revocationError) {
+        throw new Error(`${error.message}; review token revocation failed.`, {
+          cause: new AggregateError([error, revocationError]),
+        });
+      }
       throw error;
     }
   }
   return token;
+}
+
+export async function revokeInstallationToken(token, env = process.env, fetchFromGitHub = ghFetch) {
+  if (!token) throw new Error('A review token is required for revocation.');
+  let revoked = false;
+  try {
+    await fetchFromGitHub('/installation/token', token, { method: 'DELETE' });
+    revoked = true;
+  } finally {
+    // Deliberately exclude tokens, keys and API diagnostics from retained proof.
+    if (env.COMMITPERCLIP_REVOCATION_RECEIPT) {
+      writeFileSync(env.COMMITPERCLIP_REVOCATION_RECEIPT, JSON.stringify({
+        kind: 'actions-slot-revocation', repository: env.GH_REPO ?? env.GITHUB_REPOSITORY,
+        trustedSourceSha: env.COMMITPERCLIP_TRUSTED_SOURCE_SHA, runId: env.GITHUB_RUN_ID,
+        runAttempt: env.GITHUB_RUN_ATTEMPT, tokenRevoked: revoked, attemptedAt: new Date().toISOString(),
+      }, null, 2), { mode: 0o600 });
+    }
+  }
 }
 
 async function main() {

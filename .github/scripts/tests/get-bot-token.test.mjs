@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveInstallationId, resolveAppIdentity, getInstallationToken } from '../get-bot-token.mjs';
+import { resolveInstallationId, resolveAppIdentity, getInstallationToken, revokeInstallationToken } from '../get-bot-token.mjs';
 import { generateKeyPairSync } from 'node:crypto';
+import { mkdtempSync, readFileSync, statSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 test('owned forks require their issued app identity; upstream retains its identity', () => {
   assert.throws(() => resolveAppIdentity({ GH_REPO: 'caniko/paperclip' }), /owned app/);
@@ -46,6 +49,61 @@ test('a broadened review token is revoked and refused', async () => {
     return null;
   }), /exactly/);
   assert.equal(calls.at(-1), '/installation/token');
+});
+
+test('verification and revocation failures are both reported without returning a token', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const env = { GH_REPO: 'caniko/paperclip', COMMITPERCLIP_APP_ID: '123', COMMITPERCLIP_APP_SLUG: 'caniko-paperclip-review' };
+  for (const verificationError of ['scope', 'GitHub API GET /installation/repositories → 503']) {
+    let revocationAttempted = false;
+    await assert.rejects(getInstallationToken(privateKey, env, async (path) => {
+      if (path === '/app') return { id: 123, slug: env.COMMITPERCLIP_APP_SLUG, owner: { login: 'caniko' } };
+      if (path.endsWith('/installation')) return { id: 42, app_id: 123, account: { login: 'caniko' } };
+      if (path.endsWith('/access_tokens')) return { token: 'fixture-token' };
+      if (path === '/installation/repositories') {
+        if (verificationError !== 'scope') throw new Error(verificationError);
+        return { total_count: 2, repositories: [{ full_name: 'caniko/paperclip' }] };
+      }
+      assert.equal(path, '/installation/token');
+      revocationAttempted = true;
+      throw new Error('GitHub API DELETE /installation/token → 503');
+    }), (error) => {
+      assert.match(error.message, verificationError === 'scope' ? /exactly/ : /GET.*503/);
+      assert.match(error.message, /revocation.*failed/i);
+      assert.doesNotMatch(error.message, /fixture-token|PRIVATE KEY/);
+      return true;
+    });
+    assert.equal(revocationAttempted, true);
+  }
+});
+
+test('revocation retains redacted success and failure evidence and refuses failed cleanup', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'review-revocation-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  for (const succeeds of [true, false]) {
+    const receiptPath = join(directory, `${succeeds}.json`);
+    const env = {
+      COMMITPERCLIP_REVOCATION_RECEIPT: receiptPath,
+      GH_REPO: 'caniko/paperclip', COMMITPERCLIP_TRUSTED_SOURCE_SHA: 'a'.repeat(40),
+      GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2',
+    };
+    const result = revokeInstallationToken('fixture-token', env, async (path, token, options) => {
+      assert.equal(path, '/installation/token');
+      assert.equal(token, 'fixture-token');
+      assert.equal(options.method, 'DELETE');
+      if (!succeeds) throw new Error('fixture transport error with fixture-token');
+    });
+    if (succeeds) await result;
+    else await assert.rejects(result, /transport/);
+    const text = readFileSync(receiptPath, 'utf8');
+    const receipt = JSON.parse(text);
+    assert.equal(receipt.tokenRevoked, succeeds);
+    assert.equal(receipt.trustedSourceSha, env.COMMITPERCLIP_TRUSTED_SOURCE_SHA);
+    assert.equal(receipt.runId, '123');
+    assert.equal(receipt.runAttempt, '2');
+    assert.doesNotMatch(text, /fixture-token|transport error|PRIVATE KEY/);
+    assert.equal(statSync(receiptPath).mode & 0o777, 0o600);
+  }
 });
 
 test('resolveInstallationId: uses the repo installation endpoint when repo context is available', async () => {
