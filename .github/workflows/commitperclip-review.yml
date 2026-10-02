@@ -26,6 +26,7 @@ jobs:
       COMMITPERCLIP_APP_ID: ${{ vars.COMMITPERCLIP_APP_ID }}
       COMMITPERCLIP_APP_SLUG: ${{ vars.COMMITPERCLIP_APP_SLUG }}
       COMMITPERCLIP_TRUSTED_SOURCE_SHA: ${{ github.event.pull_request.base.sha }}
+      COMMITPERCLIP_REVOCATION_RECEIPT: ${{ runner.temp }}/review-app-revocation.json
     steps:
       - name: Checkout base branch (never PR code)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -72,7 +73,7 @@ jobs:
         if: always() && steps.token.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.token.outputs.value }}
-        run: gh api --hostname github.com --method DELETE installation/token
+        run: node .github/scripts/revoke-bot-token.mjs
 
       - name: Retain issued app and comment verification
         if: always()
@@ -84,6 +85,7 @@ jobs:
           path: |
             ${{ runner.temp }}/review-app-authentication.json
             ${{ runner.temp }}/review-app-comment.json
+            ${{ runner.temp }}/review-app-revocation.json
 
       - name: Fail if quality gates failed
         if: >-
