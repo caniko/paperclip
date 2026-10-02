@@ -161,6 +161,14 @@ The suite boots a disposable local-trusted instance on port 3199 (override with
 is explicitly skipped without the fixture; it must not use a logged-in provider
 as a fallback. Test companies are archived during cleanup.
 
+Full PR CI runs both journeys in the mandatory `Native composer Stop` lane.
+It checks out the exact PR head and sets `PAPERCLIP_STOP_REQUIRE_NATIVE=true`.
+Missing or non-executable fixture/runner binaries refuse startup. The required
+`e2e` check includes this lane. Qualification refuses missing cases, failures,
+retries, skips or missing timing/status evidence. The retained receipt binds
+the tested revision, Playwright JSON/JUnit reports and both binaries by SHA-256. Reports,
+receipts and test attachments are retained for 30 days.
+
 For each runner, the journey starts a parent, child, and unrelated task, plus a
 terminal child. It sends while running and verifies the durable queue, clicks
 Stop, verifies interruption and the persisted hold, and observes three

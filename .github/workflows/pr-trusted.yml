@@ -327,6 +327,9 @@ jobs:
       - name: Test e2e shard partition
         run: node --test ./scripts/__tests__/e2e-shard.test.mjs
 
+      - name: Test mandatory native composer Stop qualification
+        run: node --test ./scripts/__tests__/qualify-composer-stop.test.mjs
+
       - name: Test release verify workflow wiring
         run: node --test ./scripts/__tests__/release-verify-workflow.test.mjs ./scripts/cloud-source-verification.test.mjs ./scripts/standard-image-contract.test.mjs
 
@@ -1304,12 +1307,135 @@ jobs:
             tests/e2e/test-results/
           retention-days: 14
 
+  native_composer_stop:
+    name: Native composer Stop
+    needs: [gate]
+    if: ${{ needs.gate.outputs.full_ci == 'true' }}
+    runs-on: ${{ needs.gate.outputs.runner }}
+    timeout-minutes: 20
+    env:
+      PAPERCLIP_E2E_SKIP_LLM: "true"
+      PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"
+      PAPERCLIP_STOP_REQUIRE_NATIVE: "true"
+      PAPERCLIP_STOP_FAKE_CODEX: ${{ github.workspace }}/packages/paperclip-runner/runner/target/debug/fake-codex-app-server
+      PAPERCLIP_RUNNER_BINARY: ${{ github.workspace }}/packages/paperclip-runner/runner/target/debug/paperclip-runnerd
+      COMPOSER_STOP_HEAD_REVISION: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Setup Node.js for pnpm bootstrap
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        env:
+          NPM_CONFIG_AUDIT: "false"
+          NPM_CONFIG_FUND: "false"
+          NPM_CONFIG_UPDATE_NOTIFIER: "false"
+        with:
+          version: 9.15.4
+
+      - name: Locate pnpm store
+        id: pnpm_store
+        run: |
+          echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+          echo "arch=$(node -p 'process.arch')" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pnpm store (read only)
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ steps.pnpm_store.outputs.path }}
+          key: node-cache-${{ runner.os }}-${{ steps.pnpm_store.outputs.arch }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: node-cache-${{ runner.os }}-${{ steps.pnpm_store.outputs.arch }}-pnpm-
+
+      - name: Install dependencies
+        run: |
+          if ! pnpm install --frozen-lockfile; then
+            echo '::notice title=Lockfile::checked-in lockfile is stale; resolving it inline'
+            pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
+            pnpm install --frozen-lockfile
+          fi
+
+      - name: Select the pinned Runner Rust toolchain
+        working-directory: packages/paperclip-runner
+        run: |
+          set -euo pipefail
+          rustup show
+          toolchain="$(rustup show active-toolchain | awk '{print $1}')"
+          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+          extra_toolchains="$(rustup toolchain list | awk '{print $1}' | grep -vx "$toolchain" || true)"
+          if [ -n "$extra_toolchains" ]; then
+            echo "$extra_toolchains" | xargs -n1 rustup toolchain uninstall
+          fi
+
+      - name: Restore Runner Rust dependencies (read only)
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: packages/paperclip-runner/runner -> target
+          shared-key: release-runner-v1
+          cache-workspace-crates: false
+          cache-bin: false
+          save-if: false
+
+      - name: Build real runner and deterministic provider
+        working-directory: packages/paperclip-runner
+        run: cargo build --manifest-path runner/Cargo.toml --locked --bin paperclip-runnerd --bin fake-codex-app-server
+
+      - name: Verify runner Chrome
+        run: google-chrome --version
+
+      - name: Run mandatory composer Stop acceptance
+        env:
+          PAPERCLIP_STOP_CODEX_LOG: ${{ runner.temp }}/composer-stop-provider.log
+          PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ runner.temp }}/composer-stop-report.json
+          PLAYWRIGHT_JUNIT_OUTPUT_NAME: ${{ runner.temp }}/composer-stop-junit.xml
+        run: pnpm exec playwright test --config tests/e2e/playwright-composer-stop.config.ts --reporter=list,json,junit
+
+      - name: Qualify exact-head native composer Stop proof
+        env:
+          PLAYWRIGHT_JUNIT_OUTPUT_NAME: ${{ runner.temp }}/composer-stop-junit.xml
+        run: |
+          python3 - "$PLAYWRIGHT_JUNIT_OUTPUT_NAME" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          cases = root.findall('.//testcase')
+          required = {f'{adapter}: queue, composer Stop, subtree pause/cancel, and resume'
+                      for adapter in ('process', 'paperclip_runner')}
+          if (len(cases) != 2 or {case.get('name') for case in cases} != required
+              or any(root.findall(f'.//{tag}') for tag in ('failure', 'error', 'skipped'))):
+              raise SystemExit('Incomplete composer Stop JUnit proof')
+          PY
+          COMPOSER_STOP_REVISION="$(git rev-parse HEAD)"
+          export COMPOSER_STOP_REVISION
+          node scripts/qualify-composer-stop.mjs "$RUNNER_TEMP/composer-stop-report.json" "$RUNNER_TEMP/composer-stop-receipt.json"
+
+      - name: Retain native composer Stop evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-composer-stop-${{ github.event.pull_request.head.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/composer-stop-report.json
+            ${{ runner.temp }}/composer-stop-junit.xml
+            ${{ runner.temp }}/composer-stop-receipt.json
+            tests/e2e/test-results/
+
   e2e:
     # Preserve the legacy required-check name while the specs run sharded
     # across the matrix above (same pattern as the `verify` aggregate).
     name: e2e
     if: ${{ always() }}
-    needs: [gate, policy, e2e_shards]
+    needs: [gate, policy, e2e_shards, native_composer_stop]
     runs-on: ${{ needs.gate.outputs.runner }}
     timeout-minutes: 5
 
@@ -1319,11 +1445,18 @@ jobs:
           FULL_CI: ${{ needs.gate.outputs.full_ci }}
           POLICY_RESULT: ${{ needs.policy.result }}
           E2E_SHARDS_RESULT: ${{ needs.e2e_shards.result }}
+          NATIVE_COMPOSER_STOP_RESULT: ${{ needs.native_composer_stop.result }}
         run: |
           test "$POLICY_RESULT" = "success"
           case "$FULL_CI" in
-            true) test "$E2E_SHARDS_RESULT" = "success" ;;
-            false) test "$E2E_SHARDS_RESULT" = "skipped" ;;
+            true)
+              test "$E2E_SHARDS_RESULT" = "success"
+              test "$NATIVE_COMPOSER_STOP_RESULT" = "success"
+              ;;
+            false)
+              test "$E2E_SHARDS_RESULT" = "skipped"
+              test "$NATIVE_COMPOSER_STOP_RESULT" = "skipped"
+              ;;
             *)
               echo "Invalid full_ci decision: $FULL_CI" >&2
               exit 1
