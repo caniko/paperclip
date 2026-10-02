@@ -8212,7 +8212,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
           select count(*)::int as count from pg_stat_activity
           where datname = current_database() and ${pid} = any(pg_blocking_pids(pid))
             and query ilike '%heartbeat_runs%'
-            and (query ilike '%for update%' or query ilike '%update%heartbeat_runs%')
+            and (query ilike '%for update%' or query ilike '%for no key update%' or query ilike '%update%heartbeat_runs%')
         `);
           expect(row!.count).toBeGreaterThan(0);
         });
