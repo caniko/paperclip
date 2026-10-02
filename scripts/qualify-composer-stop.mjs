@@ -7,9 +7,13 @@ const REQUIRED = ["process", "paperclip_runner"].map(adapter =>
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
 
 export function qualifyComposerStop(raw, provenance) {
-  for (const field of ["revision", "headRevision", "runnerSha256", "providerSha256", "junitSha256"]) {
+  for (const field of ["revision", "headRevision", "runnerSha256", "providerSha256", "junitSha256", "sourceLockSha256", "effectiveLockSha256"]) {
     const pattern = field.endsWith("Sha256") ? /^[0-9a-f]{64}$/ : /^[0-9a-f]{40}$/;
     if (!pattern.test(provenance[field] ?? "")) throw new Error(`Invalid composer Stop provenance: ${field}`);
+  }
+  for (const field of ["nodeVersion", "pnpmVersion"]) {
+    if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9.-]+)?$/.test(provenance[field] ?? ""))
+      throw new Error(`Invalid composer Stop provenance: ${field}`);
   }
   if (provenance.revision !== provenance.headRevision) {
     throw new Error("Invalid composer Stop provenance: checkout is not the declared PR head");
@@ -46,6 +50,7 @@ export function qualifyComposerStop(raw, provenance) {
   return {
     kind: "native-composer-stop-qualification", ...provenance,
     reportSha256: sha256(raw), cases: REQUIRED, evidence, qualified: true,
+    lockfileRegenerated: provenance.sourceLockSha256 !== provenance.effectiveLockSha256,
   };
 }
 
@@ -58,6 +63,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       runnerSha256: sha256(readFileSync(process.env.PAPERCLIP_RUNNER_BINARY)),
       providerSha256: sha256(readFileSync(process.env.PAPERCLIP_STOP_FAKE_CODEX)),
       junitSha256: sha256(readFileSync(process.env.PLAYWRIGHT_JUNIT_OUTPUT_NAME)),
+      sourceLockSha256: sha256(readFileSync(process.env.COMPOSER_STOP_SOURCE_LOCKFILE)),
+      effectiveLockSha256: sha256(readFileSync(process.env.COMPOSER_STOP_EFFECTIVE_LOCKFILE)),
+      nodeVersion: process.versions.node,
+      pnpmVersion: process.env.COMPOSER_STOP_PNPM_VERSION,
     });
     writeFileSync(receiptPath, JSON.stringify({
       ...receipt, runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,

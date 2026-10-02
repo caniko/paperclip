@@ -170,6 +170,10 @@ retries, skips or missing timing/status evidence. The retained receipt binds
 the tested revision, Playwright JSON/JUnit reports, attachment bytes and both
 binaries by SHA-256. Reports,
 receipts and test attachments are retained for 30 days.
+The receipt records Node/pnpm versions and hashes both the source and effective
+dependency lockfiles. Both lockfiles are retained. A changed resolution is
+explicitly marked `lockfileRegenerated`; bundle freezing must compare that
+tested dependency graph with the packaged resolution.
 
 For each runner, the journey starts a parent, child, and unrelated task, plus a
 terminal child. It sends while running and verifies the durable queue, clicks

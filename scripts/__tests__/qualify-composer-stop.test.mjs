@@ -11,6 +11,8 @@ const provenance = {
   revision: "a".repeat(40), headRevision: "a".repeat(40),
   runnerSha256: "c".repeat(64), providerSha256: "d".repeat(64),
   junitSha256: "e".repeat(64),
+  sourceLockSha256: "f".repeat(64), effectiveLockSha256: "f".repeat(64),
+  nodeVersion: "24.20.0", pnpmVersion: "9.15.4",
 };
 function report() {
   return {
@@ -37,10 +39,24 @@ test("qualification binds both mandatory cases and the exact report and binaries
   assert.equal(receipt.runnerSha256, provenance.runnerSha256);
   assert.equal(receipt.providerSha256, provenance.providerSha256);
   assert.equal(receipt.junitSha256, provenance.junitSha256);
+  assert.equal(receipt.sourceLockSha256, provenance.sourceLockSha256);
+  assert.equal(receipt.effectiveLockSha256, provenance.effectiveLockSha256);
+  assert.equal(receipt.nodeVersion, provenance.nodeVersion);
+  assert.equal(receipt.pnpmVersion, provenance.pnpmVersion);
+  assert.equal(receipt.lockfileRegenerated, false);
   assert.equal(receipt.cases.length, 2);
   assert.equal(receipt.evidence.length, 4);
   assert.equal(receipt.evidence[0].sha256, createHash("sha256")
     .update('{"clickToRequestMs":1,"requestToStoppedMs":2}').digest("hex"));
+});
+
+test("a regenerated dependency lock is explicitly identified in the receipt", () => {
+  const receipt = qualifyComposerStop(Buffer.from(JSON.stringify(report())), {
+    ...provenance, effectiveLockSha256: "0".repeat(64),
+  });
+  assert.equal(receipt.lockfileRegenerated, true);
+  assert.equal(receipt.sourceLockSha256, provenance.sourceLockSha256);
+  assert.equal(receipt.effectiveLockSha256, "0".repeat(64));
 });
 
 test("missing, skipped, failed, retried or incomplete native proof is refused", () => {

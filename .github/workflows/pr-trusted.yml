@@ -1401,6 +1401,8 @@ jobs:
       - name: Qualify exact-head native composer Stop proof
         env:
           PLAYWRIGHT_JUNIT_OUTPUT_NAME: ${{ runner.temp }}/composer-stop-junit.xml
+          COMPOSER_STOP_SOURCE_LOCKFILE: ${{ runner.temp }}/composer-stop-source-lock.yaml
+          COMPOSER_STOP_EFFECTIVE_LOCKFILE: ${{ runner.temp }}/composer-stop-effective-lock.yaml
         run: |
           python3 - "$PLAYWRIGHT_JUNIT_OUTPUT_NAME" <<'PY'
           import sys
@@ -1414,7 +1416,10 @@ jobs:
               raise SystemExit('Incomplete composer Stop JUnit proof')
           PY
           COMPOSER_STOP_REVISION="$(git rev-parse HEAD)"
-          export COMPOSER_STOP_REVISION
+          COMPOSER_STOP_PNPM_VERSION="$(pnpm --version)"
+          export COMPOSER_STOP_REVISION COMPOSER_STOP_PNPM_VERSION
+          git show HEAD:pnpm-lock.yaml > "$COMPOSER_STOP_SOURCE_LOCKFILE"
+          cp pnpm-lock.yaml "$COMPOSER_STOP_EFFECTIVE_LOCKFILE"
           node scripts/qualify-composer-stop.mjs "$RUNNER_TEMP/composer-stop-report.json" "$RUNNER_TEMP/composer-stop-receipt.json"
 
       - name: Retain native composer Stop evidence
@@ -1428,6 +1433,8 @@ jobs:
             ${{ runner.temp }}/composer-stop-report.json
             ${{ runner.temp }}/composer-stop-junit.xml
             ${{ runner.temp }}/composer-stop-receipt.json
+            ${{ runner.temp }}/composer-stop-source-lock.yaml
+            ${{ runner.temp }}/composer-stop-effective-lock.yaml
             tests/e2e/test-results/
 
   e2e:
