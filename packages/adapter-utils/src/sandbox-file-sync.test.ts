@@ -4,6 +4,7 @@ import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
+import { configureFixtureGitIdentity } from "../test/helpers/git-fixture.mjs";
 
 import {
   assertSyncOperationsConfined,
@@ -100,11 +101,12 @@ describe("sandbox native file sync", () => {
     const remoteDir = path.join(rootDir, "remote");
     await mkdir(selectedDir, { recursive: true });
     await execFile("git", ["-C", repo, "init"]);
+    configureFixtureGitIdentity(repo);
     await writeFile(path.join(repo, "outside.txt"), "outside boundary\n");
     await writeFile(path.join(repo, ".gitignore"), "project/private.txt\n");
     await writeFile(path.join(selectedDir, "draft.md"), "preserved draft\n");
     await execFile("git", ["-C", repo, "add", "."]);
-    await execFile("git", ["-C", repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "base"]);
+    await execFile("git", ["-C", repo, "commit", "-m", "base"]);
     await writeFile(path.join(selectedDir, "private.txt"), "stay local\n");
 
     const { client } = makeNativeClient();

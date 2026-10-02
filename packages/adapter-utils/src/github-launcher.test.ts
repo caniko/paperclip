@@ -6,7 +6,16 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { githubBrokerEnvironment, githubLauncherSource } from "./github-launcher.js";
+import { configureFixtureGitIdentity } from "../test/helpers/git-fixture.mjs";
 const exec = promisify(execFile);
+
+async function readFixtureGitIdentity(repo: string) {
+  const read = async (key: string) => (await exec("git", ["config", "--local", "--get", key], { cwd: repo }))
+    .stdout.replace(/\r?\n$/, "");
+  const [name, email] = await Promise.all([read("user.name"), read("user.email")]);
+  return { name, email };
+}
+
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
@@ -25,14 +34,18 @@ describe("managed GitHub launchers", () => {
     // No configured identity must fail, rather than guessing the host user's.
     await expect(git("var", "GIT_AUTHOR_IDENT")).rejects.toThrow();
     await expect(git("var", "GIT_COMMITTER_IDENT")).rejects.toThrow();
-    if (identitySource === "repository") {
-      await git("config", "user.name", "Local Author");
-      await git("config", "user.email", "local@example.test");
+    configureFixtureGitIdentity(root);
+    const { name, email } = await readFixtureGitIdentity(root);
+    if (identitySource === "command") {
+      await git("config", "--local", "--unset", "user.name");
+      await git("config", "--local", "--unset", "user.email");
+      await expect(git("var", "GIT_AUTHOR_IDENT")).rejects.toThrow();
+      await expect(git("var", "GIT_COMMITTER_IDENT")).rejects.toThrow();
     }
-    await git(...(identitySource === "command" ? ["-c", "user.name=Local Author", "-c", "user.email=local@example.test"] : []),
+    await git(...(identitySource === "command" ? ["-c", `user.name=${name}`, "-c", `user.email=${email}`] : []),
       "commit", "--allow-empty", "-m", "Local work");
     expect(await git("log", "-1", "--format=%an <%ae>|%cn <%ce>"))
-      .toBe("Local Author <local@example.test>|Local Author <local@example.test>");
+      .toBe(`${name} <${email}>|${name} <${email}>`);
   });
 
   it.each(["broker-offline", "config-unwritable", "capability-rejected"])("keeps real local Git usable when %s", async (failure) => {
@@ -41,8 +54,7 @@ describe("managed GitHub launchers", () => {
     const bin = path.join(root, "managed");
     await mkdir(bin);
     await exec("git", ["init", root]);
-    await exec("git", ["-C", root, "config", "user.name", "Local Author"]);
-    await exec("git", ["-C", root, "config", "user.email", "local@example.test"]);
+    configureFixtureGitIdentity(root);
     await writeFile(path.join(bin, "git"), githubLauncherSource(), { mode: 0o700 });
     const server = createServer((_req, res) => { res.writeHead(403); res.end(); });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -117,8 +129,8 @@ process.stdout.write(JSON.stringify({identity, token:process.env.GH_TOKEN ?? nul
     }, { url: `http://127.0.0.1:${address.port}`, token: "run-capability" }), PATH: `${bin}:${realBin}:${process.env.PATH}` };
     const git = async (...args: string[]) => (await exec(path.join(bin, "git"), args, { cwd: repo, env })).stdout.trim();
     await git("init");
-    await git("config", "user.name", "Repository Author");
-    await git("config", "user.email", "repository@example.test");
+    configureFixtureGitIdentity(repo);
+    const { name, email } = await readFixtureGitIdentity(repo);
     await git("commit", "--allow-empty", "-m", "A");
     user = "B";
     await git("commit", "--allow-empty", "-m", "B");
@@ -143,7 +155,7 @@ process.stdout.write(JSON.stringify({identity, token:process.env.GH_TOKEN ?? nul
     user = null;
     await git("commit", "--allow-empty", "-m", "Local identity");
     expect(await git("log", "-1", "--format=%an <%ae>|%cn <%ce>"))
-      .toBe("Repository Author <repository@example.test>|Repository Author <repository@example.test>");
+      .toBe(`${name} <${email}>|${name} <${email}>`);
     const anonymous = JSON.parse((await exec(path.join(bin, "gh"), [], { cwd: repo, env })).stdout);
     expect(anonymous.token).toBeNull();
     await git("config", "--unset", "user.name");

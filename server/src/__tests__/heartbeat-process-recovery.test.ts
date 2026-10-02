@@ -25,6 +25,7 @@ import {
   describe,
   expect,
   it,
+  onTestFinished,
   vi,
 } from "vitest";
 import {
@@ -1569,13 +1570,33 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     }
   });
 
+  async function isolateRunFailureFixtureEnvironment() {
+    // As in run-failure-report.test.ts, unknown inherited values are secrets.
+    // Build settings such as AR=ar must not rewrite this fixture's diagnostics.
+    const inheritedEnv = process.env;
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "recovery-report-"));
+    process.env = Object.fromEntries(
+      ["PATH", "HOME", "USER", "USERNAME", "LOGNAME", "USERPROFILE", "TMPDIR", "TEMP", "TMP"]
+        .flatMap((key) => inheritedEnv[key] === undefined ? [] : [[key, inheritedEnv[key]]]),
+    );
+    process.env.PAPERCLIP_HOME = home;
+    process.env.PAPERCLIP_INSTANCE_ID = `recovery-fixture-${randomUUID()}`;
+    onTestFinished(async () => {
+      process.env = inheritedEnv;
+      await fs.rm(home, { recursive: true, force: true });
+    });
+  }
+
   it.each([
     "continuation_source_context_missing",
     "continuation_user_authorization_missing",
     "continuation_task_ownership_changed",
   ])("retains untyped continuation setup failures: %s", async (message) => {
+    await isolateRunFailureFixtureEnvironment();
+    const credential = `continuation-test-credential-${randomUUID()}`;
+    process.env.PAPERCLIP_CONTINUATION_TEST_CREDENTIAL = credential;
     const { runId, wakeupRequestId } = await seedQueuedIssueRunFixture();
-    const error = new Error(message, { cause: Object.assign(new Error("upstream setup failed"), { code: "ECONNRESET" }) });
+    const error = new Error(message, { cause: Object.assign(new Error(`upstream setup failed ${credential}`), { code: "ECONNRESET" }) });
     const build = vi.spyOn(executionContinuation, "buildExecutionContinuation")
       .mockRejectedValueOnce(error);
     try {
@@ -1590,8 +1611,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       const report = await waitForValue(async () => mockCaptureRunFailure.mock.calls.find(([event]) => event.runId === runId)?.[0]);
       expect(report?.diagnostics).toMatchObject({
         execution: { failurePhase: "setup" },
-        exceptions: [{ message, stack: expect.stringContaining("heartbeat-process-recovery.test.ts") }, { code: "ECONNRESET" }],
+        exceptions: [{ message, stack: expect.stringContaining("heartbeat-process-recovery.test.ts") },
+          { code: "ECONNRESET", message: "upstream setup failed ***REDACTED***" }],
       });
+      expect(JSON.stringify(report)).not.toContain(credential);
       const [wakeup] = await db.select().from(agentWakeupRequests)
         .where(eq(agentWakeupRequests.id, wakeupRequestId));
       expect(wakeup.status).toBe("failed");
@@ -2455,6 +2478,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
   it("schedules one conversation continuation after losing the provider", async () => {
+    await isolateRunFailureFixtureEnvironment();
     const { agentId, runId, issueId } = await seedRunFixture({
       agentStatus: "idle",
       processPid: 999_999_999,

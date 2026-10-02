@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { agents } from "@paperclipai/db";
 import { sessionCodec as codexSessionCodec } from "@paperclipai/adapter-codex-local/server";
 import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
+import { configureFixtureGitIdentity } from "./helpers/git-fixture.js";
 import {
   applyPersistedExecutionWorkspaceConfig,
   assertGitSensitiveAdapterWorkspaceValid,
@@ -384,8 +385,7 @@ describe("assertGitSensitiveAdapterWorkspaceValid", () => {
     const recordedBranch = "PAP-1-recorded-branch";
     const actualBranch = "PAP-1-push-pr-head";
     try {
-      await runGit(repoRoot, ["config", "user.email", "test@example.com"]);
-      await runGit(repoRoot, ["config", "user.name", "Paperclip Test"]);
+      configureFixtureGitIdentity(repoRoot);
       await fs.writeFile(path.join(repoRoot, "README.md"), "initial\n", "utf8");
       await runGit(repoRoot, ["add", "README.md"]);
       await runGit(repoRoot, ["commit", "-m", "Initial commit"]);

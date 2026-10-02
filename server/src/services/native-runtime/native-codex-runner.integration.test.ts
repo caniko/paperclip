@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -44,20 +44,8 @@ const runnerWorkspace = resolve(
   "../../../../packages/paperclip-runner/runner",
 );
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
-const runnerBinary = resolve(
-  runnerWorkspace,
-  "target",
-  "release",
-  `paperclip-runnerd${executableSuffix}`,
-);
-const fakeCodexBinary = resolve(
-  runnerWorkspace,
-  "target",
-  "release",
-  `fake-codex-app-server${executableSuffix}`,
-);
 
-function ensureRunnerTestBinaries(): void {
+function ensureRunnerTestBinaries(): { runnerBinary: string; fakeCodexBinary: string } {
   // Cargo's freshness check is necessary even when the files exist: an older
   // fake provider can otherwise exercise a different protocol than the source.
   execFileSync("cargo", [
@@ -78,6 +66,31 @@ function ensureRunnerTestBinaries(): void {
     // finish on GitHub-hosted runners.
     timeout: 600_000,
   });
+
+  // Ask Cargo for the target directory used by the build, including toolchain
+  // environment and config overrides (see stage-runner-binary.mjs).
+  const metadata: unknown = JSON.parse(execFileSync("cargo", [
+    "metadata",
+    "--format-version=1",
+    "--no-deps",
+    "--locked",
+    "--offline",
+  ], {
+    cwd: runnerWorkspace,
+    encoding: "utf8",
+  }));
+  if (
+    !metadata || typeof metadata !== "object" ||
+    !("target_directory" in metadata) ||
+    typeof metadata.target_directory !== "string" ||
+    !isAbsolute(metadata.target_directory)
+  ) {
+    throw new Error("Cargo metadata must contain an absolute target_directory");
+  }
+  return {
+    runnerBinary: resolve(metadata.target_directory, "release", `paperclip-runnerd${executableSuffix}`),
+    fakeCodexBinary: resolve(metadata.target_directory, "release", `fake-codex-app-server${executableSuffix}`),
+  };
 }
 
 async function closeServer(server: Server | null): Promise<void> {
@@ -93,9 +106,11 @@ describeEmbeddedPostgres("native Codex server vertical slice", () => {
   let temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   let runtimeRoot: string | null = null;
   let server: Server | null = null;
+  let runnerBinary: string;
+  let fakeCodexBinary: string;
 
   beforeAll(async () => {
-    ensureRunnerTestBinaries();
+    ({ runnerBinary, fakeCodexBinary } = ensureRunnerTestBinaries());
     temporary = await startEmbeddedPostgresTestDatabase("native-codex-vertical-slice-");
     runtimeRoot = await mkdtemp(resolve(tmpdir(), "native-codex-runtime-"));
     server = createServer();

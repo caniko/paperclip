@@ -5,6 +5,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { instructionGitExcludeProgram } from "../services/agent-instruction-files.js";
+import { configureFixtureGitIdentity } from "./helpers/git-fixture.js";
 
 const execFile = promisify(execFileCallback);
 let root: string;
@@ -25,6 +26,8 @@ it("excludes runtime files without changing tracked ignore rules or Git metadata
   await git(root, "init");
   await fs.writeFile(path.join(root, ".gitignore"), "keep-me\n");
   const metadata = path.join(root, ".git", "info", "exclude");
+  await fs.mkdir(path.dirname(metadata), { recursive: true });
+  await fs.writeFile(metadata, "# Fixture Git metadata\nfixture-private\n");
   const before = await fs.readFile(metadata, "utf8");
   await exclude(root);
   await exclude(root);
@@ -38,6 +41,8 @@ it("never writes to an external gitdir selected by task-controlled metadata", as
   await fs.mkdir(workspace);
   await git(workspace, "init", `--separate-git-dir=${outside}`);
   const metadata = path.join(outside, "info", "exclude");
+  await fs.mkdir(path.dirname(metadata), { recursive: true });
+  await fs.writeFile(metadata, "# Fixture Git metadata\nfixture-private\n");
   const before = await fs.readFile(metadata, "utf8");
   await exclude(workspace);
   await assertPrivateFilesIgnored(workspace);
@@ -48,11 +53,14 @@ it("supports linked worktrees and nested task directories without changing the c
   const repository = path.join(root, "repository"), worktree = path.join(root, "worktree");
   await fs.mkdir(repository);
   await git(repository, "init");
-  await git(repository, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "-m", "initial");
+  configureFixtureGitIdentity(repository);
+  await git(repository, "commit", "--allow-empty", "-m", "initial");
   await git(repository, "worktree", "add", "--detach", worktree);
   const nested = path.join(worktree, "nested");
   await fs.mkdir(nested);
   const metadata = path.join(repository, ".git", "info", "exclude");
+  await fs.mkdir(path.dirname(metadata), { recursive: true });
+  await fs.writeFile(metadata, "# Fixture Git metadata\nfixture-private\n");
   const before = await fs.readFile(metadata, "utf8");
   await exclude(nested);
   await assertPrivateFilesIgnored(nested);

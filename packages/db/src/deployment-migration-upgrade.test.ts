@@ -83,7 +83,7 @@ async function readHistory(sql: TestSql) {
 
 async function readSchema(sql: TestSql) {
   const tables = await sql<{ table_name: string }[]>`SELECT table_name FROM information_schema.tables
-    WHERE table_schema = 'public' AND table_name IN ${sql([...browserTables, "deployment_resources"])} ORDER BY table_name`;
+    WHERE table_schema = 'public' AND table_name = ANY(${sql.array([...browserTables, "deployment_resources"])}::text[]) ORDER BY table_name`;
   const [keyboard] = await sql`SELECT EXISTS (SELECT 1 FROM information_schema.columns
     WHERE table_schema = 'public' AND table_name = 'user' AND column_name = 'keyboard_shortcuts') AS present`;
   const guards = await sql`SELECT c.relname AS table_name, t.tgenabled AS enabled,

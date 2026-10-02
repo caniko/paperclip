@@ -904,24 +904,68 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
   // whether a specific test-authored script (identified by its own temp file
   // path) is still running. Production host code never does this — it never
   // matches or signals a process by name or command line.
-  async function findLivePidsByArgvSubstring(substring: string): Promise<number[]> {
+  async function findLivePidsByArgvSubstring(
+    substring: string,
+    probe = { command: "ps", args: ["-ww", "-eo", "pid=,args="] },
+  ): Promise<number[]> {
+    // Busy hosts can exceed execFile's 1 MiB default even when ps succeeds.
+    // Keep a bounded allowance and propagate every observation failure: an
+    // unreadable process table must never certify successful termination.
+    let stdout: string;
     try {
-      const { stdout } = await execFile("ps", ["-eo", "pid=,args="]);
-      const pids: number[] = [];
-      for (const line of stdout.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        const match = /^(\d+)\s+(.*)$/.exec(trimmed);
-        if (match && match[2].includes(substring)) {
-          const pid = Number.parseInt(match[1], 10);
-          if (Number.isFinite(pid)) pids.push(pid);
-        }
-      }
-      return pids;
-    } catch {
-      return [];
+      ({ stdout } = await execFile(probe.command, probe.args, { maxBuffer: 16 * 1024 * 1024 }));
+    } catch (error) {
+      const probeError = error as { code?: string | number; stdout?: string | Buffer; stderr?: string | Buffer };
+      // Vitest serializes error properties and causes. Keep only safe metadata,
+      // never the process argv table or stderr attached to execFile errors.
+      throw Object.assign(new Error("Process-table observation failed"), {
+        code: typeof probeError.code === "number" || /^[A-Z0-9_]{1,64}$/.test(probeError.code ?? "")
+          ? probeError.code : "PROCESS_PROBE_FAILED",
+        stdoutBytes: Buffer.byteLength(probeError.stdout ?? ""),
+        stderrBytes: Buffer.byteLength(probeError.stderr ?? ""),
+      });
     }
+    const pids: number[] = [];
+    for (const line of stdout.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const match = /^(\d+)\s+(.*)$/.exec(trimmed);
+      if (match && match[2].includes(substring)) {
+        const pid = Number.parseInt(match[1], 10);
+        if (Number.isFinite(pid)) pids.push(pid);
+      }
+    }
+    return pids;
   }
+
+  it("does not certify termination when the process-table probe fails", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-probe-error-"));
+    cleanupDirs.push(root);
+    await expect(findLivePidsByArgvSubstring(root, {
+      command: path.join(root, "missing-process-probe"), args: [],
+    })).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("finds the owned process after more than 1 MiB of unrelated process output", async () => {
+    const marker = `paperclip-owned-process-probe-${process.pid}`;
+    const script = `process.stdout.write("0 unrelated process\\n".repeat(120000) + ${JSON.stringify(`${process.pid} ${marker}\n`)});`;
+    await expect(findLivePidsByArgvSubstring(marker, {
+      command: process.execPath, args: ["-e", script],
+    })).resolves.toEqual([process.pid]);
+  });
+
+  it("keeps process argv and stderr off a failed observation's error", async () => {
+    const canary = "synthetic-process-argv-secret";
+    const output = `0 ${canary}\n`;
+    const script = `process.stdout.write(${JSON.stringify(output)}); process.stderr.write(${JSON.stringify(canary)}); process.exitCode = 7;`;
+    const error = await findLivePidsByArgvSubstring(canary, {
+      command: process.execPath, args: ["-e", script],
+    }).catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: 7, stdoutBytes: Buffer.byteLength(output), stderrBytes: Buffer.byteLength(canary) });
+    for (const key of ["stdout", "stderr", "cause"]) expect(error).not.toHaveProperty(key);
+    expect(String(error)).not.toContain(canary);
+    expect(JSON.stringify(error)).not.toContain(canary);
+  });
 
   type WrapperFrame = {
     seq?: number;

@@ -16,6 +16,7 @@ import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { configureFixtureGitIdentity } from "../../test/helpers/git-fixture.mjs";
 import type { AdapterExecutionContext, AdapterRuntimeMcpAccess } from "@paperclipai/adapter-utils";
 import {
   startAdapterExecutionTargetPaperclipBridge,
@@ -911,8 +912,7 @@ describe("ACP settlement — Layer B: restoreWorkspace order + native-sync selec
     await fs.mkdir(sourceRepoDir, { recursive: true });
     await git(sourceRepoDir, ["init"]);
     await git(sourceRepoDir, ["checkout", "-b", "main"]);
-    await git(sourceRepoDir, ["config", "user.name", "Paperclip Test"]);
-    await git(sourceRepoDir, ["config", "user.email", "test@paperclip.dev"]);
+    configureFixtureGitIdentity(sourceRepoDir);
     await fs.writeFile(path.join(sourceRepoDir, "tracked.txt"), "base\n", "utf8");
     await git(sourceRepoDir, ["add", "tracked.txt"]);
     await git(sourceRepoDir, ["commit", "-m", "base"]);
@@ -940,8 +940,7 @@ describe("ACP settlement — Layer B: restoreWorkspace order + native-sync selec
 
     // The sandbox holds a real git worktree seeded from the host history.
     expect((await git(remoteWorkspaceDir, ["rev-list", "--count", "HEAD"]))).toBe("1");
-    await git(remoteWorkspaceDir, ["config", "user.name", "Paperclip Sandbox"]);
-    await git(remoteWorkspaceDir, ["config", "user.email", "sandbox@paperclip.dev"]);
+    configureFixtureGitIdentity(remoteWorkspaceDir);
     await git(remoteWorkspaceDir, ["add", "-A"]);
     await git(remoteWorkspaceDir, ["commit", "-m", "sandbox update"]);
     await fs.writeFile(path.join(remoteWorkspaceDir, "remote-only.txt"), "from sandbox\n", "utf8");
