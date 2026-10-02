@@ -79,7 +79,7 @@ export async function terminalizeLegacyExecution(input: {
           .where(
             and(eq(issues.companyId, run.companyId), eq(issues.id, issueId)),
           )
-          .for("update")
+          .for("no key update")
       : [];
     await lockRunForAdapterSettlement(tx, run.id);
     const [updated] = await tx
