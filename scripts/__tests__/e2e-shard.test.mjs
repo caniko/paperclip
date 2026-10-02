@@ -29,10 +29,10 @@ function readTrustedPrWorkflow() {
   const caller = readFileSync(prCallerWorkflow, "utf8");
   assert.match(
     caller,
-    /^\s+uses: paperclipai\/paperclip\/\.github\/workflows\/pr-trusted\.yml@master\s*$/m,
-    "pr.yml must call the trusted workflow from CODEOWNERS-protected master",
+    /^\s+uses: caniko\/paperclip\/\.github\/workflows\/pr-trusted\.yml@[0-9a-f]{40}\s*$/m,
+    "the owned candidate must call its own immutable qualification workflow",
   );
-  // Validate proposed workflow changes locally; CI executes the merged master version.
+  // Validate the owned workflow here; hosted run metadata records its pinned source.
   return readFileSync(trustedPrWorkflow, "utf8");
 }
 
@@ -157,7 +157,7 @@ test("shard arguments are validated", () => {
   }
 });
 
-test("pr.yml calls the trusted PR workflow from master", () => {
+test("pr.yml calls the owned qualification workflow by immutable commit", () => {
   assert.ok(readTrustedPrWorkflow().length > 0);
 });
 

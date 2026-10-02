@@ -162,6 +162,7 @@ is explicitly skipped without the fixture; it must not use a logged-in provider
 as a fallback. Test companies are archived during cleanup.
 
 Full PR CI runs both journeys in the mandatory `Native composer Stop` lane.
+The owned candidate calls its reusable CI workflow through an immutable commit.
 It checks out the exact PR head and sets `PAPERCLIP_STOP_REQUIRE_NATIVE=true`.
 Missing or non-executable fixture/runner binaries refuse startup. The required
 `e2e` check includes this lane. Qualification refuses missing cases, failures,
