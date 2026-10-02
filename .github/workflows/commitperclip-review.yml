@@ -26,7 +26,6 @@ jobs:
       COMMITPERCLIP_APP_ID: ${{ vars.COMMITPERCLIP_APP_ID }}
       COMMITPERCLIP_APP_SLUG: ${{ vars.COMMITPERCLIP_APP_SLUG }}
       COMMITPERCLIP_TRUSTED_SOURCE_SHA: ${{ github.event.pull_request.base.sha }}
-      COMMITPERCLIP_REVOCATION_RECEIPT: ${{ runner.temp }}/review-app-revocation.json
     steps:
       - name: Checkout base branch (never PR code)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -50,11 +49,12 @@ jobs:
         run: |
           TOKEN=$(node .github/scripts/get-bot-token.mjs)
           echo "::add-mask::$TOKEN"
-          echo "value=$TOKEN" >> $GITHUB_OUTPUT
+          echo "value=$TOKEN" >> "$GITHUB_OUTPUT"
         env:
           COMMITPERCLIP_KEY: ${{ secrets.COMMITPERCLIP_KEY }}
           COMMITPERCLIP_TOKEN_REPOSITORY: ${{ github.repository }}
           COMMITPERCLIP_VERIFICATION_RECEIPT: ${{ runner.temp }}/review-app-authentication.json
+          COMMITPERCLIP_REVOCATION_RECEIPT: ${{ runner.temp }}/review-app-revocation.json
 
       - name: Run quality gates
         id: quality
@@ -73,6 +73,7 @@ jobs:
         if: always() && steps.token.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.token.outputs.value }}
+          COMMITPERCLIP_REVOCATION_RECEIPT: ${{ runner.temp }}/review-app-revocation.json
         run: node .github/scripts/revoke-bot-token.mjs
 
       - name: Retain issued app and comment verification
