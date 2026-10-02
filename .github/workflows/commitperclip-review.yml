@@ -12,15 +12,26 @@ permissions:
   checks: write
   contents: read
 
+# Serialize the entire lookup/create/update sequence for one PR. Let an active
+# review finish (including token revocation) before the next run can publish.
+concurrency:
+  group: commitperclip-review-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
 jobs:
   review:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      COMMITPERCLIP_APP_ID: ${{ vars.COMMITPERCLIP_APP_ID }}
+      COMMITPERCLIP_APP_SLUG: ${{ vars.COMMITPERCLIP_APP_SLUG }}
+      COMMITPERCLIP_TRUSTED_SOURCE_SHA: ${{ github.event.pull_request.base.sha }}
     steps:
       - name: Checkout base branch (never PR code)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: master
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
 
       - name: Dependency Review
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
@@ -33,14 +44,34 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Verify trusted review runtime
+        run: |
+          node --input-type=module - <<'JS'
+          import { existsSync } from 'node:fs';
+          import { resolve } from 'node:path';
+          import { pathToFileURL } from 'node:url';
+          const refuse = () => { throw new Error('Incompatible review runtime: refresh the trusted base before minting a token.'); };
+          for (const name of ['get-bot-token.mjs', 'revoke-bot-token.mjs', 'run-quality-gates.mjs']) {
+            if (!existsSync(`.github/scripts/${name}`)) refuse();
+          }
+          const runtime = await import(pathToFileURL(resolve('.github/scripts/get-bot-token.mjs')));
+          for (const name of ['getInstallationToken', 'revokeInstallationToken']) {
+            if (typeof runtime[name] !== 'function') refuse();
+          }
+          JS
+          node --check .github/scripts/revoke-bot-token.mjs
+
       - name: Generate commitperclip token
         id: token
         run: |
           TOKEN=$(node .github/scripts/get-bot-token.mjs)
           echo "::add-mask::$TOKEN"
-          echo "value=$TOKEN" >> $GITHUB_OUTPUT
+          echo "value=$TOKEN" >> "$GITHUB_OUTPUT"
         env:
           COMMITPERCLIP_KEY: ${{ secrets.COMMITPERCLIP_KEY }}
+          COMMITPERCLIP_TOKEN_REPOSITORY: ${{ github.repository }}
+          COMMITPERCLIP_VERIFICATION_RECEIPT: ${{ runner.temp }}/review-app-authentication.json
+          COMMITPERCLIP_REVOCATION_RECEIPT: ${{ runner.temp }}/review-app-revocation.json
 
       - name: Run quality gates
         id: quality
@@ -53,6 +84,26 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          COMMITPERCLIP_COMMENT_RECEIPT: ${{ runner.temp }}/review-app-comment.json
+
+      - name: Revoke review token
+        if: always() && steps.token.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.value }}
+          COMMITPERCLIP_REVOCATION_RECEIPT: ${{ runner.temp }}/review-app-revocation.json
+        run: node .github/scripts/revoke-bot-token.mjs
+
+      - name: Retain issued app and comment verification
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: review-app-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/review-app-authentication.json
+            ${{ runner.temp }}/review-app-comment.json
+            ${{ runner.temp }}/review-app-revocation.json
 
       - name: Fail if quality gates failed
         if: >-

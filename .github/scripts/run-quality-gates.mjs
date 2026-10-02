@@ -8,7 +8,8 @@
  * Exit: 0 if all quality gates pass, 1 if any fail.
  */
 import { fileURLToPath } from 'node:url';
-import { ghFetch } from './get-bot-token.mjs';
+import { writeFileSync } from 'node:fs';
+import { ghFetch, resolveAppIdentity } from './get-bot-token.mjs';
 import { fetchAllPullRequestFiles } from './fetch-pr-files.mjs';
 import { checkTemplate } from './check-pr-template.mjs';
 import { checkLinkedIssue } from './check-pr-linked-issue.mjs';
@@ -19,11 +20,12 @@ import { checkDependencies } from './check-pr-dependencies.mjs';
 import { checkReleaseBootstrap } from './check-pr-release-bootstrap.mjs';
 import { checkCoauthors, fetchAllPullRequestCommits } from './check-pr-coauthors.mjs';
 
-const COMMENT_SIGNATURE = '— commitperclip';
+const COMMENT_MARKER = '<!-- paperclip-quality-gates -->';
 
-function buildComment(author, failures, informational) {
+function buildComment(author, failures, informational, identity) {
+  const signature = `${COMMENT_MARKER}\n\n— ${identity.slug}`;
   if (failures.length === 0 && informational.length === 0) {
-    return `✅ All checks passing — ready for Greptile review and maintainer approval.\n\n${COMMENT_SIGNATURE}`;
+    return `✅ All checks passing — ready for Greptile review and maintainer approval.\n\n${signature}`;
   }
 
   const lines = [
@@ -43,13 +45,14 @@ function buildComment(author, failures, informational) {
 
   lines.push(
     '\nOnce updated, push a new commit and these checks will re-run automatically.\n',
-    COMMENT_SIGNATURE
+    signature
   );
 
   return lines.join('\n');
 }
 
-export async function findExistingComment(fetchFromGitHub, token, repo, prNumber) {
+export async function findExistingComment(fetchFromGitHub, token, repo, prNumber,
+  identity = resolveAppIdentity({ ...process.env, GH_REPO: repo })) {
   for (let page = 1; ; page += 1) {
     const comments = await fetchFromGitHub(
       `/repos/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
@@ -57,8 +60,9 @@ export async function findExistingComment(fetchFromGitHub, token, repo, prNumber
     );
 
     const existing = comments.find(
-      c => (c.user.login === 'commitperclip[bot]' || c.user.login === 'commitperclip') &&
-           c.body.includes(COMMENT_SIGNATURE)
+      c => c.user.login === identity.botLogin &&
+           (!c.performed_via_github_app || String(c.performed_via_github_app.id) === identity.id) &&
+           (c.body.includes(COMMENT_MARKER) || c.body.includes(`— ${identity.slug}`))
     );
     if (existing) return existing;
 
@@ -66,20 +70,12 @@ export async function findExistingComment(fetchFromGitHub, token, repo, prNumber
   }
 }
 
-async function upsertComment(token, repo, prNumber, body, existing) {
-  if (existing) {
-    await ghFetch(`/repos/${repo}/issues/comments/${existing.id}`, token, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ body }),
-    });
-  } else {
-    await ghFetch(`/repos/${repo}/issues/${prNumber}/comments`, token, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ body }),
-    });
-  }
+export async function upsertComment(token, repo, prNumber, body, existing, fetchFromGitHub = ghFetch) {
+  return fetchFromGitHub(existing ? `/repos/${repo}/issues/comments/${existing.id}` : `/repos/${repo}/issues/${prNumber}/comments`, token, {
+    method: existing ? 'PATCH' : 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ body }),
+  });
 }
 
 async function main() {
@@ -150,12 +146,23 @@ async function main() {
   ];
   const allPassed = allFailures.length === 0;
 
-  const commentBody = buildComment(author, allFailures, informational);
+  const identity = resolveAppIdentity();
+  const commentBody = buildComment(author, allFailures, informational, identity);
 
-  // Post comment if there are failures/informational, or update existing comment
+  // One marked comment also records successful review and is updated on retry.
   const existing = await findExistingComment(ghFetch, GH_TOKEN, GH_REPO, prNumber);
-  if (allFailures.length > 0 || informational.length > 0 || existing) {
-    await upsertComment(GH_TOKEN, GH_REPO, prNumber, commentBody, existing);
+  const comment = await upsertComment(GH_TOKEN, GH_REPO, prNumber, commentBody, existing);
+  if (comment.user?.login !== identity.botLogin || String(comment.performed_via_github_app?.id) !== identity.id) {
+    throw new Error('Review comment was not authored by the configured GitHub App.');
+  }
+  if (process.env.COMMITPERCLIP_COMMENT_RECEIPT) {
+    writeFileSync(process.env.COMMITPERCLIP_COMMENT_RECEIPT, JSON.stringify({
+      kind: 'actions-slot-review-comment', appId: identity.id, appSlug: identity.slug,
+      repository: GH_REPO, prNumber, commentId: comment.id, action: existing ? 'updated' : 'created',
+      trustedSourceSha: process.env.COMMITPERCLIP_TRUSTED_SOURCE_SHA,
+      runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+      qualityGatesPassed: allPassed,
+    }, null, 2), { mode: 0o600 });
   }
 
   console.log(JSON.stringify({ passed: allPassed, failures: allFailures, informational }));
