@@ -12,6 +12,12 @@ permissions:
   checks: write
   contents: read
 
+# Serialize the entire lookup/create/update sequence for one PR. Let an active
+# review finish (including token revocation) before the next run can publish.
+concurrency:
+  group: commitperclip-review-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
 jobs:
   review:
     runs-on: ubuntu-latest
