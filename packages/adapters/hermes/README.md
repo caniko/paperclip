@@ -144,6 +144,11 @@ This mode does not start Hermes. It creates runs with `POST /v1/runs`, streams
 Hermes events with SSE, polls run status as a fallback, and stops timed-out runs
 with `POST /v1/runs/{run_id}/stop`.
 
+Controller cancellation also applies to ordinary gateway runs. After admission,
+the adapter retries Stop and keeps observing until a terminal parent-run receipt
+is verified; child completion, mismatched run IDs, and nonterminal Stop responses
+do not acknowledge cancellation. The adapter tests run in the PR workspace lane.
+
 #### Maintain an existing directory
 
 The gateway adapter supports a configured worker whose terminal backend is
