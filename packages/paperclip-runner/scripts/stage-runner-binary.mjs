@@ -3,21 +3,13 @@ import { chmod, copyFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { resolveCargoBinary } from "./cargo-artifacts.mjs";
 
 const execFileAsync = promisify(execFile);
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const executable = process.platform === "win32" ? "paperclip-runnerd.exe" : "paperclip-runnerd";
-// Resolve the same target directory Cargo used, including environment and config overrides.
-const { stdout } = await execFileAsync("cargo", [
-  "metadata",
-  "--format-version=1",
-  "--no-deps",
-  "--manifest-path", "runner/Cargo.toml",
-  "--locked",
-  "--offline",
-], { cwd: packageRoot });
-const source = path.join(JSON.parse(stdout).target_directory, "release", executable);
+const source = resolveCargoBinary({ binary: "paperclip-runnerd", profile: "release" });
 const destinationDirectory = path.join(packageRoot, "dist", "bin");
 const destination = path.join(destinationDirectory, executable);
 
