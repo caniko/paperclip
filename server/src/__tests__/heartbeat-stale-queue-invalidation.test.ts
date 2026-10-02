@@ -764,6 +764,8 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
           source: "connection_intent.resolved",
         },
       });
+      let mutationCommitted!: () => void;
+      const mutationReady = new Promise<void>((resolve) => { mutationCommitted = resolve; });
       beforeContinuationDispatchCheck = async ({ runId: guardedRunId, issueId: guardedIssueId }) => {
         expect(guardedRunId).toBe(runId);
         expect(guardedIssueId).toBe(issueId);
@@ -773,10 +775,14 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
             ? { status: "backlog", updatedAt: new Date() }
             : { assigneeAgentId: replacementAgentId, updatedAt: new Date() })
           .where(eq(issues.id, issueId));
+        mutationCommitted();
       };
 
       await heartbeat.resumeQueuedRuns();
-      await waitForCondition(async () => {
+      // resumeQueuedRuns starts setup asynchronously. Observe the actual race
+      // mutation before waiting for its dispatch-gate cancellation to settle.
+      await mutationReady;
+      expect(await waitForCondition(async () => {
         const [run, wakeup] = await Promise.all([
           db.select({ status: heartbeatRuns.status })
             .from(heartbeatRuns)
@@ -788,7 +794,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
             .then((rows) => rows[0] ?? null),
         ]);
         return run?.status === "cancelled" && wakeup?.status === "skipped";
-      });
+      })).toBe(true);
 
       const [run, wakeup, issue] = await Promise.all([
         db.select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })

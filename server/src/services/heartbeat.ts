@@ -17332,6 +17332,7 @@ export function heartbeatService(
   async function claimQueuedRun(
     run: typeof heartbeatRuns.$inferSelect,
     companyAgents?: AgentOrgRow[],
+    queueOptions: Pick<CancelRunOptions, "skipQueuedRunStart"> = {},
   ) {
     if (run.status !== "queued") return run;
     const agent = await getAgent(run.agentId);
@@ -17339,6 +17340,7 @@ export function heartbeatService(
       await cancelRunInternal(
         run.id,
         "Cancelled because the agent no longer exists",
+        queueOptions,
       );
       return null;
     }
@@ -17349,6 +17351,7 @@ export function heartbeatService(
       await cancelRunInternal(
         run.id,
         `Cancelled because the agent is not invokable: ${invokability.reason}`,
+        queueOptions,
       );
       return null;
     }
@@ -17363,7 +17366,7 @@ export function heartbeatService(
       },
     );
     if (budgetBlock) {
-      await cancelRunInternal(run.id, budgetBlock.reason);
+      await cancelRunInternal(run.id, budgetBlock.reason, queueOptions);
       return null;
     }
 
@@ -17418,6 +17421,7 @@ export function heartbeatService(
         await cancelRunInternal(
           run.id,
           "Cancelled because issue is held by an active subtree pause hold",
+          queueOptions,
         );
         await logActivity(db, {
           companyId: run.companyId,
@@ -20000,6 +20004,8 @@ export function heartbeatService(
           await cancelActiveForAgentInternal(
             agentId,
             `Cancelled because the agent is not invokable: ${invokability.reason}`,
+            "cancelled",
+            { skipQueuedRunStart: true },
           );
         }
         return [];
@@ -20101,7 +20107,9 @@ export function heartbeatService(
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
-        const claimed = await claimQueuedRun(queuedRun, companyAgents);
+        const claimed = await claimQueuedRun(queuedRun, companyAgents, {
+          skipQueuedRunStart: true,
+        });
         if (claimed) claimedRuns.push(claimed);
       }
       if (claimedRuns.length === 0) return [];
@@ -29313,6 +29321,8 @@ export function heartbeatService(
     terminationGraceMs?: number;
     /** Caller is immediately scheduling an explicit successor path. */
     suppressImmediateRecovery?: boolean;
+    /** The caller already holds the agent start lock and advances this queue. */
+    skipQueuedRunStart?: boolean;
   };
 
   function cancellationTerminationGraceMs(
@@ -29637,7 +29647,9 @@ export function heartbeatService(
         await finalizeAgentStatus(run.agentId, "cancelled", undefined, {
           wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
         });
-        await startNextQueuedRunForAgent(run.agentId);
+        if (!options.skipQueuedRunStart) {
+          await startNextQueuedRunForAgent(run.agentId);
+        }
       }
       return cancelled;
     } finally {
@@ -29649,6 +29661,7 @@ export function heartbeatService(
     agentId: string,
     reason = "Cancelled due to agent pause",
     errorCode = "cancelled",
+    queueOptions: Pick<CancelRunOptions, "skipQueuedRunStart"> = {},
   ) {
     const agent = await getAgent(agentId);
     const runs = await db
@@ -29668,7 +29681,7 @@ export function heartbeatService(
           : undefined;
       try {
         if (run.runtimeMode !== "native") {
-          await cancelRunInternal(run.id, reason, { errorCode });
+          await cancelRunInternal(run.id, reason, { ...queueOptions, errorCode });
           continue;
         }
         if (run.runtimeMode === "native") {
