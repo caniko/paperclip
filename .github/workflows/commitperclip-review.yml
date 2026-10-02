@@ -44,6 +44,23 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Verify trusted review runtime
+        run: |
+          node --input-type=module - <<'JS'
+          import { existsSync } from 'node:fs';
+          import { resolve } from 'node:path';
+          import { pathToFileURL } from 'node:url';
+          const refuse = () => { throw new Error('Incompatible review runtime: refresh the trusted base before minting a token.'); };
+          for (const name of ['get-bot-token.mjs', 'revoke-bot-token.mjs', 'run-quality-gates.mjs']) {
+            if (!existsSync(`.github/scripts/${name}`)) refuse();
+          }
+          const runtime = await import(pathToFileURL(resolve('.github/scripts/get-bot-token.mjs')));
+          for (const name of ['getInstallationToken', 'revokeInstallationToken']) {
+            if (typeof runtime[name] !== 'function') refuse();
+          }
+          JS
+          node --check .github/scripts/revoke-bot-token.mjs
+
       - name: Generate commitperclip token
         id: token
         run: |
