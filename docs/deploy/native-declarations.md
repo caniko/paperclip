@@ -205,11 +205,15 @@ local encrypted material without recording secret-access timestamps. Preserve
 that key, runtime credentials, storage, and the migration journal in backups.
 Application generation rollback is not database rollback.
 
-Migration `0291_deployment_resources` follows upstream `0290`. Older
-fork-only `0284_bizarre_mastermind` / `0285_deployment_workspaces` databases are
-not upgrade-qualified; unknown hashes fail closed. Use a separate verified
-migration or restore procedure. Fresh disposable staging does not prove
-retained-data production recovery.
+Migration `0295_nostalgic_rhodey` follows upstream `0294`. Its deployment SQL
+has the same hash as the earlier fork's `0291_deployment_resources`, so a
+database with that applied hash retains its journal entry and guard triggers
+while the upstream `0291`–`0294` gap is applied. The embedded PostgreSQL
+upgrade fixture checks unchanged credential ciphertext, ownership, and history.
+Older fork-only `0284_bizarre_mastermind` / `0285_deployment_workspaces`
+databases are not upgrade-qualified; unknown hashes fail closed. Use a
+separate verified migration or restore procedure. Fresh disposable staging
+does not prove retained-data production recovery.
 
 ## Verification
 
