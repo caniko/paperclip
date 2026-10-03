@@ -34,8 +34,17 @@ if (fixture) {
   );
 }
 const server = base.webServer as Exclude<typeof base.webServer, unknown[]>;
+const browserExecutable = process.env.PAPERCLIP_PLAYWRIGHT_EXECUTABLE_PATH;
 export default defineConfig({
   ...base,
+  // Nix development hosts may have a wrapped Chromium with the runtime
+  // libraries that the downloaded Playwright shell does not include.
+  ...(browserExecutable ? {
+    projects: base.projects?.map((project) => ({
+      ...project,
+      use: { ...project.use, launchOptions: { executablePath: browserExecutable } },
+    })),
+  } : {}),
   testMatch: "composer-stop.spec.ts",
   timeout: 90_000,
   webServer: {
