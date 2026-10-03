@@ -26740,7 +26740,11 @@ export function heartbeatService(
           adapterExecutionControls.delete(run.id);
         }
       }
-      if (pauseCancelledDuringPreparation && latestRun?.status === "cancelled") {
+      if (latestRun?.status === "cancelled" && (pauseCancelledDuringPreparation ||
+          (!legacyAdapterEntered && !nativeDispatchStarted && !nativeOwnershipHeld &&
+            parseObject(latestRun.resultJson?.startupCancellation).beforeNativeSelection === true))) {
+        // External Stop may fence this same preparer before it reaches the
+        // pause check. Keep its task lock until this owner finishes cleanup.
         await releaseIssueExecutionAndPromote(latestRun, { suppressImmediateRecovery: true });
       }
       // Terminalization precedes lease and adapter cleanup. Only now is the
@@ -29496,6 +29500,11 @@ export function heartbeatService(
       if (!fenced) return getRun(runId);
       run = fenced;
     }
+    const cancelledBeforeNativeSelection =
+      parseObject(run.resultJson?.startupCancellation).beforeNativeSelection === true;
+    // A claim-time pause can win before any preparer starts; only a registered
+    // executor can take responsibility for the deferred cleanup and release.
+    const preparerWillReleaseIssue = cancelledBeforeNativeSelection && activeRunExecutions.has(run.id);
     const resultJson = agent
       ? {
           ...mergeRunStopMetadataForAgent(agent, "cancelled", {
@@ -29504,6 +29513,11 @@ export function heartbeatService(
             errorMessage: reason,
           }),
           ...(options.resultJson ?? {}),
+          // This row-locked fence prevents native selection, so cancellation
+          // cannot turn an unused preparation into uncertain provider work.
+          ...(cancelledBeforeNativeSelection ? {
+            executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+          } : {}),
         }
       : options.resultJson;
 
@@ -29732,7 +29746,7 @@ export function heartbeatService(
           message: options.eventMessage ?? "run cancelled",
           ...(options.eventPayload ? { payload: options.eventPayload } : {}),
         });
-        if (!options.deferIssueRelease) {
+        if (!options.deferIssueRelease && !preparerWillReleaseIssue) {
           await releaseIssueExecutionAndPromote(cancelled, {
             suppressImmediateRecovery: options.suppressImmediateRecovery,
           });
@@ -29740,7 +29754,7 @@ export function heartbeatService(
         await finalizeAgentStatus(run.agentId, "cancelled", undefined, {
           wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
         });
-        if (!options.skipQueuedRunStart) {
+        if (!options.skipQueuedRunStart && !preparerWillReleaseIssue) {
           await startNextQueuedRunForAgent(run.agentId);
         }
       }

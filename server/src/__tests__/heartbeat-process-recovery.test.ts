@@ -3327,7 +3327,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
   it("fences native selection when cancellation wins during preparation", async () => {
     await withTempPaperclipHome(async () => {
-      const { agentId, issueId, runId } = await seedQueuedIssueRunFixture();
+      const { companyId, agentId, issueId, runId } = await seedQueuedIssueRunFixture();
       await db.update(agents).set({ adapterType: "paperclip_runner",
         adapterConfig: { provider: "codex", model: "gpt-5.6-luna" },
       }).where(eq(agents.id, agentId));
@@ -3338,6 +3338,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         beforeNativeRuntimeSelection: async id => {
           reachedSelection = true;
           await heartbeat.cancelRun(id);
+          const [preparingTask] = await db.select().from(issues).where(eq(issues.id, issueId));
+          expect(preparingTask.executionRunId).toBe(id);
+          expect((await heartbeat.getRun(id))?.resultJson?.startupPreparationSettledAt).toBeUndefined();
+          expect(await getExecutionBlocker(db, companyId, issueId)).toBeNull();
         },
       });
       await heartbeat.resumeQueuedRuns();
@@ -3353,6 +3357,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       expect(mockAdapterExecute).not.toHaveBeenCalled();
       const [task] = await db.select().from(issues).where(eq(issues.id, issueId));
       expect(task.executionRunId).toBeNull();
+      expect(task.status).not.toBe("blocked");
+      expect(await getExecutionBlocker(db, companyId, issueId)).toBeNull();
+      expect(await db.select().from(issueRecoveryActions).where(and(
+        eq(issueRecoveryActions.companyId, companyId), eq(issueRecoveryActions.sourceIssueId, issueId),
+      ))).toEqual([]);
     });
   });
 

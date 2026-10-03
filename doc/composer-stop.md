@@ -27,6 +27,12 @@ operator can release the pause without waking agents, then use the existing
 execution-reconciliation flow after reviewing the stopped run. Resume does not
 claim that unknown provider actions completed or were never performed.
 
+A native attempt cancelled before runtime selection has a durable no-dispatch
+fence. Its preparer retains the task lock through workspace and lease cleanup,
+then records settled preparation and releases the lock. This unused attempt
+does not create an execution-reconciliation blocker. Cancellation after runtime
+selection still requires the native startup or provider-termination proofs.
+
 A completed release remains successful if a best-effort wake fails. Its response
 includes optional `wakeFailures`, the page reports them inline, and remaining
 eligible tasks still receive their wake requests. No new endpoint is introduced.
