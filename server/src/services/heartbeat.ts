@@ -15310,20 +15310,8 @@ export function heartbeatService(
       // A remote Hermes run has no local process to kill. Its owner must
       // acknowledge termination before shutdown may release the issue or the
       // agent's next queued run. A missing control is not evidence of a stop.
-      if (isDispatchedHermesRun(run, agent.adapterType)) {
-        const control = adapterExecutionControls.get(run.id);
-        if (control) {
-          control.controller.abort(new Error(message));
-          try {
-            await waitForAdapterStop(control.settled, 20_000);
-          } catch (error) {
-            logger.warn({ err: error, runId: run.id }, "Hermes stop is still unverified during shutdown");
-          }
-        }
-        const latest = await getRun(run.id);
-        if (latest?.status === "running") {
-          await holdUnverifiedHermesRun(latest, message);
-        }
+      if (isDispatchedHermesRun(run, agent.adapterType) && !adapterExecutionControls.has(run.id)) {
+        await holdUnverifiedHermesRun(run, message);
         continue;
       }
       const running = runningProcesses.get(run.id);
@@ -19441,11 +19429,6 @@ export function heartbeatService(
         if (now.getTime() - refTime < staleThresholdMs) continue;
       }
 
-      if (isDispatchedHermesRun(run, adapterType)) {
-        await holdUnverifiedHermesRun(run, "Controller ownership expired before Hermes termination was verified");
-        continue;
-      }
-
       const currentAdapterTracksLocalChild =
         isTrackedLocalChildProcessAdapter(adapterType);
       const tracksLegacyLocalChild =
@@ -19511,7 +19494,12 @@ export function heartbeatService(
           (!!run.processPid || !!run.processGroupId)) ||
           monitorDispatchLostWithoutFutureWake);
       if (!(await revokeExpiredLegacyController(db, run))) continue;
-      if (await reconcileRunAdapterExecution(run) === "pending") continue;
+      const adapterSettlement = await reconcileRunAdapterExecution(run);
+      if (adapterSettlement === "pending") continue;
+      if (adapterSettlement === "unmanaged" && isDispatchedHermesRun(run, adapterType)) {
+        await holdUnverifiedHermesRun(run, "Controller ownership expired before Hermes termination was verified");
+        continue;
+      }
       const baseMessage = buildProcessLossMessage(run);
       const conversationContinuationEligible = await runUsedConversationAdapter(db, run);
 
@@ -29477,10 +29465,6 @@ export function heartbeatService(
       return getRun(run.id);
     }
     const running = runningProcesses.get(run.id);
-    if (isDispatchedHermesRun(run, agent?.adapterType ?? null) &&
-        !adapterExecutionControls.has(run.id)) {
-      throw conflict("Hermes remote owner is unverified. Verify and reconcile the gateway run before releasing this execution.");
-    }
     const stopOwnership =
       run.runtimeMode !== "native"
         ? captureAdapterStopOwnership(run.id)
@@ -29631,6 +29615,9 @@ export function heartbeatService(
 
           {
             const settlement = await reconcileRunAdapterExecution(run);
+            if (settlement === "unmanaged" && !control && isDispatchedHermesRun(run, agent?.adapterType ?? null)) {
+              throw conflict("Hermes remote owner is unverified. Verify and reconcile the gateway run before releasing this execution.");
+            }
             if (settlement === "pending") {
               await db.update(heartbeatRuns).set({
                 error: reason, errorCode: "adapter_execution_settlement_pending",

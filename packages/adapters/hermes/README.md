@@ -201,6 +201,16 @@ incompatible with this protected mode. See
 [`doc/filesystem-workspaces.md`](../../../doc/filesystem-workspaces.md) for the
 configuration, isolation, recovery and qualification contract.
 
+After controller loss, supervised runs use their original encrypted checkpoint
+to stop the original idempotent admission. Recovery does not use the agent's
+current gateway configuration or start a replacement provider. A pending provider
+or workspace receipt retains the run, task, environment lease and agent slot.
+Verified settlement permits cancellation or interrupted-run reconciliation.
+An already dispatched gateway run without a durable checkpoint remains held as
+`remote_owner_unverified`; ordinary cancellation returns `409` until its remote
+owner can be verified. Graceful shutdown joins registered Stop and suppresses
+successor dispatch while the existing owner settles.
+
 ### Run-isolated managed MCP
 
 Controller-delivered MCP credentials require an explicit instance-operator

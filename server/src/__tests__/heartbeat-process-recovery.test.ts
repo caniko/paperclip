@@ -3133,7 +3133,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(lease.metadata).toEqual({ ordinary: true });
   });
 
-  it("recovers the sealed admission after controller loss and releases ownership only after settlement", async () => {
+  it.each(["cancel", "reap"] as const)("recovers the sealed admission after controller loss through %s only after settlement", async (recovery) => {
     const { companyId, agentId, runId, issueId } = await seedRunFixture({ adapterType: "hermes_gateway" });
     const environment = await environmentService(db).ensureLocalEnvironment();
     const [lease] = await db.insert(environmentLeases).values({ companyId, environmentId: environment.id,
@@ -3163,7 +3163,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     };
     const heartbeat = heartbeatService(db);
     try {
-      await db.update(heartbeatRuns).set(controllerLeases.legacyControllerClaim("legacy"))
+      await db.update(heartbeatRuns).set({
+        ...controllerLeases.legacyControllerClaim("legacy"),
+        executionStage: "dispatching",
+        runnerProfileJson: { adapterDispatch: { adapterType: "hermes_gateway" } },
+      })
         .where(eq(heartbeatRuns.id, runId));
       await prepareAdapterExecution(db, { ...identity, adapterType: "hermes_gateway", checkpoint });
       await prepareAdapterExecution(db, { ...identity, adapterType: "hermes_gateway", checkpoint });
@@ -3191,10 +3195,21 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].executionRunId).toBe(runId);
 
       state = "settled";
-      await heartbeat.cancelRun(runId);
-      expect((await heartbeat.getRun(runId))?.status).toBe("cancelled");
+      if (recovery === "cancel") {
+        await heartbeat.cancelRun(runId);
+        expect((await heartbeat.getRun(runId))).toMatchObject({
+          status: "cancelled", resultJson: { executionCancellation: { state: "acknowledged" } },
+        });
+      } else {
+        // Expire cleanup authority so the next controller can retry this same
+        // sealed admission without dispatching a new provider or workspace.
+        await db.update(heartbeatRuns).set({ controllerLeaseExpiresAt: new Date(0) })
+          .where(eq(heartbeatRuns.id, runId));
+        expect((await heartbeat.reapOrphanedRuns()).runIds).toContain(runId);
+        expect((await heartbeat.getRun(runId))).toMatchObject({ status: "failed", errorCode: "process_lost" });
+      }
       const releasedLease = await environmentService(db).getLeaseById(lease.id);
-      expect(releasedLease?.status).toBe("expired");
+      expect(releasedLease?.status).toBe(recovery === "cancel" ? "expired" : "failed");
       expect(releasedLease?.releasedAt).toBeInstanceOf(Date);
       expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].executionRunId).toBeNull();
       const stops = requests.filter((request) => request.path === "/v1/runs/stop");
@@ -3208,7 +3223,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         .metadata?.adapterExecution).not.toHaveProperty("material");
     } finally {
       await settleAdapterExecution(db, identity);
-      await heartbeat.cancelRun(runId);
+      await heartbeat.cancelRun(runId).catch(() => {});
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   });
@@ -4436,6 +4451,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     try {
       await heartbeat.resumeQueuedRuns();
       await vi.waitFor(() => expect(adapterExecutionControls.has(runId)).toBe(true));
+      await vi.waitFor(async () => expect((await heartbeat.getRun(runId))?.executionStage).toBe("dispatching"));
       expect(runningProcesses.has(runId)).toBe(false);
       drain = heartbeat.drainRunningRunsForShutdown("SIGTERM", new Date(), [runId]);
       await Promise.race([
