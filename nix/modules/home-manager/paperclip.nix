@@ -29,7 +29,13 @@ in
       type = lib.types.package;
       default = pkgs.paperclip;
       defaultText = lib.literalExpression "pkgs.paperclip";
-      description = "Paperclip package providing bin/paperclip.";
+      description = ''
+        Paperclip package providing bin/paperclip. When the client is enabled
+        with apiKeyFile, this must be a package attribute set declaring
+        supportsPaperclipApiKeyFile = true. The marker declares full protected
+        credential-file runtime support from Paperclip #14466, not just support
+        for the PAPERCLIP_API_KEY_FILE environment variable.
+      '';
     };
     apiUrl = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
@@ -46,7 +52,9 @@ in
       default = null;
       description = ''
         Runtime CLI credential file outside the Nix store. The client reads the
-        file at runtime; Nix does not read or copy its contents.
+        file at runtime; Nix does not read or copy its contents. An enabled
+        client requires a package declaring supportsPaperclipApiKeyFile = true
+        for Paperclip #14466's protected credential-file runtime support.
       '';
     };
     deployments = lib.mkOption {
@@ -64,6 +72,16 @@ in
 
   config = {
     assertions = [
+      {
+        assertion =
+          !cfg.enable
+          || cfg.apiKeyFile == null
+          || (
+            builtins.isAttrs cfg.package
+            && (cfg.package.supportsPaperclipApiKeyFile or false) == true
+          );
+        message = "Paperclip CLI apiKeyFile requires a package attribute set declaring supportsPaperclipApiKeyFile = true for full protected credential-file runtime support from Paperclip #14466.";
+      }
       {
         assertion =
           cfg.apiKeyFile == null
