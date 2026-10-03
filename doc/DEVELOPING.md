@@ -8,6 +8,8 @@ For mode definitions and intended CLI behavior, see `doc/DEPLOYMENT-MODES.md`.
 
 For descriptor-driven native startup, first-admin bootstrap, and owned resource
 reconciliation, see [Native deployment declarations](../docs/deploy/native-declarations.md).
+That guide also describes the optional flake-provided Home Manager and Hermes
+Nix integration; no host or credential provider is selected by this flake.
 
 Current implementation status:
 
