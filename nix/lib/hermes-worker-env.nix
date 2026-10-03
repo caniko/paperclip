@@ -11,6 +11,10 @@ let
   runtimePath = path:
     builtins.isString path
     && lib.hasPrefix "/" path
+    && path != "/"
+    && !(lib.hasSuffix "/" path)
+    && !(lib.hasInfix "//" path)
+    && lib.all (segment: segment != "." && segment != "..") (lib.splitString "/" path)
     && !(lib.hasPrefix "/nix/store/" path)
     && builtins.match ".*[[:space:]].*" path == null;
   runtimeDir = "${name}-worker";

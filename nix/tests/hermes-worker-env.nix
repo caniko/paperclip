@@ -20,8 +20,12 @@ let
     name = "operations";
     gatewayFile = "/nix/store/unencrypted-key";
   }) true);
+  traversingCredential = builtins.tryEval (builtins.deepSeq (mkWorker {
+    name = "operations";
+    gatewayFile = "/run/credentials/../../nix/store/unencrypted-key";
+  }) true);
 in
-assert lib.assertMsg (!invalid.success && !storeCredential.success) "unsafe worker declaration accepted";
+assert lib.assertMsg (!invalid.success && !storeCredential.success && !traversingCredential.success) "unsafe worker declaration accepted";
 assert lib.assertMsg (
   operations."operations-worker-env".serviceConfig.RuntimeDirectoryMode == "0700"
   && operations."hermes-agent-operations".serviceConfig.EnvironmentFile == [ "/run/operations-worker/env" ]

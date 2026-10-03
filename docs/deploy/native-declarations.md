@@ -83,6 +83,9 @@ loading, or database changes. The supported profile is `trusted-local`.
 The flake exports `homeManagerModules.paperclip` for personal declarations,
 `nixosModules.homeManager` for explicit integrated Home Manager selection, and
 `lib.mkHermesWorkerEnv` for a **separately managed** Hermes gateway instance.
+For a `flake = false` source input, import
+`"${inputs.paperclip}/nix/lib/hermes-worker-env.nix"` with `{ inherit lib pkgs; }`
+instead of accessing the flake's `lib` output.
 The latter is an optional systemd companion, not a new Paperclip adapter or
 credential backend. It does not install Hermes, enable Paperclip, choose a
 package, or create a worker account. With the corresponding Hermes NixOS
