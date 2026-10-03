@@ -46,6 +46,13 @@ updates that include a comment return `409` while an effective task or ancestor
 pause hold is active. Interrupted agents may still report their results. Neither path permits a fresh-session fallback
 when the interrupted checkpoint cannot be restored.
 
+Comments accepted before the pause also require release before they can start
+new work. Verified comment authorship and historical `treeHoldInteraction`
+metadata do not bypass the hold at enqueue, deferred-wake promotion, queued-run
+claim, checkout, or the final provider-dispatch check. A pause committed during
+preparation cancels that unused attempt without dispatching a provider; its
+record retains the pause's originating actor and hold identity.
+
 The credential-free ACP regression journey uses an actual ACP child process:
 
 ```sh

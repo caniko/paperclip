@@ -1113,7 +1113,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     expect(mockAdapterExecute.mock.calls.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("suppresses normal wakeups while allowing comment interaction wakes under a pause hold", async () => {
+  it("suppresses normal and verified board-comment wakeups under an ancestor pause hold", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const rootIssueId = randomUUID();
@@ -1164,7 +1164,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
         responsibleUserId: "responsible-user",
       })),
     ]);
-    const [hold] = await db
+    await db
       .insert(issueTreeHolds)
       .values({
         companyId,
@@ -1230,24 +1230,15 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       },
     });
 
-    expect(childCommentWake).not.toBeNull();
-    const childRun = await db
-      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+    expect(childCommentWake).toBeNull();
+    expect(await db
+      .select({ id: heartbeatRuns.id })
       .from(heartbeatRuns)
-      .where(eq(heartbeatRuns.id, childCommentWake!.id))
-      .then((rows) => rows[0] ?? null);
-    expect(childRun?.contextSnapshot).toMatchObject({
-      treeHoldInteraction: true,
-      activeTreeHold: {
-        holdId: hold.id,
-        rootIssueId,
-        mode: "pause",
-        interaction: true,
-      },
-    });
+      .where(eq(heartbeatRuns.companyId, companyId))).toEqual([]);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
   });
 
-  it("allows comment interaction wakes when a legacy hold has a full_pause note", async () => {
+  it("requires release before a verified board comment can wake a legacy full_pause task", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const rootIssueId = randomUUID();
@@ -1318,19 +1309,26 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       },
     });
 
-    expect(rootCommentWake).not.toBeNull();
-    const rootRun = await db
-      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
-      .from(heartbeatRuns)
-      .where(eq(heartbeatRuns.id, rootCommentWake!.id))
-      .then((rows) => rows[0] ?? null);
-    expect(rootRun?.contextSnapshot).toMatchObject({
-      treeHoldInteraction: true,
-      activeTreeHold: {
-        rootIssueId,
-        mode: "pause",
-        interaction: true,
+    expect(rootCommentWake).toBeNull();
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    mockAdapterExecute.mockImplementation(async () => {
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, rootIssueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Completed resumed work", provider: "test", model: "test-model" };
+    });
+    await db.update(issueTreeHolds).set({ status: "released", releasedAt: new Date() })
+      .where(eq(issueTreeHolds.companyId, companyId));
+    const resumedWake = await heartbeat.wakeup(agentId, {
+      source: "automation", triggerDetail: "system", reason: "issue_commented",
+      payload: { issueId: rootIssueId, commentId: rootCommentId },
+      requestedByActorType: "user", requestedByActorId: "board-user",
+      contextSnapshot: {
+        issueId: rootIssueId, wakeReason: "issue_commented", source: "issue.comment",
+        commentId: rootCommentId, wakeCommentId: rootCommentId,
       },
     });
+    expect(resumedWake).not.toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
   });
 });

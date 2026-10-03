@@ -1263,6 +1263,86 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     return { companyId, agentId, issueId };
   }
 
+  it.each([
+    ["legacy", "queued"], ["native", "queued"],
+    ["legacy", "claim"], ["native", "claim"],
+    ["legacy", "dispatch"], ["native", "dispatch"],
+  ] as const)("stops verified %s comment work when pause commits at %s", async (runtimeMode, boundary) => {
+    const source = await seedAssignedTodoNoRunFixture();
+    const runId = randomUUID();
+    const wakeupRequestId = randomUUID();
+    const commentId = randomUUID();
+    if (runtimeMode === "native") await db.update(agents).set({
+      adapterType: "paperclip_runner", adapterConfig: { provider: "codex", model: "gpt-5.6-luna" },
+    }).where(eq(agents.id, source.agentId));
+    await db.insert(issueComments).values({
+      id: commentId, companyId: source.companyId, issueId: source.issueId,
+      authorUserId: "responsible-user", body: "Queued before the operator paused work",
+    });
+    await db.insert(agentWakeupRequests).values({
+      id: wakeupRequestId, companyId: source.companyId, agentId: source.agentId,
+      source: "automation", reason: "issue_commented", status: "queued", runId,
+      requestedByActorType: "user", requestedByActorId: "responsible-user",
+      payload: { issueId: source.issueId, commentId },
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId, companyId: source.companyId, agentId: source.agentId,
+      // Fresh native candidates begin in legacy preparation until the atomic
+      // runtime selection writes the native binding and coordinator together.
+      invocationSource: "automation", triggerDetail: "system", status: "queued", runtimeMode: "legacy",
+      wakeupRequestId, contextSnapshot: {
+        issueId: source.issueId, wakeReason: "issue_commented", source: "issue.comment",
+        commentId, wakeCommentId: commentId, wakeCommentIds: [commentId],
+        // A saved flag from the old policy cannot grant new execution.
+        treeHoldInteraction: true,
+      },
+    });
+    let paused = false;
+    let pausedStatus: string | undefined;
+    const pause = async () => {
+      await db.insert(issueTreeHolds).values({
+        companyId: source.companyId, rootIssueId: source.issueId,
+        mode: "pause", status: "active", reason: "operator pause", createdByActorType: "user",
+        createdByUserId: "responsible-user",
+      });
+      pausedStatus = (await db.select({ status: issues.status }).from(issues)
+        .where(eq(issues.id, source.issueId)))[0]?.status;
+      paused = true;
+    };
+    if (boundary === "queued") await pause();
+    const nativeFactory = vi.fn(() => { throw new Error("Paused work reached the provider boundary"); });
+    const heartbeat = heartbeatService(db, {
+      runtimeEnv: {}, nativeSessionBackendFactory: nativeFactory,
+      beforeChatControlRecoveryCheck: async ({ stage, runId: id }) => {
+        if (!paused && id === runId && stage === boundary) await pause();
+      },
+    });
+    await heartbeat.resumeQueuedRuns();
+    await heartbeat.drainActiveRunExecutions();
+    expect(paused).toBe(true);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    expect(mockExecutePaperclipNativeSession).not.toHaveBeenCalled();
+    expect(nativeFactory).not.toHaveBeenCalled();
+    const stopped = await heartbeat.getRun(runId);
+    expect(stopped).toMatchObject({
+      status: "cancelled",
+      errorCode: "issue_paused",
+      resultJson: { stopReason: "issue_paused", cancelledByActorType: "user", cancelledByUserId: "responsible-user" },
+    });
+    if (runtimeMode === "native" && boundary === "dispatch") {
+      expect(stopped).toMatchObject({ runtimeMode: "native", resultJson: {
+        startupPreparationSettledAt: expect.any(String),
+        nativeCancellation: { dispatchState: "acknowledged", dispatched: false },
+      } });
+      expect((await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, runId)))[0])
+        .toMatchObject({ attempt: 0, controllerGeneration: 0, resultId: null, leaseOwner: null });
+    }
+    expect((await db.select().from(issues).where(eq(issues.id, source.issueId)))[0])
+      .toMatchObject({ status: pausedStatus, executionRunId: null, checkoutRunId: null });
+    expect(await db.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, source.issueId))).toEqual([]);
+  });
+
   async function seedIdleTimerAgentFixture() {
     const companyId = randomUUID();
     const agentId = randomUUID();

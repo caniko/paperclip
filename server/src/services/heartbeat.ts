@@ -437,8 +437,8 @@ import {
 } from "./issue-execution-policy.js";
 import {
   ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
-  isVerifiedIssueTreeControlInteractionWake,
   issueTreeControlService,
+  type ActiveIssueTreePauseHoldGate,
 } from "./issue-tree-control.js";
 import {
   continuationSummaryParksExecutor,
@@ -17342,6 +17342,30 @@ export function heartbeatService(
     }
   }
 
+  async function cancelRunForPauseHold(
+    run: typeof heartbeatRuns.$inferSelect,
+    hold: ActiveIssueTreePauseHoldGate,
+    deferIssueRelease = false,
+  ) {
+    // These callers own the queued claim or pre-dispatch preparation. A fresh
+    // legacy preparation has not entered its adapter; native resumptions still
+    // require the native cancellation and unused-startup receipt checks.
+    await cancelRunInternal(run.id, "Cancelled because an active subtree pause hold blocks execution", {
+      errorCode: "issue_paused",
+      suppressImmediateRecovery: true,
+      skipQueuedRunStart: true,
+      deferIssueRelease,
+      resultJson: {
+        stopReason: "issue_paused", holdId: hold.holdId, rootIssueId: hold.rootIssueId,
+        cancelledByActorType: hold.createdByActorType,
+        cancelledByUserId: hold.createdByUserId,
+        ...(run.runtimeMode === "legacy" ? {
+          executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+        } : {}),
+      },
+    });
+  }
+
   async function claimQueuedRun(
     run: typeof heartbeatRuns.$inferSelect,
     companyAgents?: AgentOrgRow[],
@@ -17420,22 +17444,8 @@ export function heartbeatService(
         run.companyId,
         issueId,
       );
-      const treeHoldInteractionWake =
-        activePauseHold &&
-        (await isVerifiedIssueTreeControlInteractionWake(db, {
-          companyId: run.companyId,
-          issueId,
-          agentId: run.agentId,
-          runId: run.id,
-          wakeupRequestId: run.wakeupRequestId,
-          contextSnapshot: context,
-        }));
-      if (activePauseHold && !treeHoldInteractionWake) {
-        await cancelRunInternal(
-          run.id,
-          "Cancelled because issue is held by an active subtree pause hold",
-          queueOptions,
-        );
+      if (activePauseHold) {
+        await cancelRunForPauseHold(run, activePauseHold);
         await logActivity(db, {
           companyId: run.companyId,
           actorType: "system",
@@ -20273,6 +20283,15 @@ export function heartbeatService(
       run = claimed;
     }
 
+    const claimedIssueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
+    const claimedPauseHold = claimedIssueId
+      ? await treeControlSvc.getActivePauseHoldGate(run.companyId, claimedIssueId)
+      : null;
+    if (claimedPauseHold) {
+      await cancelRunForPauseHold(run, claimedPauseHold);
+      return;
+    }
+
     if (
       runOptions.nativeLeaseOwner &&
       run.runtimeMode === "native" &&
@@ -20372,6 +20391,7 @@ export function heartbeatService(
     let nativeSessionResumeScheduled = false;
     let nativeOwnershipHeld = false;
     let nativeDispatchStarted = false;
+    let pauseCancelledDuringPreparation = false;
     let nativeWorkspaceFinalizeScheduled = false;
     let nativeWorkspaceSync: Awaited<
       ReturnType<typeof prepareNativeWorkspaceSync>
@@ -22663,6 +22683,19 @@ export function heartbeatService(
           ))
         )
           return { dispatched: false };
+        // A queued comment can be claimed after the pause preview, or a pause
+        // can commit during workspace preparation. Saved comment provenance
+        // does not authorize new provider work while the hold is effective.
+        const pauseHold = issueId
+          ? await treeControlSvc.getActivePauseHoldGate(run.companyId, issueId)
+          : null;
+        if (pauseHold) {
+          // Keep the issue's execution owner until this preparer's finally
+          // cleanup has produced the unused-startup and lease receipts.
+          await cancelRunForPauseHold(run, pauseHold, true);
+          pauseCancelledDuringPreparation = true;
+          return { dispatched: false };
+        }
         const repairBlock = await recovery.legacyRepairDispatchBlock(run.id);
         if (repairBlock) {
           const cancelled = await setRunStatusIfRunning(run.id, "cancelled", {
@@ -26648,6 +26681,9 @@ export function heartbeatService(
           adapterExecutionControls.delete(run.id);
         }
       }
+      if (pauseCancelledDuringPreparation && latestRun?.status === "cancelled") {
+        await releaseIssueExecutionAndPromote(latestRun, { suppressImmediateRecovery: true });
+      }
       // Terminalization precedes lease and adapter cleanup. Only now is the
       // owner gone; retry pending input for ordinary completions as well as Stop.
       if (latestRun?.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(latestRun.status)) {
@@ -27216,54 +27252,32 @@ export function heartbeatService(
         issueId,
       );
       if (activePauseHold) {
-        const treeHoldInteractionWake =
-          await isVerifiedIssueTreeControlInteractionWake(db, {
-            companyId: agent.companyId,
-            issueId,
-            agentId,
-            contextSnapshot: enrichedContextSnapshot,
-            requestedByActorType: opts.requestedByActorType,
-            requestedByActorId: opts.requestedByActorId,
-          });
-
-        if (!treeHoldInteractionWake) {
-          const wait = await writeSkippedRequest("issue_tree_hold_active", {}, {
-            holdId: activePauseHold.holdId,
-          });
-          if (wait.created) await logActivity(db, {
-            companyId: agent.companyId,
-            actorType: "system",
-            actorId: "system",
-            agentId,
-            runId: null,
-            action: "issue.tree_hold_wakeup_deferred",
-            entityType: "issue",
-            entityId: issueId,
-            details: {
-              holdId: activePauseHold.holdId,
-              rootIssueId: activePauseHold.rootIssueId,
-              requestedReason: reason,
-              source,
-              triggerDetail,
-              securityPrinciples: [
-                "Complete Mediation",
-                "Fail Securely",
-                "Secure Defaults",
-              ],
-            },
-          });
-          return null;
-        }
-
-        enrichedContextSnapshot.treeHoldInteraction = true;
-        enrichedContextSnapshot.activeTreeHold = {
+        const wait = await writeSkippedRequest("issue_tree_hold_active", {}, {
           holdId: activePauseHold.holdId,
-          rootIssueId: activePauseHold.rootIssueId,
-          mode: activePauseHold.mode,
-          reason: activePauseHold.reason,
-          releasePolicy: activePauseHold.releasePolicy,
-          interaction: true,
-        };
+        });
+        if (wait.created) await logActivity(db, {
+          companyId: agent.companyId,
+          actorType: "system",
+          actorId: "system",
+          agentId,
+          runId: null,
+          action: "issue.tree_hold_wakeup_deferred",
+          entityType: "issue",
+          entityId: issueId,
+          details: {
+            holdId: activePauseHold.holdId,
+            rootIssueId: activePauseHold.rootIssueId,
+            requestedReason: reason,
+            source,
+            triggerDetail,
+            securityPrinciples: [
+              "Complete Mediation",
+              "Fail Securely",
+              "Secure Defaults",
+            ],
+          },
+        });
+        return null;
       }
     }
 
@@ -29336,6 +29350,8 @@ export function heartbeatService(
     suppressImmediateRecovery?: boolean;
     /** The caller already holds the agent start lock and advances this queue. */
     skipQueuedRunStart?: boolean;
+    /** The owning preparer releases the issue after its finally cleanup settles. */
+    deferIssueRelease?: boolean;
   };
 
   function cancellationTerminationGraceMs(
@@ -29654,9 +29670,11 @@ export function heartbeatService(
           message: options.eventMessage ?? "run cancelled",
           ...(options.eventPayload ? { payload: options.eventPayload } : {}),
         });
-        await releaseIssueExecutionAndPromote(cancelled, {
-          suppressImmediateRecovery: options.suppressImmediateRecovery,
-        });
+        if (!options.deferIssueRelease) {
+          await releaseIssueExecutionAndPromote(cancelled, {
+            suppressImmediateRecovery: options.suppressImmediateRecovery,
+          });
+        }
         await finalizeAgentStatus(run.agentId, "cancelled", undefined, {
           wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
         });
