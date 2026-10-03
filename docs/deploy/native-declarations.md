@@ -120,6 +120,13 @@ service. Qualify the real worker and a failed-cutover path before enabling
 unattended dispatch. A test-only `checks.<system>.hermes-worker-env` covers the
 portable environment graph and synthetic malformed credentials.
 
+The Simit-generated `Nix installable builds` PR gate builds
+`checks.x86_64-linux.hermes-worker-env` in hosted CI. It retains the checkout
+revision, installable, raw build result, and log for 31 days. Keep the companion
+module revision distinct from the packaged application revision when freezing
+a deployment bundle. A green renderer check proves the synthetic credential
+contract; the real worker and rotation recovery still need their own receipts.
+
 ## Native resource manifest
 
 ```json

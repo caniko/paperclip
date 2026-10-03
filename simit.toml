@@ -1,0 +1,22 @@
+[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+runner = "ubuntu-24.04"
+nix_builds = [".#checks.x86_64-linux.hermes-worker-env"]
+
+[ci.nix_build]
+only = true
+timeout_minutes = 30
+max_parallel = 1
+max_jobs = 1
+cores = 2
+capture_results = true
+artifact_retention_days = 31
+extra_setup = [
+  "nix run github:caniko/simit/be445e3b4493690aff1da7a00a6b52caf18676ee -- init ci --platform github --ci-provider actions --runtime nix --check --diff",
+]
+
+[release.artifacts]
+substituters = ["https://cache.nixos.org"]
+trusted_public_keys = ["cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="]
