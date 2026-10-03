@@ -5576,7 +5576,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const report = await waitForValue(async () => mockCaptureRunFailure.mock.calls.find(([event]) => event.runId === runId)?.[0]);
     expect(report?.diagnostics).toMatchObject({
       execution: { failurePhase: "execute" },
-      exceptions: [{ stack: expect.stringContaining("heartbeat-process-recovery.test.ts") }],
+      // Secret redaction may mask substrings of the checkout path and test filename.
+      exceptions: [{ stack: expect.stringContaining('Sandbox provider "kubernetes" is not installed') }],
     });
 
     const interaction = await waitForValue(async () => {
