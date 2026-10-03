@@ -4315,6 +4315,78 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     ]);
   });
 
+  it.each([false, true])("settles the live gateway before graceful shutdown (delayed target settlement: %s)", async (delayed) => {
+    const { agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    let stopRequests = 0;
+    let targetSettled = false;
+    const stopObserved = Promise.withResolvers<void>();
+    const gateway = createServer((request, response) => {
+      const reply = (body: unknown) => {
+        response.setHeader("Content-Type", "application/json");
+        response.end(JSON.stringify(body));
+      };
+      if (request.method === "POST" && request.url === "/v1/runs") {
+        request.resume();
+        reply({ run_id: "shutdown-fixture", status: "started" });
+      } else if (request.method === "POST" && request.url === "/v1/runs/shutdown-fixture/stop") {
+        stopRequests += 1;
+        if (!delayed) targetSettled = true;
+        reply({ status: "stopping" });
+        stopObserved.resolve();
+      } else if (request.url === "/v1/runs/shutdown-fixture/events") {
+        response.writeHead(204).end();
+      } else if (request.url === "/v1/runs/shutdown-fixture") {
+        reply({ run_id: "shutdown-fixture", status: targetSettled ? "cancelled" : "running" });
+      } else {
+        response.writeHead(404).end();
+      }
+    });
+    gateway.listen(0, "127.0.0.1");
+    await once(gateway, "listening");
+    await db.update(agents).set({ adapterType: "hermes_gateway", adapterConfig: {
+      apiBaseUrl: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`,
+      apiKey: "shutdown-fixture-key", pollIntervalMs: 250, eventReconnectMs: 250,
+    } }).where(eq(agents.id, agentId));
+    const actual = await vi.importActual<typeof import("../adapters/index.ts")>("../adapters/index.ts");
+    mockAdapterExecute.mockImplementationOnce((async (input: unknown) => actual.getServerAdapter("hermes_gateway").execute(
+      input as import("@paperclipai/adapter-utils").AdapterExecutionContext,
+    )) as typeof mockAdapterExecute);
+    const heartbeat = heartbeatService(db);
+    let drain: ReturnType<typeof heartbeat.drainRunningRunsForShutdown> | undefined;
+    try {
+      await heartbeat.resumeQueuedRuns();
+      await vi.waitFor(() => expect(adapterExecutionControls.has(runId)).toBe(true));
+      expect(runningProcesses.has(runId)).toBe(false);
+      drain = heartbeat.drainRunningRunsForShutdown("SIGTERM", new Date(), [runId]);
+      await Promise.race([
+        stopObserved.promise,
+        drain.then(() => { throw new Error("Shutdown returned before requesting target Stop"); }),
+      ]);
+      if (delayed) {
+        expect((await heartbeat.getRun(runId))?.status).toBe("running");
+        expect((await heartbeat.getRun(runId))?.resultJson?.executionCancellation).toMatchObject({ state: "requested" });
+        expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].executionRunId).toBe(runId);
+        expect((await db.select().from(environmentLeases).where(eq(environmentLeases.heartbeatRunId, runId)))[0].releasedAt).toBeNull();
+        targetSettled = true;
+      }
+      await drain;
+      await heartbeat.waitForRunExecutionDrain(runId);
+      expect(stopRequests).toBeGreaterThan(0);
+      expect((await heartbeat.getRun(runId))).toMatchObject({ status: "cancelled",
+        resultJson: { executionCancellation: { state: "acknowledged" } } });
+      expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].executionRunId).toBeNull();
+      expect((await db.select().from(environmentLeases).where(eq(environmentLeases.heartbeatRunId, runId)))[0].releasedAt).not.toBeNull();
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId))).toEqual([]);
+    } finally {
+      targetSettled = true;
+      adapterExecutionControls.get(runId)?.controller.abort();
+      await drain?.catch(() => undefined);
+      await heartbeat.waitForRunExecutionDrain(runId);
+      gateway.closeAllConnections();
+      await new Promise<void>(resolve => gateway.close(() => resolve()));
+    }
+  });
+
   it("suspends native Paperclip Runner ownership on graceful restart without cancelling or creating a retry run", async () => {
     const { agentId, runId, issueId, wakeupRequestId } = await seedRunFixture({
       adapterType: "paperclip_runner",

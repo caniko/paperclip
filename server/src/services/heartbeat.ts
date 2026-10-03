@@ -15272,6 +15272,19 @@ export function heartbeatService(
       }
       const message = `Interrupted by graceful server shutdown (${signal})`;
       const running = runningProcesses.get(run.id);
+      if (run.runtimeMode !== "native" && !running && adapterExecutionControls.has(run.id)) {
+        // Embedded/remote adapters own their target through this control rather
+        // than a local child. Join Stop before terminalizing the run or releasing
+        // its lease; an interrupted row alone cannot stop the remote execution.
+        await cancelRunInternal(run.id, message, {
+          errorCode: "server_shutdown_interrupted",
+          eventMessage: message,
+          eventPayload: { signal },
+          suppressImmediateRecovery: true,
+          skipQueuedRunStart: true,
+        });
+        continue;
+      }
       try {
         if (run.runtimeMode === "native") {
           await cancelHeartbeatNativeRun({
