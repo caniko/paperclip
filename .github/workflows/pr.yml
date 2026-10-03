@@ -12,4 +12,4 @@ jobs:
   ci:
     # Qualify the owned workflow, including mandatory native Stop, from this
     # immutable source. Refresh this pin when the owned CI definition changes.
-    uses: caniko/paperclip/.github/workflows/pr-trusted.yml@36d79f35ce0944c3942d9ef581a25b119bf4a234
+    uses: caniko/paperclip/.github/workflows/pr-trusted.yml@28e815c12bb5daa074d5d12e3abcc8c9339d07cf
