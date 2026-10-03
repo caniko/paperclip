@@ -463,7 +463,7 @@ stored migration hash against the installed SQL files. Unknown hashes refuse
 startup without changing the journal. Use the matching application or a verified
 compatible backup; rewriting a fork's applied migration journal is not an upgrade.
 
-Migration `0295_aromatic_mother_askani.sql` adds the `deployment_resources` ownership
+Migration `0295_nostalgic_rhodey.sql` adds the `deployment_resources` ownership
 ledger and guards owned resource fields and secret versions. Resource identities
 use owner, kind, and key; no cascading foreign key can silently erase ownership.
 Operational pauses and spending remain mutable. The reconciler uses a

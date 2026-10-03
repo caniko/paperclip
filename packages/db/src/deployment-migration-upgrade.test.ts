@@ -12,7 +12,7 @@ import { EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, getEmbeddedPostgresTestSupport, star
 type TestSql = ReturnType<typeof postgres>;
 type JournalEntry = { idx: number; version: string; when: number; tag: string; breakpoints: boolean };
 type Journal = { version: string; dialect: string; entries: JournalEntry[] };
-const nativeFile = "0295_aromatic_mother_askani.sql";
+const nativeFile = "0295_nostalgic_rhodey.sql";
 const nativeHash = "ac20d3f6626b23aaf07e7bc7f6502bbcd728a2808d4b4adb56b2116bb30e6412";
 // Authentic entry and SQL from 843bb5b, whose upstream prefix through 0288 is unchanged.
 const oldEntry: JournalEntry = { idx: 289, version: "7", when: 1790713813737, tag: "0289_messy_vivisector", breakpoints: true };
