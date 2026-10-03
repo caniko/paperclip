@@ -443,6 +443,9 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
         if (currentParent.status === "blocked") {
           expect((await json(await request.get(`/api/issues/${child.id}`))).status).toBe("in_progress");
           expect(await json(await request.get(`/api/issues/${parent.id}/live-runs`))).toEqual([]);
+          await expect(page.getByRole("button", {
+            name: /Change status \(current: Blocked · waiting on active sub-task/,
+          })).toBeVisible();
         } else {
           resumedParentRun = await running(request, parent.id, adapter);
         }
