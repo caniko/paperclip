@@ -428,17 +428,33 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
         await reconcileDemoExecution(request, parent.id, parentRun.id);
         await reconcileDemoExecution(request, child.id, childRun.id);
       }
-      // A verified stopped native runner can honor the explicitly selected
-      // Wake agents option without another manual reconciliation step.
-      const resumedParentRun = await running(request, parent.id, adapter);
+      // A verified stopped runner can honor Wake agents without a false
+      // recovery gate. If the child is still active, the parent may instead
+      // remain blocked by that real subtask dependency.
       const resumedChildRun = await running(request, child.id, adapter);
-      expect(resumedParentRun.id).not.toBe(parentRun.id);
       expect(resumedChildRun.id).not.toBe(childRun.id);
+      let resumedParentRun: { id: string } | null = null;
+      if (adapter === "paperclip_runner") {
+        for (const issue of [parent, child]) {
+          const recovery = await json(await request.get(`/api/issues/${issue.id}/recovery-actions`));
+          expect(recovery.active).toBeNull();
+        }
+        const currentParent = await json(await request.get(`/api/issues/${parent.id}`));
+        if (currentParent.status === "blocked") {
+          expect((await json(await request.get(`/api/issues/${child.id}`))).status).toBe("in_progress");
+          expect(await json(await request.get(`/api/issues/${parent.id}/live-runs`))).toEqual([]);
+        } else {
+          resumedParentRun = await running(request, parent.id, adapter);
+        }
+      } else {
+        resumedParentRun = await running(request, parent.id, adapter);
+      }
+      if (resumedParentRun) expect(resumedParentRun.id).not.toBe(parentRun.id);
       if (adapter === "paperclip_runner") {
         await expect.poll(async () => {
           const calls = await readFile(process.env.PAPERCLIP_STOP_CODEX_LOG!, "utf8");
           return calls.split("turn/start").length - 1;
-        }, { timeout: 30_000 }).toBeGreaterThanOrEqual(5);
+        }, { timeout: 30_000 }).toBeGreaterThanOrEqual(resumedParentRun ? 5 : 4);
         await page.screenshot({ path: testInfo.outputPath("native-resumed.png"), fullPage: true });
       }
       await menu(page, "Pause subtree");
