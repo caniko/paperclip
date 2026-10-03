@@ -1427,7 +1427,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: native-composer-stop-${{ github.event.pull_request.head.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          retention-days: 30
+          # Leave headroom for GitHub's independently rounded artifact timestamps.
+          # Independent qualification still requires at least 30 full days.
+          retention-days: 31
           if-no-files-found: error
           path: |
             ${{ runner.temp }}/composer-stop-report.json

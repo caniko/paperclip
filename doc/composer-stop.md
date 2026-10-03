@@ -182,7 +182,10 @@ Missing or non-executable fixture/runner binaries refuse startup. The required
 retries, skips or missing timing/status evidence. The retained receipt binds
 the tested revision, Playwright JSON/JUnit reports, attachment bytes and both
 binaries by SHA-256. Reports,
-receipts and test attachments are retained for 30 days.
+receipts and test attachments use a 31-day upload policy. Independent evidence
+verification requires an advertised interval of at least 30 full days; it does
+not round up short intervals or substitute the requested policy for actual
+artifact expiry. The extra day accommodates GitHub's timestamp rounding.
 The receipt records Node/pnpm versions and hashes both the source and effective
 dependency lockfiles. Both lockfiles are retained. A changed resolution is
 explicitly marked `lockfileRegenerated`; bundle freezing must compare that
