@@ -405,6 +405,14 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
           await json(await request.get(`/api/issues/${child.id}/live-runs`)),
         ).toEqual([]);
       }
+      if (adapter === "paperclip_runner") {
+        // A queued comment cancelled under the pause must not manufacture a
+        // recovery incident for a provider that never claimed the run.
+        for (const issue of [parent, child]) {
+          const recovery = await json(await request.get(`/api/issues/${issue.id}/recovery-actions`));
+          expect(recovery.active).toBeNull();
+        }
+      }
       await menu(page, "Resume subtree");
       await page.getByRole("dialog").getByRole("checkbox").check();
       await page

@@ -13,6 +13,7 @@ import {
   issueComments,
   issueRecoveryActions,
   issues,
+  nativeRunFinalizations,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -59,6 +60,7 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
   afterEach(async () => {
     await db.delete(activityLog);
     await db.delete(issueComments);
+    await db.delete(nativeRunFinalizations);
     // `heartbeat_runs.wakeup_request_id` references `agent_wakeup_requests.id`,
     // so the run row must go first.
     await db.delete(heartbeatRuns);
@@ -340,6 +342,52 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     });
     expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId)))[0].status).toBe("deferred_issue_execution");
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId))).toHaveLength(0);
+  });
+
+  it("releases a cancelled native startup before provider claim without manufacturing an incident", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent({ companyId });
+    const issueId = await seedIssue({ companyId, assigneeAgentId: agentId, status: "in_progress" });
+    const runId = await seedRun({ companyId, agentId, status: "cancelled", contextSnapshot: { issueId } });
+    await db.update(heartbeatRuns).set({
+      runtimeMode: "native", nativeIssueId: issueId, errorCode: "cancelled",
+      finishedAt: new Date(), resultJson: { startupPreparationSettledAt: new Date().toISOString() },
+    }).where(eq(heartbeatRuns.id, runId));
+    await db.insert(nativeRunFinalizations).values({ runId, companyId, issueId, phase: "observed" });
+    await db.update(issues).set({ executionRunId: runId, checkoutRunId: runId }).where(eq(issues.id, issueId));
+    const release = createReleaseIssueExecution({
+      issueLock: createPostgresWakeQueueAdapter(db, stubDeps),
+      recovery: {
+        escalateStrandedAssignedIssue: async () => { throw new Error("unexpected escalation"); },
+        escalateStrandedRecoveryIssueInPlace: async () => { throw new Error("unexpected escalation"); },
+      },
+    });
+    const result = await release({ companyId, runId, now: new Date() });
+    expect(result.outcome.kind).toBe("queued_recovery");
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(issue).toMatchObject({ status: "in_progress", checkoutRunId: null });
+    expect(issue.executionRunId).not.toBe(runId);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId))).toEqual([]);
+  });
+
+  it("holds a cancelled native run once provider claim is possible", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent({ companyId });
+    const issueId = await seedIssue({ companyId, assigneeAgentId: agentId, status: "in_progress" });
+    const runId = await seedRun({ companyId, agentId, status: "cancelled", contextSnapshot: { issueId } });
+    await db.update(heartbeatRuns).set({
+      runtimeMode: "native", nativeIssueId: issueId, errorCode: "cancelled",
+      finishedAt: new Date(), resultJson: { startupPreparationSettledAt: new Date().toISOString() },
+    }).where(eq(heartbeatRuns.id, runId));
+    await db.insert(nativeRunFinalizations).values({ runId, companyId, issueId, phase: "observed", attempt: 1 });
+    await db.update(issues).set({ executionRunId: runId, checkoutRunId: runId }).where(eq(issues.id, issueId));
+    const adapter = createPostgresWakeQueueAdapter(db, stubDeps);
+    await adapter.withIssueExecutionLock({ companyId, runId, now: new Date() }, async () => {
+      throw new Error("uncertain execution must not replay");
+    });
+    expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].status).toBe("blocked");
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId)))[0])
+      .toMatchObject({ cause: "native_continuation_requires_reconciliation" });
   });
 
   it.each(["in_progress", "blocked"])("preserves recovery ownership and queued messages when a native task fails from %s", async (status) => {

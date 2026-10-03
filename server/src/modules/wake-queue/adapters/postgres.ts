@@ -718,7 +718,7 @@ async function recordNativeTerminalRecoveryIfNeeded(tx: Db, run: HeartbeatRunRow
     !["done", "cancelled"].includes(issue.status);
   if (!applies || isAcknowledgedNativeStop(run) || isAcknowledgedNativeReassignmentStop(run)) return false;
 
-  if (run.status === "cancelled" && run.errorCode === "issue_paused") {
+  if (run.status === "cancelled") {
     // Match native claim's coordinator-before-run lock order. Cancellation is
     // not a provider failure when no executor ever claimed this native attempt
     // and the preparer has finished the independently verified lease cleanup.
