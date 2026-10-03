@@ -30,7 +30,9 @@ assert lib.assertMsg (runtimePath gatewayFile && (researchFile == null || runtim
     description = "Render Paperclip Hermes worker credentials";
     before = [ "hermes-agent-${name}.service" ];
     requiredBy = [ "hermes-agent-${name}.service" ];
-    path = [ pkgs.coreutils ];
+    # The renderer uses cmp to compare the original bytes before Bash can
+    # discard trailing LF or NUL bytes. cmp belongs to diffutils, not coreutils.
+    path = [ pkgs.coreutils pkgs.diffutils ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;

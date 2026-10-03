@@ -2,7 +2,7 @@
 set -euo pipefail
 
 render="$1"
-fixture="$(mktemp -d "${TMPDIR:-/data/scratch/tmp/opencode}/paperclip-hermes-env.XXXXXXXX")"
+fixture="$(mktemp -d)"
 trap 'rm -rf "$fixture"' EXIT
 gateway="$fixture/gateway"
 research="$fixture/research"
