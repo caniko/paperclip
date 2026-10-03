@@ -17,4 +17,12 @@ describe("declarative startup diagnostics", () => {
     expect(result).toContain("code=unclassified");
     expect(result).not.toMatch(/PASSWORD|secret|sensitive/);
   });
+
+  it("reports only allowlisted reconciliation steps", () => {
+    const safe = startupDiagnostic({ deploymentStage: "operator-apply", cause: new Error("secret") }, "serve");
+    expect(safe).toContain("step=operator-apply, code=unclassified");
+    expect(safe).not.toContain("secret");
+    const unsafe = startupDiagnostic({ deploymentStage: "password-for-private-user" }, "serve");
+    expect(unsafe).not.toContain("password-for-private-user");
+  });
 });
