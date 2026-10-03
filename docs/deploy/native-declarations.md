@@ -107,6 +107,12 @@ reuses native validators. Supported declaration adapters are `hermes_gateway`,
 allowed fields. Worker credentials are native encrypted secret references.
 Manifest fields must contain nonsecret values.
 
+Hermes declarations accept the boolean `adapterConfig.waitForJobs`. When enabled,
+the existing adapter binds a selected execution target and requires the worker's
+`wait_for_jobs` and Stop-admission capabilities. Run ownership is retained until
+the execution-host jobs and descendants settle. This uses the same execution
+preconditions as application-managed Hermes configuration.
+
 Identity is `owner + kind + key`, independent of display names. Existing
 resources need explicit `adopt` UUIDs. Cross-company references, duplicate
 ownership, manager cycles, and adoption of plugin/bundled resources fail.

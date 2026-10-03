@@ -19,6 +19,15 @@ describe("native declaration adapter contracts", () => {
     }, { apiKey: "gateway" })).not.toThrow();
   });
 
+  it("accepts the remote Stop and recovery fixture's explicit job lifetime", () => {
+    for (const waitForJobs of [true, false]) {
+      expect(() => validateDeclaredAdapterConfig("hermes_gateway", {
+        apiBaseUrl: "http://worker:8642", paperclipApiUrl: "http://controller:3115",
+        dangerouslyAllowInsecureRemoteHttp: true, waitForJobs,
+      }, { apiKey: "gateway" })).not.toThrow();
+    }
+  });
+
   it.each([
     ["process", { command: "worker", args: "--once" }, {}],
     ["process", { command: "worker", timeoutSec: -1 }, {}],
@@ -27,6 +36,8 @@ describe("native declaration adapter contracts", () => {
     ["hermes_gateway", { apiBaseUrl: "https://worker.test", apiKey: "inline-secret" }, {}],
     ["hermes_gateway", { apiBaseUrl: "https://worker.test" }, {}],
     ["hermes_gateway", { apiBaseUrl: "https://worker.test" }, { instructions: "secret" }],
+    ["hermes_gateway", { apiBaseUrl: "https://worker.test", waitForJobs: "true" }, { apiKey: "gateway" }],
+    ["hermes_gateway", { apiBaseUrl: "https://worker.test", waitForJobs: 1 }, { apiKey: "gateway" }],
     ["process", { command: "worker", env: { WORKER_TOKEN: "inline" } }, { "env.WORKER_TOKEN": "worker" }],
     ["process", { command: "worker" }, { "env.NODE_OPTIONS": "worker" }],
     ["process", { command: "worker" }, { "env.PAPERCLIP_API_KEY": "worker" }],
