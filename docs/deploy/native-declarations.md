@@ -78,6 +78,45 @@ not restore a removed membership; company access remains application-managed.
 `remote-only` is reserved and refuses every command before credentials, adapter
 loading, or database changes. The supported profile is `trusted-local`.
 
+### Optional Nix integration for a Hermes gateway
+
+The flake exports `homeManagerModules.paperclip` for personal declarations,
+`nixosModules.homeManager` for explicit integrated Home Manager selection, and
+`lib.mkHermesWorkerEnv` for a **separately managed** Hermes gateway instance.
+The latter is an optional systemd companion, not a new Paperclip adapter or
+credential backend. It does not install Hermes, enable Paperclip, choose a
+package, or create a worker account. With the corresponding Hermes NixOS
+instance module imported, a host can compose it as follows:
+
+```nix
+systemd.services = lib.mkIf config.services.paperclip.instances.operations.enable (
+  inputs.paperclip.lib.mkHermesWorkerEnv { inherit lib pkgs; } {
+    name = "operations"; # existing hermes-agent-operations.service
+    gatewayFile = "/run/credentials/paperclip/operations-gateway";
+    researchFile = "/run/credentials/hermes/operations-research"; # optional
+    restartTriggers = [ encryptedGatewaySource encryptedResearchSource ];
+  }
+);
+```
+
+Set `services.paperclip.instances.operations.credentialFiles.gateway` to the
+same gateway credential path, and bind the agent's `credentials.apiKey` to
+`gateway` in its native manifest. The companion renders a root-only environment
+file in a root-only `/run` directory and systemd reads it before applying the
+Hermes worker's filesystem isolation. It validates the original credential
+bytes (one optional final LF, no NULs, embedded newlines or quotes) and fails
+startup rather than changing malformed credentials. The optional research key
+becomes worker-wide `TAVILY_API_KEY`; enable the Hermes `web` toolset separately
+only for workers intended to use it. Select source files and rotation triggers
+in the host's secret manager; do not put values in Nix or the manifest.
+
+The Hermes instance and the Paperclip controller still need a host-owned
+startup relationship, network policy, and recovery procedure. During rotation,
+hold dispatch and account for active worker runs before restarting either
+service. Qualify the real worker and a failed-cutover path before enabling
+unattended dispatch. A test-only `checks.<system>.hermes-worker-env` covers the
+portable environment graph and synthetic malformed credentials.
+
 ## Native resource manifest
 
 ```json

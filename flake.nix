@@ -11,6 +11,16 @@
     nixpkgs,
     ...
   }: {
+    # Optional Nix integration. Packages and secret stores are supplied by the
+    # consumer; these modules do not select a host or enable a controller.
+    homeManagerModules.paperclip = import ./nix/modules/home-manager/paperclip.nix;
+    nixosModules.homeManager = import ./nix/modules/nixos/home-manager.nix;
+    lib.mkHermesWorkerEnv = import ./nix/lib/hermes-worker-env.nix;
+    checks = nixpkgs.lib.genAttrs ["x86_64-linux" "aarch64-linux"] (system: {
+      hermes-worker-env = import ./nix/tests/hermes-worker-env.nix {
+        pkgs = nixpkgs.legacyPackages.${system};
+      };
+    });
     devShells = nixpkgs.lib.genAttrs ["x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin"] (system: let
       pkgs = nixpkgs.legacyPackages.${system};
       packageJson = ./package.json;
