@@ -7,6 +7,13 @@ import base from "./playwright.config";
 // Opt-in native coverage uses real runnerd with the repo's deterministic Codex
 // protocol fixture. Never let this suite fall through to a logged-in real Codex.
 const fixture = process.env.PAPERCLIP_STOP_FAKE_CODEX;
+if (process.env.PAPERCLIP_STOP_REQUIRE_NATIVE === "true") {
+  for (const binary of [fixture, process.env.PAPERCLIP_RUNNER_BINARY]) {
+    if (!binary || !path.isAbsolute(binary) || !fs.statSync(binary).isFile())
+      throw new Error("Mandatory native composer Stop requires both absolute binary paths");
+    fs.accessSync(binary, fs.constants.X_OK);
+  }
+}
 const fixtureDir = fs.mkdtempSync(
   path.join(os.tmpdir(), "composer-stop-provider-"),
 );

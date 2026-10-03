@@ -437,8 +437,8 @@ import {
 } from "./issue-execution-policy.js";
 import {
   ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
-  isVerifiedIssueTreeControlInteractionWake,
   issueTreeControlService,
+  type ActiveIssueTreePauseHoldGate,
 } from "./issue-tree-control.js";
 import {
   continuationSummaryParksExecutor,
@@ -15168,6 +15168,42 @@ export function heartbeatService(
     };
   }
 
+  function isDispatchedHermesRun(
+    run: typeof heartbeatRuns.$inferSelect,
+    currentAdapterType: string | null,
+  ): boolean {
+    return run.runtimeMode === "legacy" && run.executionStage === "dispatching" &&
+      (claimedAdapterType(run) ?? currentAdapterType) === "hermes_gateway";
+  }
+
+  async function holdUnverifiedHermesRun(
+    run: typeof heartbeatRuns.$inferSelect,
+    message: string,
+    evidence?: { errorCode?: string | null; resultJson?: Record<string, unknown> | null },
+  ) {
+    const code = evidence?.errorCode ?? "remote_owner_unverified";
+    const [held] = await db.update(heartbeatRuns).set({
+      error: message,
+      errorCode: code,
+      ...(evidence?.resultJson ? {
+        resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify(evidence.resultJson)}::jsonb`,
+      } : {}),
+      updatedAt: new Date(),
+    }).where(and(
+      eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+      eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.executionStage, "dispatching"),
+      // A repeated reaper sweep should not create an unbounded event stream.
+      sql`${heartbeatRuns.errorCode} is distinct from ${code}`,
+      code === "remote_owner_unverified"
+        ? sql`coalesce(${heartbeatRuns.errorCode}, '') not in ('hermes_gateway_create_unverified', 'hermes_gateway_cancel_unverified')`
+        : undefined,
+    )).returning();
+    if (held) await appendRunEvent(held, {
+      eventType: "lifecycle", stream: "system", level: "warn", message,
+      payload: { errorCode: code, remoteTerminationVerified: false },
+    });
+  }
+
   async function drainRunningRunsForShutdown(
     signal: "SIGINT" | "SIGTERM",
     now = new Date(),
@@ -15271,7 +15307,27 @@ export function heartbeatService(
         continue;
       }
       const message = `Interrupted by graceful server shutdown (${signal})`;
+      // A remote Hermes run has no local process to kill. Its owner must
+      // acknowledge termination before shutdown may release the issue or the
+      // agent's next queued run. A missing control is not evidence of a stop.
+      if (isDispatchedHermesRun(run, agent.adapterType) && !adapterExecutionControls.has(run.id)) {
+        await holdUnverifiedHermesRun(run, message);
+        continue;
+      }
       const running = runningProcesses.get(run.id);
+      if (run.runtimeMode !== "native" && !running && adapterExecutionControls.has(run.id)) {
+        // Embedded/remote adapters own their target through this control rather
+        // than a local child. Join Stop before terminalizing the run or releasing
+        // its lease; an interrupted row alone cannot stop the remote execution.
+        await cancelRunInternal(run.id, message, {
+          errorCode: "server_shutdown_interrupted",
+          eventMessage: message,
+          eventPayload: { signal },
+          suppressImmediateRecovery: true,
+          skipQueuedRunStart: true,
+        });
+        continue;
+      }
       try {
         if (run.runtimeMode === "native") {
           await cancelHeartbeatNativeRun({
@@ -17329,9 +17385,34 @@ export function heartbeatService(
     }
   }
 
+  async function cancelRunForPauseHold(
+    run: typeof heartbeatRuns.$inferSelect,
+    hold: ActiveIssueTreePauseHoldGate,
+    deferIssueRelease = false,
+  ) {
+    // These callers own the queued claim or pre-dispatch preparation. A fresh
+    // legacy preparation has not entered its adapter; native resumptions still
+    // require the native cancellation and unused-startup receipt checks.
+    await cancelRunInternal(run.id, "Cancelled because an active subtree pause hold blocks execution", {
+      errorCode: "issue_paused",
+      suppressImmediateRecovery: true,
+      skipQueuedRunStart: true,
+      deferIssueRelease,
+      resultJson: {
+        stopReason: "issue_paused", holdId: hold.holdId, rootIssueId: hold.rootIssueId,
+        cancelledByActorType: hold.createdByActorType,
+        cancelledByUserId: hold.createdByUserId,
+        ...(run.runtimeMode === "legacy" ? {
+          executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+        } : {}),
+      },
+    });
+  }
+
   async function claimQueuedRun(
     run: typeof heartbeatRuns.$inferSelect,
     companyAgents?: AgentOrgRow[],
+    queueOptions: Pick<CancelRunOptions, "skipQueuedRunStart"> = {},
   ) {
     if (run.status !== "queued") return run;
     const agent = await getAgent(run.agentId);
@@ -17339,6 +17420,7 @@ export function heartbeatService(
       await cancelRunInternal(
         run.id,
         "Cancelled because the agent no longer exists",
+        queueOptions,
       );
       return null;
     }
@@ -17349,6 +17431,7 @@ export function heartbeatService(
       await cancelRunInternal(
         run.id,
         `Cancelled because the agent is not invokable: ${invokability.reason}`,
+        queueOptions,
       );
       return null;
     }
@@ -17363,7 +17446,7 @@ export function heartbeatService(
       },
     );
     if (budgetBlock) {
-      await cancelRunInternal(run.id, budgetBlock.reason);
+      await cancelRunInternal(run.id, budgetBlock.reason, queueOptions);
       return null;
     }
 
@@ -17404,21 +17487,8 @@ export function heartbeatService(
         run.companyId,
         issueId,
       );
-      const treeHoldInteractionWake =
-        activePauseHold &&
-        (await isVerifiedIssueTreeControlInteractionWake(db, {
-          companyId: run.companyId,
-          issueId,
-          agentId: run.agentId,
-          runId: run.id,
-          wakeupRequestId: run.wakeupRequestId,
-          contextSnapshot: context,
-        }));
-      if (activePauseHold && !treeHoldInteractionWake) {
-        await cancelRunInternal(
-          run.id,
-          "Cancelled because issue is held by an active subtree pause hold",
-        );
+      if (activePauseHold) {
+        await cancelRunForPauseHold(run, activePauseHold);
         await logActivity(db, {
           companyId: run.companyId,
           actorType: "system",
@@ -19424,7 +19494,12 @@ export function heartbeatService(
           (!!run.processPid || !!run.processGroupId)) ||
           monitorDispatchLostWithoutFutureWake);
       if (!(await revokeExpiredLegacyController(db, run))) continue;
-      if (await reconcileRunAdapterExecution(run) === "pending") continue;
+      const adapterSettlement = await reconcileRunAdapterExecution(run);
+      if (adapterSettlement === "pending") continue;
+      if (adapterSettlement === "unmanaged" && isDispatchedHermesRun(run, adapterType)) {
+        await holdUnverifiedHermesRun(run, "Controller ownership expired before Hermes termination was verified");
+        continue;
+      }
       const baseMessage = buildProcessLossMessage(run);
       const conversationContinuationEligible = await runUsedConversationAdapter(db, run);
 
@@ -20000,6 +20075,8 @@ export function heartbeatService(
           await cancelActiveForAgentInternal(
             agentId,
             `Cancelled because the agent is not invokable: ${invokability.reason}`,
+            "cancelled",
+            { skipQueuedRunStart: true },
           );
         }
         return [];
@@ -20101,7 +20178,9 @@ export function heartbeatService(
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
-        const claimed = await claimQueuedRun(queuedRun, companyAgents);
+        const claimed = await claimQueuedRun(queuedRun, companyAgents, {
+          skipQueuedRunStart: true,
+        });
         if (claimed) claimedRuns.push(claimed);
       }
       if (claimedRuns.length === 0) return [];
@@ -20252,6 +20331,15 @@ export function heartbeatService(
       run = claimed;
     }
 
+    const claimedIssueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
+    const claimedPauseHold = claimedIssueId
+      ? await treeControlSvc.getActivePauseHoldGate(run.companyId, claimedIssueId)
+      : null;
+    if (claimedPauseHold) {
+      await cancelRunForPauseHold(run, claimedPauseHold);
+      return;
+    }
+
     if (
       runOptions.nativeLeaseOwner &&
       run.runtimeMode === "native" &&
@@ -20351,6 +20439,7 @@ export function heartbeatService(
     let nativeSessionResumeScheduled = false;
     let nativeOwnershipHeld = false;
     let nativeDispatchStarted = false;
+    let pauseCancelledDuringPreparation = false;
     let nativeWorkspaceFinalizeScheduled = false;
     let nativeWorkspaceSync: Awaited<
       ReturnType<typeof prepareNativeWorkspaceSync>
@@ -22642,6 +22731,19 @@ export function heartbeatService(
           ))
         )
           return { dispatched: false };
+        // A queued comment can be claimed after the pause preview, or a pause
+        // can commit during workspace preparation. Saved comment provenance
+        // does not authorize new provider work while the hold is effective.
+        const pauseHold = issueId
+          ? await treeControlSvc.getActivePauseHoldGate(run.companyId, issueId)
+          : null;
+        if (pauseHold) {
+          // Keep the issue's execution owner until this preparer's finally
+          // cleanup has produced the unused-startup and lease receipts.
+          await cancelRunForPauseHold(run, pauseHold, true);
+          pauseCancelledDuringPreparation = true;
+          return { dispatched: false };
+        }
         const repairBlock = await recovery.legacyRepairDispatchBlock(run.id);
         if (repairBlock) {
           const cancelled = await setRunStatusIfRunning(run.id, "cancelled", {
@@ -25191,6 +25293,17 @@ export function heartbeatService(
             }
           }
         }
+        if (agent.adapterType === "hermes_gateway" && [
+          "hermes_gateway_create_unverified", "hermes_gateway_cancel_unverified",
+        ].includes(adapterResult.errorCode ?? "")) {
+          // The gateway may still be executing. Keeping the run running retains
+          // the agent slot and issue lock across controller loss; a terminal
+          // failure would release both and allow overlapping remote work.
+          await holdUnverifiedHermesRun(run,
+            adapterResult.errorMessage ?? "Hermes remote execution is unverified",
+            { errorCode: adapterResult.errorCode, resultJson: parseObject(adapterResult.resultJson) });
+          return;
+        }
         const processCancellation =
           processRunCancellationSettlements.get(run.id) ??
           failedProcessRunCancellations.get(run.id);
@@ -26627,6 +26740,13 @@ export function heartbeatService(
           adapterExecutionControls.delete(run.id);
         }
       }
+      if (latestRun?.status === "cancelled" && (pauseCancelledDuringPreparation ||
+          (!legacyAdapterEntered && !nativeDispatchStarted && !nativeOwnershipHeld &&
+            parseObject(latestRun.resultJson?.startupCancellation).beforeNativeSelection === true))) {
+        // External Stop may fence this same preparer before it reaches the
+        // pause check. Keep its task lock until this owner finishes cleanup.
+        await releaseIssueExecutionAndPromote(latestRun, { suppressImmediateRecovery: true });
+      }
       // Terminalization precedes lease and adapter cleanup. Only now is the
       // owner gone; retry pending input for ordinary completions as well as Stop.
       if (latestRun?.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(latestRun.status)) {
@@ -27195,54 +27315,32 @@ export function heartbeatService(
         issueId,
       );
       if (activePauseHold) {
-        const treeHoldInteractionWake =
-          await isVerifiedIssueTreeControlInteractionWake(db, {
-            companyId: agent.companyId,
-            issueId,
-            agentId,
-            contextSnapshot: enrichedContextSnapshot,
-            requestedByActorType: opts.requestedByActorType,
-            requestedByActorId: opts.requestedByActorId,
-          });
-
-        if (!treeHoldInteractionWake) {
-          const wait = await writeSkippedRequest("issue_tree_hold_active", {}, {
-            holdId: activePauseHold.holdId,
-          });
-          if (wait.created) await logActivity(db, {
-            companyId: agent.companyId,
-            actorType: "system",
-            actorId: "system",
-            agentId,
-            runId: null,
-            action: "issue.tree_hold_wakeup_deferred",
-            entityType: "issue",
-            entityId: issueId,
-            details: {
-              holdId: activePauseHold.holdId,
-              rootIssueId: activePauseHold.rootIssueId,
-              requestedReason: reason,
-              source,
-              triggerDetail,
-              securityPrinciples: [
-                "Complete Mediation",
-                "Fail Securely",
-                "Secure Defaults",
-              ],
-            },
-          });
-          return null;
-        }
-
-        enrichedContextSnapshot.treeHoldInteraction = true;
-        enrichedContextSnapshot.activeTreeHold = {
+        const wait = await writeSkippedRequest("issue_tree_hold_active", {}, {
           holdId: activePauseHold.holdId,
-          rootIssueId: activePauseHold.rootIssueId,
-          mode: activePauseHold.mode,
-          reason: activePauseHold.reason,
-          releasePolicy: activePauseHold.releasePolicy,
-          interaction: true,
-        };
+        });
+        if (wait.created) await logActivity(db, {
+          companyId: agent.companyId,
+          actorType: "system",
+          actorId: "system",
+          agentId,
+          runId: null,
+          action: "issue.tree_hold_wakeup_deferred",
+          entityType: "issue",
+          entityId: issueId,
+          details: {
+            holdId: activePauseHold.holdId,
+            rootIssueId: activePauseHold.rootIssueId,
+            requestedReason: reason,
+            source,
+            triggerDetail,
+            securityPrinciples: [
+              "Complete Mediation",
+              "Fail Securely",
+              "Secure Defaults",
+            ],
+          },
+        });
+        return null;
       }
     }
 
@@ -29313,6 +29411,10 @@ export function heartbeatService(
     terminationGraceMs?: number;
     /** Caller is immediately scheduling an explicit successor path. */
     suppressImmediateRecovery?: boolean;
+    /** The caller already holds the agent start lock and advances this queue. */
+    skipQueuedRunStart?: boolean;
+    /** The owning preparer releases the issue after its finally cleanup settles. */
+    deferIssueRelease?: boolean;
   };
 
   function cancellationTerminationGraceMs(
@@ -29398,6 +29500,11 @@ export function heartbeatService(
       if (!fenced) return getRun(runId);
       run = fenced;
     }
+    const cancelledBeforeNativeSelection =
+      parseObject(run.resultJson?.startupCancellation).beforeNativeSelection === true;
+    // A claim-time pause can win before any preparer starts; only a registered
+    // executor can take responsibility for the deferred cleanup and release.
+    const preparerWillReleaseIssue = cancelledBeforeNativeSelection && activeRunExecutions.has(run.id);
     const resultJson = agent
       ? {
           ...mergeRunStopMetadataForAgent(agent, "cancelled", {
@@ -29406,6 +29513,11 @@ export function heartbeatService(
             errorMessage: reason,
           }),
           ...(options.resultJson ?? {}),
+          // This row-locked fence prevents native selection, so cancellation
+          // cannot turn an unused preparation into uncertain provider work.
+          ...(cancelledBeforeNativeSelection ? {
+            executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+          } : {}),
         }
       : options.resultJson;
 
@@ -29517,6 +29629,9 @@ export function heartbeatService(
 
           {
             const settlement = await reconcileRunAdapterExecution(run);
+            if (settlement === "unmanaged" && !control && isDispatchedHermesRun(run, agent?.adapterType ?? null)) {
+              throw conflict("Hermes remote owner is unverified. Verify and reconcile the gateway run before releasing this execution.");
+            }
             if (settlement === "pending") {
               await db.update(heartbeatRuns).set({
                 error: reason, errorCode: "adapter_execution_settlement_pending",
@@ -29631,13 +29746,17 @@ export function heartbeatService(
           message: options.eventMessage ?? "run cancelled",
           ...(options.eventPayload ? { payload: options.eventPayload } : {}),
         });
-        await releaseIssueExecutionAndPromote(cancelled, {
-          suppressImmediateRecovery: options.suppressImmediateRecovery,
-        });
+        if (!options.deferIssueRelease && !preparerWillReleaseIssue) {
+          await releaseIssueExecutionAndPromote(cancelled, {
+            suppressImmediateRecovery: options.suppressImmediateRecovery,
+          });
+        }
         await finalizeAgentStatus(run.agentId, "cancelled", undefined, {
           wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
         });
-        await startNextQueuedRunForAgent(run.agentId);
+        if (!options.skipQueuedRunStart && !preparerWillReleaseIssue) {
+          await startNextQueuedRunForAgent(run.agentId);
+        }
       }
       return cancelled;
     } finally {
@@ -29649,6 +29768,7 @@ export function heartbeatService(
     agentId: string,
     reason = "Cancelled due to agent pause",
     errorCode = "cancelled",
+    queueOptions: Pick<CancelRunOptions, "skipQueuedRunStart"> = {},
   ) {
     const agent = await getAgent(agentId);
     const runs = await db
@@ -29668,7 +29788,7 @@ export function heartbeatService(
           : undefined;
       try {
         if (run.runtimeMode !== "native") {
-          await cancelRunInternal(run.id, reason, { errorCode });
+          await cancelRunInternal(run.id, reason, { ...queueOptions, errorCode });
           continue;
         }
         if (run.runtimeMode === "native") {

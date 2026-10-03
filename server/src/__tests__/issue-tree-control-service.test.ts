@@ -402,7 +402,7 @@ describeEmbeddedPostgres("issueTreeControlService", () => {
     });
   });
 
-  it("walks pause-hold ancestry beyond 15 levels for checkout and interaction waives", async () => {
+  it("requires release before verified comment checkouts at the root or beyond 15 ancestor levels", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const issuePath = Array.from({ length: 17 }, () => randomUUID());
@@ -587,13 +587,10 @@ describeEmbeddedPostgres("issueTreeControlService", () => {
       }),
     });
 
-    const checkedOutChild = await issueSvc.checkout(deepDescendantIssueId, agentId, ["todo"], deepDescendantRunId);
-    expect(checkedOutChild.status).toBe("in_progress");
-    expect(checkedOutChild.checkoutRunId).toBe(deepDescendantRunId);
-
-    const checkedOutRoot = await issueSvc.checkout(rootIssueId, agentId, ["todo"], rootRunId);
-    expect(checkedOutRoot.status).toBe("in_progress");
-    expect(checkedOutRoot.checkoutRunId).toBe(rootRunId);
+    await expect(issueSvc.checkout(deepDescendantIssueId, agentId, ["todo"], deepDescendantRunId))
+      .rejects.toMatchObject({ status: 409, details: expect.objectContaining({ rootIssueId, mode: "pause" }) });
+    await expect(issueSvc.checkout(rootIssueId, agentId, ["todo"], rootRunId))
+      .rejects.toMatchObject({ status: 409, details: expect.objectContaining({ rootIssueId, mode: "pause" }) });
 
     await db.update(issues).set({
       status: "todo",
@@ -611,16 +608,25 @@ describeEmbeddedPostgres("issueTreeControlService", () => {
       releaseReason: "switch to full pause",
       updatedAt: new Date(),
     }).where(eq(issueTreeHolds.rootIssueId, rootIssueId));
-    await treeSvc.createHold(companyId, rootIssueId, {
+    const legacyHold = await treeSvc.createHold(companyId, rootIssueId, {
       mode: "pause",
       reason: "full pause",
       releasePolicy: { strategy: "manual", note: "full_pause" },
       actor: { actorType: "user", actorId: "board-user", userId: "board-user" },
     });
 
-    const checkedOutLegacyFullPauseRoot = await issueSvc.checkout(rootIssueId, agentId, ["todo"], rootRunId);
-    expect(checkedOutLegacyFullPauseRoot.status).toBe("in_progress");
-    expect(checkedOutLegacyFullPauseRoot.checkoutRunId).toBe(rootRunId);
+    await expect(issueSvc.checkout(rootIssueId, agentId, ["todo"], rootRunId))
+      .rejects.toMatchObject({ status: 409, details: expect.objectContaining({ rootIssueId, mode: "pause" }) });
+    await treeSvc.releaseHold(companyId, rootIssueId, legacyHold.hold.id, {
+      actor: { actorType: "user", actorId: "board-user", userId: "board-user" },
+      reason: "resume explicitly",
+    });
+    const checkedOutChild = await issueSvc.checkout(deepDescendantIssueId, agentId, ["todo"], deepDescendantRunId);
+    expect(checkedOutChild.status).toBe("in_progress");
+    expect(checkedOutChild.checkoutRunId).toBe(deepDescendantRunId);
+    const checkedOutRoot = await issueSvc.checkout(rootIssueId, agentId, ["todo"], rootRunId);
+    expect(checkedOutRoot.status).toBe("in_progress");
+    expect(checkedOutRoot.checkoutRunId).toBe(rootRunId);
   });
 
   it("resumes subtree pauses by releasing matching pause holds", async () => {

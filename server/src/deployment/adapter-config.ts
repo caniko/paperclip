@@ -23,6 +23,7 @@ const schemas: Record<string, z.ZodType> = {
   }).strict(),
   hermes_gateway: z.object({
     apiBaseUrl: url, paperclipApiUrl: url.optional(),
+    waitForJobs: z.boolean().optional(),
     dangerouslyAllowInsecureRemoteHttp: z.boolean().optional(),
     sessionKeyStrategy: z.enum(["issue", "agent", "run", "none"]).optional(),
     timeoutSec: duration.optional(), eventReconnectMs: duration.optional(), pollIntervalMs: duration.optional(),

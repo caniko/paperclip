@@ -74,7 +74,7 @@ it.each(["normal", "lost-admission", "managed-mcp-lost-admission", "failed-loggi
     runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
     context: { paperclipWorkspace: { cwd: "/srv/data" } },
     executionTarget: { kind: "local", environmentId: "worker", workspaceRealization: {
-      mode: "in_place", authoritativeRoot: "/srv/data", pathAliases: [], outboundRestorePaths: [],
+      mode: "in_place" as const, authoritativeRoot: "/srv/data", pathAliases: [], outboundRestorePaths: [],
     } },
     ...(managed ? { runtimeMcp: { getServers: () => [{ name: "reader", connectionId: "reader", token: "run-reader-secret",
       url: "http://127.0.0.1:9000/mcp", runBinding: { runId: "paperclip-owned", executionHostId: "worker", serverHostId: "worker",
@@ -124,9 +124,10 @@ it.each([
   { name: "mismatched", receipt: { run_id: "other", status: "cancelled" }, terminal: false, blockedObservers: false },
   { name: "nonterminal", receipt: { run_id: "owned", status: "stopping" }, terminal: false, blockedObservers: false },
   { name: "terminal with blocked observers", receipt: { run_id: "owned", status: "cancelled" }, terminal: true, blockedObservers: true },
-])("settles cancellation only from a parent terminal stop receipt: $name", async ({ receipt, terminal, blockedObservers }) => {
+].flatMap(test => ["gateway", "in_place"].map(mode => ({ ...test, mode }))))("settles cancellation only from a parent terminal stop receipt: $name / $mode", async ({ receipt, terminal, blockedObservers, mode }) => {
   const cancel = new AbortController();
   const collected = vi.fn(async () => {});
+  const ready = vi.fn(async () => {});
   let stops = 0;
   let polls = 0;
   let streams = 0;
@@ -165,15 +166,15 @@ it.each([
   await once(server, "listening");
   let returned = false;
   const execution = execute({
-    runId: "paperclip-stop-receipt", signal: cancel.signal, onProviderStopped: collected,
+    runId: "paperclip-stop-receipt", signal: cancel.signal, onProviderStopped: collected, onCancellationReady: ready,
     onExecutionCheckpoint: async () => {},
     agent: { id: "agent", companyId: "company", name: "Worker", adapterType: "hermes_gateway", adapterConfig: {} },
     config: { apiBaseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, apiKey: "fixture",
       pollIntervalMs: 250, eventReconnectMs: 250 },
     runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null }, context: {},
-    executionTarget: { kind: "local", workspaceRealization: {
+    ...(mode === "in_place" ? { executionTarget: { kind: "local" as const, workspaceRealization: {
       mode: "in_place", authoritativeRoot: "/srv/data", pathAliases: [], outboundRestorePaths: [],
-    } }, onLog: async () => {},
+    } } } : {}), onLog: async () => {},
   }).then(result => { returned = true; return result; });
   try {
     await vi.waitFor(() => {
@@ -191,9 +192,11 @@ it.each([
     const result = await execution;
     expect(result.errorCode).toBe("hermes_gateway_cancelled");
     expect(result.resultJson).toMatchObject({ run_id: "owned", status: "cancelled" });
+    expect(result.resultJson?.executionCancellation).toMatchObject({ state: "acknowledged" });
     expect(result.summary).toBe("Owned jobs stopped");
     expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 2 });
     expect(collected).toHaveBeenCalledOnce();
+    expect(ready).toHaveBeenCalledOnce();
     if (blockedObservers) await vi.waitFor(() => expect(closedObservers).toBe(2), { timeout: 3000 });
     const counts = { stops, polls, streams };
     await new Promise(resolve => setTimeout(resolve, 350));

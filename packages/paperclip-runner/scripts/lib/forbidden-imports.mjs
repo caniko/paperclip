@@ -1,8 +1,9 @@
 import { readFile, readdir } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { EVAL_KERNEL_IMPORTER, EVAL_KERNEL_PACKAGE, readModuleReferences } from "./package-boundaries.mjs";
 
-const SOURCE_EXTENSIONS = new Set([".cjs", ".js", ".jsx", ".mjs", ".rs", ".ts", ".tsx"]);
+const SOURCE_EXTENSIONS = new Set([".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".rs", ".ts", ".tsx"]);
 const IMPORT_PATTERNS = [
   /\b(?:import|export)\s+(?:type\s+)?(?:[^"'`;]{0,500}?\s+from\s+)?["']([^"']+)["']/g,
   /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
@@ -79,7 +80,7 @@ function isForbiddenBrowserPackage(specifier) {
   );
 }
 
-function violationReason({ file, packageRoot, specifier }) {
+function violationReason({ file, packageRoot, specifier, runnerExports }) {
   const relativeFile = relative(packageRoot, file).split(/[\\/]/).join("/");
   const isExampleConsumer = relativeFile.startsWith("examples/");
   const publicRunnerImports = new Set([
@@ -87,8 +88,12 @@ function violationReason({ file, packageRoot, specifier }) {
     "@paperclipai/paperclip-runner/react",
     "@paperclipai/paperclip-runner/standalone",
     "@paperclipai/paperclip-runner/testing",
+    "@paperclipai/paperclip-runner/evals",
     "@paperclipai/paperclip-runner/styles.css",
-  ]);
+  ].filter((specifier) => Object.hasOwn(
+    runnerExports,
+    `./${specifier.slice("@paperclipai/paperclip-runner/".length)}`,
+  )));
   if (
     specifier.startsWith("@paperclipai/paperclip-runner/") &&
     !publicRunnerImports.has(specifier)
@@ -97,6 +102,10 @@ function violationReason({ file, packageRoot, specifier }) {
   }
   if (isExampleConsumer && specifier === "@paperclipai/paperclip-runner") {
     return "runner consumers may import only declared public subpaths";
+  }
+  // ADR 0001 permits this exact private development import, never a runtime port.
+  if (specifier === EVAL_KERNEL_PACKAGE && relativeFile === EVAL_KERNEL_IMPORTER) {
+    return null;
   }
   if (
     specifier.startsWith("@paperclipai/") &&
@@ -152,7 +161,9 @@ async function manifestViolations(packageRoot) {
   const unreviewedDevelopmentDependencies = Object.keys(
     manifest.devDependencies ?? {},
   ).filter(
-    (name) => name.startsWith("@paperclipai/"),
+    (name) => name.startsWith("@paperclipai/") && !(
+      name === EVAL_KERNEL_PACKAGE && manifest.devDependencies[name] === "workspace:*"
+    ),
   );
   return [...runtimeDependencies, ...unreviewedDevelopmentDependencies]
     .filter(
@@ -217,14 +228,23 @@ export async function checkForbiddenImports({
 } = {}) {
   const violations = [];
   const files = [];
+  const runnerExports = JSON.parse(await readFile(resolve(packageRoot, "package.json"), "utf8")).exports ?? {};
   for (const root of scanRoots) {
     files.push(...(await collectSourceFiles(resolve(packageRoot, root))));
   }
 
+  const graph = await readModuleReferences(files.filter((file) => extension(file) !== ".rs"), packageRoot);
   for (const file of files.sort()) {
     const source = await readFile(file, "utf8");
-    for (const { specifier, offset } of findSpecifiers(source)) {
-      const reason = violationReason({ file, packageRoot, specifier });
+    const module = graph.get(file);
+    if (module !== undefined) violations.push(...module.diagnostics);
+    // Retain the Rust include/path checks. JS/TS uses syntax, not import-looking
+    // text inside fixture strings; nonliteral private script loaders are checked
+    // when reachable from a public export/bin by check:package-boundaries.
+    const references = module?.references ?? findSpecifiers(source);
+    for (const { specifier, offset } of references) {
+      if (specifier === null) continue;
+      const reason = violationReason({ file, packageRoot, specifier, runnerExports });
       if (reason === null) {
         continue;
       }

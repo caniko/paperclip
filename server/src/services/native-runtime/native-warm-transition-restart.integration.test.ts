@@ -15,6 +15,7 @@ import {
   agents,
   companies,
   createDb,
+  heartbeatRunEvents,
   heartbeatRuns,
   issues,
   nativeRunFinalizations,
@@ -823,6 +824,9 @@ generated(
             await db
               .delete(nativeRunFinalizations)
               .where(eq(nativeRunFinalizations.companyId, companyId));
+            await db
+              .delete(heartbeatRunEvents)
+              .where(eq(heartbeatRunEvents.companyId, companyId));
             await db
               .delete(heartbeatRuns)
               .where(eq(heartbeatRuns.companyId, companyId));

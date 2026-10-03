@@ -89,6 +89,9 @@ interface EventWaiter {
 
 export interface StartLocalRunnerScenarioOptions {
   scenario: LocalRunnerScenario;
+  /** Explicit build artifacts supplied by development tooling. */
+  runnerBinaryPath?: string;
+  fakeHarnessBinaryPath?: string;
   delayMs?: number;
   onEvent?: (event: PrpEvent) => void;
   onDiagnostic?: (message: string) => void;
@@ -192,7 +195,10 @@ class LocalRunnerController implements LocalRunnerRunHandle {
   #onEvent?: (event: PrpEvent) => void;
   #onDiagnostic?: (message: string) => void;
 
-  private constructor(options: StartLocalRunnerScenarioOptions) {
+  private constructor(options: StartLocalRunnerScenarioOptions & {
+    runnerBinaryPath: string;
+    fakeHarnessBinaryPath: string;
+  }) {
     this.metadata = metadata(options.scenario);
     this.#onEvent = options.onEvent;
     this.#onDiagnostic = options.onDiagnostic;
@@ -210,7 +216,7 @@ class LocalRunnerController implements LocalRunnerRunHandle {
       "--runner-id",
       this.metadata.identity.runnerInstanceId,
       "--fake-harness",
-      fakeHarnessBinary,
+      options.fakeHarnessBinaryPath,
       "--script",
       scriptPath,
       "--delay-ms",
@@ -222,7 +228,7 @@ class LocalRunnerController implements LocalRunnerRunHandle {
       "--shutdown-grace-ms",
       "75",
     ];
-    this.#process = spawn(runnerBinary, args, {
+    this.#process = spawn(options.runnerBinaryPath, args, {
       cwd: packageRoot,
       env: runnerEnvironment(),
       stdio: "pipe",
@@ -241,12 +247,16 @@ class LocalRunnerController implements LocalRunnerRunHandle {
     if (!LOCAL_RUNNER_SCENARIOS.includes(options.scenario)) {
       throw new Error(`Unsupported Local runner scenario: ${options.scenario}`);
     }
-    await Promise.all([access(runnerBinary), access(fakeHarnessBinary)]).catch(() => {
+    const binaries = {
+      runnerBinaryPath: resolve(options.runnerBinaryPath ?? runnerBinary),
+      fakeHarnessBinaryPath: resolve(options.fakeHarnessBinaryPath ?? fakeHarnessBinary),
+    };
+    await Promise.all([access(binaries.runnerBinaryPath), access(binaries.fakeHarnessBinaryPath)]).catch(() => {
       throw new Error(
         `Local runner Rust binaries are missing. Run pnpm --filter @paperclipai/paperclip-runner build:rust first. PATH entries: ${(process.env.PATH ?? "").split(delimiter).length}.`,
       );
     });
-    const controller = new LocalRunnerController(options);
+    const controller = new LocalRunnerController({ ...options, ...binaries });
     await controller.#initialize();
     return controller;
   }

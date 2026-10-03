@@ -13,6 +13,7 @@ import { execFileSync } from "node:child_process";
 import { describe, it, expect } from "vitest";
 import { parse } from "smol-toml";
 import { trustCodexStartupRoot } from "./codex-startup-trust.js";
+import { configureFixtureGitIdentity } from "../../../test/helpers/git-fixture.js";
 
 describe("isolated Codex startup trust", () => {
   it.each(["missing", "table", "empty-table", "inline", "empty-inline", "inline-projects"])(
@@ -84,15 +85,12 @@ describe("isolated Codex startup trust", () => {
       const home = join(temp, "home");
       mkdirSync(main);
       execFileSync("git", ["init", main], { stdio: "ignore" });
+      configureFixtureGitIdentity(main);
       execFileSync(
         "git",
         [
           "-C",
           main,
-          "-c",
-          "user.name=Test",
-          "-c",
-          "user.email=test@example.com",
           "commit",
           "--allow-empty",
           "-m",

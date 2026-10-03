@@ -10,6 +10,7 @@ import { agents, companies, createDb, heartbeatRuns, issues, projects, projectWo
 import { setExpensiveWorkspaceGitExecutor } from "@paperclipai/adapter-utils/git-workspace-sync";
 import { createWorkspaceGitOperationScheduler, WorkspaceGitScanError } from "../services/workspace-git-operation-scheduler.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { configureFixtureGitIdentity } from "./helpers/git-fixture.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
@@ -77,9 +78,10 @@ suite("task project repository provisioning", () => {
       await mkdir(source, { recursive: true });
       const git = (...args: string[]) => execFileSync("git", args, { cwd: source, stdio: "ignore" });
       git("init", "-b", "main");
+      configureFixtureGitIdentity(source);
       await writeFile(path.join(source, "README.md"), "Research notes\n");
       git("add", ".");
-      git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "seed");
+      git("commit", "-m", "seed");
       await db.insert(projectWorkspaces).values({
         id: randomUUID(), companyId, projectId, name: "Research repository", sourceType: "local_path", cwd: source, isPrimary: true,
       });
@@ -126,10 +128,11 @@ suite("task project repository provisioning", () => {
     await mkdir(source, { recursive: true });
     const git = (...args: string[]) => execFileSync("git", args, { cwd: source, stdio: "ignore" });
     git("init", "-b", "main");
+    configureFixtureGitIdentity(source);
     await writeFile(path.join(source, "README.md"), "committed");
     await writeFile(path.join(source, ".gitignore"), "private.secret\n");
     git("add", ".");
-    git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "seed");
+    git("commit", "-m", "seed");
     await writeFile(path.join(source, "README.md"), "preserved dirty work");
     await writeFile(path.join(source, "private.secret"), "must not copy");
     await db.insert(companies).values({ id: companyId, name: "Bootstrap recovery", issuePrefix: `R${companyId.slice(0, 6)}`, defaultResponsibleUserId: "responsible-user" });
@@ -228,9 +231,10 @@ suite("task project repository provisioning", () => {
       await mkdir(source, { recursive: true });
       const git = (...args: string[]) => execFileSync("git", args, { cwd: source, stdio: "ignore" });
       git("init", "-b", "main");
+      configureFixtureGitIdentity(source);
       await writeFile(path.join(source, "README.md"), `repository ${index}`);
       git("add", ".");
-      git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "seed");
+      git("commit", "-m", "seed");
       repositoryRows.push({ id: randomUUID(), companyId, projectId, name: `Repo ${index}`, sourceType: "git_repo", repoUrl: pathToFileURL(source).href, cwd: null, isPrimary: index === 0 });
     }
     await db.insert(companies).values({ id: companyId, name: "Repo test", issuePrefix: `R${companyId.slice(0, 6)}`, defaultResponsibleUserId: "responsible-user" });

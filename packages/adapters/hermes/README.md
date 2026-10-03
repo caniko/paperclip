@@ -144,6 +144,11 @@ This mode does not start Hermes. It creates runs with `POST /v1/runs`, streams
 Hermes events with SSE, polls run status as a fallback, and stops timed-out runs
 with `POST /v1/runs/{run_id}/stop`.
 
+Controller cancellation also applies to ordinary gateway runs. After admission,
+the adapter retries Stop and keeps observing until a terminal parent-run receipt
+is verified; child completion, mismatched run IDs, and nonterminal Stop responses
+do not acknowledge cancellation. The adapter tests run in the PR workspace lane.
+
 #### Maintain an existing directory
 
 The gateway adapter supports a configured worker whose terminal backend is
@@ -195,6 +200,16 @@ provisioners, worktrees, runtime services and instruction-bundle staging are
 incompatible with this protected mode. See
 [`doc/filesystem-workspaces.md`](../../../doc/filesystem-workspaces.md) for the
 configuration, isolation, recovery and qualification contract.
+
+After controller loss, supervised runs use their original encrypted checkpoint
+to stop the original idempotent admission. Recovery does not use the agent's
+current gateway configuration or start a replacement provider. A pending provider
+or workspace receipt retains the run, task, environment lease and agent slot.
+Verified settlement permits cancellation or interrupted-run reconciliation.
+An already dispatched gateway run without a durable checkpoint remains held as
+`remote_owner_unverified`; ordinary cancellation returns `409` until its remote
+owner can be verified. Graceful shutdown joins registered Stop and suppresses
+successor dispatch while the existing owner settles.
 
 ### Run-isolated managed MCP
 

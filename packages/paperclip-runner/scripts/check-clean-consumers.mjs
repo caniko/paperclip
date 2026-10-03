@@ -15,6 +15,7 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { resolveCargoBinary } from "./cargo-artifacts.mjs";
 
 const runnerRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const scratchParent = process.env.PAPERCLIP_RUN_SCRATCH_DIR
@@ -154,7 +155,7 @@ async function resolveInstalledDependencyRoot(packageRoot, dependencyName) {
 
 async function stageRunnerdArtifact(destination) {
   const suffix = process.platform === "win32" ? ".exe" : "";
-  const source = resolve(runnerRoot, `runner/target/release/paperclip-runnerd${suffix}`);
+  const source = resolveCargoBinary({ binary: "paperclip-runnerd", profile: "release" });
   const executablePath = resolve(destination, `paperclip-runnerd-${process.platform}-${process.arch}${suffix}`);
   await copyFile(source, executablePath);
   if (process.platform !== "win32") await chmod(executablePath, 0o755);

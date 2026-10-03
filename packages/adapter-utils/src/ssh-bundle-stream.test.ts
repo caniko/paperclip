@@ -5,6 +5,7 @@ import path from "node:path";
 import { Transform } from "node:stream";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
+import { configureFixtureGitIdentity } from "../test/helpers/git-fixture.mjs";
 import {
   restoreWorkspaceFromSshExecution,
   streamSshToLocalFileForTest,
@@ -149,8 +150,7 @@ function baseSpec(): SshRemoteExecutionSpec {
 async function createRemoteRepo(rootDir: string): Promise<{ remoteDir: string; head: string }> {
   const remoteDir = path.join(rootDir, "remote");
   await execFile("git", ["init", "-b", "main", remoteDir], { timeout: 30_000 });
-  await git(remoteDir, ["config", "user.name", "Paperclip Test"]);
-  await git(remoteDir, ["config", "user.email", "test@paperclip.dev"]);
+  configureFixtureGitIdentity(remoteDir);
   // Random payload so the bundle is large enough to exercise backpressure.
   const big = path.join(rootDir, "big.bin");
   const writer = spawn("sh", ["-c", `head -c 1500000 /dev/urandom > ${JSON.stringify(big)}`]);
@@ -179,8 +179,7 @@ describe("ssh bundle stream", () => {
 
     const localDir = path.join(rootDir, "local");
     await execFile("git", ["init", "-b", "main", localDir], { timeout: 30_000 });
-    await git(localDir, ["config", "user.name", "Paperclip Test"]);
-    await git(localDir, ["config", "user.email", "test@paperclip.dev"]);
+    configureFixtureGitIdentity(localDir);
     await git(localDir, ["commit", "--allow-empty", "-m", "seed"]);
 
     const seen: string[] = [];
@@ -211,8 +210,7 @@ describe("ssh bundle stream", () => {
 
     const localDir = path.join(rootDir, "local");
     await execFile("git", ["init", "-b", "main", localDir], { timeout: 30_000 });
-    await git(localDir, ["config", "user.name", "Paperclip Test"]);
-    await git(localDir, ["config", "user.email", "test@paperclip.dev"]);
+    configureFixtureGitIdentity(localDir);
     await git(localDir, ["commit", "--allow-empty", "-m", "seed"]);
 
     await expect(
@@ -234,8 +232,7 @@ describe("ssh bundle stream", () => {
 
     const localDir = path.join(rootDir, "local");
     await execFile("git", ["init", "-b", "main", localDir], { timeout: 30_000 });
-    await git(localDir, ["config", "user.name", "Paperclip Test"]);
-    await git(localDir, ["config", "user.email", "test@paperclip.dev"]);
+    configureFixtureGitIdentity(localDir);
     await git(localDir, ["commit", "--allow-empty", "-m", "seed"]);
 
     const seen: string[] = [];
@@ -272,8 +269,7 @@ describe("ssh bundle stream", () => {
 
     const localDir = path.join(rootDir, "local");
     await execFile("git", ["init", "-b", "main", localDir], { timeout: 30_000 });
-    await git(localDir, ["config", "user.name", "Paperclip Test"]);
-    await git(localDir, ["config", "user.email", "test@paperclip.dev"]);
+    configureFixtureGitIdentity(localDir);
     await git(localDir, ["commit", "--allow-empty", "-m", "seed"]);
 
     await expect(

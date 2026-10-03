@@ -19,6 +19,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { configureFixtureGitIdentity } from "./helpers/git-fixture.js";
 import {
   EXECUTION_WORKSPACE_LIFECYCLE_GENERATION_METADATA_KEY,
   EXECUTION_WORKSPACE_REOPEN_FAILED_REASON,
@@ -205,16 +206,10 @@ describeEmbeddedPostgres("reopen archived isolated execution workspace", () => {
     const git = (...args: string[]) =>
       execFileSync("git", args, {
         cwd: dir,
-        env: {
-          ...process.env,
-          GIT_AUTHOR_NAME: "Test",
-          GIT_AUTHOR_EMAIL: "test@example.com",
-          GIT_COMMITTER_NAME: "Test",
-          GIT_COMMITTER_EMAIL: "test@example.com",
-        },
         stdio: "ignore",
       });
     git("init");
+    configureFixtureGitIdentity(dir);
     writeFileSync(join(dir, "README.md"), "seed\n");
     git("add", "README.md");
     git("commit", "-m", "seed");

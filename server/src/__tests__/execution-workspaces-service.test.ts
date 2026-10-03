@@ -27,6 +27,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { configureFixtureGitIdentity } from "./helpers/git-fixture.js";
 import {
   EXECUTION_WORKSPACE_LIFECYCLE_GENERATION_METADATA_KEY,
   EXECUTION_WORKSPACE_REOPEN_PENDING_METADATA_KEY,
@@ -175,8 +176,7 @@ async function readGit(cwd: string, args: string[]) {
 async function createTempRepo() {
   const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-execution-workspace-"));
   await runGit(repoRoot, ["init"]);
-  await runGit(repoRoot, ["config", "user.name", "Paperclip Test"]);
-  await runGit(repoRoot, ["config", "user.email", "test@paperclip.local"]);
+  configureFixtureGitIdentity(repoRoot);
   await fs.writeFile(path.join(repoRoot, "README.md"), "# Test repo\n", "utf8");
   await runGit(repoRoot, ["add", "README.md"]);
   await runGit(repoRoot, ["commit", "-m", "Initial commit"]);

@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { createWorkspaceManifest, readManifestRecords, WorkspaceNulParser, WORKSPACE_PATH_MAX_BYTES, workspacePaths } from "./workspace-manifest.js";
 import { readGitWorkspaceSnapshot, disposeGitWorkspaceSnapshot, runLocalGit, setExpensiveWorkspaceGitExecutor } from "./git-workspace-sync.js";
+import { configureFixtureGitIdentity } from "../test/helpers/git-fixture.mjs";
 
 const cleanup: string[] = [];
 afterEach(async () => {
@@ -75,9 +76,8 @@ it("fails a real Git scan at its disk allowance and removes the incomplete manif
   const repo = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-scan-quota-"));
   cleanup.push(repo);
   await runLocalGit(repo, ["init"]);
-  await runLocalGit(repo, ["commit", "--allow-empty", "-qm", "fixture"], {
-    env: { ...process.env, GIT_AUTHOR_NAME: "Test", GIT_COMMITTER_NAME: "Test", GIT_AUTHOR_EMAIL: "test@example.test", GIT_COMMITTER_EMAIL: "test@example.test" },
-  });
+  configureFixtureGitIdentity(repo);
+  await runLocalGit(repo, ["commit", "--allow-empty", "-qm", "fixture"]);
   for (let index = 0; index < 500; index++) await fs.writeFile(path.join(repo, `${index}-${"x".repeat(200)}`), "");
   const available = nodeFs.statfsSync(os.tmpdir(), { bigint: true });
   const reserve = 256 * 1024 * 1024;
@@ -99,9 +99,8 @@ it("settles a late producer before removing shared storage after another scan fa
   const repo = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-scan-barrier-"));
   cleanup.push(repo);
   await runLocalGit(repo, ["init"]);
-  await runLocalGit(repo, ["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "-qm", "fixture"], {
-    env: { ...process.env, GIT_AUTHOR_NAME: "Test", GIT_COMMITTER_NAME: "Test", GIT_AUTHOR_EMAIL: "test@example.test", GIT_COMMITTER_EMAIL: "test@example.test" },
-  });
+  configureFixtureGitIdentity(repo);
+  await runLocalGit(repo, ["commit", "--allow-empty", "-qm", "fixture"]);
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   let lateFinished = false;
@@ -139,9 +138,8 @@ it("fails a malformed completed scan instead of publishing a partial snapshot", 
   const repo = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-truncated-scan-"));
   cleanup.push(repo);
   await runLocalGit(repo, ["init"]);
-  await runLocalGit(repo, ["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "-qm", "fixture"], {
-    env: { ...process.env, GIT_AUTHOR_NAME: "Test", GIT_COMMITTER_NAME: "Test", GIT_AUTHOR_EMAIL: "test@example.test", GIT_COMMITTER_EMAIL: "test@example.test" },
-  });
+  configureFixtureGitIdentity(repo);
+  await runLocalGit(repo, ["commit", "--allow-empty", "-qm", "fixture"]);
   setExpensiveWorkspaceGitExecutor(async (input) => {
     if (input.operation.endsWith("untracked_files")) await input.onStdout!(Buffer.from("complete\0partial"));
     return { stdout: "", stderr: "" };

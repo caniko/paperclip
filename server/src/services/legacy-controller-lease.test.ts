@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, companies, createDb, heartbeatRuns } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { heartbeatService } from "./heartbeat.js";
+import { adapterExecutionControls, createAdapterExecutionControl } from "./adapter-execution-control.js";
 import { hasLiveLegacyController, legacyControllerBootId, legacyControllerClaim,
   renewLegacyControllerLease, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
 
@@ -16,10 +17,10 @@ const support = await getEmbeddedPostgresTestSupport();
     db = createDb(database.connectionString);
   }, 30000);
   afterAll(async () => { await database?.cleanup(); });
-  async function seed() {
+  async function seed(adapterType = "claude_local") {
     const companyId = randomUUID(), agentId = randomUUID();
-    await db.insert(companies).values({ id: companyId, name: "Controller test", issuePrefix: `C${companyId.slice(0, 7)}` });
-    await db.insert(agents).values({ id: agentId, companyId, name: "Agent", role: "general", adapterType: "claude_local", status: "idle" });
+    await db.insert(companies).values({ id: companyId, name: "Controller test", issuePrefix: `C${companyId.slice(0, 7)}`, defaultResponsibleUserId: "responsible-user" });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Agent", role: "general", adapterType, status: "idle" });
     const [queued] = await db.insert(heartbeatRuns).values({ companyId, agentId }).returning();
     const [run] = await db.update(heartbeatRuns).set({ status: "running", ...legacyControllerClaim("legacy") })
       .where(eq(heartbeatRuns.id, queued.id)).returning();
@@ -42,6 +43,58 @@ const support = await getEmbeddedPostgresTestSupport();
     const [saved] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
     expect(saved.status).toBe("running");
     expect(saved.errorCode).toBeNull();
+  });
+  it("holds an expired Hermes owner and its queued successor until remote work is reconciled", async () => {
+    const run = await seed("hermes_gateway");
+    await db.update(heartbeatRuns).set({
+      controllerBootId: randomUUID(), executionStage: "dispatching",
+      runnerProfileJson: { adapterDispatch: { adapterType: "hermes_gateway" } },
+      controllerLeaseExpiresAt: sql`clock_timestamp() - interval '1 second'`,
+    }).where(eq(heartbeatRuns.id, run.id));
+    // The run's pinned dispatch identity, not a later agent edit, determines
+    // whether a vanished controller could have left remote work behind.
+    await db.update(agents).set({ adapterType: "claude_local" }).where(eq(agents.id, run.agentId));
+    const [successor] = await db.insert(heartbeatRuns).values({ companyId: run.companyId, agentId: run.agentId }).returning();
+
+    const heartbeat = heartbeatService(db);
+    expect(await heartbeat.reapOrphanedRuns({ staleThresholdMs: 0 })).toEqual({ reaped: 0, runIds: [] });
+    const [held] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+    expect(held).toMatchObject({ status: "running", errorCode: "remote_owner_unverified" });
+    await heartbeat.reapOrphanedRuns({ staleThresholdMs: 0 });
+    const [stillQueued] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, successor.id));
+    expect(stillQueued.status).toBe("queued");
+    await expect(heartbeat.cancelRun(run.id)).rejects.toThrow(/remote.*unverified|remote.*owner/i);
+    const [afterStop] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+    expect(afterStop.status).toBe("running");
+  });
+  it("does not terminalize an unowned Hermes run during graceful shutdown", async () => {
+    const run = await seed("hermes_gateway");
+    await db.update(heartbeatRuns).set({ executionStage: "dispatching" }).where(eq(heartbeatRuns.id, run.id));
+    const drain = await heartbeatService(db).drainRunningRunsForShutdown("SIGTERM", new Date(), [run.id]);
+    expect(drain.interruptedRunIds).toEqual([]);
+    const [held] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+    expect(held).toMatchObject({ status: "running", errorCode: "remote_owner_unverified" });
+  });
+  it("waits for its live Hermes adapter's verified stop during graceful shutdown", async () => {
+    const run = await seed("hermes_gateway");
+    await db.update(heartbeatRuns).set({ executionStage: "dispatching" }).where(eq(heartbeatRuns.id, run.id));
+    const control = createAdapterExecutionControl();
+    adapterExecutionControls.set(run.id, control);
+    control.controller.signal.addEventListener("abort", () => {
+      void db.update(heartbeatRuns).set({
+        status: "cancelled", resultJson: { executionCancellation: { state: "acknowledged" } },
+      }).where(eq(heartbeatRuns.id, run.id)).then(() => control.finish());
+    }, { once: true });
+    try {
+      const drain = await heartbeatService(db).drainRunningRunsForShutdown("SIGTERM", new Date(), [run.id]);
+      expect(control.controller.signal.aborted).toBe(true);
+      expect(drain.interruptedRunIds).toEqual([]);
+      const [stopped] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+      expect(stopped).toMatchObject({ status: "cancelled", resultJson: { executionCancellation: { state: "acknowledged" } } });
+    } finally {
+      adapterExecutionControls.delete(run.id);
+      control.finish();
+    }
   });
   it.each([false, true])("shutdown preserves a foreign controller (expired: %s)", async expired => {
     const run = await seed();

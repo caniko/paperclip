@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { resolveCargoBinary, resolveCargoTargetDirectory } from "./cargo-artifacts.mjs";
 
 export const LOCAL_RUNNER_BROWSER_LIMITS = Object.freeze({
   maxActiveRuns: 4,
@@ -227,7 +228,15 @@ async function loadLocalRunnerRunner() {
     "../dist/mock-core/local-runner.js",
     import.meta.url,
   ).href;
-  return import(runnerModuleUrl);
+  const runner = await import(runnerModuleUrl);
+  const targetDirectory = resolveCargoTargetDirectory();
+  const binaries = {
+    runnerBinaryPath: resolveCargoBinary({ binary: "paperclip-runnerd", targetDirectory }),
+    fakeHarnessBinaryPath: resolveCargoBinary({ binary: "fake-harness", targetDirectory }),
+  };
+  return {
+    startLocalRunnerScenario: (options) => runner.startLocalRunnerScenario({ ...options, ...binaries }),
+  };
 }
 
 export function createLocalRunnerBrowserMiddleware(options = {}) {

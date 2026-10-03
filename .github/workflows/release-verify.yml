@@ -273,7 +273,7 @@ jobs:
       matrix:
         include:
           - lane: protocol
-            checks: check:eval-kernel check:protocol
+            checks: check:standalone-boundary check:eval-kernel check:protocol
           - lane: rust
             checks: check:runner check:api-authority
 

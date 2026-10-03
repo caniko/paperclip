@@ -901,12 +901,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   let runId: string | null = null;
   const supervised = binding?.context.lifetime === "wait_for_jobs";
+  const cancellable = supervised || Boolean(ctx.signal);
   const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : null;
   const deadlineExpired = () => deadline !== null && Date.now() >= deadline;
   const checkpoint = executionCheckpoint(baseUrl, runHeaders, requestBody);
   let checkpointPrepared = false;
   try {
-    if (supervised) await ctx.onCancellationReady?.();
+    if (cancellable) await ctx.onCancellationReady?.();
     if (binding || managedMcp) {
       const capabilities = await fetchJson(apiUrl(baseUrl, "/v1/capabilities"), {
         method: "GET", headers: runHeaders,
@@ -915,8 +916,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       if (binding) requireWorkspaceCapability(capabilities, binding);
       if (managedMcp) requireManagedMcpCapability(capabilities, managedMcp);
     }
-    if (supervised && ctx.signal?.aborted) {
-      return { exitCode: 1, signal: "SIGTERM", timedOut: false, errorCode: "hermes_gateway_cancelled" };
+    if (cancellable && ctx.signal?.aborted) {
+      return { exitCode: 1, signal: "SIGTERM", timedOut: false, errorCode: "hermes_gateway_cancelled",
+        resultJson: { executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString() } } };
     }
     if (supervised) {
       if (!ctx.onExecutionCheckpoint) throw new Error("wait_for_jobs requires host-owned durable execution checkpoints");
@@ -964,7 +966,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   // After admission, a broken log sink must not stop lifecycle observation.
   // Both synchronous throws and rejected log writes leave ownership intact.
-  const observer = supervised ? {
+  const observer = cancellable ? {
     ...ctx,
     onLog: async (...args: Parameters<AdapterExecutionContext["onLog"]>) => {
       try { await ctx.onLog(...args); } catch { /* keep observing the owned run */ }
@@ -990,11 +992,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     state,
     signal: controller.signal,
     intervalMs: pollIntervalMs,
-    supervised,
+    supervised: cancellable,
     redactText,
   }).catch(() => undefined);
 
-  if (supervised && binding) {
+  if (cancellable) {
     const timedOutBeforeObservation = deadlineExpired();
     const owned = await waitForOwnedRun({
       terminal: state.terminalPromise.then(terminal => { controller.abort(); return terminal; }), signal: ctx.signal,
@@ -1010,7 +1012,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     await ctx.onProviderStopped?.();
     const result = mapFinalResultForTest({ terminal: owned.terminal, outputChunks: state.outputChunks,
       sessionKey, strategy, redactText });
-    result.sessionParams = { ...result.sessionParams, executionContextFingerprint: binding.fingerprint };
+    if (binding) result.sessionParams = { ...result.sessionParams, executionContextFingerprint: binding.fingerprint };
+    if (ctx.signal?.aborted) {
+      result.resultJson = { ...result.resultJson,
+        executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString() } };
+    }
     if (owned.timedOut || timedOutBeforeObservation) {
       result.timedOut = true;
       result.errorCode = "hermes_gateway_timeout";

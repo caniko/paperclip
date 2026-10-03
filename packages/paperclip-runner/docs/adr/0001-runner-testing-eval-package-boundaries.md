@@ -57,6 +57,29 @@ renderer. The runner may use it only as a development dependency; runtime,
 optional, and peer dependency sets remain free of eval packages. Paid provider
 campaigns remain external.
 
+### Development boundary enforcement (2026-09-30)
+
+The kernel exception admits only its root import from private
+`src/eval/workflow-harness.ts` and its `workspace:*` development dependency.
+It does not admit kernel subpaths, runtime/optional/peer dependencies, or App
+internals. The kernel remains private, has empty runtime dependency sets, and
+may declare only TypeScript and Node types as development tools. Every kernel
+source module must stay package-local or use Node builtins; dependency additions
+fail before any transitive runtime coupling can enter.
+
+`check:standalone-boundary` runs the source guard, kernel/public-closure checks,
+and positive/negative fixture tests in the aggregate and static gates. The
+existing TypeScript parser inspects imports, re-exports, dynamic/require loads,
+and type/declaration references without emitting or typechecking. Every declared
+export condition and bin is traversed through local modules, mapping `dist`
+targets back to source. Private `src/eval` code and the kernel cannot enter those
+closures; unresolved/ambiguous local targets require review. `./evals` is the
+declared public integration contract, distinct from private `src/eval`.
+
+App/Runner parity assertions belong to App-owned tests. In particular, the
+server's project-icon contract test validates both Runner tool schemas against
+the App icon list; standalone Runner tests do not import `packages/shared`.
+
 The dependency graph is acyclic:
 
 ```text

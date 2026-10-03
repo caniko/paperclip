@@ -8,6 +8,7 @@ import { disposeGitWorkspaceSnapshot, readGitWorkspaceSnapshot, runLocalGit, set
 import { isPathManifest, workspacePaths } from "@paperclipai/adapter-utils/workspace-manifest";
 import { prepareSandboxManagedRuntime, type PreparedSandboxManagedRuntime, type SandboxManagedRuntimeClient } from "@paperclipai/adapter-utils/sandbox-managed-runtime";
 import { createWorkspaceGitOperationScheduler } from "./workspace-git-operation-scheduler.js";
+import { configureFixtureGitIdentity } from "../__tests__/helpers/git-fixture.js";
 
 const exec = promisify(execFile);
 async function execute(command: string, args: string[], options: ExecFileOptions = {}): Promise<void> {
@@ -58,9 +59,9 @@ it("streams and stages all four real Git filename lanes above 32 MiB through the
   directories.push(root);
   const repo = path.join(root, "repo");
   await fs.mkdir(repo);
-  const env = { ...process.env, GIT_AUTHOR_NAME: "Test", GIT_COMMITTER_NAME: "Test", GIT_AUTHOR_EMAIL: "test@example.test", GIT_COMMITTER_EMAIL: "test@example.test" };
-  const git = (args: string[]) => runLocalGit(repo, args, { env, timeout: 120_000, maxBuffer: 64 * 1024 });
+  const git = (args: string[]) => runLocalGit(repo, args, { timeout: 120_000, maxBuffer: 64 * 1024 });
   await git(["init"]);
+  configureFixtureGitIdentity(repo);
   await git(["commit", "--allow-empty", "-qm", "fixture"]);
   // Leave room for the fixture/staging root below macOS's 1,024-byte path
   // limit while keeping each 40,000-name Git lane above the 32 MiB boundary.

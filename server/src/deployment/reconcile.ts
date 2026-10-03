@@ -54,15 +54,19 @@ async function validateAdapters(manifest: DeploymentManifest, credentials: Recor
 export async function reconcileDeployment(db: Db, raw: unknown, options: {
   apply: boolean; descriptor: DeploymentDescriptor; config: Config; singleOwner: boolean;
 }) {
+  let stage = "manifest";
+  try {
   const parsed = deploymentManifestSchema.safeParse(raw);
   if (!parsed.success) throw new Error("Invalid deployment manifest or references");
   const m = parsed.data;
+  stage = "credentials";
   const credentials = Object.fromEntries(Object.entries(options.descriptor.credentialFiles).map(([key, file]) => [key, readCredential(file)]));
   await validateAdapters(m, credentials);
   for (const b of Object.values(m.taskBridges)) {
     if (!credentials[b.credential] || credentials[b.credential].trim().length < 32) throw new Error("Task bridge requires a runtime token of at least 32 characters");
   }
-  return db.transaction(async (transaction) => {
+  stage = "database-preflight";
+  return await db.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
     if (!options.apply) await tx.execute(sql`set transaction read only`);
     // Serialize all owners, including adoption across different manifests.
@@ -73,6 +77,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     if (options.singleOwner && identity?.general.owner && identity.general.owner !== m.owner) {
       throw new Error("Deployment owner changed; an explicit ownership handoff is required");
     }
+    stage = "encryption-check";
     // Validate historical and unmanaged local secrets too: the instance key is
     // shared, and a no-op declaration must not mask a broken restore/rotation.
     const encrypted = await tx.select({ material: companySecretVersions.material }).from(companySecretVersions)
@@ -82,6 +87,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     if (encrypted.length || options.descriptor.serverCredentials.encryption || existsSync(keyFile)) {
       verifyLocalEncryptedMaterials(readCredential(keyFile), encrypted.map((v) => v.material));
     }
+    stage = "operator-preflight";
     const ledger = await tx.select().from(deploymentResources);
     if (options.singleOwner && ledger.some((binding) => binding.owner !== m.owner)) {
       throw new Error("Deployment owner changed; an explicit ownership handoff is required");
@@ -105,6 +111,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     for (const [key, a] of Object.entries(m.agents)) getId("agent", key, a.adopt);
     const actorId = await bootstrapOperator(tx, options.config, options.descriptor.bootstrap, false);
     if (Object.keys(m.routines).length && !actorId && !options.descriptor.bootstrap) throw new Error("Declared routines require an operator bootstrap identity");
+    stage = "resource-preflight";
     const actor = { userId: actorId };
     const companySvc = companyService(tx), projectSvc = projectService(tx), agentSvc = agentService(tx), routineSvc = routineService(tx), secrets = secretService(tx);
     const specs: Spec[] = [];
@@ -282,6 +289,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     for (const b of removed) differences.push({ kind: b.kind, key: b.key, action: "disable", fields: [] });
     if (options.descriptor.bootstrap && !actorId) differences.unshift({ kind: "operator", key: "bootstrap", action: "create", fields: [] });
     if (options.apply) {
+      stage = "operator-apply";
       if (!identity) await tx.insert(instanceSettings).values({ singletonKey: "deployment", general: {
         instance: options.descriptor.instance, ...(options.singleOwner ? { owner: m.owner } : {}),
       } });
@@ -290,6 +298,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
           .where(eq(instanceSettings.id, identity.id));
       }
       actor.userId = await bootstrapOperator(tx, options.config, options.descriptor.bootstrap, true);
+      stage = "resource-apply";
       for (const spec of specs) {
         if (!actions.has(spec)) continue;
         const fields = spec.fields();
@@ -317,6 +326,15 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       bindings: Object.fromEntries(specs.filter((s) => options.apply || bindings.has(`${s.kind}/${s.key}`)).map((s) => [`${s.kind}/${s.key}`, s.id])),
     };
   });
+  } catch (error) {
+    // This receipt is consumed by the deployment entry point. Never copy the
+    // exception's message, SQL query, credential path, or manifest fields.
+    if (error instanceof Error && Object.isExtensible(error)) {
+      Object.defineProperty(error, "deploymentStage", { value: stage, configurable: true });
+      throw error;
+    }
+    throw Object.assign(new Error("Declarative reconciliation failed", { cause: error }), { deploymentStage: stage });
+  }
 }
 
 async function disableResource(db: Db, kind: Kind, id: string) {

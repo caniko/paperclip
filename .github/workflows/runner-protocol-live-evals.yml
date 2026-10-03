@@ -117,6 +117,8 @@ jobs:
         id: evals_token
         env:
           COMMITPERCLIP_KEY: ${{ secrets.COMMITPERCLIP_KEY }}
+          COMMITPERCLIP_APP_ID: ${{ vars.COMMITPERCLIP_APP_ID }}
+          COMMITPERCLIP_APP_SLUG: ${{ vars.COMMITPERCLIP_APP_SLUG }}
           GH_REPO: paperclipai/paperclip-evals
         run: |
           set -euo pipefail
@@ -240,6 +242,8 @@ jobs:
         id: evals_token
         env:
           COMMITPERCLIP_KEY: ${{ secrets.COMMITPERCLIP_KEY }}
+          COMMITPERCLIP_APP_ID: ${{ vars.COMMITPERCLIP_APP_ID }}
+          COMMITPERCLIP_APP_SLUG: ${{ vars.COMMITPERCLIP_APP_SLUG }}
           GH_REPO: paperclipai/paperclip-evals
         run: |
           set -euo pipefail
@@ -450,6 +454,8 @@ jobs:
         id: evals_token
         env:
           COMMITPERCLIP_KEY: ${{ secrets.COMMITPERCLIP_KEY }}
+          COMMITPERCLIP_APP_ID: ${{ vars.COMMITPERCLIP_APP_ID }}
+          COMMITPERCLIP_APP_SLUG: ${{ vars.COMMITPERCLIP_APP_SLUG }}
           GH_REPO: paperclipai/paperclip-evals
         run: |
           set -euo pipefail
@@ -673,6 +679,8 @@ jobs:
         id: evals_token
         env:
           COMMITPERCLIP_KEY: ${{ secrets.COMMITPERCLIP_KEY }}
+          COMMITPERCLIP_APP_ID: ${{ vars.COMMITPERCLIP_APP_ID }}
+          COMMITPERCLIP_APP_SLUG: ${{ vars.COMMITPERCLIP_APP_SLUG }}
           GH_REPO: paperclipai/paperclip-evals
         run: |
           set -euo pipefail

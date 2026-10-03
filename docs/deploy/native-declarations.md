@@ -107,6 +107,12 @@ reuses native validators. Supported declaration adapters are `hermes_gateway`,
 allowed fields. Worker credentials are native encrypted secret references.
 Manifest fields must contain nonsecret values.
 
+Hermes declarations accept the boolean `adapterConfig.waitForJobs`. When enabled,
+the existing adapter binds a selected execution target and requires the worker's
+`wait_for_jobs` and Stop-admission capabilities. Run ownership is retained until
+the execution-host jobs and descendants settle. This uses the same execution
+preconditions as application-managed Hermes configuration.
+
 Identity is `owner + kind + key`, independent of display names. Existing
 resources need explicit `adopt` UUIDs. Cross-company references, duplicate
 ownership, manager cycles, and adoption of plugin/bundled resources fail.
@@ -140,6 +146,10 @@ The controller reserves a database connection for its full lifetime. Managed
 startup checks migration hashes before applying migrations, then bootstraps and
 reconciles transactionally. Failure stops startup before the application listener
 or dispatch services. Unexpected lease loss terminates the controller or apply.
+The service journal emits a bounded failure phase, reconciliation step when
+available, and validated error code. It omits exception messages, SQL text,
+credential paths, and manifest values; check runtime credentials and database
+privileges using the reported step without posting secret-bearing logs.
 
 Bindings publish after database commit to
 `<home>/instances/<instance>/deployment-bindings.json`, mode `0600`, by file sync,

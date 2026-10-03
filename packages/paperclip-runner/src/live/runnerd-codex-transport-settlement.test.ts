@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { expect, it, vi } from "vitest";
+import { resolveCargoBinary, resolveCargoTargetDirectory } from "../../scripts/cargo-artifacts.mjs";
 import type { ControlPlanePort } from "../contracts/control-plane-port.js";
 import type { NativeExecutionInputV1 } from "../contracts/native-execution.js";
 import type {
@@ -39,7 +40,6 @@ import * as durableControlPlane from "../control-plane/durable-prp-control-plane
 import {
   createCapabilityRunnerdCodexTransport,
   createCapabilityRunnerdProviderEnvironment,
-  defaultCapabilityRunnerdBinary as qualifiedCapabilityRunnerdBinary,
   drainRetainedRunnerdMaintenanceOperations,
   runnerdRecoveryInternals,
   resolveRunnerdSessionIdentity,
@@ -49,9 +49,11 @@ import {
 } from "./runnerd-codex-transport.js";
 
 // Explicit private-artifact test lane; production/default dist is never changed.
+const cargoTargetDirectory = resolveCargoTargetDirectory();
 const defaultCapabilityRunnerdBinary = () =>
   process.env.PAPERCLIP_ATTACH_TRANSITION_RUNNER ??
-  qualifiedCapabilityRunnerdBinary();
+  process.env.PAPERCLIP_ATTACH_LEGACY_RUNNER ??
+  resolveCargoBinary({ binary: "paperclip-runnerd", targetDirectory: cargoTargetDirectory });
 
 function maintenanceFixtureBackendName(fixtureId: string): string {
   return `maintenance-test-${fixtureId}`;
@@ -138,10 +140,10 @@ it.each([
     const activated = join(directory, "activated");
     const home = join(directory, "source-home");
     await mkdir(home);
-    const fakeCodex = resolve(
-      import.meta.dirname,
-      "../../runner/target/debug/fake-codex-app-server",
-    );
+    const fakeCodex = resolveCargoBinary({
+      binary: "fake-codex-app-server",
+      targetDirectory: cargoTargetDirectory,
+    });
     const bin = join(directory, "provider-bin");
     if (bareCodex) {
       await mkdir(bin);

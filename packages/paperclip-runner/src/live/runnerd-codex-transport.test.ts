@@ -21,6 +21,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { expect, it, vi } from "vitest";
+import { resolveCargoBinary, resolveCargoTargetDirectory } from "../../scripts/cargo-artifacts.mjs";
 import type { ControlPlanePort } from "../contracts/control-plane-port.js";
 import type { NativeExecutionInputV1 } from "../contracts/native-execution.js";
 import type {
@@ -65,7 +66,6 @@ import {
   createCapabilityRunnerdCodexTransport,
   createCapabilityRunnerdProviderEnvironment,
   createRunnerdCodexAppServerArgs,
-  defaultCapabilityRunnerdBinary as qualifiedCapabilityRunnerdBinary,
   readRunnerdArtifactBinding,
   expandRunnerdCanonicalNotifications,
   latestRunnerdSessionReadiness,
@@ -93,9 +93,11 @@ import {
 } from "./runnerd-codex-transport.js";
 
 // Explicit private-artifact test lane; production/default dist is never changed.
+const cargoTargetDirectory = resolveCargoTargetDirectory();
 const defaultCapabilityRunnerdBinary = () =>
   process.env.PAPERCLIP_ATTACH_TRANSITION_RUNNER ??
-  qualifiedCapabilityRunnerdBinary();
+  process.env.PAPERCLIP_ATTACH_LEGACY_RUNNER ??
+  resolveCargoBinary({ binary: "paperclip-runnerd", targetDirectory: cargoTargetDirectory });
 
 it("attributes opened candidate sessions to the harness biller instead of the model vendor", () => {
   const provider = runnerdLaunchProfileInternals.openedThreadModelProvider;
@@ -2373,10 +2375,10 @@ it("recovers provider readiness from an already-committed journal without replay
   ).toEqual(persistedReady);
 });
 
-const fakeCodex = resolve(
-  import.meta.dirname,
-  "../../runner/target/debug/fake-codex-app-server",
-);
+const fakeCodex = resolveCargoBinary({
+  binary: "fake-codex-app-server",
+  targetDirectory: cargoTargetDirectory,
+});
 
 function fakeCodexArgs(stateDirectory: string, ...args: string[]): string[] {
   return [
@@ -3611,10 +3613,7 @@ it("does not retry a real memoized transport close whose suspension proof is una
   }));
   const bundle = createCapabilityRunnerdCodexTransport({
     runnerBinary: defaultCapabilityRunnerdBinary(),
-    codexCommand: resolve(
-      import.meta.dirname,
-      "../../runner/target/debug/fake-codex-app-server",
-    ),
+    codexCommand: fakeCodex,
     codexArgs: ["--state-file", join(stateDirectory, "fake-codex-state.json")],
     stateDirectory,
     closeGraceMs: 400,

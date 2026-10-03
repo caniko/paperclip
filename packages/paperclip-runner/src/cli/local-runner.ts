@@ -9,7 +9,10 @@ import {
 
 function argument(name: string): string | undefined {
   const index = process.argv.indexOf(name);
-  return index === -1 ? undefined : process.argv[index + 1];
+  if (index === -1) return undefined;
+  const value = process.argv[index + 1];
+  if (!value || value.startsWith("--")) throw new Error(`${name} requires a value`);
+  return value;
 }
 
 const scenarioInput = argument("--scenario") ?? "happy-path";
@@ -22,6 +25,8 @@ if (!LOCAL_RUNNER_SCENARIOS.includes(scenarioInput as LocalRunnerScenario)) {
   const scenario = scenarioInput as LocalRunnerScenario;
   const trace = await runLocalRunnerScenario({
     scenario,
+    runnerBinaryPath: argument("--runner-binary"),
+    fakeHarnessBinaryPath: argument("--fake-harness-binary"),
     duplicateTurnCommand: process.argv.includes("--duplicate-turn-command"),
     onEvent(event) {
       if (!process.argv.includes("--quiet")) {

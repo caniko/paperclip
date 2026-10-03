@@ -190,6 +190,14 @@ blocks concurrent task or run updates. It allows audit inserts to retain their
 foreign-key `KEY SHARE` locks without waiting on identity acquisition. The audit
 foreign keys and their deletion behavior remain enforced.
 
+Legacy terminalization uses the same task-before-run order and `NO KEY UPDATE`
+locks. It reads adapter ownership in a separate statement after acquiring the
+run lock, so an admission committed during the wait still fences terminalization.
+Stop and executor completion remain serialized; only one can publish the terminal
+delivery receipt and release the task's owned execution/checkout locks. The
+`adapter-execution-settlement-postgres.test.ts` suite exercises audit lock
+compatibility, admission visibility and concurrent terminal writers in PostgreSQL.
+
 ## Switching between modes
 
 The database mode is controlled by `DATABASE_URL`:

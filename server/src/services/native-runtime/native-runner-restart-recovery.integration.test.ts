@@ -1,11 +1,11 @@
 import { hasNativeLocalProcessStop } from "../native-local-process-stop.js";
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rename, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 
 import { and, eq } from "drizzle-orm";
 import {
@@ -20,10 +20,7 @@ import {
 } from "@paperclipai/db";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-import {
-  createRunnerdCodexTransport,
-  defaultCapabilityRunnerdBinary,
-} from "../../vendor/paperclip-runner/index.js";
+import { createRunnerdCodexTransport } from "../../vendor/paperclip-runner/index.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -55,13 +52,11 @@ const describeEmbeddedPostgres = embeddedPostgresSupport.supported
   ? describe
   : describe.skip;
 
-const fakeCodexAppServer = resolve(
+const runnerWorkspace = resolve(
   import.meta.dirname,
-  "../../../../packages/paperclip-runner/runner/target/debug/fake-codex-app-server",
+  "../../../../packages/paperclip-runner/runner",
 );
-const binariesAvailable =
-  existsSync(defaultCapabilityRunnerdBinary()) && existsSync(fakeCodexAppServer);
-const realProcessIt = binariesAvailable ? it : it.skip;
+const executableSuffix = process.platform === "win32" ? ".exe" : "";
 
 async function closeServer(server: Server | null): Promise<void> {
   if (!server) return;
@@ -119,6 +114,8 @@ describeEmbeddedPostgres("native runner restart recovery with real processes", (
   let server: Server | null = null;
   let apiUrl: string;
   let originalPaperclipHome: string | undefined;
+  let runnerBinary: string;
+  let fakeCodexAppServer: string;
 
   const companyId = randomUUID();
   const agentId = randomUUID();
@@ -169,7 +166,47 @@ describeEmbeddedPostgres("native runner restart recovery with real processes", (
       runtimeConfig: {},
       permissions: {},
     });
-  });
+
+    // Build even when binaries exist so the restart proofs exercise fresh source.
+    execFileSync("cargo", [
+      "build",
+      "--release",
+      "--locked",
+      "-p",
+      "paperclip-runner-core",
+      "--bin",
+      "paperclip-runnerd",
+      "--bin",
+      "fake-codex-app-server",
+    ], {
+      cwd: runnerWorkspace,
+      stdio: "inherit",
+      timeout: 600_000,
+    });
+
+    // Resolve the same target directory Cargo used, including toolchain
+    // environment and config overrides (see stage-runner-binary.mjs).
+    const metadata: unknown = JSON.parse(execFileSync("cargo", [
+      "metadata",
+      "--format-version=1",
+      "--no-deps",
+      "--locked",
+      "--offline",
+    ], {
+      cwd: runnerWorkspace,
+      encoding: "utf8",
+    }));
+    if (
+      !metadata || typeof metadata !== "object" ||
+      !("target_directory" in metadata) ||
+      typeof metadata.target_directory !== "string" ||
+      !isAbsolute(metadata.target_directory)
+    ) {
+      throw new Error("Cargo metadata must contain an absolute target_directory");
+    }
+    runnerBinary = resolve(metadata.target_directory, "release", `paperclip-runnerd${executableSuffix}`);
+    fakeCodexAppServer = resolve(metadata.target_directory, "release", `fake-codex-app-server${executableSuffix}`);
+  }, 660_000);
 
   afterAll(async () => {
     runnerPrpWebSocketInternals.resetForTests();
@@ -244,7 +281,7 @@ describeEmbeddedPostgres("native runner restart recovery with real processes", (
     stateDirectory: string,
   ) {
     return {
-      runnerBinary: defaultCapabilityRunnerdBinary(),
+      runnerBinary,
       codexCommand: fakeCodexAppServer,
       codexArgs: [
         "--state-file",
@@ -395,7 +432,7 @@ describeEmbeddedPostgres("native runner restart recovery with real processes", (
     expect(run?.processPid).toBe(remotePid);
   });
 
-  realProcessIt("adopts one active runner across hot and hard controller restarts without duplicating steering", async () => {
+  it("adopts one active runner across hot and hard controller restarts without duplicating steering", async () => {
     const fixture = await seedRun("LIVE");
     const stateDirectory = resolve(runtimeRoot, fixture.runId);
     const baseOptions = transportOptions(fixture, stateDirectory);
@@ -564,7 +601,7 @@ describeEmbeddedPostgres("native runner restart recovery with real processes", (
     }
   }, 45_000);
 
-  realProcessIt("hard-restarts a dead runner on the same run and provider session", async () => {
+  it("hard-restarts a dead runner on the same run and provider session", async () => {
     const fixture = await seedRun("DEAD");
     const stateDirectory = resolve(runtimeRoot, fixture.runId);
     const baseOptions = transportOptions(fixture, stateDirectory);
@@ -662,7 +699,7 @@ describeEmbeddedPostgres("native runner restart recovery with real processes", (
     }
   }, 45_000);
 
-  realProcessIt("quarantines a pre-auth runner root and bootstraps the same run", async () => {
+  it("quarantines a pre-auth runner root and bootstraps the same run", async () => {
     const fixture = await seedRun("BOOTSTRAP");
     const stateDirectory = resolve(runtimeRoot, fixture.runId);
     const baseOptions = transportOptions(fixture, stateDirectory);
@@ -1019,37 +1056,54 @@ describeEmbeddedPostgres("native runner restart recovery with real processes", (
   });
 
   it("terminalizes the recorded failed-checkpoint incident atomically instead of resuming it on upgrade", async () => {
-    const fixture = await seedRun("FAILED-CHECKPOINT");
-    await fixture.db.update(heartbeatRuns).set({ runnerProfileJson: { sessionCheckpoint: {
-      terminal: { runTerminalState: "failed", turnTerminalState: "failed" },
-      providerSessionId: "unusable-provider-session",
-    } } }).where(eq(heartbeatRuns.id, fixture.runId));
-    await fixture.db.update(nativeRunFinalizations).set({ attempt: 3 }).where(eq(nativeRunFinalizations.runId, fixture.runId));
-    const input = { db: fixture.db, controller: successor, restartKind: "hard" as const, runIds: [fixture.runId] };
-    const captureCallsBeforeFirstClaim = mockCaptureRunFailure.mock.calls.length;
-    expect(await claimNativeRestartRecoveries(input)).toEqual([{ kind: "blocked", runId: fixture.runId, reason: "provider_checkpoint_permanently_failed" }]);
-    // The report fires without being awaited, so wait for it before asserting.
-    await vi.waitFor(() => {
-      expect(mockCaptureRunFailure.mock.calls.length).toBeGreaterThan(captureCallsBeforeFirstClaim);
-    });
-    const firstClaimCaptures = mockCaptureRunFailure.mock.calls.slice(captureCallsBeforeFirstClaim);
-    expect(firstClaimCaptures).toHaveLength(1);
-    expect(firstClaimCaptures[0]?.[0]).toMatchObject({
-      runId: fixture.runId,
-      runStatus: "failed",
-      errorCode: "native_restart_recovery_blocked",
-    });
+    // Harbor inherits AR=ar and AR_FOR_BUILD=ar. Unknown environment values
+    // are redacted as secrets, so isolate these build-only names from the
+    // diagnostic fixture: "ar" otherwise collides with "restart".
+    vi.stubEnv("AR", undefined);
+    vi.stubEnv("AR_FOR_BUILD", undefined);
+    const credential = `native-restart-test-credential-${randomUUID()}`;
+    vi.stubEnv("PAPERCLIP_RESTART_TEST_CREDENTIAL", credential);
+    try {
+      const fixture = await seedRun("FAILED-CHECKPOINT");
+      await fixture.db.update(heartbeatRuns).set({
+        runnerProfileJson: { sessionCheckpoint: {
+          terminal: { runTerminalState: "failed", turnTerminalState: "failed" },
+          providerSessionId: "unusable-provider-session",
+        } },
+        resultJson: { terminalSessionFailure: { details: `Provider rejected ${credential}` } },
+      }).where(eq(heartbeatRuns.id, fixture.runId));
+      await fixture.db.update(nativeRunFinalizations).set({ attempt: 3 }).where(eq(nativeRunFinalizations.runId, fixture.runId));
+      const input = { db: fixture.db, controller: successor, restartKind: "hard" as const, runIds: [fixture.runId] };
+      const captureCallsBeforeFirstClaim = mockCaptureRunFailure.mock.calls.length;
+      expect(await claimNativeRestartRecoveries(input)).toEqual([{ kind: "blocked", runId: fixture.runId, reason: "provider_checkpoint_permanently_failed" }]);
+      // The report fires without being awaited, so wait for it before asserting.
+      await vi.waitFor(() => {
+        expect(mockCaptureRunFailure.mock.calls.length).toBeGreaterThan(captureCallsBeforeFirstClaim);
+      });
+      const firstClaimCaptures = mockCaptureRunFailure.mock.calls.slice(captureCallsBeforeFirstClaim);
+      expect(firstClaimCaptures).toHaveLength(1);
+      const capture = firstClaimCaptures[0]?.[0];
+      expect(capture).toMatchObject({
+        runId: fixture.runId,
+        runStatus: "failed",
+        errorCode: "native_restart_recovery_blocked",
+        diagnostics: { provider: { details: "Provider rejected ***REDACTED***" } },
+      });
+      expect(JSON.stringify(capture)).not.toContain(credential);
 
-    const captureCallsBeforeReplay = mockCaptureRunFailure.mock.calls.length;
-    expect(await claimNativeRestartRecoveries(input)).toEqual([]);
-    // A replay that finds no eligible candidate must not report a second event.
-    expect(mockCaptureRunFailure.mock.calls.slice(captureCallsBeforeReplay)).toHaveLength(0);
+      const captureCallsBeforeReplay = mockCaptureRunFailure.mock.calls.length;
+      expect(await claimNativeRestartRecoveries(input)).toEqual([]);
+      // A replay that finds no eligible candidate must not report a second event.
+      expect(mockCaptureRunFailure.mock.calls.slice(captureCallsBeforeReplay)).toHaveLength(0);
 
-    const [run] = await fixture.db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, fixture.runId));
-    const [issue] = await fixture.db.select().from(issues).where(eq(issues.id, fixture.issueId));
-    expect(run).toMatchObject({ status: "failed", nativePhase: "terminal_failure", errorCode: "native_restart_recovery_blocked" });
-    expect(issue).toMatchObject({ assigneeAgentId: agentId, executionRunId: null });
-    expect(await fixture.db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, fixture.issueId))).toHaveLength(1);
+      const [run] = await fixture.db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, fixture.runId));
+      const [issue] = await fixture.db.select().from(issues).where(eq(issues.id, fixture.issueId));
+      expect(run).toMatchObject({ status: "failed", nativePhase: "terminal_failure", errorCode: "native_restart_recovery_blocked" });
+      expect(issue).toMatchObject({ assigneeAgentId: agentId, executionRunId: null });
+      expect(await fixture.db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, fixture.issueId))).toHaveLength(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("classifies every requested recovery candidate without an implicit 100-run cap", async () => {

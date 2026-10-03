@@ -8,6 +8,7 @@ import { ensureManagedProjectWorkspace, prepareProjectRepositoryWorkspaces } fro
 import { buildGitAuthInvocation, GIT_CREDENTIAL_TOKEN_ENV_KEY } from "../services/git-credentials.ts";
 import { sanitizeRuntimeServiceBaseEnv } from "../services/workspace-runtime.ts";
 import { resolveManagedProjectWorkspaceDir } from "../home-paths.ts";
+import { configureFixtureGitIdentity } from "./helpers/git-fixture.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -29,8 +30,7 @@ afterAll(async () => {
 async function createLocalSourceRepo() {
   const sourceRepo = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-clone-source-"));
   await execFile("git", ["init"], { cwd: sourceRepo });
-  await execFile("git", ["config", "user.email", "paperclip@example.com"], { cwd: sourceRepo });
-  await execFile("git", ["config", "user.name", "Paperclip Test"], { cwd: sourceRepo });
+  configureFixtureGitIdentity(sourceRepo);
   await fs.writeFile(path.join(sourceRepo, "README.md"), "hello\n", "utf8");
   await execFile("git", ["add", "README.md"], { cwd: sourceRepo });
   await execFile("git", ["commit", "-m", "init"], { cwd: sourceRepo });

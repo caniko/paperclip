@@ -61,10 +61,12 @@ export function leaseAdapterExecutionNotHeldCondition() {
 /** Call inside the terminal writer's transaction, BEFORE its conditional update.
  * A subquery in an UPDATE alone keeps a pre-lock statement snapshot and can miss
  * an admission that commits while it waits for this row. The next statement must
- * see the checkpoint committed by prepareAdapterExecution under the same lock. */
+ * see the checkpoint committed by prepareAdapterExecution under the same lock.
+ * Settlement changes no parent key. NO KEY UPDATE still fences admission and
+ * terminal writers, while permitting audit inserts' foreign-key KEY SHARE. */
 export async function lockRunForAdapterSettlement(db: Pick<Db, "select">, runId: string): Promise<void> {
   await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
-    .where(eq(heartbeatRuns.id, runId)).for("update");
+    .where(eq(heartbeatRuns.id, runId)).for("no key update");
 }
 
 /** Serialize protected finalization writes with recovery and remote release.
