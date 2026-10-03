@@ -21,7 +21,8 @@ import {
 import { isImmutableDaytonaImage, runnerMatrix } from "./catalog.js";
 import { renderRunnerE2EDashboard } from "./dashboard.js";
 import { packageEvidence } from "./evidence.js";
-import { classifyFailure, shouldRetryFailure } from "./failure-classifier.js";
+import { classifyFailure } from "./failure-classifier.js";
+import { effectiveAutomaticRetryLimit, executeWithAutomaticRetry } from "./automatic-retry.js";
 import { buildRunnerCampaign } from "./history.js";
 import {
   buildRunnerE2EProcessEnvironment,
@@ -49,6 +50,8 @@ import {
   type MatrixExecution,
   type RunnerE2EResult,
 } from "./types.js";
+import { assertRunnerE2EPrerequisites } from "./prerequisites.js";
+import { assertNativeCompletionSelection, prepareNativeCompletionPreflight, NATIVE_COMPLETION_PREFLIGHT_ENV } from "./native-completion-admission.js";
 import {
   reapNewDetachedDarwinSharedMemory,
   snapshotDarwinSharedMemory,
@@ -1013,35 +1016,19 @@ async function runExecutionWithRetry(input: {
   options: ReturnType<typeof parseRunnerSelectors>;
 }): Promise<RunnerE2EResult> {
   const { execution, campaignId, options } = input;
-  const [firstResult] = await runAttempt({
-    executions: [execution],
-    attempt: 1,
-    campaignId,
-    options,
+  return executeWithAutomaticRetry({
+    task: execution.task, options,
+    qualificationCandidate: execution.profile.qualificationCandidate !== undefined,
+    cancelled: () => cancelled,
+    onRetry: result => console.warn(
+      `Retrying ${execution.id} in a fresh isolated harness after ${result.failureClass!.replaceAll("_", " ")}`,
+    ),
+    runAttempt: async attempt => {
+      const [result] = await runAttempt({ executions: [execution], attempt, campaignId, options });
+      if (!result) throw new Error(`No result produced for ${execution.id} attempt ${attempt}`);
+      return result;
+    },
   });
-  if (!firstResult) throw new Error(`No result produced for ${execution.id}`);
-  if (
-    options.ui ||
-    options.debug ||
-    firstResult.status !== "failed" ||
-    !firstResult.failureClass ||
-    !shouldRetryFailure(firstResult.failureClass)
-  ) {
-    return firstResult;
-  }
-  if (cancelled) throw new Error("Runner E2E campaign cancelled");
-  console.warn(
-    `Retrying ${execution.id} in a fresh isolated harness after ${firstResult.failureClass.replaceAll("_", " ")}`,
-  );
-  const [retryResult] = await runAttempt({
-    executions: [execution],
-    attempt: 2,
-    campaignId,
-    options,
-  });
-  if (!retryResult)
-    throw new Error(`No retry result produced for ${execution.id}`);
-  return retryResult;
 }
 
 async function runWithConcurrency<T, R>(
@@ -1093,6 +1080,19 @@ async function main() {
     return;
   }
 
+  // Keep admission before local-env loading and credential checks. Pending
+  // profiles remain discoverable, but cannot reach a provider.
+  assertRunnerE2EPrerequisites(executions);
+  assertNativeCompletionSelection(executions);
+  let nativeCampaignId: string | undefined;
+  if (executions.some(execution => execution.suite.id === "native-completion")) {
+    nativeCampaignId = cleanId(process.env.PAPERCLIP_E2E_CAMPAIGN_ID ??
+      `local-${new Date().toISOString().replace(/[:.]/g, "-")}`);
+    const nativeCampaignDirectory = path.join(resultsRoot, nativeCampaignId);
+    await mkdir(nativeCampaignDirectory, { recursive: true });
+    process.env[NATIVE_COMPLETION_PREFLIGHT_ENV] = prepareNativeCompletionPreflight(nativeCampaignDirectory);
+  }
+
   await loadLocalEnvironment(process.env);
   const missingCredentials = [
     ...new Set(
@@ -1113,9 +1113,29 @@ async function main() {
     );
   }
 
-  const campaignId = cleanId(
+  const campaignId = nativeCampaignId ?? cleanId(
     process.env.PAPERCLIP_E2E_CAMPAIGN_ID ??
       `local-${new Date().toISOString().replace(/[:.]/g, "-")}`,
+  );
+  const summaryDir = path.join(resultsRoot, campaignId);
+  await mkdir(summaryDir, { recursive: true });
+  await writeFile(
+    path.join(summaryDir, "invocation-policy.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        maxAutomaticRetries: options.maxAutomaticRetries,
+        retryClasses: ["transient_infrastructure", "provider_variance"],
+        executions: executions.map(execution => ({
+          executionId: execution.id,
+          automaticRetryPolicy: execution.task.automaticRetryPolicy ?? "default",
+          maxAutomaticRetries: effectiveAutomaticRetryLimit(execution.task, options.maxAutomaticRetries),
+        })),
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
   );
   const requestedParallelism =
     options.headed || options.ui || options.debug ? 1 : options.maxParallel;
@@ -1135,8 +1155,6 @@ async function main() {
     expected: executions.map((execution) => execution.id),
     results: finalResults,
   });
-  const summaryDir = path.join(resultsRoot, campaignId);
-  await mkdir(summaryDir, { recursive: true });
   const campaignSecrets = normalizedSecrets(
     CREDENTIAL_NAMES.map((name) => process.env[name]),
   );
