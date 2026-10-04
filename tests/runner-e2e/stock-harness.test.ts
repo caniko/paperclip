@@ -59,6 +59,36 @@ describe("stock harness Product E2E", () => {
     expect(gradeStockHarness(recording(generation)).some(check => /vendor|base/.test(check.id))).toBe(false);
   });
 
+  it("rejects a clipped resume receipt that hides a removed procedure", () => {
+    const evidence = recording();
+    const fullResumePrompt = `## Paperclip Resume Delta\n${"x".repeat(17_000)}\nExecution contract:`;
+    evidence.invocations[1]!.prompt = fullResumePrompt;
+    const fullChecks = gradeStockHarness(evidence);
+    expect(fullChecks).toContainEqual(expect.objectContaining({ id: "invocation-evidence-complete", passed: true }));
+    expect(fullChecks).toContainEqual(expect.objectContaining({ id: "generic-procedures-absent", passed: false }));
+
+    const clippedResumePrompt = `${fullResumePrompt.slice(0, 16_384)}\n[truncated ${fullResumePrompt.length - 16_384} chars]`;
+    expect(clippedResumePrompt).not.toContain("Execution contract:");
+    evidence.invocations[1]!.prompt = clippedResumePrompt;
+    const checks = gradeStockHarness(evidence);
+    expect(checks.every(check => check.passed)).toBe(false);
+    expect(checks).toContainEqual(expect.objectContaining({
+      id: "invocation-evidence-complete", passed: false,
+      detail: expect.stringContaining("Explicitly clipped public prompt receipts for runs resumed are incomplete evidence."),
+    }));
+    expect(checks).toContainEqual(expect.objectContaining({
+      id: "generic-procedures-absent", passed: false,
+      detail: expect.stringContaining("clipped receipts cannot establish whole-prompt absence"),
+    }));
+    expect(checks).toContainEqual(expect.objectContaining({ id: "fresh-default-delivered", passed: true }));
+  });
+
+  it("accepts a full resume receipt beyond the clipping limit without removed procedures", () => {
+    const evidence = recording();
+    evidence.invocations[1]!.prompt = `## Paperclip Resume Delta\n${"x".repeat(17_000)}\nCurrent ordered comments.`;
+    expect(gradeStockHarness(evidence).every(check => check.passed)).toBe(true);
+  });
+
   it("checks the hire before paid execution without treating that receipt as provider evidence", () => {
     const hire = recording();
     hire.runIds = [];

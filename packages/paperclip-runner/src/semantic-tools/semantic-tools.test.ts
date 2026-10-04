@@ -62,6 +62,64 @@ describe("Capability semantic catalog and authorization", () => {
     expect(await denied.dispatch({ ...call, callId: "denied", input: { ...args, idempotencyKey: "denied" } })).toMatchObject({ ok: false, denial: { code: "scenario_denied" } });
   });
 
+  it.each(["live", "restored"] as const)("replays the original skill update receipt after an intervening edit (%s adapter)", async (mode) => {
+    const adapter = await running();
+    const dispatcher = new CapabilitySemanticDispatcher(adapter);
+    const markdown = "---\nname: release-review\ndescription: Review release notes.\n---\n# Review\nCheck each note.";
+    const created = await dispatcher.dispatch({
+      runId: OPEN.identity.runId, callId: "create", operationId: "create_skill",
+      input: { name: "release-review", description: "Review release notes.", markdown, idempotencyKey: "create" },
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const initial = created.result as { id: string; versionId: string };
+    const firstCall = {
+      runId: OPEN.identity.runId, callId: "edit1", operationId: "update_skill" as const,
+      input: { skillId: initial.id, expectedVersionId: initial.versionId,
+        markdown: markdown + " Inspect tests.", idempotencyKey: "edit1" },
+    };
+    const first = await dispatcher.dispatch(firstCall);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const firstVersionId = (first.result as { versionId: string }).versionId;
+    expect(firstVersionId).not.toBe(initial.versionId);
+    expect(first.result).toStrictEqual({
+      skillId: initial.id, path: "SKILL.md", versionId: firstVersionId,
+      studioPath: `/skills/studio/${initial.id}`,
+    });
+
+    const secondMarkdown = markdown.replace("Review release notes.", "Review release notes and tests.") + " Verify the final release.";
+    const second = await dispatcher.dispatch({
+      ...firstCall, callId: "edit2",
+      input: { skillId: initial.id, expectedVersionId: firstVersionId,
+        markdown: secondMarkdown, idempotencyKey: "edit2" },
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    const secondVersionId = (second.result as { versionId: string }).versionId;
+    expect(secondVersionId).not.toBe(firstVersionId);
+    expect(second.stateRevision).toBeGreaterThan(first.stateRevision);
+
+    const replayAdapter = mode === "restored"
+      ? CapabilityMockControlPlaneAdapter.restore(adapter.serialize())
+      : adapter;
+    const beforeRetry = replayAdapter.snapshot();
+    expect(beforeRetry.skills).toEqual([expect.objectContaining({
+      id: initial.id, markdown: secondMarkdown, versionId: secondVersionId,
+      description: "Review release notes and tests.",
+    })]);
+    const replay = await new CapabilitySemanticDispatcher(replayAdapter).dispatch({
+      ...firstCall, callId: "retry-edit1",
+    });
+    const afterRetry = replayAdapter.snapshot();
+    expect(replay).toStrictEqual({
+      ...first, callId: "retry-edit1", stateRevision: afterRetry.revision,
+    });
+    expect(afterRetry.skills).toStrictEqual(beforeRetry.skills);
+    expect(afterRetry.audit).toStrictEqual(beforeRetry.audit);
+    expect(afterRetry.idempotency).toStrictEqual(beforeRetry.idempotency);
+  });
+
   it("creates a durable skill once and returns its reference on retry", async () => {
     const adapter = await running();
     const dispatcher = new CapabilitySemanticDispatcher(adapter);
