@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { configureFixtureGitIdentity } from './helpers/git-fixture.js';
 
 const interception = vi.hoisted(() => ({ remote: '', commands: [] as Array<{ args: string[]; cwd: string; env: NodeJS.ProcessEnv }>, hang: false, closedFetches: 0 }));
 vi.mock('node:child_process', async importOriginal => {
@@ -22,12 +23,13 @@ vi.mock('node:child_process', async importOriginal => {
 import { clearGitSkillSnapshotCache, openGitSkillSnapshot, parseGitDownloadProgress } from '../services/skill-source-git-snapshot.js';
 const exec = promisify(execFile);
 let directory: string, commit: string, laterCommit: string;
-const git = (...args: string[]) => exec('git', ['-C', directory, '-c', 'user.name=Test', '-c', 'user.email=test@example.test', ...args]);
+const git = (...args: string[]) => exec('git', ['-C', directory, ...args]);
 const request = (values: Partial<Parameters<typeof openGitSkillSnapshot>[0]> = {}) => ({ repositoryUrl: 'https://github.com/acme/skills', ref: 'feature/skills', token: 'test-token-never-on-disk', cacheScope: 'company:alice', ...values });
 beforeAll(async () => {
   directory = await mkdtemp(path.join(os.tmpdir(), 'paperclip-snapshot-fixture-'));
   interception.remote = directory;
   await git('init', '-b', 'feature/skills');
+  configureFixtureGitIdentity(directory);
   await mkdir(path.join(directory, '.agents/deep/scripts'), { recursive: true });
   await writeFile(path.join(directory, '.agents/deep/SKILL.md'), '---\nname: skill\ndescription: Useful\n---\nInstructions');
   await writeFile(path.join(directory, '.agents/deep/scripts/run.sh'), '#!/bin/sh\ntouch SHOULD_NOT_RUN\n');
