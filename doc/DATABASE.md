@@ -493,17 +493,18 @@ ownership. Release is idempotent and does not report expected shutdown as loss.
 Before managed migrations, `assertDeploymentSchemaCompatible` checks every
 stored migration hash against the installed SQL files. Unknown hashes refuse
 startup without changing the journal. Use the matching application or a verified
-compatible backup; renumbering a fork's applied migrations is not an upgrade.
+compatible backup; rewriting a fork's applied migration journal is not an upgrade.
 
-Migration `0291_deployment_resources.sql` adds the `deployment_resources` ownership
+Migration `0295_nostalgic_rhodey.sql` adds the `deployment_resources` ownership
 ledger and guards owned resource fields and secret versions. Resource identities
 use owner, kind, and key; no cascading foreign key can silently erase ownership.
 Operational pauses and spending remain mutable. The reconciler uses a
 transaction-local setting for its own writes. This guard controls application
 writes, not arbitrary SQL access by the database owner.
 
-This migration is generated from the upstream `0290` schema for fresh staging
-and upstream-history databases. A database with the older fork-only
+The migration follows upstream `0294`. Its SQL hash matches the earlier fork's
+`0289_messy_vivisector.sql`; that applied hash remains in the database journal
+while the upstream `0289`–`0294` gap is filled. A database with the older fork-only
 `0284_bizarre_mastermind` / `0285_deployment_workspaces` history needs a separate
 verified migration/restore procedure. The compatibility check refuses that
 unknown history.
