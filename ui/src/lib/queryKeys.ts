@@ -1,5 +1,12 @@
 export const queryKeys = {
+  skillSources: {
+    preview: (companyId: string, repositoryUrl: string, connectionId: string | null, commitSha: string | null, skillPath: string, filePath: string) => ['skill-sources', companyId, 'preview', repositoryUrl, connectionId, commitSha, skillPath, filePath] as const,
+    all: (companyId: string) => ["skill-sources", companyId] as const,
+    repositories: (companyId: string) => ["skill-source-repositories", companyId] as const,
+  },
   agentChats: {
+    list: (companyId: string | null, userId?: string | null) =>
+      ["agent-chats", companyId, userId] as const,
     detail: (companyId: string | null, userId: string | null, agentId: string | undefined) =>
       ["agent-chat", companyId, userId, agentId] as const,
   },
@@ -330,6 +337,8 @@ export const queryKeys = {
         "plugin-operations",
         originKindPrefix,
       ] as const,
+    listParticipatedByAgent: (companyId: string, agentId: string) =>
+      ["issues", companyId, "participated-by-agent", agentId] as const,
     listByParent: (companyId: string, parentId: string) =>
       ["issues", companyId, "parent", parentId] as const,
     listCreatedFromIssue: (companyId: string, issueId: string) =>
@@ -563,6 +572,8 @@ export const queryKeys = {
         groupBy ?? "none",
         groupIssueId ?? "",
       ] as const,
+    byAgent: (companyId: string, agentId: string) =>
+      ["artifacts", companyId, "by-agent", agentId] as const,
   },
   budgets: {
     overview: (companyId: string) =>
@@ -594,7 +605,6 @@ export const queryKeys = {
     currentBoardAccess: ["access", "current-board-access"] as const,
   },
   auth: {
-    preferences: (userId: string | null) => ["auth", "preferences", userId] as const,
     session: ["auth", "session"] as const,
   },
   inboxAgentPolicy: {
