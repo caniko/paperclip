@@ -313,7 +313,7 @@ printf '%s\\n' '{"type":"result","subtype":"success","session_id":"cursor-sessio
     // shell seam faithful to that protocol instead of returning empty stdout
     // for every shell command.
     const runner = {
-      execute: async (input: { command: string; args?: string[]; env?: Record<string, string> }) => {
+      execute: async (input: { command: string; args?: string[]; env?: Record<string, string>; stdin?: string }) => {
         runnerState.commands.push(input.command);
         // Exercise actual bounded file reads during managed-home restoration;
         // reporting empty success for every shell command hides missing bytes.
@@ -323,6 +323,7 @@ printf '%s\\n' '{"type":"result","subtype":"success","session_id":"cursor-sessio
             ...input.env,
             PATH: input.env?.PATH ? `${input.env.PATH}${path.delimiter}${supportBin}` : supportBin,
           },
+          stdin: input.stdin,
           timeoutSec: 30,
           graceSec: 5,
           onLog: async () => {},

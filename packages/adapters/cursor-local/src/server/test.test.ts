@@ -96,7 +96,9 @@ exit 7
 
   it("re-resolves the installed agent under ~/.cursor/bin and verifies --version before the hello probe", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-cursor-envtest-"));
-    const supportBin = await createFixtureSupportBin(root, ["bash", "mkdir", "cat", "chmod"]);
+    const supportBin = await createFixtureSupportBin(root, [
+      "sh", "bash", "mkdir", "rm", "base64", "mv", "tar", "cp", "find", "wc", "dd", "cat", "chmod",
+    ]);
     const homeDir = path.join(root, "home");
     const workspace = path.join(root, "workspace");
     const remoteWorkspace = path.join(root, "remote-workspace");
