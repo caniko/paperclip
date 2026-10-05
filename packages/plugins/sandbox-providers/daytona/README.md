@@ -34,6 +34,17 @@ Notes:
 - The SDK returns full log snapshots, so fallback bandwidth grows with retained output; it has no paged snapshot or stream cancellation API. A recovery-read timeout keeps partial output and explicitly reports whether command exit remains unconfirmed; it does not prove the remote command stopped. Provider/session teardown remains responsible for closing an outstanding socket. A final snapshot reconciles bytes missed by the stream before returning a recorded exit.
 - A sandbox record can survive the loss of its underlying container. Resume treats it as expired only when a fresh provider read confirms the exact missing-container error for that sandbox and marks it unrecoverable. Unknown errors and failed confirmation reads preserve the lease. The host still requires a verified native-runner backup before replacement.
 
+## Native inbound directory archives
+
+Native directory sync preserves ordinary archive permission bits (`0o777`),
+including read-only files/directories and executables, independently of the sandbox
+command's umask. Archived owners are not restored. Setuid, setgid and sticky bits
+are unsupported and rejected from the completed archive before upload or extraction.
+The archive omits the `.` root entry; the target container directory is created
+separately and does not inherit the source root's mode. Native and generic fallback
+archives share entry selection, but fallback extraction remains umask-sensitive;
+this is not permission-mode parity between transports.
+
 ## Local development
 
 ```bash

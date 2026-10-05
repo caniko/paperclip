@@ -7,6 +7,7 @@ import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { execute } from "./execute.js";
 import { createPromptContextFixture } from "@paperclipai/adapter-utils/test-fixtures/prompt-context";
+import { createFixtureSupportBin } from "./sandbox-fixture-tools.js";
 
 type PrepareCursorSandboxCommandInput = {
   runId: string;
@@ -82,18 +83,10 @@ function createFreshLeaseSandboxRunner(options: {
   homeDir: string;
   installCommandPath: string;
   captureDir: string;
+  supportBin: string;
 }) {
   let counter = 0;
   const installCommands: string[] = [];
-  const systemPath = [
-    "/usr/local/bin",
-    "/opt/homebrew/bin",
-    "/usr/local/sbin",
-    "/usr/bin",
-    "/bin",
-    "/usr/sbin",
-    "/sbin",
-  ].join(path.delimiter);
 
   return {
     installCommands,
@@ -114,7 +107,7 @@ function createFreshLeaseSandboxRunner(options: {
         args[1] = buildInstallSimulationCommand(options.installCommandPath, options.captureDir);
       }
 
-      const inheritedPath = input.env?.PATH ?? systemPath;
+      const inheritedPath = input.env?.PATH ?? options.supportBin;
       const pathWithLocalBin = `${path.join(options.homeDir, ".local", "bin")}${path.delimiter}${inheritedPath}`;
       const env = {
         ...(input.env ?? {}),
@@ -183,6 +176,9 @@ exit 7
     });
 
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-cursor-fresh-lease-"));
+    const supportBin = await createFixtureSupportBin(root, [
+      "sh", "bash", "mkdir", "rm", "base64", "mv", "tar", "cp", "find", "wc", "dd", "cat", "chmod",
+    ]);
     const homeDir = path.join(root, "home");
     const workspace = path.join(root, "workspace");
     const remoteWorkspace = path.join(root, "remote-workspace");
@@ -195,6 +191,7 @@ exit 7
       homeDir,
       installCommandPath: agentPath,
       captureDir,
+      supportBin,
     });
 
     const previousHome = process.env.HOME;
@@ -226,6 +223,7 @@ exit 7
         config: {
           command: "agent",
           cwd: workspace,
+          env: { PATH: supportBin },
           promptTemplate: "Follow the paperclip heartbeat.",
         },
         context: createPromptContextFixture(),
@@ -257,6 +255,9 @@ exit 7
     let finalPreparedCommand: string | null = null;
 
     const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-cursor-fresh-lease-managed-"));
+    const supportBin = await createFixtureSupportBin(rootDir, [
+      "sh", "bash", "mkdir", "rm", "base64", "mv", "tar", "cp", "find", "wc", "dd", "cat", "chmod",
+    ]);
     const workspaceDir = path.join(rootDir, "workspace");
     const remoteWorkspace = path.join(rootDir, "remote-workspace");
     const systemHomeDir = path.join(rootDir, "system-home");
@@ -318,7 +319,10 @@ printf '%s\\n' '{"type":"result","subtype":"success","session_id":"cursor-sessio
         // reporting empty success for every shell command hides missing bytes.
         return runChildProcess(`cursor-fresh-lease-${runnerState.commands.length}`, input.command, input.args ?? [], {
           cwd: remoteWorkspace,
-          env: { ...input.env, PATH: `${input.env?.PATH ?? ""}:/usr/bin:/bin` },
+          env: {
+            ...input.env,
+            PATH: input.env?.PATH ? `${input.env.PATH}${path.delimiter}${supportBin}` : supportBin,
+          },
           timeoutSec: 30,
           graceSec: 5,
           onLog: async () => {},
@@ -359,6 +363,7 @@ printf '%s\\n' '{"type":"result","subtype":"success","session_id":"cursor-sessio
         config: {
           command,
           cwd: workspaceDir,
+          env: { PATH: supportBin },
           promptTemplate: "Run against runtime-managed command.",
         },
         context: {},

@@ -2,15 +2,20 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import zlib from "node:zlib";
-import { Transform } from "node:stream";
+import { PassThrough, Transform } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 
 // The plugin module imports `@daytonaio/sdk` as a value, but the sync tests never
 // touch a real Daytona client — every sandbox call goes through a local mock. Stub
 // the SDK so the import resolves without the excluded provider package.
 import { vi } from "vitest";
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, execFile: vi.fn(actual.execFile), spawn: vi.fn(actual.spawn) };
+});
 vi.mock("@daytonaio/sdk", () => ({
   Daytona: class MockDaytona {},
   DaytonaNotFoundError: class MockDaytonaNotFoundError extends Error {},
@@ -266,6 +271,7 @@ function createRecordingSandbox(input: {
 function createRealExecSandbox(input?: {
   uploadOverride?: (uploads: Array<{ source: string; destination: string }>) => Promise<boolean>;
   commandEnv?: NodeJS.ProcessEnv;
+  restrictiveUmask?: boolean;
 }) {
   const commands: RecordedCommand[] = [];
   return {
@@ -274,7 +280,11 @@ function createRealExecSandbox(input?: {
       process: {
         executeCommand: async (command: string) => {
           commands.push({ command });
-          const result = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, env: input?.commandEnv });
+          // Set only the child shell's umask; the test process retains its own.
+          const args = input?.restrictiveUmask
+            ? ["-c", 'umask 077; exec /bin/sh -c "$1"', "sh", command]
+            : ["-c", command];
+          const result = spawnSync("/bin/sh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, env: input?.commandEnv });
           return { exitCode: result.status ?? 1, result: (result.stdout ?? "") + (result.stderr ?? "") };
         },
       },
@@ -298,6 +308,15 @@ const gnuTar = ["gtar", "tar"].map((candidate) => {
   return resolved && spawnSync(resolved, ["--version"], { encoding: "utf8" }).stdout?.includes("GNU tar") ? resolved : null;
 }).find(Boolean);
 
+function archiveListingBeforeUpload(archivePath: string): string[] {
+  const listing = spawnSync(gnuTar!, ["--numeric-owner", "-tvf", archivePath], {
+    encoding: "utf8", maxBuffer: 64 * 1024, timeout: 30_000,
+    env: { ...process.env, LC_ALL: "C", LANG: "C" },
+  });
+  expect(listing.status, listing.stderr).toBe(0);
+  return listing.stdout.trim().split("\n");
+}
+
 it.skipIf(!gnuTar)("extracts interleaved read-only skill directories with GNU tar and preserves their modes", async () => {
   const root = await fs.mkdtemp("/tmp/paperclip-daytona-readonly-");
   const source = path.join(root, "source");
@@ -310,17 +329,37 @@ it.skipIf(!gnuTar)("extracts interleaved read-only skill directories with GNU ta
   await fs.symlink(gnuTar!, path.join(bin, "tar"));
   await fs.writeFile(path.join(source, "references", "overview.md"), "overview", { mode: 0o444 });
   await fs.writeFile(path.join(source, "references", "agents", "qa.md"), "QA instructions", { mode: 0o444 });
+  for (const file of ["references/overview.md", "references/agents/qa.md"]) {
+    await fs.chmod(path.join(source, file), 0o444);
+    expect((await fs.stat(path.join(source, file))).mode & 0o777).toBe(0o444);
+  }
   for (const dir of ["references/agents", "references"]) await fs.chmod(path.join(source, dir), 0o555);
+  for (const dir of ["references/agents", "references"]) expect((await fs.stat(path.join(source, dir))).mode & 0o777).toBe(0o555);
+  const pack = vi.mocked(execFile);
+  const realExecFile = pack.getMockImplementation()!;
   try {
+    // Inject the foreign-owned, interleaved archive at the host PACK seam,
+    // before the native mode admission checks the exact upload source.
+    pack.mockImplementation((...args) => {
+      const [command, argv, options, callback] = args;
+      if (command === "tar" && Array.isArray(argv) && argv[0] === "-cz") {
+        return realExecFile(gnuTar!, ["-cz", "--owner=12345", "--group=12345", "--no-xattrs", "--no-recursion",
+          "-f", argv[argv.indexOf("-f") + 1], "-C", source,
+          "references", "references/agents", "references/overview.md", "references/agents/qa.md"], options, callback);
+      }
+      return realExecFile(...args);
+    });
+    let uploadedArchives = 0;
     const { sandbox } = createRealExecSandbox({
+      restrictiveUmask: true,
       commandEnv: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
       uploadOverride: async (uploads) => {
         for (const upload of uploads) {
-          // BSD tar can list a child directory before its parent's files, then
-          // visit that child later. GNU tar must not finalize its 0555 mode early.
-          const archive = spawnSync(gnuTar!, ["-c", "--owner=12345", "--group=12345", "--no-xattrs", "--no-recursion", "-f", upload.destination, "-C", source,
-            "references", "references/agents", "references/overview.md", "references/agents/qa.md"], { encoding: "utf8", env: { ...process.env, COPYFILE_DISABLE: "1" } });
-          expect(archive.status, archive.stderr).toBe(0);
+          const listing = archiveListingBeforeUpload(upload.source);
+          expect(listing.find((line) => line.endsWith("references/agents/"))).toMatch(/^dr-xr-xr-x\s+12345\/12345\s+/);
+          expect(listing.find((line) => line.endsWith("references/agents/qa.md"))).toMatch(/^-r--r--r--\s+12345\/12345\s+/);
+          uploadedArchives += 1;
+          await fs.copyFile(upload.source, upload.destination);
         }
         return true;
       },
@@ -335,6 +374,12 @@ it.skipIf(!gnuTar)("extracts interleaved read-only skill directories with GNU ta
     expect(await fs.readFile(path.join(target, "references", "agents", "qa.md"), "utf8")).toBe("QA instructions");
     expect((await fs.stat(path.join(target, "references", "agents"))).mode & 0o777).toBe(0o555);
     expect((await fs.stat(path.join(target, "references", "agents", "qa.md"))).mode & 0o777).toBe(0o444);
+    const uid = process.getuid!();
+    expect(uid).not.toBe(12345);
+    expect((await fs.stat(path.join(target, "references", "agents"))).uid).toBe(uid);
+    expect((await fs.stat(path.join(target, "references", "agents", "qa.md"))).uid).toBe(uid);
+    // No "." member: the target container comes from mkdir under the child umask.
+    expect((await fs.stat(target)).mode & 0o777).toBe(0o700);
     // Never treat a corrupted read-only bundle as a cache hit, even if its
     // file size, permissions and timestamp still match the source archive.
     const qa = path.join(target, "references", "agents", "qa.md");
@@ -347,8 +392,10 @@ it.skipIf(!gnuTar)("extracts interleaved read-only skill directories with GNU ta
       operations: [{ operationId: "corrupt-skill-resume", files: [{ sourcePath: source, targetPath: target, kind: "directory", mode: 0o555 }] }] })).rejects.toThrow("syncIn extract");
     expect(await fs.readFile(qa, "utf8")).toBe("XX instructions");
     expect((await fs.readdir(remoteDir)).filter((name) => name.startsWith(".paperclip-upload"))).toEqual([]);
+    expect(uploadedArchives).toBe(3);
 
   } finally {
+    pack.mockImplementation(realExecFile);
     for (const base of [source, target]) {
       for (const dir of ["references/agents", "references"]) await fs.chmod(path.join(base, dir), 0o700).catch(() => undefined);
     }
@@ -367,13 +414,25 @@ it.skipIf(!gnuTar)("uploads gzip directory archives and preserves content, execu
   await fs.mkdir(bin);
   await fs.symlink(gnuTar!, path.join(bin, "tar"));
   await fs.writeFile(path.join(source, "bin", "tool.sh"), "#!/bin/sh\necho ok\n", { mode: 0o755 });
+  await fs.chmod(path.join(source, "bin", "tool.sh"), 0o755);
+  await fs.writeFile(path.join(source, "README.md"), "read-only content\n");
+  await fs.chmod(path.join(source, "README.md"), 0o444);
+  await fs.chmod(path.join(source, "bin"), 0o555);
+  expect((await fs.stat(path.join(source, "bin", "tool.sh"))).mode & 0o777).toBe(0o755);
+  expect((await fs.stat(path.join(source, "README.md"))).mode & 0o777).toBe(0o444);
+  expect((await fs.stat(path.join(source, "bin"))).mode & 0o777).toBe(0o555);
   await fs.symlink("bin/tool.sh", path.join(source, "tool-link"));
 
   try {
     let uploadedArchiveBytes: Buffer | undefined;
     const { sandbox } = createRealExecSandbox({
+      restrictiveUmask: true,
       commandEnv: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
       uploadOverride: async (uploads) => {
+        const listing = archiveListingBeforeUpload(uploads[0]!.source);
+        expect(listing.find((line) => line.endsWith("bin/"))).toMatch(/^dr-xr-xr-x\s+/);
+        expect(listing.find((line) => line.endsWith("README.md"))).toMatch(/^-r--r--r--\s+/);
+        expect(listing.find((line) => line.endsWith("bin/tool.sh"))).toMatch(/^-rwxr-xr-x\s+/);
         uploadedArchiveBytes = await fs.readFile(uploads[0]!.source);
         for (const upload of uploads) await fs.copyFile(upload.source, upload.destination);
         return true;
@@ -395,10 +454,104 @@ it.skipIf(!gnuTar)("uploads gzip directory archives and preserves content, execu
     expect(await fs.readFile(path.join(target, "bin", "tool.sh"), "utf8")).toBe("#!/bin/sh\necho ok\n");
     expect((await fs.stat(path.join(target, "bin", "tool.sh"))).mode & 0o777).toBe(0o755);
     expect(await fs.readlink(path.join(target, "tool-link"))).toBe("bin/tool.sh");
+    expect(await fs.readFile(path.join(target, "README.md"), "utf8")).toBe("read-only content\n");
+    expect((await fs.stat(path.join(target, "README.md"))).mode & 0o777).toBe(0o444);
+    expect((await fs.stat(path.join(target, "bin"))).mode & 0o777).toBe(0o555);
+    expect((await fs.stat(target)).mode & 0o777).toBe(0o700);
+    expect((await fs.readdir(remoteDir)).filter((name) => name.startsWith(".paperclip-upload"))).toEqual([]);
   } finally {
+    for (const base of [source, target]) await fs.chmod(path.join(base, "bin"), 0o700).catch(() => undefined);
     await fs.rm(root, { recursive: true, force: true });
   }
 }, 30_000);
+
+describe("native inbound archive permission admission", () => {
+  const cleanupDirs: string[] = [];
+  const realSpawn = vi.mocked(spawn).getMockImplementation()!;
+  afterEach(async () => {
+    vi.mocked(spawn).mockReset().mockImplementation(realSpawn);
+    await Promise.all(cleanupDirs.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
+  });
+
+  it.each([
+    { name: "setuid file", mode: 0o4755, directory: false },
+    { name: "setgid file", mode: 0o2755, directory: false },
+    { name: "sticky directory", mode: 0o1755, directory: true },
+  ])("rejects a generated archive containing a $name before upload or extraction", async ({ mode, directory }) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-daytona-special-mode-"));
+    cleanupDirs.push(root);
+    const source = path.join(root, "source");
+    const remoteDir = path.join(root, "remote");
+    const target = path.join(remoteDir, "target");
+    await fs.mkdir(source);
+    await fs.mkdir(target, { recursive: true });
+    await fs.writeFile(path.join(target, "sentinel.txt"), "retain existing target");
+    await fs.chmod(path.join(target, "sentinel.txt"), 0o640);
+    const member = path.join(source, "special");
+    if (directory) await fs.mkdir(member);
+    else await fs.writeFile(member, "unsupported mode\n");
+    await fs.chmod(member, mode);
+    expect((await fs.stat(member)).mode & 0o7777).toBe(mode);
+    const { sandbox, commands } = createRealExecSandbox({ restrictiveUmask: true });
+    const upload = vi.spyOn(sandbox.fs, "uploadFiles");
+    await expect(performSyncIn({ sandbox: sandbox as never, remoteDir, timeoutSeconds: 30,
+      operations: [{ operationId: "special-mode", files: [{ sourcePath: source, targetPath: target, kind: "directory" }] }],
+    })).rejects.toThrow("unsupported special permission bits");
+    expect(upload).not.toHaveBeenCalled();
+    expect(commands.some(({ command }) => command.includes("tar -xf"))).toBe(false);
+    expect(await fs.readFile(path.join(target, "sentinel.txt"), "utf8")).toBe("retain existing target");
+    expect((await fs.stat(path.join(target, "sentinel.txt"))).mode & 0o777).toBe(0o640);
+    expect(await fs.readdir(target)).toEqual(["sentinel.txt"]);
+    expect((await fs.readdir(remoteDir)).filter((name) => name.startsWith(".paperclip-upload"))).toEqual([]);
+  });
+
+  it.each(["GNU", "BSD"])("checks only the permission field and fails closed on malformed %s listings", async (dialect) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-daytona-listing-mode-"));
+    cleanupDirs.push(root);
+    const source = path.join(root, "source");
+    await fs.mkdir(source);
+    await fs.writeFile(path.join(source, "file.txt"), "ordinary file");
+    for (const [permissions, error] of [
+      ["-rwxr-xr-x", null], ["dr-xr-xr-x", null], ["-r--r--r--", null],
+      ["lrwxrwxrwx", null], ["hrw-r--r--", null],
+      ["-rwsr-xr-x", "special"], ["-rwSr--r--", "special"],
+      ["-rwxr-sr-x", "special"], ["-rw-r-Sr--", "special"],
+      ["drwxrwxrwt", "special"], ["drwxrwxrwT", "special"],
+      ["-rwxr-xr-z", "unparseable"], ["-rwxr-xr-x+", "unparseable"],
+      ["prw-------", "unparseable"], ["-777", "unparseable"],
+    ] as const) {
+      const suffix = "ordinary-sStT-name";
+      const line = dialect === "GNU"
+        ? `${permissions} 12345/12345 0 2026-10-05 12:00 ${suffix}`
+        : `${permissions} 0 12345 12345 0 Oct 5 12:00 ${suffix}`;
+      vi.mocked(spawn).mockImplementationOnce(() => {
+        const child = Object.assign(new EventEmitter(), {
+          stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(() => true),
+        });
+        queueMicrotask(() => {
+          child.stdout.end(`${line}\n`);
+          child.stderr.end();
+          child.emit("close", 0, null);
+        });
+        return child as unknown as ReturnType<typeof spawn>;
+      });
+      const uploadedDestinations: string[] = [];
+      const commands: RecordedCommand[] = [];
+      const sandbox = createMockSandbox({ uploadedDestinations, commands });
+      const result = performSyncIn({ sandbox: sandbox as never, remoteDir: "/workspace", timeoutSeconds: 30,
+        operations: [{ operationId: "listed-mode", files: [{ sourcePath: source, targetPath: "/workspace/target", kind: "directory" }] }],
+      });
+      if (error) {
+        await expect(result).rejects.toThrow(error === "special" ? "unsupported special permission bits" : "unparseable or unsupported entry mode");
+        expect(uploadedDestinations).toEqual([]);
+        expect(commands.some(({ command }) => command.includes("tar -xf"))).toBe(false);
+      } else {
+        await expect(result).resolves.toMatchObject({ operations: [{ filesTransferred: 1 }] });
+        expect(uploadedDestinations).toHaveLength(1);
+      }
+    }
+  });
+});
 
 it.skipIf(!gnuTar)("uploads and extracts a gzip empty directory archive", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-daytona-gzip-empty-"));

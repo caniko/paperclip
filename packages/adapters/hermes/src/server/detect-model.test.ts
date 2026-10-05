@@ -1,7 +1,25 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+
+const mockExecFileAsync = vi.hoisted(() => vi.fn<(
+  command: string,
+  args: string[],
+  options: { timeout: number },
+) => Promise<{ stdout: string; stderr: string }>>());
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  const { promisify } = await import("node:util");
+  return {
+    ...actual,
+    // Native execFile's custom promisifier resolves both output streams.
+    execFile: Object.assign(vi.fn(() => {
+      throw new Error("Unexpected callback-style execFile in Hermes config fixture");
+    }), { [promisify.custom]: mockExecFileAsync }),
+  };
+});
 
 import { parseModelFromConfig, resolveProvider } from "./detect-model.js";
 import { testEnvironment } from "./test.js";
@@ -23,7 +41,35 @@ const previousEnv = {
   ...Object.fromEntries(providerEnvKeys.map((key) => [key, process.env[key]])),
 };
 
+beforeEach(() => {
+  mockExecFileAsync.mockReset();
+  mockExecFileAsync.mockImplementation(async (command, args, options) => {
+    const cliProbe = options.timeout === 10_000;
+    const pythonProbe = command === "python3" && options.timeout === 5_000;
+    if (
+      !["python3", "hermes-fixture"].includes(command) ||
+      args.length !== 1 || args[0] !== "--version" ||
+      (!cliProbe && !pythonProbe)
+    ) {
+      throw new Error("Unexpected executable/version probe in Hermes config fixture");
+    }
+    return {
+      stdout: command === "python3" ? "Python 3.11.0\n" : "Hermes fixture 1.0.0\n",
+      stderr: "",
+    };
+  });
+});
+
+function expectVersionProbes(command = "python3") {
+  expect(mockExecFileAsync.mock.calls).toEqual([
+    [command, ["--version"], { timeout: 10_000 }],
+    [command, ["--version"], { timeout: 10_000 }],
+    ["python3", ["--version"], { timeout: 5_000 }],
+  ]);
+}
+
 afterEach(async () => {
+  mockExecFileAsync.mockReset();
   for (const [key, value] of Object.entries(previousEnv)) {
     if (value === undefined) {
       delete process.env[key];
@@ -135,6 +181,7 @@ test("testEnvironment does not warn about missing API keys when Hermes config pr
 
     expect(codes.includes("hermes_no_api_keys")).toBe(false);
     expect(result.status).toBe("pass");
+    expectVersionProbes();
   });
 });
 
@@ -158,6 +205,7 @@ test("testEnvironment describes provider-omitted runtime config without inventin
     expect(apiKeyCheck).toBeTruthy();
     expect(apiKeyCheck?.message).toMatch(/without an explicit provider/i);
     expect(apiKeyCheck?.message).not.toMatch(/provider "auto"/i);
+    expectVersionProbes();
   });
 });
 
@@ -182,5 +230,46 @@ test("testEnvironment does not warn about missing API keys when Hermes config pr
 
     expect(codes.includes("hermes_no_api_keys")).toBe(false);
     expect(result.status).toBe("pass");
+    expectVersionProbes();
+  });
+});
+
+test("testEnvironment rejects a missing Hermes CLI before config checks", async () => {
+  mockExecFileAsync.mockRejectedValueOnce(Object.assign(new Error("Fixture CLI missing"), {
+    code: "ENOENT",
+  }));
+  await withHermesHomeConfig([], async () => {
+    const result = await testEnvironment({
+      companyId: "company-test",
+      adapterType: "hermes_local",
+      config: { hermesCommand: "missing-hermes-fixture" },
+    });
+    expect(result.status).toBe("fail");
+    expect(result.checks).toEqual([
+      expect.objectContaining({ code: "hermes_cli_not_found", level: "error" }),
+    ]);
+    expect(mockExecFileAsync.mock.calls).toEqual([
+      ["missing-hermes-fixture", ["--version"], { timeout: 10_000 }],
+    ]);
+  });
+});
+
+test("testEnvironment rejects Python below 3.10 after admitting the Hermes CLI", async () => {
+  mockExecFileAsync
+    .mockResolvedValueOnce({ stdout: "Hermes fixture 1.0.0\n", stderr: "" })
+    .mockResolvedValueOnce({ stdout: "Hermes fixture 1.0.0\n", stderr: "" })
+    .mockResolvedValueOnce({ stdout: "Python 3.9.0\n", stderr: "" });
+  await withHermesHomeConfig([], async () => {
+    const result = await testEnvironment({
+      companyId: "company-test",
+      adapterType: "hermes_local",
+      config: { hermesCommand: "hermes-fixture" },
+    });
+    expect(result.status).toBe("fail");
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      code: "hermes_python_old",
+      level: "error",
+    }));
+    expectVersionProbes("hermes-fixture");
   });
 });

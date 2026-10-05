@@ -1,6 +1,9 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockAccessService = vi.hoisted(() => ({
   isInstanceAdmin: vi.fn(),
@@ -90,6 +93,43 @@ async function createApp(actor: any, db: any = {} as any) {
   return app;
 }
 
+function createActiveInviteDb() {
+  const invite = {
+    id: "invite-1",
+    companyId: "company-1",
+    inviteType: "company_join",
+    allowedJoinTypes: "agent",
+    tokenHash: "hash",
+    defaultsPayload: null,
+    expiresAt: new Date(Date.now() + 60_000),
+    invitedByUserId: null,
+    revokedAt: null,
+    acceptedAt: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+  return {
+    select: vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn().mockResolvedValue([invite]),
+      })),
+    })),
+  };
+}
+
+const tempDirs: string[] = [];
+
+function createOperatorPaperclipSkill() {
+  const claudeHome = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-cli-auth-skills-"));
+  tempDirs.push(claudeHome);
+  const skillDir = path.join(claudeHome, "skills", "paperclip");
+  fs.mkdirSync(skillDir, { recursive: true, mode: 0o700 });
+  const markdown = "# Operator skill sentinel\n";
+  fs.writeFileSync(path.join(skillDir, "SKILL.md"), markdown, { mode: 0o600 });
+  vi.stubEnv("CLAUDE_HOME", claudeHome);
+  return markdown;
+}
+
 describe.sequential("cli auth routes", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -99,6 +139,14 @@ describe.sequential("cli auth routes", () => {
     vi.doUnmock("../middleware/index.js");
     registerModuleMocks();
     vi.resetAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    for (const dir of tempDirs) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    tempDirs.length = 0;
   });
 
   it.sequential("creates a CLI auth challenge with approval metadata", async () => {
@@ -144,27 +192,7 @@ describe.sequential("cli auth routes", () => {
   });
 
   it.sequential("serves the invite-scoped paperclip skill anonymously for active invites", async () => {
-    const invite = {
-      id: "invite-1",
-      companyId: "company-1",
-      inviteType: "company_join",
-      allowedJoinTypes: "agent",
-      tokenHash: "hash",
-      defaultsPayload: null,
-      expiresAt: new Date(Date.now() + 60_000),
-      invitedByUserId: null,
-      revokedAt: null,
-      acceptedAt: null,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-    const db = {
-      select: vi.fn(() => ({
-        from: vi.fn(() => ({
-          where: vi.fn().mockResolvedValue([invite]),
-        })),
-      })),
-    };
+    const db = createActiveInviteDb();
 
     const app = await createApp({ type: "none", source: "none" }, db);
     const res = await request(app).get("/api/invites/token-123/skills/paperclip");
@@ -172,6 +200,32 @@ describe.sequential("cli auth routes", () => {
     expect(res.status).toBe(200);
     expect(res.headers["content-type"]).toContain("text/markdown");
     expect(res.text).toContain("# Paperclip Skill");
+  });
+
+  it.sequential("serves bundled invite skill content despite a same-name operator skill", async () => {
+    const operatorMarkdown = createOperatorPaperclipSkill();
+    const bundledMarkdown = fs.readFileSync(
+      new URL("../../../skills/paperclip/SKILL.md", import.meta.url),
+      "utf8",
+    );
+    const app = await createApp({ type: "none", source: "none" }, createActiveInviteDb());
+    const res = await request(app).get("/api/invites/token-123/skills/paperclip");
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/markdown");
+    expect(res.text).toContain("# Paperclip Skill");
+    expect(res.text).toBe(bundledMarkdown);
+    expect(res.text).not.toContain(operatorMarkdown.trim());
+  });
+
+  it.sequential("preserves same-name operator skill content for authenticated generic reads", async () => {
+    const operatorMarkdown = createOperatorPaperclipSkill();
+    const app = await createApp({ type: "board", userId: "user-1", source: "session" });
+    const res = await request(app).get("/api/skills/paperclip");
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/markdown");
+    expect(res.text).toBe(operatorMarkdown);
   });
 
   it.sequential("marks challenge status as requiring sign-in for anonymous viewers", async () => {

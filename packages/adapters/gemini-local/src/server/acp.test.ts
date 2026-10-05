@@ -570,6 +570,7 @@ describe("gemini_local ACP lane", () => {
 
   it("test_gemini_acp_seam_registers_workspace_sync_back", async () => {
     const root = await makeTempRoot("paperclip-gemini-acp-syncback-");
+    process.env.HOME = path.join(root, "home");
     const localCwd = path.join(root, "worktree");
     const remoteCwd = path.join(root, "remote-workspace");
     await fs.mkdir(localCwd, { recursive: true });
@@ -639,6 +640,7 @@ describe("gemini_local ACP lane", () => {
     // call through it, and a leftover call could hide a real wiring bug.
     mockCreateWorkspaceRestoreTeardown.mockClear();
     const root = await makeTempRoot("paperclip-gemini-acp-teardown-wiring-");
+    process.env.HOME = path.join(root, "home");
     const localCwd = path.join(root, "worktree");
     const remoteCwd = path.join(root, "remote-workspace");
     await fs.mkdir(localCwd, { recursive: true });

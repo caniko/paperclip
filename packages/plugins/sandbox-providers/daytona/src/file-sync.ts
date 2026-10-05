@@ -154,8 +154,8 @@ async function withHostTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
  * Build a host-side gzip-compressed tarball of a directory, mirroring the runtime's own
  * `createTarballFromDirectory`: archive top-level entries by name (no "." self
  * entry), suppress AppleDouble/xattr sidecars, honor `exclude`, and reproduce the
- * `followSymlinks` → `-h` mapping so the native path is observationally identical
- * to the base64 fallback's tar.
+ * `followSymlinks` → `-h` mapping. Entry selection matches the base64 fallback;
+ * native inbound extraction separately preserves ordinary archive permissions.
  */
 async function createHostTarball(input: {
   localDir: string;
@@ -297,8 +297,30 @@ const TAR_LISTING_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const TAR_LISTING_MAX_ENTRIES = 250_000;
 const TAR_LISTING_TIMEOUT_MS = 120_000;
 
+function assertInboundTarListingLineSupported(line: string): void {
+  const parsed = parseTarVerboseListingLine(line);
+  const permissions = line.match(/^\S+/)?.[0];
+  // Check the host tar's effective entry mode, not a source stat or the member
+  // name. Only files, directories, symlinks and hardlinks are supported here.
+  if (!parsed || !permissions || !/^[-dlh][r-][w-][xsS-][r-][w-][xsS-][r-][w-][xtT-]$/.test(permissions)) {
+    throw new Error(`Daytona syncIn refusing tarball with an unparseable or unsupported entry mode: ${line}`);
+  }
+  if (/[sStT]/.test(permissions)) {
+    throw new Error(`Daytona syncIn refusing tarball with unsupported special permission bits: ${line}`);
+  }
+}
+
 export async function assertTarballEntriesConfined(
   archivePath: string,
+  timeoutMs = TAR_LISTING_TIMEOUT_MS,
+): Promise<void> {
+  await validateTarballListing(archivePath, assertTarListingLineConfined, "syncOut", timeoutMs);
+}
+
+async function validateTarballListing(
+  archivePath: string,
+  assertEntry: (line: string) => void,
+  label: "syncIn" | "syncOut",
   timeoutMs = TAR_LISTING_TIMEOUT_MS,
 ): Promise<void> {
   // A valid large workspace can exceed execFile's buffer. Stream within both
@@ -306,7 +328,7 @@ export async function assertTarballEntriesConfined(
   // every entry before extraction. Keep bytes until a full line to preserve
   // UTF-8 characters split across pipe chunks.
   const child = spawn("tar", ["-tvf", archivePath], {
-    env: { ...process.env, COPYFILE_DISABLE: "1" },
+    env: { ...process.env, COPYFILE_DISABLE: "1", ...(label === "syncIn" ? { LC_ALL: "C", LANG: "C" } : {}) },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let spawnError: Error | undefined;
@@ -318,9 +340,9 @@ export async function assertTarballEntriesConfined(
   const validateLine = (line: Buffer) => {
     // Count empty lines too, so whitespace cannot evade the parsing-work quota.
     if (++entries > TAR_LISTING_MAX_ENTRIES) {
-      throw new Error("Daytona syncOut tar listing entry limit exceeded (250000)");
+      throw new Error(`Daytona ${label} tar listing entry limit exceeded (250000)`);
     }
-    assertTarListingLineConfined(line.toString("utf8"));
+    assertEntry(line.toString("utf8"));
   };
   const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
     child.once("error", (error) => { spawnError = error; });
@@ -331,11 +353,11 @@ export async function assertTarballEntriesConfined(
     child.kill("SIGKILL");
   };
   const timer = setTimeout(() => {
-    stop(new Error("Daytona syncOut tar listing validation timed out"));
+    stop(new Error(`Daytona ${label} tar listing validation timed out`));
   }, Math.max(1, Math.min(timeoutMs, TAR_LISTING_TIMEOUT_MS)));
   child.stderr.on("data", (chunk: Buffer) => {
     if (stderr.length + chunk.length > TAR_LISTING_MAX_STDERR_BYTES) {
-      stop(new Error("Daytona syncOut tar listing diagnostics exceed the byte limit"));
+      stop(new Error(`Daytona ${label} tar listing diagnostics exceed the byte limit`));
       return;
     }
     stderr = Buffer.concat([stderr, chunk]);
@@ -346,14 +368,14 @@ export async function assertTarballEntriesConfined(
       const bytes = chunk as Buffer;
       totalBytes += bytes.length;
       if (totalBytes > TAR_LISTING_MAX_TOTAL_BYTES) {
-        throw new Error("Daytona syncOut tar total listing byte limit exceeded (64 MiB)");
+        throw new Error(`Daytona ${label} tar total listing byte limit exceeded (64 MiB)`);
       }
       let start = 0;
       while (start < bytes.length) {
         const newline = bytes.indexOf(10, start);
         const end = newline < 0 ? bytes.length : newline;
         if (pending.length + end - start > TAR_LISTING_MAX_LINE_BYTES) {
-          throw new Error("Daytona syncOut refusing tarball with an entry listing exceeding the byte limit");
+          throw new Error(`Daytona ${label} refusing tarball with an entry listing exceeding the byte limit`);
         }
         pending = Buffer.concat([pending, bytes.subarray(start, end)]);
         if (newline < 0) break;
@@ -367,7 +389,7 @@ export async function assertTarballEntriesConfined(
     if (failure) throw failure;
     if (spawnError) throw spawnError;
     if (result.code !== 0) {
-      throw new Error(`Daytona syncOut tar listing failed (${result.signal ?? result.code}): ${stderr.toString("utf8").trim()}`);
+      throw new Error(`Daytona ${label} tar listing failed (${result.signal ?? result.code}): ${stderr.toString("utf8").trim()}`);
     }
   } catch (error) {
     stop(error instanceof Error ? error : new Error(String(error)));
@@ -950,7 +972,13 @@ async function syncInDirectoryMapping(input: {
         followSymlinks: mapping.followSymlinks,
       }),
     });
-    const bytesTransferred = (await fs.stat(archivePath)).size;
+    // The completed archive lives in our private temp directory. Admit its
+    // effective member modes before upload, then recheck this same path's file
+    // identity and content metadata at the upload boundary.
+    const archiveIdentity = await fs.lstat(archivePath);
+    if (!archiveIdentity.isFile()) throw new Error("Daytona syncIn archive is not a regular file");
+    await validateTarballListing(archivePath, assertInboundTarListingLineSupported, "syncIn", timeoutSeconds * 1000);
+    const bytesTransferred = archiveIdentity.size;
     // The tar bytes ride the native bulk channel (string source ⇒ streamed);
     // only the extract/cleanup control commands use exec.
     const remoteTar = path.posix.join(remoteDir, scratchName(".tar.gz"));
@@ -987,8 +1015,14 @@ async function syncInDirectoryMapping(input: {
           [SPAN_ATTR.transferGuardCount]: guardRoundTrips,
           [SPAN_ATTR.transferDirection]: "inbound",
         },
-        run: () =>
-          sandbox.fs.uploadFiles([{ source: archivePath, destination: remoteTar }], timeoutSeconds),
+        run: async () => {
+          const current = await fs.lstat(archivePath);
+          if (!current.isFile() || current.dev !== archiveIdentity.dev || current.ino !== archiveIdentity.ino ||
+            current.size !== archiveIdentity.size || current.mtimeMs !== archiveIdentity.mtimeMs || current.ctimeMs !== archiveIdentity.ctimeMs) {
+            throw new Error("Daytona syncIn archive changed after permission admission");
+          }
+          return sandbox.fs.uploadFiles([{ source: archivePath, destination: remoteTar }], timeoutSeconds);
+        },
       });
       // Extract the uploaded tarball onto the already-created target directory,
       // then remove the scratch tarball.
@@ -1006,7 +1040,7 @@ async function syncInDirectoryMapping(input: {
           'cleanup_compare() { if [ -d "$compare_dir" ]; then find "$compare_dir" -type d -exec chmod u+w {} +; rm -rf "$compare_dir"; fi; rm -f "$compare_tar" "$compare_list"; };',
           "trap cleanup_compare EXIT;",
           'mkdir -m 700 "$compare_dir" || exit 43;',
-          `tar -xf ${shellQuote(remoteTar)} --no-same-owner --delay-directory-restore -C "$compare_dir" || exit 43;`,
+          `tar -xf ${shellQuote(remoteTar)} --same-permissions --no-same-owner --delay-directory-restore -C "$compare_dir" || exit 43;`,
           '(cd "$compare_dir" && find . -mindepth 1 -maxdepth 1 -print0) > "$compare_list" || exit 43;',
           'tar -cf "$compare_tar" --format=pax -C "$compare_dir" --null -T "$compare_list" || exit 43;',
           `if tar -df "$compare_tar" -C ${shellQuote(mapping.targetPath)} >/dev/null 2>&1; then rm -f ${shellQuote(remoteTar)}; exit 0; fi;`,
@@ -1016,7 +1050,7 @@ async function syncInDirectoryMapping(input: {
         // BSD archives may revisit a directory after its parent's files. Keep
         // GNU tar from restoring a read-only skill directory's mode before all
         // of its children are extracted; final permissions remain unchanged.
-        `tar -xf ${shellQuote(remoteTar)} --delay-directory-restore -C ${shellQuote(mapping.targetPath)} || { echo "extract failed"; exit 43; };`,
+        `tar -xf ${shellQuote(remoteTar)} --same-permissions --no-same-owner --delay-directory-restore -C ${shellQuote(mapping.targetPath)} || { echo "extract failed"; exit 43; };`,
         `rm -f ${shellQuote(remoteTar)};`,
       ].join("\n");
       // `extractTarball` span: one round trip — re-check the path, `tar -xf`, and

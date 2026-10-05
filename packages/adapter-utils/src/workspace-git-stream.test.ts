@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, it } from "vitest";
 import { runWorkspaceGitProcess } from "./workspace-git-stream.js";
+import { configureFixtureGitIdentity } from "../test/helpers/git-fixture.mjs";
 
 const exec = promisify(execFile);
 const roots: string[] = [];
@@ -20,8 +21,7 @@ async function repository() {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-git-scan-locks-"));
   roots.push(cwd);
   await git(cwd, ["init"]);
-  await git(cwd, ["config", "user.name", "Test"]);
-  await git(cwd, ["config", "user.email", "test@example.com"]);
+  configureFixtureGitIdentity(cwd);
   await fs.writeFile(path.join(cwd, "tracked.txt"), "tracked content\n");
   await git(cwd, ["add", "tracked.txt"]);
   await git(cwd, ["commit", "-m", "Initial fixture"]);

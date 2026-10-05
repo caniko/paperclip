@@ -1692,6 +1692,11 @@ The board UI generates agent onboarding prompts from the add-agent modal (`+` in
 - `GET /api/invites/:token/onboarding.txt` returns a plain-text onboarding doc intended for both human operators and agents (llm.txt-style handoff), including optional inviter message and suggested network host candidates.
 - `GET /api/skills/index` lists available skill documents.
 - `GET /api/skills/paperclip` returns the Paperclip heartbeat skill markdown.
+- `GET /api/invites/:token/skills/paperclip` serves the app-bundled heartbeat skill for a valid, unexpired, non-revoked invite without requiring a session.
+
+Invite skill delivery reads only the application-relative published/development
+resources. Same-name operator skills and the process working directory cannot
+replace it. Authenticated generic skill reads retain operator override priority.
 
 Hermes gateway agents use this same generic agent invite flow with
 `adapterType=hermes_gateway` and `agentDefaultsPayload.apiBaseUrl` /
