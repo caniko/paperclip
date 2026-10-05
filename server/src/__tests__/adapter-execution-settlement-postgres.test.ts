@@ -3,7 +3,9 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { activityLog, agents, companies, createDb, environmentLeases, heartbeatRuns, issues, secretAccessEvents } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
-import { settleAdapterExecution } from "../services/adapter-execution-ownership.js";
+import { recordAdapterExecutionProgress, settleAdapterExecution } from "../services/adapter-execution-ownership.js";
+import { legacyControllerBootId } from "../services/legacy-controller-lease.js";
+import { appendHeartbeatRunEvent } from "../services/heartbeat-run-events.js";
 import { terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
 
 describe("legacy settlement PostgreSQL locking", () => {
@@ -120,5 +122,43 @@ describe("legacy settlement PostgreSQL locking", () => {
     expect(persisted.executionStatusDeliveryId).toBe(winners[0]!.executionStatusDeliveryId);
     expect(persisted.executionStatusDeliveryId).toBeTruthy();
     await expectReleased(issueId);
+  });
+
+  it("persists successor observations without changing admission material and rejects foreign ownership", async () => {
+    const { run, issueId } = await seed();
+    await db.update(heartbeatRuns).set({ controllerBootId: legacyControllerBootId,
+      controllerLeaseExpiresAt: new Date(Date.now() + 60_000) }).where(eq(heartbeatRuns.id, run.id));
+    const leaseId = randomUUID();
+    const material = { provider: "local_encrypted", externalRef: "immutable-admission-material" };
+    await db.insert(environmentLeases).values({ id: leaseId, companyId: run.companyId, issueId,
+      heartbeatRunId: run.id, status: "active", metadata: { unrelated: "retained",
+        adapterExecution: { state: "pending", version: 1, material } } });
+    const progress = { version: 1, rootRunId: "hermes-parent", runId: "hermes-leaf",
+      lineage: ["hermes-parent", "hermes-leaf"], cursors: { "hermes-leaf": 4 } };
+    await recordAdapterExecutionProgress(db, { companyId: run.companyId, runId: run.id, leaseId, progress });
+    const [lease] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, leaseId));
+    expect(lease.metadata).toEqual({ unrelated: "retained", adapterExecution: { state: "pending", version: 1, material, progress } });
+    await expect(recordAdapterExecutionProgress(writer, { companyId: randomUUID(), runId: run.id, leaseId, progress }))
+      .rejects.toThrow("controller lease");
+    await settleAdapterExecution(db, { companyId: run.companyId, runId: run.id, leaseId });
+    await expect(recordAdapterExecutionProgress(db, { companyId: run.companyId, runId: run.id, leaseId, progress }))
+      .rejects.toThrow("pending admission");
+  });
+
+  it("deduplicates durable Hermes receipts across writers and rejects changed replay payloads", async () => {
+    const { run } = await seed();
+    const input = { companyId: run.companyId, runId: run.id, agentId: run.agentId,
+      eventType: "hermes.message.delta", message: "once", nativeSource: {
+        sourceInstanceId: "hermes_gateway:leaf", sourceEventId: "hermes_gateway:leaf:1",
+        sourceSeq: 1, protocolSchemaVersion: 1, canonicalPayload: { run_id: "leaf", delta: "once" },
+      } };
+    const first = await appendHeartbeatRunEvent(db, input);
+    const replay = await appendHeartbeatRunEvent(writer, input);
+    expect(first.disposition).toBe("committed");
+    expect(replay.disposition).toBe("duplicate");
+    expect(replay.row.id).toBe(first.row.id);
+    await expect(appendHeartbeatRunEvent(writer, { ...input,
+      nativeSource: { ...input.nativeSource, canonicalPayload: { run_id: "leaf", delta: "changed" } } }))
+      .rejects.toThrow("native_event_replay_conflict");
   });
 });

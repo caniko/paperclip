@@ -19,7 +19,8 @@ it.each(["normal", "lost-admission", "managed-mcp-lost-admission", "failed-loggi
     if (req.url === "/v1/capabilities") {
       res.end(JSON.stringify({ features: { runs_execution_context: {
         version: 1, mode: "precondition", backends: ["local"], lifetimes: ["wait_for_jobs"], stop_admission: true,
-      }, runs_managed_mcp: { version: 1, enabled: true, mode: "run_isolated", host_id: "worker" } } }));
+      }, runs_managed_mcp: { version: 1, enabled: true, mode: "run_isolated", host_id: "worker" },
+        runs_recovery: { version: 1, durable_lineage_stop: true, ordinary_stop_admission: true } } }));
     } else if (req.url === "/v1/runs" || req.url === "/v1/runs/stop") {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -27,7 +28,9 @@ it.each(["normal", "lost-admission", "managed-mcp-lost-admission", "failed-loggi
       if (managed) expect(JSON.parse(body)).toMatchObject({ runtime_mcp: { run_id: "paperclip-owned", servers: [{ token: "run-reader-secret" }] } });
       if (req.url === "/v1/runs/stop") {
         stops++;
-        res.end(JSON.stringify({ run_id: "owned", status: allowSettlement ? "cancelled" : "stopping" }));
+        res.end(JSON.stringify({ run_id: "owned", status: allowSettlement ? "cancelled" : "stopping",
+          stop_requested: true, lineage_settled: allowSettlement,
+          lineage: [{ run_id: "owned", status: allowSettlement ? "cancelled" : "stopping" }] }));
         return;
       }
       admitted++;
@@ -38,7 +41,9 @@ it.each(["normal", "lost-admission", "managed-mcp-lost-admission", "failed-loggi
     } else if (req.url === "/v1/runs/owned/stop") {
       stops++;
       // Acknowledging the stop request is not evidence of target settlement.
-      res.end(JSON.stringify({ status: "stopping" }));
+      res.end(JSON.stringify({ run_id: "owned", status: allowSettlement ? "cancelled" : "stopping",
+        stop_requested: true, lineage_settled: allowSettlement,
+        lineage: [{ run_id: "owned", status: allowSettlement ? "cancelled" : "stopping" }] }));
     } else if (req.url === "/v1/runs/owned/events") {
       if (allowSettlement) {
         res.setHeader("Content-Type", "text/event-stream");
@@ -139,7 +144,7 @@ it.each([
     if (req.url === "/v1/capabilities") {
       res.end(JSON.stringify({ features: { runs_execution_context: {
         version: 1, mode: "precondition", backends: ["local"], lifetimes: ["wait_for_jobs"], stop_admission: true,
-      } } }));
+      }, runs_recovery: { version: 1, durable_lineage_stop: true, ordinary_stop_admission: true } } }));
     } else if (req.url === "/v1/runs") {
       for await (const _chunk of req) { /* consume the admission body */ }
       res.writeHead(202).end(JSON.stringify({ run_id: "owned", status: "started" }));

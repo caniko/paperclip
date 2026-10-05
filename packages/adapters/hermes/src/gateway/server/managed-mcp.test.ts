@@ -21,6 +21,7 @@ function gateway(capability: unknown = { version: 1, enabled: true, mode: "run_i
   const mock = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
     if (String(url).endsWith("/v1/capabilities")) return Response.json({ features: { runs_managed_mcp: capability,
       runs_execution_context: { version: 1, mode: "precondition", backends: ["local"], lifetimes: ["wait_for_jobs"], stop_admission: true },
+      runs_recovery: { version: 1, durable_lineage_stop: true, ordinary_stop_admission: true },
     } });
     if (String(url).endsWith("/v1/runs")) {
       bodies.push(JSON.parse(String(init?.body)));

@@ -24,7 +24,7 @@ import { AGENT_CHAT_DIRECTIVE, conversationReplay, isConversation, isConversatio
 import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
 import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
-import { adapterExecutionOwnershipNotHeldCondition, lockRunForAdapterSettlement, prepareAdapterExecution, reconcileAdapterExecution, settleAdapterExecution } from "./adapter-execution-ownership.js";
+import { adapterExecutionOwnershipNotHeldCondition, lockRunForAdapterSettlement, prepareAdapterExecution, reconcileAdapterExecution, recordAdapterExecutionProgress, settleAdapterExecution } from "./adapter-execution-ownership.js";
 import { assertOwnedWorkspacePreparation, filesystemOwnershipPolicy, filesystemOwnershipStateColumn, readFilesystemOwnershipState, prepareRunWorkspaceOwnership } from "./workspace-ownership.js";
 import { bindRuntimeMcpServersToRun } from "./runtime-mcp-admission.js";
 import type { WorkspaceOwnershipIntent } from "@paperclipai/adapter-utils";
@@ -13882,6 +13882,7 @@ export function heartbeatService(
       message?: string;
       payload?: Record<string, unknown>;
       retryExhaustion?: AppendHeartbeatRunEventInput["retryExhaustion"];
+      nativeSource?: AppendHeartbeatRunEventInput["nativeSource"];
     },
   ) {
     const eventAt = new Date();
@@ -13921,6 +13922,7 @@ export function heartbeatService(
       message: sanitizedMessage,
       payload: sanitizedPayload,
       retryExhaustion: event.retryExhaustion,
+      nativeSource: event.nativeSource,
     });
     if (persistedEvent.disposition === "duplicate") return;
     const seq = persistedEvent.row.seq;
@@ -23470,6 +23472,12 @@ export function heartbeatService(
             color: event.color,
             message: event.message,
             payload: event.payload,
+            nativeSource: event.providerSource ? {
+              sourceInstanceId: `${agent.adapterType}:${event.providerSource.runId}`,
+              sourceEventId: `${agent.adapterType}:${event.providerSource.runId}:${event.providerSource.sequence}`,
+              sourceSeq: event.providerSource.sequence, protocolSchemaVersion: 1,
+              canonicalPayload: event.providerSource.canonicalPayload,
+            } : undefined,
           });
         };
 
@@ -24909,6 +24917,10 @@ export function heartbeatService(
                     onExecutionCheckpoint: async (checkpoint) => {
                       await prepareAdapterExecution(db, { companyId: run.companyId, runId: run.id,
                         leaseId: activeEnvironmentLease.lease.id, adapterType: agent.adapterType, checkpoint });
+                    },
+                    onExecutionProgress: async (progress) => {
+                      await recordAdapterExecutionProgress(db, { companyId: run.companyId, runId: run.id,
+                        leaseId: activeEnvironmentLease.lease.id, progress });
                     },
                     onProviderStopped: async () => {
                       await settleAdapterExecution(db, { companyId: run.companyId, runId: run.id,
