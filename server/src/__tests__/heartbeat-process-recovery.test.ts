@@ -2836,32 +2836,87 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
   it("wires ordinary Hermes admission, successor progress and redacted deduplicated receipts through the heartbeat", async () => {
     const { agentId, runId, issueId } = await seedQueuedIssueRunFixture();
-    await db.update(agents).set({ adapterType: "hermes_gateway" }).where(eq(agents.id, agentId));
+    await db
+      .update(agents)
+      .set({ adapterType: "hermes_gateway" })
+      .where(eq(agents.id, agentId));
     mockAdapterExecute.mockImplementationOnce(async (input: unknown) => {
-      const ctx = input as import("@paperclipai/adapter-utils").AdapterExecutionContext;
-      await ctx.onExecutionCheckpoint!({ version: 1, baseUrl: "http://127.0.0.1:1",
-        headers: { "Idempotency-Key": runId, Authorization: "Bearer private-admission-secret" }, body: "{}" });
-      const stored = () => db.select().from(environmentLeases).where(eq(environmentLeases.heartbeatRunId, runId)).then(rows => rows[0]);
+      const ctx =
+        input as import("@paperclipai/adapter-utils").AdapterExecutionContext;
+      await ctx.onExecutionCheckpoint!({
+        version: 1,
+        baseUrl: "http://127.0.0.1:1",
+        headers: {
+          "Idempotency-Key": runId,
+          Authorization: "Bearer private-admission-secret",
+        },
+        body: "{}",
+      });
+      const stored = () =>
+        db
+          .select()
+          .from(environmentLeases)
+          .where(eq(environmentLeases.heartbeatRunId, runId))
+          .then((rows) => rows[0]);
       const sealedAdmission = (await stored()).metadata?.adapterExecution;
       expect(sealedAdmission).toHaveProperty("material");
-      const progress = { version: 1, rootRunId: "parent", runId: "leaf", lineage: ["parent", "leaf"], cursors: { leaf: 1 } };
+      const progress = {
+        version: 1,
+        rootRunId: "parent",
+        runId: "leaf",
+        lineage: ["parent", "leaf"],
+        cursors: { leaf: 1 },
+      };
       await ctx.onExecutionProgress!(progress);
-      expect((await stored()).metadata?.adapterExecution).toEqual({ ...sealedAdmission as object, progress });
-      const event = { eventType: "hermes.message.delta", stream: "stdout" as const,
-        message: "Bearer private-event-secret", payload: { api_key: "private-event-secret", delta: "visible progress" },
-        providerSource: { runId: "leaf", sequence: 1, canonicalPayload: { delta: "visible progress" } } };
+      expect((await stored()).metadata?.adapterExecution).toEqual({
+        ...(sealedAdmission as object),
+        progress,
+      });
+      const event = {
+        eventType: "hermes.message.delta",
+        stream: "stdout" as const,
+        message: "Bearer private-event-secret",
+        payload: { api_key: "private-event-secret", delta: "visible progress" },
+        providerSource: {
+          runId: "leaf",
+          sequence: 1,
+          canonicalPayload: { delta: "visible progress" },
+        },
+      };
       await ctx.onEvent!(event);
       await ctx.onEvent!(event);
-      const receipts = await db.select().from(heartbeatRunEvents).where(and(
-        eq(heartbeatRunEvents.runId, runId), eq(heartbeatRunEvents.sourceInstanceId, "hermes_gateway:leaf"),
-      ));
+      const receipts = await db
+        .select()
+        .from(heartbeatRunEvents)
+        .where(
+          and(
+            eq(heartbeatRunEvents.runId, runId),
+            eq(heartbeatRunEvents.sourceInstanceId, "hermes_gateway:leaf"),
+          ),
+        );
       expect(receipts).toHaveLength(1);
-      expect(receipts[0]).toMatchObject({ sourceEventId: "hermes_gateway:leaf:1", sourceSeq: 1 });
+      expect(receipts[0]).toMatchObject({
+        sourceEventId: "hermes_gateway:leaf:1",
+        sourceSeq: 1,
+      });
       expect(JSON.stringify(receipts)).not.toContain("private-event-secret");
       await ctx.onProviderStopped!();
-      expect((await stored()).metadata?.adapterExecution).toMatchObject({ state: "settled" });
-      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
-      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Complete", provider: "test", model: "test" };
+      expect((await stored()).metadata?.adapterExecution).toMatchObject({
+        state: "settled",
+      });
+      await db
+        .update(issues)
+        .set({ status: "done" })
+        .where(eq(issues.id, issueId));
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        errorMessage: null,
+        summary: "Complete",
+        provider: "test",
+        model: "test",
+      };
     });
     const heartbeat = heartbeatService(db);
     await heartbeat.resumeQueuedRuns();
