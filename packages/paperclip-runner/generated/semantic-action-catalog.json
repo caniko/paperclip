@@ -62,6 +62,54 @@
   {
     "allowedModes": [
       "standard",
+      "skill_test"
+    ],
+    "description": "Replace an existing company skill's complete SKILL.md using the current version as a guard. Reuse idempotencyKey on lost-response retries; read again after a version conflict.",
+    "effect": "write",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "expectedVersionId": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "idempotencyKey": {
+          "maxLength": 240,
+          "minLength": 1,
+          "type": "string"
+        },
+        "markdown": {
+          "maxLength": 200000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "skillId": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "skillId",
+        "markdown",
+        "expectedVersionId",
+        "idempotencyKey"
+      ],
+      "type": "object"
+    },
+    "operationId": "update_skill",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "placement": "optional",
+    "requiredClaims": [],
+    "schema": "paperclip.semantic-action.v1",
+    "title": "Update skill",
+    "version": 1
+  },
+  {
+    "allowedModes": [
+      "standard",
       "ask",
       "planning",
       "skill_test"

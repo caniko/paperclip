@@ -7,6 +7,7 @@ import type {
   PaperclipSemanticActionMode,
 } from "./semantic-action-types.js";
 import { createSkillAction } from "../protocol-actions/create-skill.js";
+import { updateSkillAction } from "../protocol-actions/update-skill.js";
 import { searchApiAction } from "../protocol-actions/search-api.js";
 import { callApiAction } from "../protocol-actions/call-api.js";
 import { projectIconSchema, projectRepositoryUrlSchema } from "../protocol-actions/create-project.js";
@@ -112,6 +113,7 @@ function descriptor(input: DescriptorInput): PaperclipSemanticActionDescriptor {
 
 const descriptors: readonly PaperclipSemanticActionDescriptor[] = [
   descriptor({ ...createSkillAction.live.descriptor, placement: "optional", effect: "write" }),
+  descriptor({ ...updateSkillAction.live.descriptor, placement: "optional", effect: "write" }),
   ...[searchApiAction, callApiAction].map(action => descriptor({
     operationId: action.id,
     title: action.live.descriptor.title,

@@ -1316,6 +1316,13 @@ function invalidateActivityQueries(
     queryClient.invalidateQueries({
       queryKey: queryKeys.issues.listUnreadTouchedByMe(companyId),
     });
+    if (
+      action?.startsWith("issue.attachment_") ||
+      action?.startsWith("issue.work_product_") ||
+      (action && ISSUE_DOCUMENT_ACTIVITY_ACTIONS.has(action))
+    ) {
+      queryClient.invalidateQueries({ queryKey: ["artifacts", companyId] });
+    }
     if (entityId) {
       const selfCommentActivity =
         (action === "issue.comment_added" ||

@@ -335,29 +335,9 @@ export function TaskSidePanel({
   const controller = useSidePanelTabs<TaskSidePanelTabPayload>({ initialState, onStateChange: persist });
   const browsersQuery = useTaskBrowsers(issue.id);
   const newestLiveBrowser = browsersQuery.data?.findLast((browser) => browser.status === "running" || browser.status === "idle");
-  useEffect(() => {
-    if (!openBrowserId) return;
-    setLauncherOpen(false);
-    controller.openTab(taskPanelBrowserTab(openBrowserId));
-  }, [openBrowserId, controller.openTab]);
-  useEffect(() => {
-    // Acknowledge only after selection and persistence commit. Clearing the
-    // parent request earlier can replace the panel before its tab state lands.
-    if (openBrowserId && controller.activeTabId === `browser:${openBrowserId}` &&
-      readTaskSidePanelState(accountScope, issue.companyId, issue.id, fileTabsEnabled)?.state.activeTabId === controller.activeTabId) {
-      onBrowserOpened?.();
-    }
-  }, [openBrowserId, controller.activeTabId, onBrowserOpened, accountScope, issue.companyId, issue.id, fileTabsEnabled]);
   const activeTab = controller.tabs.find((tab) => tab.id === controller.activeTabId) ?? null;
   const subtasksAvailable = showRelatedTasks && (taskCount > 0 || tasksTab?.hasError === true);
   const hasSubtasksTab = controller.tabs.some((tab) => tab.id === "subtasks");
-
-  useEffect(() => {
-    if (!openSkillId) return;
-    setLauncherOpen(false);
-    controller.openTab(taskPanelSkillTab(openSkillId, openSkillName ?? "Skill"));
-    onSkillOpened?.(openSkillId);
-  }, [controller.openTab, onSkillOpened, openSkillId, openSkillName]);
 
   useEffect(() => {
     if (!subtasksAvailable) {
@@ -379,6 +359,41 @@ export function TaskSidePanel({
     hasSubtasksTab,
     subtasksAvailable,
   ]);
+
+  useEffect(() => {
+    if (conversationAgentId) return;
+    const unsupported = controller.tabs.filter((tab) => tab.payload.kind === "agent-tasks");
+    if (unsupported.length === 0) return;
+    // Reconcile live capability changes after related-task insertion, keeping
+    // valid tabs and their selection unless the removed Tasks tab had focus.
+    const showArtifacts = unsupported.length === controller.tabs.length
+      || unsupported.some((tab) => tab.id === controller.activeTabId);
+    unsupported.forEach((tab) => controller.closeTab(tab.id));
+    if (showArtifacts) controller.openTab(taskPanelArtifactsTab());
+  }, [conversationAgentId, controller.activeTabId, controller.closeTab, controller.openTab, controller.tabs]);
+
+  // Explicit open requests take focus after capability reconciliation has
+  // removed unsupported tabs and selected any needed fallback.
+  useEffect(() => {
+    if (!openBrowserId) return;
+    setLauncherOpen(false);
+    controller.openTab(taskPanelBrowserTab(openBrowserId));
+  }, [openBrowserId, controller.openTab]);
+  useEffect(() => {
+    // Acknowledge only after selection and persistence commit. Clearing the
+    // parent request earlier can replace the panel before its tab state lands.
+    if (openBrowserId && controller.activeTabId === `browser:${openBrowserId}` &&
+      readTaskSidePanelState(accountScope, issue.companyId, issue.id, fileTabsEnabled)?.state.activeTabId === controller.activeTabId) {
+      onBrowserOpened?.();
+    }
+  }, [openBrowserId, controller.activeTabId, onBrowserOpened, accountScope, issue.companyId, issue.id, fileTabsEnabled]);
+
+  useEffect(() => {
+    if (!openSkillId) return;
+    setLauncherOpen(false);
+    controller.openTab(taskPanelSkillTab(openSkillId, openSkillName ?? "Skill"));
+    onSkillOpened?.(openSkillId);
+  }, [controller.openTab, onSkillOpened, openSkillId, openSkillName]);
 
   useEffect(() => {
     if (inline) {

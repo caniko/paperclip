@@ -29,12 +29,12 @@ export function AgentConversationsSidebar() {
   const active = [...byId.values()].find(agent => agent.id === activeRef || (agent.status !== "terminated" && encodeURIComponent(agentRouteRef(agent)) === activeRef));
   const conversations = (chats.data ?? []).flatMap(chat => {
     const agent = chat.conversationAgentId ? byId.get(chat.conversationAgentId) : undefined;
-    return agent ? [agent] : [];
+    return agent && agent.id !== active?.id ? [agent] : [];
   });
-  if (active && !conversations.some(agent => agent.id === active.id)) conversations.unshift(active);
+  if (active) conversations.unshift(active);
   // Everyone you can chat with is listed, not only agents you've already
-  // talked to: conversations first by recent activity, then the rest of the
-  // roster alphabetically. Same eligibility rule as the Agents nav section —
+  // talked to: the open conversation first, then other conversations by recent
+  // activity, then the roster alphabetically. Same eligibility rule as the Agents nav section —
   // terminated agents and agents you've left are omitted.
   const listedIds = new Set(conversations.map(agent => agent.id));
   const teammates = roster

@@ -71,13 +71,17 @@ export function gradeStockHarness(evidence: StockHarnessEvidence, instructionVar
     "The lifecycle oracle must reach actual provider runs; missing runs cannot pass instruction delivery.");
   if (evidence.generation === "legacy") {
     const prompts = evidence.invocations.filter(row => typeof row.prompt === "string" && row.prompt.length > 0);
-    check("invocation-evidence-complete", evidence.runIds.length > 0 && evidence.runIds.every(runId =>
+    // A clipped public receipt is only a prefix, so its omitted suffix cannot qualify.
+    const clippedRunIds = prompts.filter(row => /\n\[truncated \d+ chars\]$/.test(String(row.prompt))).map(row => row.runId);
+    const clippingDetail = clippedRunIds.length > 0
+      ? ` Explicitly clipped public prompt receipts for runs ${clippedRunIds.join(", ")} are incomplete evidence.` : "";
+    check("invocation-evidence-complete", clippedRunIds.length === 0 && evidence.runIds.length > 0 && evidence.runIds.every(runId =>
       prompts.some(row => row.runId === runId)),
-    "Every legacy run must have a public adapter.invoke event with its actual nonempty prompt.");
+    "Every legacy run must have a public adapter.invoke event with its actual nonempty, untruncated prompt." + clippingDetail);
     if (instructionVariant.variant === "reduced") {
-      check("generic-procedures-absent", prompts.length > 0 && prompts.every(row =>
+      check("generic-procedures-absent", clippedRunIds.length === 0 && prompts.length > 0 && prompts.every(row =>
         REMOVED_PROCEDURES.every(procedure => !String(row.prompt).includes(procedure))),
-      "Neither startup nor continuation may reintroduce the removed generic manual.");
+      "Neither startup nor continuation may reintroduce the removed generic manual; clipped receipts cannot establish whole-prompt absence." + clippingDetail);
     } else {
       const classified = prompts.every(row => typeof row.conversationMode === "boolean" &&
         typeof row.promptMetrics?.heartbeatPromptChars === "number" &&

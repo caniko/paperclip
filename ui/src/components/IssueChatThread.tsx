@@ -2664,7 +2664,7 @@ function IssueChatAssistantMessage({
               <ChevronDown
                 aria-hidden="true"
                 className={cn(
-                  "h-3.5 w-3.5 shrink-0 text-muted-foreground/40 opacity-0 transition-[opacity,transform] group-hover:opacity-100 group-focus-visible:opacity-100",
+                  "h-3.5 w-3.5 shrink-0 text-muted-foreground/40 opacity-0 transition-(--tp-transform-opacity) group-hover:opacity-100 group-focus-visible:opacity-100",
                   !folded && "rotate-180",
                 )}
               />

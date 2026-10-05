@@ -425,11 +425,11 @@ export class CapabilitySemanticDispatcher {
       });
     }
     if (operationId === "update_skill" && outcome.ok) {
-      const id = outcome.result.entityRefs.find(ref => ref.startsWith("skill:"))?.slice(6);
-      const skill = this.port.snapshot().skills?.find(candidate => candidate.id === id);
-      if (skill) return readSuccess(outcome.result.stateRevision, {
-        skillId: skill.id, path: "SKILL.md", versionId: skill.versionId, studioPath: `/skills/studio/${skill.id}`,
-      });
+      const receipt = outcome.result.skillUpdateReceipt;
+      if (receipt === undefined) {
+        throw new SemanticDispatchFailure("operation_unavailable", "Skill update receipt is missing.");
+      }
+      return readSuccess(outcome.result.stateRevision, receipt);
     }
     return commandOutcome(outcome);
   }

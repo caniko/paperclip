@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNull, lte, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import { documents, heartbeatRunEvents, heartbeatRuns, issueComments, issueDocuments, issues, issueThreadInteractions, type Db } from "@paperclipai/db";
 import { createRunSecretRedactionRegistry } from "../run-secret-redaction.js";
 import { buildLowTrustSourceTrust, redactQuarantinedBodyForHigherTrust, sanitizeQuarantinedCommentForHigherTrust } from "../source-trust.js";
@@ -91,6 +91,8 @@ export async function buildNativeSessionHandoff(input: {
     // Only conversational summaries are history. Never replay a toolAction,
     // connection authorization payload, credentials, or approval as live authority.
     db.select({ id: issueThreadInteractions.id, kind: issueThreadInteractions.kind, status: issueThreadInteractions.status,
+      sourceRunId: issueThreadInteractions.sourceRunId, resolvedByAgentId: issueThreadInteractions.resolvedByAgentId,
+      resolvedByRunId: issueThreadInteractions.resolvedByRunId,
       title: sql<string>`left(coalesce(${issueThreadInteractions.title}, ''), 256)`,
       body: excerpt(sql`coalesce(${issueThreadInteractions.result}->>'summaryMarkdown', ${issueThreadInteractions.summary}, '')`),
       truncated: sql<boolean>`length(coalesce(${issueThreadInteractions.result}->>'summaryMarkdown', ${issueThreadInteractions.summary}, '')) > ${ENTRY_MAX_CHARS}`,
@@ -131,6 +133,17 @@ export async function buildNativeSessionHandoff(input: {
       cutoff ? and(lte(heartbeatRuns.createdAt, cutoff.createdAt), lte(heartbeatRuns.finishedAt, cutoff.createdAt)) : undefined,
     )).orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.id)).limit(3),
   ]);
+  // At most nine interactions contribute two retained actor runs each. Never
+  // derive historical trust from the agent or task's mutable current policy.
+  const interactionRunIds = [...new Set(decisions.flatMap(row => [row.sourceRunId, row.resolvedByRunId])
+    .filter((id): id is string => id !== null))];
+  const interactionRuns = interactionRunIds.length ? await db.select({
+    id: heartbeatRuns.id, agentId: heartbeatRuns.agentId,
+    matchesIssue: sql<boolean>`${runIssueScope}`,
+    executionPolicy: sql<unknown>`${heartbeatRuns.contextSnapshot}->'executionPolicy'`,
+  }).from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.id, interactionRunIds)))
+    .limit(interactionRunIds.length) : [];
+  const interactionRunById = new Map(interactionRuns.map(run => [run.id, run]));
   const entries: HandoffEntry[] = [];
   // Historical output inherits its dispatch policy. Later agent/project/task
   // edits cannot promote it. Invalid retained policy also stays quarantined.
@@ -138,13 +151,27 @@ export async function buildNativeSessionHandoff(input: {
     const trust = resolveCoreTrustPreset({ companyId, run: { companyId, executionPolicy } });
     return trust.kind === "standard" ? null : buildLowTrustSourceTrust({ issueId, agentId, runId });
   };
+  const interactionActorTrust = (runId: string | null, actorAgentId: string | null, requireSameIssue = false) => {
+    const run = runId ? interactionRunById.get(runId) : undefined;
+    if (!run || !actorAgentId || run.agentId !== actorAgentId || (requireSameIssue && run.matchesIssue !== true)
+      || (run.executionPolicy != null && (typeof run.executionPolicy !== "object" || Array.isArray(run.executionPolicy)))) {
+      return buildLowTrustSourceTrust({ issueId, agentId: actorAgentId, runId });
+    }
+    const trust = resolveCoreTrustPreset({ companyId, run: { companyId, executionPolicy: run.executionPolicy } });
+    return trust.kind === "standard" ? null : buildLowTrustSourceTrust({ issueId, agentId: actorAgentId, runId });
+  };
   const addComment = (row: typeof recent[number], kind: string) => {
     if (entries.some(entry => entry.id === row.id)) return;
     entries.push({ ...sanitizeQuarantinedCommentForHigherTrust(row), kind, author: row.authorAgentId ? "agent" : "user" });
   };
   if (origin[0]) addComment(origin[0], "original_request");
   recent.slice(0, LIMIT).forEach(row => addComment(row, "message"));
-  decisions.slice(0, 8).forEach(row => entries.push({ ...row, kind: "resolved_interaction", interactionKind: row.kind }));
+  for (const row of decisions.slice(0, 8)) {
+    const sourceTrust = interactionActorTrust(row.sourceRunId, agentId, true)
+      ?? (row.resolvedByAgentId || row.resolvedByRunId ? interactionActorTrust(row.resolvedByRunId, row.resolvedByAgentId) : null);
+    const entry = sanitizeQuarantinedCommentForHigherTrust({ ...row, sourceTrust });
+    entries.push({ ...entry, ...(sourceTrust ? { title: null } : {}), kind: "resolved_interaction", interactionKind: row.kind });
+  }
   for (const row of replies.slice(0, 4)) {
     const { executionPolicy, ...entry } = row;
     const sourceTrust = historicalTrust(row.runId, executionPolicy);

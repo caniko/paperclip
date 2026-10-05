@@ -456,6 +456,13 @@ export interface CapabilityCommandResult {
   stateRevision: number;
   entityRefs: string[];
   scheduledWakeIds: string[];
+  /** Committed update response, retained even when the skill is edited again. */
+  skillUpdateReceipt?: {
+    skillId: string;
+    path: "SKILL.md";
+    versionId: string;
+    studioPath: string;
+  };
 }
 
 export interface CapabilityCommandErrorResult {

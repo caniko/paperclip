@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowUpDown, File, FileText, Image, Search, Video } from "lucide-react";
 import type { CompanyArtifact, Issue } from "@paperclipai/shared";
 import { artifactsApi } from "@/api/artifacts";
+import { heartbeatsApi } from "@/api/heartbeats";
 import { issuesApi } from "@/api/issues";
 import { projectsApi } from "@/api/projects";
 import { IssueFiltersPopover } from "@/components/IssueFiltersPopover";
@@ -18,6 +19,7 @@ import {
   type IssueFilterState,
 } from "@/lib/issue-filters";
 import { queryKeys } from "@/lib/queryKeys";
+import { collectLiveIssueIds } from "@/lib/liveIssueIds";
 import { Link } from "@/lib/router";
 import { cn, formatDate, relativeTime } from "@/lib/utils";
 
@@ -132,6 +134,14 @@ export function AgentTasksPanel({
     queryKey: queryKeys.projects.list(companyId),
     queryFn: () => projectsApi.list(companyId),
   });
+  const liveRunsQuery = useQuery({
+    queryKey: queryKeys.liveRuns(companyId),
+    queryFn: () => heartbeatsApi.liveRunsForCompany(companyId),
+  });
+  const liveIssueIds = useMemo(
+    () => collectLiveIssueIds(liveRunsQuery.data, tasksQuery.data),
+    [liveRunsQuery.data, tasksQuery.data],
+  );
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -141,8 +151,8 @@ export function AgentTasksPanel({
       return task.title.toLowerCase().includes(needle)
         || (task.identifier ?? "").toLowerCase().includes(needle);
     });
-    return sortAgentTasks(applyIssueFilters(scoped, filters), sortField, sortDir);
-  }, [tasksQuery.data, excludeIssueId, query, filters, sortField, sortDir]);
+    return sortAgentTasks(applyIssueFilters(scoped, filters, null, false, liveIssueIds), sortField, sortDir);
+  }, [tasksQuery.data, excludeIssueId, query, filters, sortField, sortDir, liveIssueIds]);
 
   const activeFilterCount = countActiveIssueFilters(filters);
   const total = (tasksQuery.data ?? []).filter((task) => task.id !== excludeIssueId).length;

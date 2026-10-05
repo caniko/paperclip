@@ -108,9 +108,8 @@ function StreamlinedTasks() {
   const hasOrganizationScopedParam = ORGANIZATION_SCOPED_PARAMS.some(
     (param) => (searchParams.get(param) ?? "").length > 0,
   );
-  // Read the stored view once per mount so a later write can't yank the view
-  // out from under the user mid-session.
-  const [lastUsedView] = useState<TaskViewKey>(() => loadLastTaskView());
+  // Seed from storage, then keep this mount's fallback in sync with selections.
+  const [lastUsedView, setLastUsedView] = useState<TaskViewKey>(() => loadLastTaskView());
   const view = resolveInitialTaskView(requestedView, hasOrganizationScopedParam, lastUsedView);
   const definition = taskView(view);
 
@@ -128,6 +127,7 @@ function StreamlinedTasks() {
 
   const selectView = useCallback((next: TaskViewKey) => {
     saveLastTaskView(next);
+    setLastUsedView(next);
     // A view switch starts clean: the previous view's search and filters are
     // its own, not the new view's.
     navigate(`/issues?${TASK_VIEW_PARAM}=${next}`);
