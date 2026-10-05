@@ -6,6 +6,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
 import { createTaskAction } from "../protocol-actions/create-task.js";
 import { createProjectAction } from "../protocol-actions/create-project.js";
+import { updateSkillAction } from "../protocol-actions/update-skill.js";
 
 import {
   PAPERCLIP_SEMANTIC_ACTION_CATALOG,
@@ -57,13 +58,28 @@ describe("semantic action catalog", () => {
       (action) => action.operationId,
     );
 
-    expect(operationIds).toHaveLength(36);
+    expect(operationIds).toHaveLength(37);
     expect(new Set(operationIds).size).toBe(operationIds.length);
     expect(operationIds).not.toContain("generic_api_request");
     expect(Object.isFrozen(PAPERCLIP_SEMANTIC_ACTION_CATALOG)).toBe(true);
     expect(
       Object.isFrozen(paperclipSemanticAction("write_document")?.inputSchema),
     ).toBe(true);
+  });
+
+  it("projects the canonical skill update schema and modes as an optional mutation", () => {
+    const update = paperclipSemanticAction("update_skill");
+    const live = updateSkillAction.live.descriptor;
+    expect(update).toBeDefined();
+    expect(update).toMatchObject({
+      operationId: live.operationId,
+      placement: "optional",
+      effect: "write",
+      allowedModes: live.allowedModes,
+      requiredClaims: live.requiredClaims,
+      inputSchema: live.inputSchema,
+      outputSchema: live.outputSchema,
+    });
   });
 
   it("declares hire_agent as a native identity-only mutation", () => {

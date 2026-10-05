@@ -74,6 +74,59 @@ describe("run-scoped semantic tool authority", () => {
     );
   });
 
+  it("discovers and binds skill updates with version guards, mutation receipts, and current mode checks", async () => {
+    let context = runContext();
+    let executions = 0;
+    const input = {
+      skillId: "skill_semantic_test",
+      expectedVersionId: "version_semantic_original",
+      idempotencyKey: "update_semantic_test",
+      markdown: "---\nname: release-review\ndescription: Review release notes.\n---\n# Review\nInspect the changes.\n",
+    };
+    const value = {
+      skillId: input.skillId,
+      path: "SKILL.md",
+      versionId: "version_semantic_updated",
+      studioPath: `/skills/studio/${input.skillId}`,
+    };
+    const dispatcher = new PaperclipSemanticDispatcher({
+      contextProvider: () => context,
+      idempotencyStore: new MemoryIdempotencyStore(),
+      bindings: [{
+        operationId: "update_skill",
+        execute: ({ input: executedInput }) => {
+          expect(executedInput).toEqual(input);
+          executions += 1;
+          return { value };
+        },
+      }],
+    });
+
+    await expect(dispatcher.listAlwaysAvailableTools(correlation.runId)).resolves.toEqual([]);
+    await expect(dispatcher.discoverTools({
+      runId: correlation.runId, query: "update skill", namespace: "skills",
+    })).resolves.toMatchObject({ operations: [{ name: "update_skill" }] });
+    await expect(dispatcher.dispatch(call("update_skill", input, "call_skill_first")))
+      .resolves.toMatchObject({ ok: true, duplicate: false, value });
+    await expect(dispatcher.dispatch(call("update_skill", input, "call_skill_retry")))
+      .resolves.toMatchObject({ ok: true, duplicate: true, value });
+    expect(executions).toBe(1);
+
+    context = runContext({ workMode: "planning" });
+    await expect(dispatcher.discoverTools({
+      runId: correlation.runId, query: "update skill", namespace: "skills",
+    })).resolves.toMatchObject({ operations: [] });
+    await expect(dispatcher.dispatch(call("update_skill", input, "call_skill_planning")))
+      .resolves.toMatchObject({ ok: false, error: { code: "task_mode_denied" } });
+    expect(executions).toBe(1);
+
+    context = runContext();
+    const { expectedVersionId: _expectedVersionId, ...missingVersion } = input;
+    await expect(dispatcher.dispatch(call("update_skill", missingVersion, "call_skill_missing_version")))
+      .resolves.toMatchObject({ ok: false, error: { code: "input_invalid" } });
+    expect(executions).toBe(1);
+  });
+
   it("rechecks ownership after projection and before invocation", async () => {
     let context = runContext();
     let executions = 0;
@@ -458,6 +511,7 @@ function runContext(
     delegatedClaims?: readonly string[];
     actorCompanyId?: string;
     executionRunId?: string;
+    workMode?: PaperclipSemanticRunContext["activeTask"]["workMode"];
   } = {},
 ): PaperclipSemanticRunContext {
   return {
@@ -476,7 +530,7 @@ function runContext(
       assigneeActorId: "actor_semantic_test",
       executionRunId: overrides.executionRunId ?? correlation.runId,
       status: "in_progress",
-      workMode: "standard",
+      workMode: overrides.workMode ?? "standard",
     },
     delegatedClaims: overrides.delegatedClaims ?? [],
   };
