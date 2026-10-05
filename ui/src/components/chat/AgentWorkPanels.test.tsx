@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 
-import { act, type ReactNode } from "react";
+import { act, type ComponentProps, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { CompanyArtifact, Issue } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import type { LiveRunForIssue } from "@/api/heartbeats";
+import { queryKeys } from "@/lib/queryKeys";
 import { AgentArtifactsPanel, AgentTasksPanel, sortAgentTasks } from "./AgentWorkPanels";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -13,12 +15,23 @@ import { AgentArtifactsPanel, AgentTasksPanel, sortAgentTasks } from "./AgentWor
 const api = vi.hoisted(() => ({
   issuesList: vi.fn(),
   artifactsList: vi.fn(),
+  liveRunsForCompany: vi.fn(),
+  realFilters: false,
 }));
 
 vi.mock("@/api/issues", () => ({ issuesApi: { list: api.issuesList } }));
 vi.mock("@/api/artifacts", () => ({ artifactsApi: { list: api.artifactsList } }));
 vi.mock("@/api/projects", () => ({ projectsApi: { list: async () => [] } }));
-vi.mock("@/components/IssueFiltersPopover", () => ({ IssueFiltersPopover: () => <button type="button">Filters</button> }));
+vi.mock("@/api/heartbeats", () => ({ heartbeatsApi: { liveRunsForCompany: api.liveRunsForCompany } }));
+vi.mock("@/components/IssueFiltersPopover", async () => {
+  const actual = await vi.importActual<typeof import("@/components/IssueFiltersPopover")>("@/components/IssueFiltersPopover");
+  return {
+    ...actual,
+    IssueFiltersPopover: (props: ComponentProps<typeof actual.IssueFiltersPopover>) => api.realFilters
+      ? <actual.IssueFiltersPopover {...props} />
+      : <button type="button">Filters</button>,
+  };
+});
 vi.mock("@/lib/router", () => ({
   Link: ({ to, children, className, target, rel }: { to: string; children: ReactNode; className?: string; target?: string; rel?: string }) =>
     <a href={to} className={className} target={target} rel={rel}>{children}</a>,
@@ -35,6 +48,23 @@ function task(overrides: Partial<Issue>): Issue {
     updatedAt: "2026-09-01T00:00:00.000Z",
     ...overrides,
   } as Issue;
+}
+
+function liveRun(overrides: Partial<LiveRunForIssue> = {}): LiveRunForIssue {
+  return {
+    id: "run-1",
+    issueId: "running",
+    status: "running",
+    invocationSource: "manual",
+    triggerDetail: null,
+    startedAt: "2026-10-05T00:00:00.000Z",
+    finishedAt: null,
+    createdAt: "2026-10-05T00:00:00.000Z",
+    agentId: "agent-1",
+    agentName: "CEO",
+    adapterType: "codex_local",
+    ...overrides,
+  };
 }
 
 function artifact(overrides: Partial<CompanyArtifact>): CompanyArtifact {
@@ -59,6 +89,9 @@ describe("agent work panels", () => {
   beforeEach(() => {
     api.issuesList.mockReset();
     api.artifactsList.mockReset();
+    api.liveRunsForCompany.mockReset();
+    api.liveRunsForCompany.mockResolvedValue([]);
+    api.realFilters = false;
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -69,6 +102,7 @@ describe("agent work panels", () => {
     act(() => root.unmount());
     queryClient.clear();
     container.remove();
+    vi.unstubAllGlobals();
   });
 
   async function render(node: ReactNode) {
@@ -98,6 +132,61 @@ describe("agent work panels", () => {
     expect(cards[0]?.textContent).toContain("PAP-3");
     expect(container.querySelector("time")).not.toBeNull();
     expect(container.textContent).not.toContain("The conversation");
+  });
+
+  it("uses the real Live runs only filter with company-scoped live runs and updates without remounting", async () => {
+    api.realFilters = true;
+    // Radix measures the real checkbox and popover in jsdom; layout observation
+    // is the only browser primitive stubbed, not either interaction component.
+    vi.stubGlobal("ResizeObserver", class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    });
+    api.issuesList.mockResolvedValue([
+      task({ id: "running", identifier: "PAP-1", title: "Running task", companyId: "company-1", status: "in_progress" }),
+      task({ id: "idle", identifier: "PAP-2", title: "Idle task", companyId: "company-1", status: "in_progress" }),
+      task({ id: "done", identifier: "PAP-3", title: "Completed task", companyId: "company-1", status: "done" }),
+    ]);
+    api.liveRunsForCompany.mockResolvedValue([
+      liveRun(),
+      liveRun({ id: "stale-terminal-run", issueId: "done" }),
+    ]);
+    const otherCompanyKey = queryKeys.liveRuns("company-2");
+    queryClient.setQueryData(otherCompanyKey, [liveRun({ id: "foreign-run", issueId: "idle" })]);
+    const otherCompanyRuns = queryClient.getQueryData(otherCompanyKey);
+    await render(<AgentTasksPanel companyId="company-1" agentId="agent-1" />);
+    const taskLinks = () => Array.from(container.querySelectorAll("a")).map((card) => card.getAttribute("href"));
+    expect(taskLinks()).toEqual(["/issues/PAP-1", "/issues/PAP-2", "/issues/PAP-3"]);
+
+    const trigger = container.querySelector<HTMLButtonElement>('button[title="Filter"]');
+    expect(trigger).not.toBeNull();
+    await act(async () => { trigger!.click(); });
+    const liveOnlyLabel = Array.from(document.querySelectorAll("label")).find((label) => label.textContent?.trim() === "Live runs only");
+    const checkbox = liveOnlyLabel?.querySelector<HTMLButtonElement>('[role="checkbox"]');
+    expect(checkbox).toBeInstanceOf(HTMLButtonElement);
+    expect(checkbox!.getAttribute("aria-checked")).toBe("false");
+    await act(async () => { checkbox!.click(); });
+    expect(checkbox!.getAttribute("aria-checked")).toBe("true");
+    expect(taskLinks()).toEqual(["/issues/PAP-1"]);
+    expect(container.textContent).toContain("Running task");
+    expect(container.textContent).not.toContain("Idle task");
+    expect(container.textContent).not.toContain("Completed task");
+    expect(api.liveRunsForCompany).toHaveBeenCalledWith("company-1");
+
+    // The filter observes the normal company cache. Finishing a run removes the
+    // task; a newly queued run appears without resetting the selected checkbox.
+    await act(async () => { queryClient.setQueryData(queryKeys.liveRuns("company-1"), []); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(taskLinks()).toEqual([]);
+    expect(container.textContent).toContain("No tasks match these filters.");
+    await act(async () => {
+      queryClient.setQueryData(queryKeys.liveRuns("company-1"), [liveRun({ id: "queued-run", issueId: "idle", status: "queued", startedAt: null })]);
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(taskLinks()).toEqual(["/issues/PAP-2"]);
+    expect(checkbox!.getAttribute("aria-checked")).toBe("true");
+    expect(queryClient.getQueryData(otherCompanyKey)).toEqual(otherCompanyRuns);
   });
 
   it("sorts by status and title on request", () => {
