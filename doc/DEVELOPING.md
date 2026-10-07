@@ -705,11 +705,14 @@ When effective run config changes, Paperclip may intentionally skip a saved adap
 SSH commands, tar transfers, and Git-bundle transfers load the target's
 `/etc/profile` and user login profiles before resolving remote tools. This lets
 hosts expose tools through a profile instead of the default non-login SSH PATH.
-Paperclip reads `.profile`, `.bash_profile` (or `.bashrc` when absent), and
-`.zprofile`. It does not source `nvm.sh` directly.
+Paperclip reads `.profile`, then `.bash_profile` (or `.bashrc` when absent) for a
+Bash login shell, or `.zprofile` for a Zsh login shell. It uses the matching
+interpreter from the remote `SHELL`; other shells use only POSIX profiles through
+`sh`. It does not source `nvm.sh` directly.
 
-Profile initialization receives EOF on stdin and discards profile output. The
-command or transfer retains its original stdin, stdout, and stderr. Explicit
+Profile initialization, including automatic shell startup, receives EOF on stdin
+and discards profile output. The command or transfer retains its original stdin,
+stdout, and stderr. Explicit
 command environment values are applied after profiles, so those values win.
 
 ## Workspace Git Scan Protection
