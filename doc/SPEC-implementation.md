@@ -1542,6 +1542,7 @@ Required UX behaviors:
 - external instruction bundle roots and exports that read them require instance-admin access; managed company-scoped bundles remain available through normal company authorization
 - agent-authenticated callers cannot persist host-executed workspace commands, and restricted keys cannot invoke preconfigured workspace runtime controls
 - controller-delivered managed MCP consumes Harbor LLM's provider-neutral run/host/recipient contract through an exact source dependency; provider URL aliases, wire names and error translation stay in the adapter. Bindings do not replace destination grants, token expiry/revocation or worker isolation. See [Runtime MCP admission boundary](runtime-mcp-admission.md).
+- The prepared-launch controller foundation persists one sealed, complete effective launch per run, with enrolled worker identity, separate execution/server hosts, policy/assignment revisions, credentials, generation and expiry. Worker proof consumes a durable challenge; dispatch requires a matching recoverable producer checkpoint and a single atomic claim. Changed authority permanently invalidates the preparation, and expiry never releases unsettled execution/filesystem ownership. Runtime enablement requires the authenticated resolver, token-verified authorization route and combined acceptance described in [the prepared-launch contract](runtime-mcp-admission.md#durable-prepared-launches-controller-foundation).
 
 ## 17. Testing Strategy
 

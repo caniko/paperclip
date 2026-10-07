@@ -3,7 +3,7 @@ import type { AdapterSessionCodec } from "@paperclipai/adapter-utils";
 export { execute, normalizeBaseUrl, resolveSessionKey, parseSseFramesForTest, mapFinalResultForTest } from "./execute.js";
 export { testEnvironment } from "./test.js";
 export { getConfigSchema } from "./config-schema.js";
-export { reconcileExecution } from "./recovery.js";
+export { reconcileExecution, validateManagedMcpExecutionCheckpoint } from "./recovery.js";
 export { prepareWorkspaceOwnership, reconcileWorkspaceOwnership } from "./ownership.js";
 
 function readString(value: unknown): string | null {

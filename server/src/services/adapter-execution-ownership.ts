@@ -15,6 +15,25 @@ const WORKSPACE_KEY = "workspaceOwnership";
 const KEYS = [KEY, WORKSPACE_KEY] as const;
 const SCHEMA = "paperclip.adapter-execution.v1";
 
+/** Host-owned sealing/binding validation shared by dispatch and recovery. A
+ * malformed or unavailable checkpoint retains ownership and is never authority. */
+export async function readPendingAdapterExecutionCheckpoint(
+  lease: typeof environmentLeases.$inferSelect,
+  key: typeof KEYS[number] = KEY,
+): Promise<{ adapterType: string; checkpoint: Record<string, unknown> } | null> {
+  if (!lease.metadata || !(key in lease.metadata) || record(lease.metadata[key]).state === "settled") return null;
+  try {
+    const ownership = record(lease.metadata[key]);
+    if (ownership.version !== 1 || ownership.state !== "pending" || typeof ownership.adapterType !== "string") throw new Error();
+    const plaintext = await getSecretProvider("local_encrypted").resolveVersion({ material: record(ownership.material), externalRef: null });
+    const envelope = record(JSON.parse(plaintext));
+    if (envelope.schema !== (key === KEY ? SCHEMA : `${SCHEMA}.workspace`) || envelope.companyId !== lease.companyId ||
+        envelope.runId !== lease.heartbeatRunId || envelope.leaseId !== lease.id || envelope.adapterType !== ownership.adapterType ||
+        !envelope.checkpoint || typeof envelope.checkpoint !== "object" || Array.isArray(envelope.checkpoint)) throw new Error();
+    return { adapterType: ownership.adapterType, checkpoint: envelope.checkpoint as Record<string, unknown> };
+  } catch { throw new Error("Adapter recovery checkpoint is unavailable."); }
+}
+
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -240,27 +259,22 @@ export async function reconcileAdapterExecution(db: Db, input: {
     for (const key of KEYS) {
     if (!lease.metadata || !(key in lease.metadata) || record(lease.metadata[key]).state === "settled") continue;
     try {
-      const ownership = record(lease.metadata[key]);
-      if (ownership.version !== 1 || typeof ownership.adapterType !== "string") return "pending";
-      const plaintext = await getSecretProvider("local_encrypted").resolveVersion({
-        material: record(ownership.material), externalRef: null,
-      });
-      const envelope = record(JSON.parse(plaintext));
-      if (envelope.schema !== (key === KEY ? SCHEMA : `${SCHEMA}.workspace`) || envelope.companyId !== input.companyId || envelope.runId !== input.runId
-        || envelope.leaseId !== lease.id || envelope.adapterType !== ownership.adapterType) return "pending";
+       const ownership = record(lease.metadata[key]);
+       const recovered = await readPendingAdapterExecutionCheckpoint(lease, key);
+       if (!recovered || lease.companyId !== input.companyId || lease.heartbeatRunId !== input.runId) return "pending";
       const { findServerAdapter } = await import("../adapters/registry.js");
-      const adapter = findServerAdapter(ownership.adapterType);
+       const adapter = findServerAdapter(recovered.adapterType);
       if (key === WORKSPACE_KEY && !record(ownership.finalization).operationId) {
         // Observing a stopped provider cannot release a filesystem grant. A
         // recovered controller must cross the same durable workspace/teardown
         // boundary as the live executor, and persist it before remote release.
         if (!input.finalizeWorkspace) return "pending";
         await beginWorkspaceFinalizationBoundary(db, { companyId: input.companyId, runId: input.runId, leaseId: lease.id });
-        await input.finalizeWorkspace(record(envelope.checkpoint));
+         await input.finalizeWorkspace(recovered.checkpoint);
         await recordWorkspaceFinalizationBoundary(db, { companyId: input.companyId, runId: input.runId, leaseId: lease.id });
       }
       const reconcile = key === KEY ? adapter?.reconcileExecution : adapter?.reconcileWorkspaceOwnership;
-      if (await reconcile?.(record(envelope.checkpoint)) !== "settled") return "pending";
+       if (await reconcile?.(recovered.checkpoint) !== "settled") return "pending";
       if (key === KEY) await settleAdapterExecution(db, { ...input, leaseId: lease.id });
       else await db.update(environmentLeases).set({
         metadata: sql`jsonb_set(${environmentLeases.metadata}, '{workspaceOwnership}',

@@ -1,4 +1,5 @@
 export { decisionEffectTargetIssueIds } from "./decision.js";
+export type { McpPreparedLaunchSnapshot, McpLaunchChallenge, McpLaunchAuthorizationReceipt } from "./mcp-prepared-launch.js";
 export {
   NATIVE_FINALIZATION_SCHEMA,
   type NativeFinalizationResult,

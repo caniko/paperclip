@@ -42,7 +42,7 @@ connection-ID-based tool namespace, capability negotiation and
 `hermes_gateway_managed_mcp_blocked` error translation. Its adapter validates the
 raw approved and configured recipients before trimming or normalization and compares the normalized result
 with its dispatch destination before making a network request. Core admission
-does not import the Hermes adapter.
+binding helper does not import the Hermes adapter.
 
 Adapters that require this delivery precondition declare
 `requiresRuntimeMcpRunBinding: true` on their `ServerAdapterModule`. Core selects
@@ -99,3 +99,90 @@ These checks qualify the metadata helper and adapter path. Deployment acceptance
 still requires the actual trusted connector, worker artifacts, destination grant
 checks, bypass isolation, recovery reauthorization, bounded operations and
 verified settlement, as well as the combined consumer gates.
+
+## Durable prepared launches (controller foundation)
+
+`server/src/services/mcp-prepared-launch.ts` implements a private, company-scoped
+controller ledger in `mcp_prepared_launches`. This is the foundation for fresh
+worker authorization; it currently has no producer HTTP route or heartbeat
+dispatch integration. The deployed Hermes managed capability stays gated on its
+existing qualification boundary.
+
+A preparation seals the complete effective outbound JSON **and headers**, including
+credentials and the original admission key. Its snapshot binds company, agent,
+issue, project, run, controller instance/boot and dispatch generation; enrolled
+Ed25519 worker/key identity, approved recipient and execution host; separately
+authorized MCP server hosts/endpoints and credential references; assignment and
+policy digests **and revisions**; and finite expiry. Launch JSON is limited to
+1 MiB, headers to 32 KiB/32 distinct names, and the complete serialized envelope
+to 2 MiB before encryption. Harbor validates identifiers, credential endpoints
+and host-binding relationships.
+
+The public launch digest is an HMAC using a random per-launch salt retained only
+inside the encrypted envelope. It covers the ledger ID and copied, validated
+snapshot, including the exact outbound body bytes. It does not expose a reusable
+credential hash. Encrypted material is bound back to the stored company/run/task/
+project/generation/expiry and launch ID during every read.
+
+### Challenge and retry lifecycle
+
+1. `prepare` serializes on the task and run, then persists at most one immutable
+   preparation per run. Matching retries return its original ID and digest.
+2. `challenge` resolves current authority and persists a random, 60-second nonce.
+   Concurrent retries see the same challenge. An expired, unconsumed challenge
+   can be renewed atomically while the preparation is still live and unchanged;
+   earlier proofs cannot authorize its replacement nonce.
+3. `authorize` verifies the enrolled worker's Ed25519 signature over the ordered
+   protocol array produced by `mcpLaunchProofBytes`. It consumes the challenge
+   once. Lost-ack retries recheck current authority and return the same durable
+   receipt, including after challenge expiry, until launch expiry.
+4. `claimDispatch` requires the existing sealed pending adapter checkpoint. Host
+   code validates its company/run/lease binding through
+   `readPendingAdapterExecutionCheckpoint`; the Hermes producer validates that
+   its recipient, complete headers, body and admission key recover **this exact
+   launch**. Only one concurrent claim succeeds. Later retries return `false`;
+   they do not confer another dispatch entitlement.
+
+The trusted controller resolver is mandatory for each operation. It receives only
+stored scope, reconstructs the complete effective launch and authenticated worker
+enrollment, checks current company/task/operation/host/connection permissions,
+and locks mutable authority rows through commit. A normal missing/changed result
+permanently revokes the preparation, including actual task/run-row changes.
+Restoring earlier policy bytes does not revive it. A resolver exception denies
+without consuming the challenge, allowing a transient outage to recover.
+Assignment/policy revisions must identify their authoritative mutations, so an
+unobserved change-and-restore cannot hide behind an identical content digest.
+
+All ledger mutations and content-free activity events commit together. The
+database wall clock and current controller lease are checked across asynchronous
+boundaries and before commit. SQL lock waits are bounded at 5 seconds and
+statements at 15 seconds. Resolver reads must also be bounded; external worker or
+connector I/O belongs outside the locked transaction. Public failures use fixed
+`runtime_mcp_admission_blocked` text and expose no endpoints, prompts, keys or
+credentials.
+
+### Recovery and retirement
+
+An accepted worker proof establishes key possession, not a physical-host
+attestation or filesystem/network confinement. The controller must dispatch the
+stored bytes and preserve the producer's original recoverable admission rather
+than rebuilding it from agent-supplied labels. A changed controller boot,
+generation or authority cannot reuse the preparation to start replacement work.
+Existing Stop, cancellation and ownership settlement use their original private
+checkpoints independently of fresh producer admission.
+
+Expiry or revocation retains the ledger and all recovery ownership. Restrictive
+company/run/task/project references deliberately prevent deleting referenced
+entities before reconciliation. `retireForDeletion` is an explicit controller
+operation: it requires a terminal run, released leases and settled adapter **and
+filesystem** checkpoints; it atomically records retirement and removes the sealed
+ledger. Entity-deletion integration must use this operation before deleting a
+populated ledger's owners. It is not an expiry-driven cleanup or authority transfer.
+
+The focused suites cover real PostgreSQL concurrent retries, changed task rows,
+challenge renewal/replay, usable producer recovery, actual lock contention,
+elapsed-time expiry through resolution/checkpoint decryption, audit rollback for
+every mutation, and ownership-aware retirement. Full runtime acceptance still
+needs authenticated enrollment and its transactional resolver, the token-verified
+run-authorization route, exact stored-launch dispatch, trusted Chaosbox scoped
+views and private transport, and the combined consumer qualification.
