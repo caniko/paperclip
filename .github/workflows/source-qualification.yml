@@ -73,7 +73,7 @@ jobs:
         run: |
           set -euo pipefail
           strict=()
-          if [ "$LANE" = regression ]; then strict+=(--strict-reports); fi
+          case "$LANE" in tests|regression) strict+=(--strict-reports) ;; esac
           python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" "$OUTCOME" "${strict[@]}"
       - name: Retain original evidence
         if: always()
