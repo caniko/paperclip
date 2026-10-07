@@ -274,7 +274,7 @@ function createRealExecSandbox(input?: {
       process: {
         executeCommand: async (command: string) => {
           commands.push({ command });
-          const result = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, env: input?.commandEnv });
+          const result = spawnSync("sh", ["-c", command], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, env: input?.commandEnv });
           return { exitCode: result.status ?? 1, result: (result.stdout ?? "") + (result.stderr ?? "") };
         },
       },
@@ -294,7 +294,7 @@ function createRealExecSandbox(input?: {
 // Daytona uses GNU tar. macOS contributors can install gnu-tar; the usual
 // Linux CI path runs this directly without extra dependencies.
 const gnuTar = ["gtar", "tar"].map((candidate) => {
-  const resolved = spawnSync("/bin/sh", ["-c", 'command -v "$1"', "sh", candidate], { encoding: "utf8" }).stdout.trim();
+  const resolved = spawnSync("sh", ["-c", 'command -v "$1"', "sh", candidate], { encoding: "utf8" }).stdout.trim();
   return resolved && spawnSync(resolved, ["--version"], { encoding: "utf8" }).stdout?.includes("GNU tar") ? resolved : null;
 }).find(Boolean);
 
@@ -576,7 +576,7 @@ describe("daytona file-sync inbound zstd transport compression", () => {
       const fakeBinDir = await mkTempDir("paperclip-daytona-zstd-fakebin-");
       const counterFile = path.join(fakeBinDir, "rm-call-count");
       const fakeRmPath = path.join(fakeBinDir, "rm");
-      const realRm = spawnSync("/bin/sh", ["-c", "command -v rm"], { encoding: "utf8" });
+      const realRm = spawnSync("sh", ["-c", "command -v rm"], { encoding: "utf8" });
       expect(realRm.status, realRm.stderr).toBe(0);
       expect(path.isAbsolute(realRm.stdout.trim())).toBe(true);
       await fs.writeFile(
