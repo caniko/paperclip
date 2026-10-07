@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { workspacePaths } from "./workspace-manifest.js";
 import { runWorkspaceGitProcess } from "./workspace-git-stream.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { configureFixtureGitIdentity } from "../test/helpers/git-fixture.mjs";
+import { configureFixtureGitIdentity, SIGNED_GIT_FIXTURE_TEST_TIMEOUT_MS } from "../test/helpers/git-fixture.mjs";
 
 import {
   buildRemoteGitDeltaBundleScript,
@@ -123,7 +123,7 @@ describe("git workspace sync", () => {
     expect(snapshot?.overlayPaths).toContain(untrackedName);
     expect(snapshot?.deletedPaths).toContain(deletedName);
     expect(snapshot?.ignoredPaths).toContain(ignoredName);
-  });
+  }, SIGNED_GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it.each(["workspace_git_scan_timeout", "workspace_git_scan_saturated", "workspace_git_scan_output_limit", "workspace_git_scan_cancelled", "workspace_git_scan_failed"])("preserves %s instead of reporting a non-Git folder", async (code) => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-scan-failure-"));
@@ -300,7 +300,7 @@ describe("git workspace sync", () => {
       expect(await git(copied, ["status", "--porcelain"])).toBe("");
     });
     expect(await git(nested, ["status", "--porcelain"])).toBe("");
-  });
+  }, SIGNED_GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it("copies the workspace origin remote into the shallow clone", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-origin-"));
@@ -394,7 +394,7 @@ describe("git workspace sync", () => {
       expect(await git(upstream, ["rev-parse", "refs/heads/sandbox-change"])).toBe(cloneHead);
       expect(await git(upstream, ["merge-base", "refs/heads/main", "refs/heads/sandbox-change"])).toBe(baseHead);
     });
-  });
+  }, SIGNED_GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it("builds thin git delta bundles relative to the imported base", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-delta-"));
@@ -447,7 +447,7 @@ describe("git workspace sync", () => {
         await deleteLocalGitRef({ localDir: repo, ref: importedRef });
       }
     });
-  });
+  }, SIGNED_GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it("imports a diverged sandbox HEAD even when the host no longer holds baseSha", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-diverge-"));
@@ -502,7 +502,7 @@ describe("git workspace sync", () => {
     } finally {
       await deleteLocalGitRef({ localDir: host, ref: importedRef });
     }
-  });
+  }, SIGNED_GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it("re-exports a full bundle that imports when the host holds neither baseSha nor the merge-base", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-ancestor-"));
@@ -592,7 +592,7 @@ describe("git workspace sync", () => {
     } finally {
       await deleteLocalGitRef({ localDir: host, ref: importedRef });
     }
-  });
+  }, SIGNED_GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it("falls back to a full self-contained bundle when the sandbox lacks baseSha", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-full-"));
@@ -632,7 +632,7 @@ describe("git workspace sync", () => {
     } finally {
       await deleteLocalGitRef({ localDir: host, ref: importedRef });
     }
-  });
+  }, SIGNED_GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it("creates the concurrent-history merge commit with a deterministic identity", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-merge-identity-"));
@@ -686,7 +686,7 @@ describe("git workspace sync", () => {
     const mergedTree = await git(repo, ["ls-tree", "--name-only", "HEAD"]);
     expect(mergedTree).toContain("local.txt");
     expect(mergedTree).toContain("imported.txt");
-  });
+  }, SIGNED_GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it("grafts an imported head onto the current head when histories share no ancestor", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-graft-"));

@@ -6,7 +6,7 @@ import path from "node:path";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { configureFixtureGitIdentity } from "../test/helpers/git-fixture.mjs";
+import { configureFixtureGitIdentity, SIGNED_GIT_FIXTURE_TEST_TIMEOUT_MS } from "../test/helpers/git-fixture.mjs";
 import {
   resetLocalGitIndexToHead,
   runLocalGit,
@@ -989,7 +989,7 @@ describe("sandbox managed runtime", () => {
       status.phase === "export" &&
       /^Exporting git history from environment: 100% \(\d+\.\d\/\d+\.\d MB\)$/.test(status.message)
     ))).toBe(true);
-  });
+  }, SIGNED_GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it("repairs stale host index deletions when the sandbox restores a clean git worktree", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-sandbox-clean-restore-"));
@@ -4395,7 +4395,7 @@ describe("sandbox git-bundle export transport", () => {
     expect(client.syncOut).toBeUndefined();
     expect(capture.syncOutOperations).toHaveLength(0);
     expect(capture.readFilePaths.some((remotePath) => remotePath.endsWith("git-delta.bundle"))).toBe(true);
-  });
+  }, SIGNED_GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it("retries the full bundle through the native branch when the delta misses its prerequisite", async () => {
     const capture: TransportCapture = { syncOutOperations: [], readFilePaths: [] };
@@ -4450,7 +4450,7 @@ describe("sandbox git-bundle export transport", () => {
     // The full bundle was self-contained: the host repository now holds the
     // sandbox head commit.
     await expect(git(localWorkspaceDir, ["cat-file", "-e", `${sandboxHead}^{commit}`])).resolves.toBe("");
-  });
+  }, SIGNED_GIT_FIXTURE_TEST_TIMEOUT_MS);
 
   it("reports the real transferred bytes for the native git-history export and workspace restore", async () => {
     const capture: TransportCapture = { syncOutOperations: [], readFilePaths: [] };
@@ -4486,5 +4486,5 @@ describe("sandbox git-bundle export transport", () => {
     expect(restoreLines.length).toBeGreaterThan(0);
     expect(restoreLines.some((line) => /\(\d+\.\d\/\d+\.\d MB\)/.test(line))).toBe(true);
     expect(restoreLines.some((line) => line.includes("(0.0/0.0 MB)"))).toBe(false);
-  });
+  }, SIGNED_GIT_FIXTURE_TEST_TIMEOUT_MS);
 });

@@ -46,6 +46,9 @@ describe("managed GitHub launchers", () => {
       "commit", "--allow-empty", "-m", "Local work");
     expect(await git("log", "-1", "--format=%an <%ae>|%cn <%ce>"))
       .toBe(`${name} <${email}>|${name} <${email}>`);
+    if (await git("config", "--bool", "commit.gpgsign").catch(() => null) === "true") {
+      expect(await git("cat-file", "-p", "HEAD")).toContain("\ngpgsig ");
+    }
   });
 
   it.each(["broker-offline", "config-unwritable", "capability-rejected"])("keeps real local Git usable when %s", async (failure) => {
@@ -160,12 +163,17 @@ process.stdout.write(JSON.stringify({identity, token:process.env.GH_TOKEN ?? nul
     await git("init");
     configureFixtureGitIdentity(repo);
     const { name, email } = await readFixtureGitIdentity(repo);
-    await git("commit", "--allow-empty", "-m", "A");
+    // Inspect the real Git operation's captured identities. Arbitrary fixture
+    // people cannot commit under an operator's pinned committer/signing policy;
+    // the local-commit cases above prove that policy's admitted commit path.
+    expect(await git("var", "GIT_AUTHOR_IDENT")).toContain("A <A@example.test>");
+    expect(await git("var", "GIT_COMMITTER_IDENT")).toContain("A <A@example.test>");
     user = "B";
-    await git("commit", "--allow-empty", "-m", "B");
+    expect(await git("var", "GIT_AUTHOR_IDENT")).toContain("B <B@example.test>");
+    expect(await git("var", "GIT_COMMITTER_IDENT")).toContain("B <B@example.test>");
     user = "A";
-    await git("commit", "--allow-empty", "-m", "A again");
-    expect(await git("log", "--format=%an <%ae>|%cn <%ce>" )).toBe("A <A@example.test>|A <A@example.test>\nB <B@example.test>|B <B@example.test>\nA <A@example.test>|A <A@example.test>");
+    expect(await git("var", "GIT_AUTHOR_IDENT")).toContain("A <A@example.test>");
+    expect(await git("var", "GIT_COMMITTER_IDENT")).toContain("A <A@example.test>");
     const before = captures;
     const gh = JSON.parse((await exec(path.join(bin, "gh"), [], { cwd: repo, env })).stdout);
     expect(gh.identity).toContain("A <A@example.test>");

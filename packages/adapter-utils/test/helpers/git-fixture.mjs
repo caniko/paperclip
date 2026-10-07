@@ -1,5 +1,9 @@
 import { execFileSync } from "node:child_process";
 
+// Several commits plus hook/signing round trips are fixture setup, not the
+// operation under test. Keep that complete integration workload bounded.
+export const SIGNED_GIT_FIXTURE_TEST_TIMEOUT_MS = 30_000;
+
 export function configureFixtureGitIdentity(repo, callerCwd = process.cwd()) {
   // Read the caller's effective config before writing fixture-local identity.
   // Managed hooks and signing must keep using the operator's identity.
@@ -27,4 +31,11 @@ export function configureFixtureGitIdentity(repo, callerCwd = process.cwd()) {
   }
   execFileSync("git", ["config", "--local", "user.name", name], { cwd: repo });
   execFileSync("git", ["config", "--local", "user.email", email], { cwd: repo });
+  // The managed launcher clears global/system configuration to isolate GitHub
+  // credentials. Preserve only the caller's explicit local signing policy.
+  for (const key of ["commit.gpgsign", "gpg.format", "gpg.program", "gpg.openpgp.program",
+    "gpg.ssh.program", "gpg.x509.program", "user.signingkey", "gpg.ssh.allowedSignersFile"]) {
+    const value = readConfig(key);
+    if (value !== null) execFileSync("git", ["config", "--local", key, value], { cwd: repo });
+  }
 }
