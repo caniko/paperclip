@@ -1,5 +1,6 @@
 export { decisionEffectTargetIssueIds } from "./decision.js";
 export type { McpPreparedLaunchSnapshot, McpLaunchChallenge, McpLaunchAuthorizationReceipt } from "./mcp-prepared-launch.js";
+export type { McpWorkerEnrollmentPins, McpWorkerEnrollment, McpWorkerEnrollmentChallenge, McpWorkerEnrollmentPreparation } from "./mcp-worker-enrollment.js";
 export {
   NATIVE_FINALIZATION_SCHEMA,
   type NativeFinalizationResult,

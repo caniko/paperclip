@@ -128,6 +128,7 @@ export { documentAnnotationComments } from "./document_annotation_comments.js";
 export { documentAnnotationAnchorSnapshots } from "./document_annotation_anchor_snapshots.js";
 export { heartbeatRuns } from "./heartbeat_runs.js";
 export { mcpPreparedLaunches } from "./mcp_prepared_launches.js";
+export { mcpWorkerEnrollments } from "./mcp_worker_enrollments.js";
 export { heartbeatRunEvents } from "./heartbeat_run_events.js";
 export { providerTraceRecords } from "./provider_trace_records.js";
 export { completionContracts } from "./completion_contracts.js";

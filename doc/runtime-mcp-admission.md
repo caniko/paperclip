@@ -186,3 +186,48 @@ every mutation, and ownership-aware retirement. Full runtime acceptance still
 needs authenticated enrollment and its transactional resolver, the token-verified
 run-authorization route, exact stored-launch dispatch, trusted Chaosbox scoped
 views and private transport, and the combined consumer qualification.
+
+## Operator-pinned worker enrollment (controller foundation)
+
+`mcp_worker_enrollments` and `server/src/services/mcp-worker-enrollment.ts`
+provide the private enrollment ledger. This slice has no HTTP provisioning or
+proof route and does not enable managed admission. A trusted controller supplies
+the instance identity; an operator supplies company-scoped worker/key labels,
+canonical Ed25519 SPKI public key, exact approved recipient, separately named
+execution host, and an enrollment lifetime of at most 30 days. Agent profiles and
+launch payloads cannot supply enrollment authority.
+
+Preparation issues a random 256-bit `pcmwe_` bootstrap bearer, returned only in
+the one-time preparation response and hashed in the ledger, plus a random nonce.
+The bootstrap authorizes only enrollment proof, for at most five minutes and
+never beyond enrollment expiry. The worker signs the ordered
+`paperclip.mcp-worker-enrollment-proof.v1` array produced by
+`mcpWorkerEnrollmentProofBytes`: it binds the enrollment/company/controller,
+all approved pins including the public key, nonce, and both deadlines. Retries
+with the authenticated bootstrap and original proof return the same receipt and
+revision within that deadline. Ordinary inspection excludes verifier and nonce.
+
+Row locks serialize proof and revocation; database wall-clock checks run again
+after audit writes. Every state transition rotates an opaque revision and commits
+with a content-free activity event. SQL guards permit only `pending → enrolled`,
+`pending → revoked`, and `enrolled → revoked`. They prevent pin replacement,
+reactivation, direct insertion of accepted rows, and deletion of key-label
+tombstones. An expired or revoked key never releases adapter or filesystem
+ownership. A replacement requires explicit revocation and a fresh key label.
+
+`readEnrolledMcpWorker` is for the trusted launch resolver's existing transaction.
+It locks the enrolled row through commit, checks company/controller identity and
+state, and requires `launch.expiresAt <= enrollment.expiresAt`. This propagated
+deadline lets the prepared-launch foundation's final clock checks cover key
+expiry during later asynchronous work. Key possession does not attest a physical
+host or establish filesystem/network confinement.
+
+Before exposing these methods as endpoints, provision/inspection/revocation must
+enforce instance-admin **and** company authorization. Only the exact proof POST
+may use bootstrap authentication before ordinary actor authentication, with the
+bearer in `Authorization`, a bounded body, and payload-free failure logs. Browser
+sessions and implicit local-board access cannot replace bootstrap proof. Company
+deletion is currently restricted by the enrollment references; audited company
+retirement preserving key-label tombstones must be qualified before production
+provisioning is exposed. The grant resolver, runtime ingress/dispatch, protected
+worker-side key handling and combined transport acceptance remain required.

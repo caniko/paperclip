@@ -1,8 +1,9 @@
-import { createHmac, createPublicKey, randomBytes, randomUUID, verify } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { validateHeaderName, validateHeaderValue } from "node:http";
 import { isMcpAdmissionIdentifier, MCP_ADMISSION_LIMITS, requireMcpCredentialEndpoint, requireMcpRunBinding } from "@paperclipai/adapter-utils/mcp-admission";
 import type { McpLaunchChallenge, McpPreparedLaunchSnapshot } from "@paperclipai/shared";
+import { requireMcpWorkerKey, verifyMcpWorkerSignature } from "./mcp-worker-key.js";
 
 export class McpLaunchBlockedError extends Error {
   readonly code = "runtime_mcp_admission_blocked";
@@ -31,19 +32,10 @@ const snapshotSchema = z.object({
 const envelopeSchema = z.object({ schema: z.literal("paperclip.mcp-prepared-launch.v1"),
   id: z.string().guid(), salt: digest, snapshot: snapshotSchema }).strict();
 
-function enrolledKey(encoded: string) {
-  // Ed25519 SPKI is exactly 44 bytes. Reject aliases, private keys and other algorithms.
-  const bytes = Buffer.from(encoded, "base64");
-  if (bytes.length !== 44 || bytes.toString("base64") !== encoded) throw new McpLaunchBlockedError();
-  const key = createPublicKey({ key: bytes, format: "der", type: "spki" });
-  if (key.asymmetricKeyType !== "ed25519") throw new McpLaunchBlockedError();
-  return key;
-}
-
 export function parseMcpLaunchSnapshot(value: unknown): McpPreparedLaunchSnapshot {
   try {
     const snapshot = snapshotSchema.parse(value);
-    enrolledKey(snapshot.worker.publicKey);
+    requireMcpWorkerKey(snapshot.worker.publicKey);
     if (new Set(snapshot.servers.map(server => server.connectionId)).size !== snapshot.servers.length ||
         Buffer.byteLength(snapshot.launchJson, "utf8") > 1_048_576 ||
         Buffer.from(snapshot.launchJson, "utf8").toString("utf8") !== snapshot.launchJson) throw new McpLaunchBlockedError();
@@ -100,10 +92,5 @@ export function mcpLaunchProofBytes(c: McpLaunchChallenge): Buffer {
 }
 
 export function verifyMcpLaunchProof(challenge: McpLaunchChallenge, signature: string, publicKey: string): boolean {
-  try {
-    if (!/^[A-Za-z0-9_-]{86}$/.test(signature)) return false;
-    const bytes = Buffer.from(signature, "base64url");
-    return bytes.length === 64 && bytes.toString("base64url") === signature &&
-      verify(null, mcpLaunchProofBytes(challenge), enrolledKey(publicKey), bytes);
-  } catch { return false; }
+  return verifyMcpWorkerSignature(mcpLaunchProofBytes(challenge), signature, publicKey);
 }

@@ -1,5 +1,6 @@
 export { agentAdapterTypeSchema, optionalAgentAdapterTypeSchema } from "./adapter-type.js";
 export type { McpPreparedLaunchSnapshot, McpLaunchChallenge, McpLaunchAuthorizationReceipt } from "./types/mcp-prepared-launch.js";
+export type { McpWorkerEnrollmentPins, McpWorkerEnrollment, McpWorkerEnrollmentChallenge, McpWorkerEnrollmentPreparation } from "./types/mcp-worker-enrollment.js";
 export {
   RUNNER_GOAL_MAX_OBJECTIVE_CHARS,
   runnerGoalAvailabilitySchema,
