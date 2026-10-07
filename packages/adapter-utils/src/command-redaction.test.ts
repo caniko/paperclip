@@ -16,9 +16,18 @@ import {
 } from "./command-redaction.js";
 
 describe("redactDiagnosticText", () => {
+  it.each(["SERVICE_TOKEN_BACKUP", "API_KEY_V2", "PASSWORD_NEW", "OPENAI_API_KEY_1", "api-key-customer", "PASSWORD_TOKEN_POLICY"])(
+    "redacts arbitrary credential suffixes in %s", name => {
+      for (const text of [
+        `${name}=opaque-sensitive-value`, `tool --${name} opaque-sensitive-value`,
+        JSON.stringify({ [name]: "opaque-sensitive-value" }),
+        JSON.stringify(JSON.stringify({ [name]: "opaque-sensitive-value" })),
+      ]) expect(redactDiagnosticText(text)).not.toContain("opaque-sensitive-value");
+    },
+  );
   it("preserves credential metadata and dotted identifiers", () => {
     for (const text of [
-      '"tokenBudget":4000 --token-budget 4000 SECRET_STORAGE=vault',
+      '"tokenBudget":4000 --token-budget 4000 --token-policy readable SECRET_STORAGE=vault',
       '{"credentialHandling":"harness","authorizationRequired":true}',
       "executor.customTools.integrations.list deployment.credentials.example.md api.openai.com",
       "Use a private key and secret manager with credential handling.",

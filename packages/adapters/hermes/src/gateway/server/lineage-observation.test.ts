@@ -196,11 +196,15 @@ it.each(["false flag", "missing flag", "wrong root", "wrong body", "wrong key"])
   } finally { await test.close(); }
 }, 15_000);
 
-it.each(["changed replay", "past truncation", "sequence mismatch", "host conflict"])("stops and settles before returning a %s protocol failure", async kind => {
+it.each(["changed replay", "past truncation", "sequence mismatch", "host conflict", "initial gap", "later gap"])("stops and settles before returning a %s protocol failure", async kind => {
   const prefix = kind === "past truncation" ? "x".repeat(600) : "";
   const test = await fixture((path, res) => {
     if (path === "/v1/runs/parent/events") {
       const first = frame(1, "message.delta", { delta: `${prefix}first` });
+      if (kind === "initial gap" || kind === "later gap") {
+        res.end((kind === "later gap" ? first : "") + frame(3, "message.delta", { delta: "skipped-event" }));
+        return;
+      }
       res.end(first + first + (kind === "sequence mismatch"
         ? 'id: 2\nevent: run.completed\ndata: {"sequence":3,"status":"completed"}\n\n'
         : frame(1, "message.delta", { delta: `${prefix}changed` })));
@@ -210,8 +214,10 @@ it.each(["changed replay", "past truncation", "sequence mismatch", "host conflic
     await vi.waitFor(() => expect(test.stops.length).toBeGreaterThan(1), { timeout: 3000 });
     test.pending();
     if (kind !== "host conflict") {
-      expect(test.events).toHaveLength(1);
-      expect(JSON.stringify(test.events[0].providerSource?.canonicalPayload)).not.toContain("first");
+      expect(test.events).toHaveLength(kind === "initial gap" ? 0 : 1);
+      expect(JSON.stringify(test.events)).not.toContain("skipped-event");
+      if (test.events.length) expect(JSON.stringify(test.events[0].providerSource?.canonicalPayload)).not.toContain("first");
+      if (kind.endsWith("gap")) expect(test.progress.at(-1)?.cursors).toEqual(kind === "initial gap" ? {} : { parent: 1 });
     }
     test.setStop({ run_id: "parent", status: "cancelled", stop_requested: true, lineage_settled: true,
       lineage: [{ run_id: "parent", status: "cancelled" }] });
