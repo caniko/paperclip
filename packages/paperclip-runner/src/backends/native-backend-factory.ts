@@ -21,6 +21,7 @@ export interface NativeBackendFactoryOptions extends Omit<
   "transportFactory"
 > {
   codexTransportFactory?: (context?: {
+    baseInstructions?: string;
     providerRecoveryPolicy?: PersistedNativeSession["providerRecoveryPolicy"];
     persistedSession?: Pick<
       PersistedHarnessSession,
@@ -67,6 +68,7 @@ export function createNativeSessionBackend(
       );
     }
     return createOpenCodeNativeSessionBackend(input, {
+      completionFeedback: options.completionFeedback,
       runtimeDirectory: options.opencodeRuntimeDirectory,
       environment: options.opencodeEnvironment,
       command: options.opencodeCommand,
@@ -77,11 +79,6 @@ export function createNativeSessionBackend(
     });
   }
   if (input.provider.kind === "acpx") {
-    if (input.provider.agent === "pi") {
-      throw new Error(
-        "Native ACPX backend for pi is unavailable until descriptor-confined verified launch is implemented",
-      );
-    }
     if (!options.acpxRuntimeDirectory?.trim()) {
       throw new Error("ACPX backend requires an instance runtime directory");
     }
