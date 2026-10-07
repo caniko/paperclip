@@ -1,3 +1,4 @@
+export { mcpWorkerEnrollmentProofSchema, type McpWorkerEnrollmentProof } from "./mcp-worker-enrollment.js";
 export {
   connectionsSearchInputSchema,
   connectionRequestInputSchema,

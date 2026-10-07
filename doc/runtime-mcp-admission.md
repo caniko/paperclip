@@ -190,11 +190,12 @@ views and private transport, and the combined consumer qualification.
 ## Operator-pinned worker enrollment (controller foundation)
 
 `mcp_worker_enrollments` and `server/src/services/mcp-worker-enrollment.ts`
-provide the private enrollment ledger. This slice has no HTTP provisioning or
-proof route and does not enable managed admission. A trusted controller supplies
+provide the private enrollment ledger. The exact bootstrap-authenticated proof
+POST described below is wired into the application; HTTP provisioning remains
+unavailable and managed admission remains disabled. A trusted controller supplies
 the instance identity; an operator supplies company-scoped worker/key labels,
 canonical Ed25519 SPKI public key, exact approved recipient, separately named
-execution host, and an enrollment lifetime of at most 30 days. Agent profiles and
+execution host, and an enrollment lifetime of at most 720 elapsed hours. Agent profiles and
 launch payloads cannot supply enrollment authority.
 
 Preparation issues a random 256-bit `pcmwe_` bootstrap bearer, returned only in
@@ -222,11 +223,42 @@ deadline lets the prepared-launch foundation's final clock checks cover key
 expiry during later asynchronous work. Key possession does not attest a physical
 host or establish filesystem/network confinement.
 
-Before exposing these methods as endpoints, provision/inspection/revocation must
-enforce instance-admin **and** company authorization. Only the exact proof POST
-may use bootstrap authentication before ordinary actor authentication, with the
-bearer in `Authorization`, a bounded body, and payload-free failure logs. Browser
-sessions and implicit local-board access cannot replace bootstrap proof. Company
+### Bootstrap proof ingress
+
+Only `POST /mcp/worker-enrollments/:uuid/proof` uses bootstrap authentication before
+the global body parser, raw-body capture, HTTP logger and ordinary actor
+authentication. It retains the existing hostname gate and trusted-proxy policy.
+The bootstrap must appear once in `Authorization: Bearer pcmwe_…`; query
+credentials, duplicate authorization headers, compressed bodies and non-JSON
+media types are rejected before database access. The JSON body accepts only a
+canonical Ed25519 `signature`, never controller, company, host or other authority
+pins. Header authentication permits receiving this bounded proof; the mutation
+rechecks the bootstrap, current row and deadline under its lock.
+
+The ingress caps a body at 1 KiB and the complete request/response transport at
+30 seconds. Oversized or stalled chunked uploads do not trigger unbounded drainage.
+Normal rejection may flush its fixed response; the hard deadline also closes a
+backpressured socket even when a response is ended or queued. Monotonic elapsed
+time is checked before proof and success, independently of timer scheduling.
+Each application process retains at most 1,024 client budget keys, allows 30
+attempts per client per 60 seconds, and holds at most eight non-queueing database
+work permits. Client addresses come from Express's operator-configured trust
+policy, not raw forwarded headers. Full client capacity fails closed rather than
+evicting a live budget. A timeout or disconnect retains its permit until outstanding
+database work actually settles. These are process-local bounds, not a distributed
+quota. Failed proof responses contain fixed, content-free admission guidance;
+proof payloads and credentials never enter the ordinary HTTP logger.
+
+The trusted controller identity is captured once at application construction.
+An instance label unsupported by the narrower MCP contract blocks proof ingress,
+while ordinary application startup retains its existing instance-label contract.
+Pins are never silently truncated or remapped. An enrollment receipt is an
+inspection result, not fresh runtime launch authority; runtime authorization
+must still recheck the current enrollment and grants.
+
+Provision/inspection/revocation endpoints must enforce instance-admin **and**
+company authorization before they are exposed. Browser sessions and implicit
+local-board access cannot replace bootstrap proof. Company
 deletion is currently restricted by the enrollment references; audited company
 retirement preserving key-label tombstones must be qualified before production
 provisioning is exposed. The grant resolver, runtime ingress/dispatch, protected

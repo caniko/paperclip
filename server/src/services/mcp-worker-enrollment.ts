@@ -75,6 +75,17 @@ export function mcpWorkerEnrollmentService(db: Db, policy: { controllerInstanceI
     if (actor.actorType !== "user" || typeof actor.actorId !== "string" || !actor.actorId.trim() || actor.actorId.length > 256) blocked();
   }
   return {
+    /** Header authentication grants permission to receive a bounded proof only.
+     * The mutation rechecks this credential and current authority under its lock. */
+    async authenticateBootstrap(input: { enrollmentId: string; bearerToken: string }) {
+      if (!/^pcmwe_[A-Za-z0-9_-]{43}$/.test(input.bearerToken)) return blocked();
+      return transaction(async tx => {
+        const [row] = await tx.select().from(mcpWorkerEnrollments).where(and(eq(mcpWorkerEnrollments.id, input.enrollmentId),
+          eq(mcpWorkerEnrollments.bootstrapTokenHash, hash(input.bearerToken)))).limit(1);
+        if (!row || row.controllerInstanceId !== controllerInstanceId || row.state === "revoked" ||
+            row.challengeExpiresAt.getTime() <= await clock(tx)) return blocked();
+      });
+    },
     async prepare(companyId: string, input: unknown, actor: Operator): Promise<McpWorkerEnrollmentPreparation> {
       requireOperator(actor);
       const pins = parseMcpWorkerEnrollmentPins(input);

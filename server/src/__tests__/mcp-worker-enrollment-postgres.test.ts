@@ -1,10 +1,14 @@
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
+import express from "express";
+import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { activityLog, companies, createDb, mcpWorkerEnrollments } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { mcpWorkerEnrollmentService, readEnrolledMcpWorker } from "../services/mcp-worker-enrollment.js";
 import { mcpWorkerEnrollmentProofBytes } from "../services/mcp-worker-enrollment-contract.js";
+import { mcpWorkerEnrollmentProofRoutes } from "../routes/mcp-worker-enrollment.js";
+import { privateHostnameGuard } from "../middleware/private-hostname-guard.js";
 
 describe("operator-pinned MCP worker enrollment", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
@@ -29,6 +33,65 @@ describe("operator-pinned MCP worker enrollment", () => {
       signature: sign(null, mcpWorkerEnrollmentProofBytes(prepared.challenge), keys.privateKey).toString("base64url") };
     return { companyId, pins, prepared, subject };
   }
+
+  function ingress(worker = service()) {
+    const app = express();
+    app.use(mcpWorkerEnrollmentProofRoutes(worker, privateHostnameGuard({ enabled: true, allowedHostnames: [], bindHost: "127.0.0.1" })));
+    let ordinaryActorRequests = 0;
+    app.use(express.json());
+    app.use((_req, res) => { ordinaryActorRequests += 1; res.sendStatus(418); });
+    return { client: request.agent(app).set("Host", "127.0.0.1"), ordinaryActorRequests: () => ordinaryActorRequests };
+  }
+
+  it("header-authenticates the current company/controller bootstrap without consuming proof or audit state", async () => {
+    const f = await fixture(), other = await fixture();
+    const auth = { enrollmentId: f.subject.enrollmentId, bearerToken: f.subject.bearerToken };
+    await expect(service().authenticateBootstrap(auth)).resolves.toBeUndefined();
+    await expect(service().authenticateBootstrap({ ...auth, bearerToken: other.prepared.bearerToken })).rejects.toThrow();
+    await expect(service().authenticateBootstrap({ ...auth, enrollmentId: other.subject.enrollmentId })).rejects.toThrow();
+    await expect(service().authenticateBootstrap({ ...auth, bearerToken: "pcgw_not-a-bootstrap" })).rejects.toThrow();
+    await expect(mcpWorkerEnrollmentService(db, { controllerInstanceId: "controller-b" }).authenticateBootstrap(auth)).rejects.toThrow();
+    expect((await service().inspect(f.companyId, auth.enrollmentId))?.state).toBe("pending");
+    const events = await db.select().from(activityLog).where(eq(activityLog.entityId, auth.enrollmentId));
+    expect(events.map(event => event.action)).toEqual(["mcp_worker.enrollment_prepared"]);
+  });
+
+  it("proves real authenticated key possession through bounded HTTP and preserves an idempotent retry receipt", async () => {
+    const f = await fixture(), http = ingress(), path = `/mcp/worker-enrollments/${f.subject.enrollmentId}/proof`;
+    const wrongSignature = sign(null, mcpWorkerEnrollmentProofBytes(f.prepared.challenge), generateKeyPairSync("ed25519").privateKey).toString("base64url");
+    const denied = await http.client.post(path).set("Authorization", `Bearer ${f.subject.bearerToken}`).send({ signature: wrongSignature });
+    expect(denied.status).toBe(403);
+    expect(denied.body.error.code).toBe("runtime_mcp_admission_blocked");
+    expect((await service().inspect(f.companyId, f.subject.enrollmentId))?.state).toBe("pending");
+    const responses = await Promise.all([0, 1].map(() => http.client.post(path).set("Authorization", `Bearer ${f.subject.bearerToken}`).send({ signature: f.subject.signature })));
+    expect(responses.map(response => response.status)).toEqual([200, 200]);
+    expect(responses[0].body).toEqual(responses[1].body);
+    expect(responses[0].body.state).toBe("enrolled");
+    expect(responses[0].headers["cache-control"]).toBe("no-store");
+    for (const response of responses) {
+      expect(response.text).not.toContain(f.subject.bearerToken);
+      expect(response.text).not.toContain(f.prepared.challenge.nonce);
+    }
+    const events = await db.select().from(activityLog).where(eq(activityLog.entityId, f.subject.enrollmentId));
+    expect(events.map(event => event.action)).toEqual(["mcp_worker.enrollment_prepared", "mcp_worker.enrolled"]);
+    expect(http.ordinaryActorRequests()).toBe(0);
+  });
+
+  it("rechecks revocation after preauthentication instead of enrolling a stale accepted header", async () => {
+    const f = await fixture(), worker = service();
+    const http = ingress({ ...worker, authenticateBootstrap: async input => {
+      await worker.authenticateBootstrap(input);
+      await worker.revoke(f.companyId, input.enrollmentId, actor);
+    } });
+    const response = await http.client.post(`/mcp/worker-enrollments/${f.subject.enrollmentId}/proof`)
+      .set("Authorization", `Bearer ${f.subject.bearerToken}`).send({ signature: f.subject.signature });
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe("runtime_mcp_admission_blocked");
+    const enrollment = await worker.inspect(f.companyId, f.subject.enrollmentId);
+    expect(enrollment?.state).toBe("revoked");
+    expect(enrollment?.enrolledAt).toBeNull();
+    expect(http.ordinaryActorRequests()).toBe(0);
+  });
 
   it("enrolls exactly the approved pins once across concurrent lost-ack retries and returns a locked consumer binding", async () => {
     const f = await fixture();
@@ -115,6 +178,7 @@ describe("operator-pinned MCP worker enrollment", () => {
   it("rejects actual elapsed enrollment expiry without consuming the pending bootstrap", async () => {
     const f = await fixture(1500);
     await db.execute(sql`select pg_sleep(1.6)`);
+    await expect(service().authenticateBootstrap(f.subject)).rejects.toThrow();
     await expect(service().prove(f.subject)).rejects.toThrow();
     expect((await service().inspect(f.companyId, f.subject.enrollmentId))?.state).toBe("pending");
     expect(await db.transaction(tx => readEnrolledMcpWorker(tx, { companyId: f.companyId,

@@ -122,6 +122,9 @@ import {
 } from "./routes/connection-intents.js";
 import { adapterRoutes } from "./routes/adapters.js";
 import { managedAgentProfileRoutes } from "./routes/managed-agent-profiles.js";
+import { mcpWorkerEnrollmentProofRoutes } from "./routes/mcp-worker-enrollment.js";
+import { mcpWorkerEnrollmentService } from "./services/mcp-worker-enrollment.js";
+import { resolvePaperclipInstanceId } from "./home-paths.js";
 import { remoteAgentProfileRoutes } from "./routes/remote-agent-profiles.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
 import { readBrandedStaticIndexHtml } from "./static-index-html.js";
@@ -519,6 +522,31 @@ export async function createApp(
   // when the server may be reachable without a known reverse proxy in front.
   applyTrustProxy(app, parseTrustProxyEnv(process.env.TRUST_PROXY));
 
+  const privateHostnameGateEnabled = shouldEnablePrivateHostnameGuard({
+    deploymentMode: opts.deploymentMode,
+    deploymentExposure: opts.deploymentExposure,
+  });
+  const privateHostnameAllowSet = resolvePrivateHostnameAllowSet({
+    allowedHostnames: opts.allowedHostnames,
+    bindHost: opts.bindHost,
+  });
+  // This exact bootstrap proof authenticates before consuming any body. Its
+  // bounded, payload-free handler owns parsing/errors before ordinary actor auth.
+  const mcpControllerInstanceId = opts.instanceId ?? resolvePaperclipInstanceId();
+  let workerEnrollment: ReturnType<typeof mcpWorkerEnrollmentService> | undefined;
+  // Paperclip instance labels have a broader contract than MCP identifiers.
+  // Reject unsupported MCP identity only on ingress; never truncate its pins
+  // or make otherwise valid ordinary application startup depend on enrollment.
+  const getWorkerEnrollment = () => workerEnrollment ??=
+    mcpWorkerEnrollmentService(db, { controllerInstanceId: mcpControllerInstanceId });
+  app.use(mcpWorkerEnrollmentProofRoutes(
+    {
+      authenticateBootstrap: input => getWorkerEnrollment().authenticateBootstrap(input),
+      prove: input => getWorkerEnrollment().prove(input),
+    },
+    privateHostnameGuard({ enabled: privateHostnameGateEnabled, allowedHostnames: opts.allowedHostnames, bindHost: opts.bindHost }),
+  ));
+
   app.use(
     COMPANY_IMPORT_API_PATH,
     express.json({
@@ -542,14 +570,6 @@ export async function createApp(
   );
   app.use("/api", apiCompression());
   app.use(httpLogger);
-  const privateHostnameGateEnabled = shouldEnablePrivateHostnameGuard({
-    deploymentMode: opts.deploymentMode,
-    deploymentExposure: opts.deploymentExposure,
-  });
-  const privateHostnameAllowSet = resolvePrivateHostnameAllowSet({
-    allowedHostnames: opts.allowedHostnames,
-    bindHost: opts.bindHost,
-  });
   app.use(
     privateHostnameGuard({
       enabled: privateHostnameGateEnabled,
