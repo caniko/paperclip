@@ -3549,7 +3549,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
   const companies = companyService(db);
   const agents = agentService(db);
   const assetRecords = assetService(db);
-  const instructions = agentInstructionsService();
+  const instructions = agentInstructionsService(db);
   const access = accessService(db);
   const projects = projectService(db);
   const issues = issueService(db);
@@ -5671,7 +5671,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             ...patch,
             ...automationPausePatch,
             status: pauseAutomations ? "paused" : "idle",
-          });
+          }, { createdByUserId: actorUserId });
           await access.ensureMembership(targetCompany.id, "agent", created.id, "member", "active");
           await access.setPrincipalPermission(
             targetCompany.id,
