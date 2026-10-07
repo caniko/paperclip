@@ -1689,7 +1689,7 @@ describe("realizeExecutionWorkspace", () => {
     // required tools, so pnpm/paperclipai stay absent even on non-FHS hosts.
     await fs.symlink(process.execPath, path.join(isolatedBin, "node"));
     for (const command of ["bash", "sh", "git", "env", "dirname", "basename", "mkdir", "find", "sed", "ln"]) {
-      const { stdout } = await execFileAsync("/bin/sh", ["-c", 'command -v "$1"', "sh", command]);
+      const { stdout } = await execFileAsync("sh", ["-c", 'command -v "$1"', "sh", command]);
       const executable = stdout.trim();
       expect(path.isAbsolute(executable)).toBe(true);
       await fs.symlink(executable, path.join(isolatedBin, command));
