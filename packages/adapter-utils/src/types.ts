@@ -166,14 +166,7 @@ export interface AdapterRuntimeMcpServer {
   token: string;
   connectionId: string;
   /** Core-resolved admission binding. Adapters must not infer this from agent config. */
-  runBinding?: {
-    runId: string;
-    executionHostId: string;
-    serverHostId: string;
-    /** Exact normalized recipient approved by the instance operator. */
-    gatewayUrl: string;
-    authorizedCrossHost?: boolean;
-  };
+  runBinding?: import("./mcp-admission.js").McpRunBinding;
 }
 
 export interface AdapterRuntimeMcpAccess {
@@ -509,6 +502,9 @@ export interface ServerAdapterModule {
   supportsLocalAgentJwt?: boolean;
   /** How this adapter receives Paperclip's run-scoped control tools. */
   runtimeToolDelivery?: AdapterRuntimeToolDelivery;
+  /** Core must attach operator-approved run/host/recipient metadata before
+   * delivering runtime MCP servers. The adapter rechecks it at dispatch. */
+  requiresRuntimeMcpRunBinding?: boolean;
   models?: AdapterModel[];
   listModels?: () => Promise<AdapterModel[]>;
   /**

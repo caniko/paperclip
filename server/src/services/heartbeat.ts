@@ -25196,7 +25196,7 @@ export function heartbeatService(
               runtimeMcpServers.unshift({ name: "Paperclip projects", url: `${paperclipApiBaseUrl()}/api/mcp/project-tools`,
                 token: authToken, connectionId: "paperclip-project-tools" });
             }
-            const runtimeMcp = createAdapterRuntimeMcpAccess(agent.adapterType === "hermes_gateway"
+            const runtimeMcp = createAdapterRuntimeMcpAccess(adapter.requiresRuntimeMcpRunBinding
               ? bindRuntimeMcpServersToRun({ servers: runtimeMcpServers, runId: run.id, executionTarget,
                   policy: runtimeEnv.PAPERCLIP_RUNTIME_MCP_ADMISSION })
               : runtimeMcpServers);

@@ -45,6 +45,7 @@
   "dependencies": {
     "@paperclipai/shared": "workspace:*",
     "acpx": "0.12.0",
+    "harbor-llm": "git+https://github.com/caniko/harbor-llm.git#c9cbd2803e5cd69c1945bbf10ddf2efb9648fed7",
     "picocolors": "^1.1.1"
   },
   "devDependencies": {

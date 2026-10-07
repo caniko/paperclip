@@ -1,6 +1,24 @@
 import { afterEach, expect, it, vi } from "vitest";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { execute } from "./execute.js";
+import { bindMcpServersToRun } from "@paperclipai/adapter-utils/mcp-admission";
+import { requireManagedMcpCapability, type ManagedMcpManifest } from "./managed-mcp.js";
+
+it("negotiates the execution host independently from an explicitly authorized remote server", () => {
+  const manifest: ManagedMcpManifest = { version: 1, run_id: "run-b", execution_host_id: "host-b", servers: [
+    { name: "reader", connection_id: "reader", url: "https://reader.example/mcp", token: "reader-token",
+      server_host_id: "host-a", authorized_cross_host: true },
+  ] };
+  expect(() => requireManagedMcpCapability({ features: { runs_managed_mcp: {
+    version: 1, enabled: true, mode: "run_isolated", host_id: "host-b",
+  } } }, manifest)).not.toThrow();
+  expect(() => requireManagedMcpCapability({ features: { runs_managed_mcp: {
+    version: 1, enabled: true, mode: "run_isolated", host_id: "host-a",
+  } } }, manifest)).toThrow();
+  expect(() => requireManagedMcpCapability({ features: { runs_managed_mcp: {
+    version: 1, enabled: true, mode: "run_isolated", host_id: "host-b",
+  } } }, { ...manifest, servers: [{ ...manifest.servers[0]!, authorized_cross_host: false }] })).toThrow();
+});
 
 function context(runId = "run-a"): AdapterExecutionContext {
   return {
@@ -33,6 +51,60 @@ function gateway(capability: unknown = { version: 1, enabled: true, mode: "run_i
 }
 
 afterEach(() => { vi.unstubAllGlobals(); });
+
+it.each(["http://127.0.0.1:9119", "http://127.0.0.1:9119/", "http://127.0.0.1:9119/chat", "http://127.0.0.1:9119/api"])(
+  "normalizes the operator-approved Hermes alias at dispatch: %s", async (gatewayUrl) => {
+    const { bodies } = gateway();
+    const ctx = context();
+    ctx.config.apiBaseUrl = "http://127.0.0.1:9119/chat";
+    const servers = ctx.runtimeMcp!.getServers();
+    const bound = bindMcpServersToRun({ servers, runId: ctx.runId, executionHostId: "worker-host",
+      policy: { version: 1, servers: { chaosbox: { url: servers[0].url, gatewayUrl,
+        serverHostId: "worker-host", executionHostIds: ["worker-host"] } } },
+    });
+    ctx.runtimeMcp = { getServers: () => bound };
+    expect((await execute(ctx)).exitCode).toBe(0);
+    expect(bodies[0].runtime_mcp).toMatchObject({ servers: [{ name: "chaosbox", connection_id: "chaosbox" }] });
+  },
+);
+
+it.each(["https://user:secret@worker.example", "http://127.0.0.1:8642?token=x", "http://127.0.0.1:8642#fragment"])(
+  "rejects unsafe raw binding recipients before provider normalization can discard data: %s", async (gatewayUrl) => {
+    const { bodies, mock } = gateway();
+    const ctx = context();
+    const servers = ctx.runtimeMcp!.getServers();
+    servers[0].runBinding = { ...servers[0].runBinding!, gatewayUrl };
+    ctx.runtimeMcp = { getServers: () => servers };
+    expect((await execute(ctx)).errorCode).toBe("hermes_gateway_managed_mcp_blocked");
+    expect(bodies).toEqual([]);
+    expect(mock).not.toHaveBeenCalled();
+  },
+);
+
+it.each([
+  "http://127.0.0.1:8642?token=x", "http://127.0.0.1:8642#fragment",
+  " http://127.0.0.1:8642", "http://127.0.0.1:8642 ",
+  "http://127.0.0.1:8642/\n", "http://127.0.0.1:8642/\r\n", "http://127.0.0.1:8642\t",
+])(
+  "blocks unsafe configured recipients before normalization: %s", async (gatewayUrl) => {
+    const { bodies, mock } = gateway();
+    const ctx = context();
+    ctx.config.apiBaseUrl = gatewayUrl;
+    expect((await execute(ctx)).errorCode).toBe("hermes_gateway_managed_mcp_blocked");
+    expect(bodies).toEqual([]);
+    expect(mock).not.toHaveBeenCalled();
+  },
+);
+
+it("validates the raw fallback url configuration before dispatch", async () => {
+  const { bodies, mock } = gateway();
+  const ctx = context();
+  delete ctx.config.apiBaseUrl;
+  ctx.config.url = "http://127.0.0.1:8642/\n";
+  expect((await execute(ctx)).errorCode).toBe("hermes_gateway_managed_mcp_blocked");
+  expect(bodies).toEqual([]);
+  expect(mock).not.toHaveBeenCalled();
+});
 
 it("rejects a replacement gateway even when it reports the approved host label", async () => {
   const { bodies, mock } = gateway();

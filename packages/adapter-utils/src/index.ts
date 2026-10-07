@@ -47,6 +47,7 @@ export type {
   CLIAdapterModule,
   CreateConfigValues,
 } from "./types.js";
+export type { McpRunBinding, McpAdmissionServer, McpAdmissionRule, McpAdmissionPolicy, McpAdmissionReason } from "./mcp-admission.js";
 export type {
   SessionCompactionPolicy,
   NativeContextManagement,

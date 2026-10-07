@@ -29,6 +29,8 @@ import { bindSessionKey, requireWorkspaceCapability, resolveWorkspaceBinding, ty
 import { admitOwnedRun, waitForOwnedRun } from "./run-lifetime.js";
 import { executionCheckpoint, settleOwnedAdmission } from "./recovery.js";
 import { requireManagedMcpCapability, resolveManagedMcp, type ManagedMcpManifest } from "./managed-mcp.js";
+import { normalizeBaseUrl } from "./base-url.js";
+export { normalizeBaseUrl } from "./base-url.js";
 
 type SessionKeyStrategy = "issue" | "agent" | "run" | "none";
 
@@ -90,8 +92,6 @@ const TERMINAL_STATUSES = new Set([
 
 const FAILURE_STATUSES = new Set(["failed", "error"]);
 const CANCELLED_STATUSES = new Set(["cancelled", "canceled", "stopped", "interrupted"]);
-const DEFAULT_HERMES_DASHBOARD_PORT = "9119";
-const HERMES_DASHBOARD_API_PATHS = new Set(["", "/", "/chat"]);
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -120,27 +120,6 @@ function normalizeSessionKeyStrategy(value: unknown): SessionKeyStrategy {
   const raw = asString(value, "issue").trim().toLowerCase();
   if (raw === "agent" || raw === "run" || raw === "none") return raw;
   return "issue";
-}
-
-export function normalizeBaseUrl(value: string): URL | null {
-  try {
-    const url = new URL(value);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    const normalizedPath = url.pathname.replace(/\/+$/, "") || "/";
-    if (
-      url.port === DEFAULT_HERMES_DASHBOARD_PORT &&
-      HERMES_DASHBOARD_API_PATHS.has(normalizedPath)
-    ) {
-      url.pathname = "/api";
-    } else {
-      url.pathname = url.pathname.replace(/\/+$/, "");
-    }
-    url.search = "";
-    url.hash = "";
-    return url;
-  } catch {
-    return null;
-  }
 }
 
 function apiUrl(baseUrl: URL, path: string): string {
@@ -784,7 +763,8 @@ function errorResult(err: unknown, redactText: TextRedactor = sanitizeSensitiveT
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  const apiBaseUrlValue = asString(ctx.config.apiBaseUrl ?? ctx.config.url, "").trim();
+  const configuredApiBaseUrl = asString(ctx.config.apiBaseUrl ?? ctx.config.url, "");
+  const apiBaseUrlValue = configuredApiBaseUrl.trim();
   if (!apiBaseUrlValue) {
     return {
       exitCode: 1,
@@ -830,7 +810,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let binding: WorkspaceBinding | null;
   let managedMcp: ManagedMcpManifest | null;
   try {
-    managedMcp = resolveManagedMcp(ctx, baseUrl.toString());
+    managedMcp = resolveManagedMcp(ctx, configuredApiBaseUrl);
     binding = resolveWorkspaceBinding(ctx, baseUrl.toString());
     if (managedMcp && (binding?.context.lifetime !== "wait_for_jobs" || !ctx.onExecutionCheckpoint)) {
       throw Object.assign(new Error("Managed MCP requires a supervised workspace and host-owned durable execution checkpoints."), {

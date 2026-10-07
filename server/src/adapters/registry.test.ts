@@ -58,6 +58,10 @@ describe("built-in adapter login capabilities", () => {
 });
 
 describe("built-in runtime connection tool delivery", () => {
+  it("declares operator-bound MCP admission as adapter metadata", () => {
+    expect(requireServerAdapter("hermes_gateway")).toMatchObject({ requiresRuntimeMcpRunBinding: true });
+  });
+
   const expectedStrategies = new Map([
     ["acpx_local", "environment"],
     ["claude_local", "native_mcp"],

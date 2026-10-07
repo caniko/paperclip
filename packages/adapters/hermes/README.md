@@ -241,7 +241,14 @@ agent-supplied endpoint is admitted.
 
 `gatewayUrl` approves the exact HTTPS (or loopback HTTP) gateway recipient, not
 just its reported host label. Repointing the agent at another gateway is rejected
-before any network request. Managed delivery also requires `bindWorkspace` and
+before any network request. Core preserves the approved recipient and display
+name through the Harbor LLM admission implementation consumed by Paperclip. The Hermes adapter owns
+dashboard URL aliases and uses connection IDs as its wire server names; it checks
+raw recipients before normalization. See
+[`Runtime MCP admission boundary`](../../../doc/runtime-mcp-admission.md) for the
+shared contract, conformance vectors and enforcement owners.
+
+Managed delivery also requires `bindWorkspace` and
 `waitForJobs`, a selected workspace, and the controller's durable execution
 checkpoint. Lost admission acknowledgements and cancellation retain that ownership
 until the provider reports terminal parent-run and managed-tool settlement.

@@ -1541,6 +1541,7 @@ Required UX behaviors:
 - HTTP adapters use DNS-pinned outbound requests, reject redirects and link-local/metadata targets, and require an exact server-owner origin allowlist for private destinations
 - external instruction bundle roots and exports that read them require instance-admin access; managed company-scoped bundles remain available through normal company authorization
 - agent-authenticated callers cannot persist host-executed workspace commands, and restricted keys cannot invoke preconfigured workspace runtime controls
+- controller-delivered managed MCP consumes Harbor LLM's provider-neutral run/host/recipient contract through an exact source dependency; provider URL aliases, wire names and error translation stay in the adapter. Bindings do not replace destination grants, token expiry/revocation or worker isolation. See [Runtime MCP admission boundary](runtime-mcp-admission.md).
 
 ## 17. Testing Strategy
 

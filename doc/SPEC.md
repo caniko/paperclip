@@ -235,6 +235,11 @@ silently launching a different engine. A default local engine must support
 normal task work and control-plane coordination; explicit operator restrictions
 remain authoritative.
 
+Controller-delivered managed MCP consumes Harbor LLM's shared run/host/recipient
+admission implementation and contract. Adapters retain provider protocol details; destination grants and worker
+isolation remain independently enforced. See
+[Runtime MCP admission boundary](runtime-mcp-admission.md) for the V1 boundary.
+
 ### Adapter Interface
 
 Every adapter implements three methods:

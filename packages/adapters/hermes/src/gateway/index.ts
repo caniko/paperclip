@@ -68,6 +68,7 @@ export function createServerAdapter(): ServerAdapterModule {
     sessionManagement,
     models,
     supportsLocalAgentJwt: false,
+    requiresRuntimeMcpRunBinding: true,
     supportsInstructionsBundle: false,
     requiresMaterializedRuntimeSkills: false,
     agentConfigurationDoc,

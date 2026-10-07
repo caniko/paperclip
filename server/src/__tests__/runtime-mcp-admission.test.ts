@@ -14,8 +14,8 @@ afterEach(() => vi.unstubAllGlobals());
 
 it("admits only exact operator-owned endpoints and selected execution hosts", () => {
   const input = { servers: [server], runId: "run-a", executionTarget: { kind: "local" as const, environmentId: "worker-host" }, policy };
-  expect(bindRuntimeMcpServersToRun(input)).toEqual([{ ...server, name: server.connectionId,
-    runBinding: { runId: "run-a", executionHostId: "worker-host", serverHostId: "controller-host", gatewayUrl: "http://127.0.0.1:8642/", authorizedCrossHost: true } }]);
+  expect(bindRuntimeMcpServersToRun(input)).toEqual([{ ...server,
+    runBinding: { runId: "run-a", executionHostId: "worker-host", serverHostId: "controller-host", gatewayUrl: "http://127.0.0.1:8642", authorizedCrossHost: true } }]);
   expect(server).not.toHaveProperty("runBinding");
   for (const override of [
     { policy: undefined }, { policy: "{}" }, { policy: "not-json" },
@@ -31,22 +31,28 @@ it("requires no admission policy when no server credentials are delivered", () =
 });
 
 it.each(["http://127.0.0.1:9119", "http://127.0.0.1:9119/", "http://127.0.0.1:9119/chat", "http://127.0.0.1:9119/api"])(
-  "uses the dispatch canonicalizer for the approved dashboard alias %s", (gatewayUrl) => {
+   "preserves the exact operator recipient for adapter-owned normalization: %s", (gatewayUrl) => {
     const admitted = bindRuntimeMcpServersToRun({ servers: [server], runId: "dashboard-run",
       executionTarget: { kind: "local", environmentId: "worker-host" },
       policy: JSON.stringify({ version: 1, servers: { [server.connectionId]: {
         url: server.url, gatewayUrl, serverHostId: "controller-host", executionHostIds: ["worker-host"],
       } } }),
     });
-    expect(admitted[0].runBinding?.gatewayUrl).toBe("http://127.0.0.1:9119/api");
+    expect(admitted[0].runBinding?.gatewayUrl).toBe(gatewayUrl);
   },
 );
+
+it("uses a provider-neutral blocked-capability error in core", () => {
+  expect(() => bindRuntimeMcpServersToRun({ servers: [server], runId: "run-a" })).toThrow(
+    expect.objectContaining({ code: "runtime_mcp_admission_blocked", reason: "invalid_identity" }),
+  );
+});
 
 it("delivers a controller-produced run binding through the real Hermes adapter without conversation reuse", async () => {
   const bodies: Record<string, unknown>[] = [];
   vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
     if (String(url).endsWith("/v1/capabilities")) return Response.json({ features: { runs_managed_mcp: {
-      version: 1, enabled: true, mode: "run_isolated", host_id: "controller-host",
+      version: 1, enabled: true, mode: "run_isolated", host_id: "worker-host",
     }, runs_execution_context: { version: 1, mode: "precondition", backends: ["local"], lifetimes: ["wait_for_jobs"], stop_admission: true } } });
     if (String(url).endsWith("/v1/runs")) {
       bodies.push(JSON.parse(String(init?.body)));
