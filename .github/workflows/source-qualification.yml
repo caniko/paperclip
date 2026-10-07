@@ -155,8 +155,10 @@ jobs:
       - name: Require original assertion RED separately from successor GREEN
         run: |
           set -uo pipefail
+          set +e
           (cd baseline && pnpm exec vitest run packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter=junit --outputFile.junit="$EVIDENCE/regression.xml") 2>&1 | tee "$EVIDENCE/regression.log"
           status=$?
+          set -e
           printf '%s\n' "$status" > "$EVIDENCE/exit-status.txt"
           test "$status" = 1 || exit 1
           python3 .github/scripts/qualification-evidence.py expected-red "$EVIDENCE"
