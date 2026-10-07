@@ -36,7 +36,11 @@ it("runs every active nested/parameterized fixture case exactly once through the
     const run = (index: number, count: number) => spawnSync(process.execPath, [
       path.join(repoRoot, "scripts/run-vitest-stable.mjs"), "--mode", "general", "--group", "general-chat",
       "--shard-index", String(index), "--shard-count", String(count),
-    ], { cwd: root, env: { ...process.env, CI: "true" }, encoding: "utf8", timeout: 45_000, maxBuffer: 4 * 1024 * 1024 });
+    ], { cwd: root, env: { ...process.env, CI: "true",
+      // The nested expected-failure fixture must not overwrite the outer suite's
+      // mandatory report. Keep reporting enabled to exercise the real shard argv.
+      PAPERCLIP_TEST_REPORT_DIR: path.join(root, "reports", `${index}-${count}`),
+    }, encoding: "utf8", timeout: 45_000, maxBuffer: 4 * 1024 * 1024 });
     for (const index of [0, 1]) {
       const result = run(index, 2);
       expect(result.error, result.stderr).toBeUndefined();

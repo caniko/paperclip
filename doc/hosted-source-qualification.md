@@ -2,14 +2,18 @@
 
 The `Exact-head source qualification` PR workflow checks the actual PR head.
 It runs workspace typechecks, the full test command, the build, token gates,
-and mandatory Hermes lineage and PostgreSQL settlement regressions. It installs
+and mandatory Hermes lineage, PostgreSQL settlement, MCP admission and real
+chat-shard regressions. It installs
 only declared dependencies and uses disposable hosted fixture state.
 
 Each lane runs once. The test wrapper writes separate JUnit reports when
 `PAPERCLIP_TEST_REPORT_DIR` is set and disables Vitest retries in that mode.
-Mandatory regression reports must contain cases and have no failures, errors,
-skips, or retry markers. Full-suite reports retain optional skips for inspection;
-they do not replace the mandatory regression gate.
+Both the mandatory regression lane and the full-suite lane require reports with
+cases and no failures, errors, skips, or retry markers. The full-suite receipt
+remains rejected when platform-specific or deliberately disabled cases are
+skipped; their coverage still needs an independent disposition. The real nested
+chat-shard fixture keeps its reports in its own temporary directory so its
+expected assertion failure cannot overwrite mandatory outer-suite evidence.
 
 A separate lane overlays the exact successor regression fixture on F645. It
 requires completed assertion failures for endpoint identity, stale SSE, lineage

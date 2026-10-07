@@ -7,7 +7,7 @@ import * as instructionWorkingCopies from "../services/agent-instruction-working
 import * as runEvents from "../services/heartbeat-run-events.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { workspaceOperationService } from "../services/workspace-operations.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
@@ -4462,18 +4462,32 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     let stopRequests = 0;
     let targetSettled = false;
     const stopObserved = Promise.withResolvers<void>();
-    const gateway = createServer((request, response) => {
+    const gateway = createServer(async (request, response) => {
       const reply = (body: unknown) => {
         response.setHeader("Content-Type", "application/json");
         response.end(JSON.stringify(body));
       };
-      if (request.method === "POST" && request.url === "/v1/runs") {
+      if (request.url === "/v1/capabilities") {
+        reply({ features: {
+          runs_execution_context: { version: 1, mode: "precondition", backends: ["local"], lifetimes: ["wait_for_jobs"], stop_admission: true },
+          runs_recovery: { version: 1, durable_lineage_stop: true, ordinary_stop_admission: true, admission_binding: 1 },
+        } });
+      } else if (request.method === "POST" && request.url === "/v1/runs") {
         request.resume();
         reply({ run_id: "shutdown-fixture", status: "started" });
-      } else if (request.method === "POST" && request.url === "/v1/runs/shutdown-fixture/stop") {
+      } else if (request.method === "POST" && (request.url === "/v1/runs/shutdown-fixture/stop" || request.url === "/v1/runs/stop")) {
+        let body = "";
+        for await (const chunk of request) body += chunk;
         stopRequests += 1;
         if (!delayed) targetSettled = true;
-        reply({ status: "stopping" });
+        reply({ run_id: "shutdown-fixture", status: targetSettled ? "cancelled" : "stopping",
+          stop_requested: true, lineage_settled: targetSettled,
+          lineage: [{ run_id: "shutdown-fixture", status: targetSettled ? "cancelled" : "stopping" }],
+          ...(request.url === "/v1/runs/stop" ? { admission: { version: 1, root_run_id: "shutdown-fixture",
+            key_sha256: createHash("sha256").update(String(request.headers["idempotency-key"])).digest("hex"),
+            body_sha256: createHash("sha256").update(body).digest("hex"),
+          } } : {}),
+        });
         stopObserved.resolve();
       } else if (request.url === "/v1/runs/shutdown-fixture/events") {
         response.writeHead(204).end();
