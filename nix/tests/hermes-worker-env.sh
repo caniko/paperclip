@@ -2,6 +2,8 @@
 set -euo pipefail
 
 render="$1"
+store_credential="$2"
+umask 0077
 fixture="$(mktemp -d)"
 trap 'rm -rf "$fixture"' EXIT
 gateway="$fixture/gateway"
@@ -23,6 +25,28 @@ reject() {
   test ! -s "$fixture/stdout"
   cmp "$fixture/expected" "$environment"
 }
+
+# Validate the actual source, not just the configured path spelling.
+chmod 0644 "$research"
+reject
+chmod 0640 "$research"
+bash "$render" "$environment" "$gateway" "$research"
+cmp "$fixture/expected" "$environment"
+mv "$research" "$fixture/private-research"
+ln -s "$store_credential" "$research"
+reject
+rm "$research"
+ln -s "$fixture/private-research" "$research"
+bash "$render" "$environment" "$gateway" "$research"
+cmp "$fixture/expected" "$environment"
+rm "$research"
+mkfifo "$research"
+reject
+rm "$research"
+mkdir "$research"
+reject
+rmdir "$research"
+mv "$fixture/private-research" "$research"
 
 for bad in 'tvly\nother' 'tvly\n\n' 'tvly\r\n' 'tvly\000other' 'tvly\000\n' 'tvly"other' 'tvly\tother'; do
   printf '%b' "$bad" > "$research"
