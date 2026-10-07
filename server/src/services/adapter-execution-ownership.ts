@@ -146,6 +146,27 @@ export function prepareAdapterExecution(db: Db, input: OwnershipIdentity & { ada
   return prepareCheckpoint(db, input, KEY);
 }
 
+export async function recordAdapterExecutionProgress(db: Db, input: OwnershipIdentity & { progress: Record<string, unknown> }): Promise<void> {
+  await db.transaction(async (tx) => {
+    const [run] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId),
+      eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
+      eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
+      sql`${heartbeatRuns.controllerLeaseExpiresAt} > clock_timestamp()`,
+    )).for("no key update");
+    if (!run) throw new Error("Adapter observation no longer owns the controller lease");
+    const [lease] = await tx.select().from(environmentLeases).where(and(
+      eq(environmentLeases.id, input.leaseId), eq(environmentLeases.companyId, input.companyId),
+      eq(environmentLeases.heartbeatRunId, input.runId), eq(environmentLeases.status, "active"),
+    )).for("update");
+    const ownership = record(lease?.metadata?.[KEY]);
+    if (!lease || ownership.state !== "pending" || !ownership.material) throw new Error("Adapter observation has no pending admission");
+    await tx.update(environmentLeases).set({ metadata: { ...lease.metadata,
+      [KEY]: { ...ownership, progress: input.progress } }, updatedAt: new Date(),
+    }).where(eq(environmentLeases.id, input.leaseId));
+  });
+}
+
 export function prepareWorkspaceOwnershipCheckpoint(db: Db, input: OwnershipIdentity & { adapterType: string; checkpoint: Record<string, unknown> }) {
   return prepareCheckpoint(db, input, WORKSPACE_KEY);
 }

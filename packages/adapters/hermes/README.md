@@ -149,6 +149,27 @@ the adapter retries Stop and keeps observing until a terminal parent-run receipt
 is verified; child completion, mismatched run IDs, and nonterminal Stop responses
 do not acknowledge cancellation. The adapter tests run in the PR workspace lane.
 
+#### Durable run recovery and Stop
+
+When the host supplies an execution checkpoint callback, ordinary gateway runs
+require `features.runs_recovery.version = 1`, `durable_lineage_stop`, and
+`ordinary_stop_admission`. The host seals the original endpoint, headers, and
+create body before admission. Observation progress (successor identities and
+per-run SSE cursors) is recorded separately and cannot replace that admission.
+
+The adapter follows `superseded` parents to their approved successors. SSE
+reconnects send `Last-Event-ID` for the current run; sequenced receipts reuse the
+server's existing run-log deduplication. A lineage Stop is acknowledged only
+after every admitted executor settles. Controller loss uses the sealed original
+admission to stop and reconcile the lineage; it does not automatically continue
+model work. Missing capabilities or unavailable workers retain pending ownership.
+
+`unrecoverable` with `intervention_reason: "tool_effect_uncertain"` produces
+`hermes_gateway_tool_effect_uncertain`, not successful completion or an automatic
+retry. Inspect the original tool effect before deciding whether to start new work.
+Rolling back requires settling pending provider admissions first, since an older
+controller or worker cannot enforce these recovery contracts.
+
 #### Maintain an existing directory
 
 The gateway adapter supports a configured worker whose terminal backend is

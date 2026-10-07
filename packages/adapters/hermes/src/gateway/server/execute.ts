@@ -27,7 +27,7 @@ import {
 } from "./transport-security.js";
 import { bindSessionKey, requireWorkspaceCapability, resolveWorkspaceBinding, type WorkspaceBinding } from "./execution-context.js";
 import { admitOwnedRun, waitForOwnedRun } from "./run-lifetime.js";
-import { executionCheckpoint, settleOwnedAdmission } from "./recovery.js";
+import { executionCheckpoint, lineageStopSettled, settleOwnedAdmission } from "./recovery.js";
 import { requireManagedMcpCapability, resolveManagedMcp, type ManagedMcpManifest } from "./managed-mcp.js";
 
 type SessionKeyStrategy = "issue" | "agent" | "run" | "none";
@@ -35,6 +35,7 @@ type SessionKeyStrategy = "issue" | "agent" | "run" | "none";
 type SseFrame = {
   event: string | null;
   data: string;
+  id?: string;
 };
 
 type HermesHttpError = Error & {
@@ -54,6 +55,9 @@ type TerminalState = {
 
 type ExecutionState = {
   runId: string;
+  rootRunId: string;
+  lineage: Set<string>;
+  cursors: Map<string, number>;
   outputChunks: string[];
   lastEventName: string | null;
   terminal: TerminalState | null;
@@ -424,6 +428,7 @@ export function parseSseFramesForTest(buffer: string): { frames: SseFrame[]; res
     const rawFrame = normalized.slice(offset, idx);
     offset = idx + 2;
     let event: string | null = null;
+    let id: string | undefined;
     const dataLines: string[] = [];
     for (const line of rawFrame.split("\n")) {
       if (!line || line.startsWith(":")) continue;
@@ -431,9 +436,11 @@ export function parseSseFramesForTest(buffer: string): { frames: SseFrame[]; res
         event = line.slice("event:".length).trim();
       } else if (line.startsWith("data:")) {
         dataLines.push(line.slice("data:".length).trimStart());
+      } else if (line.startsWith("id:")) {
+        id = line.slice("id:".length).trim();
       }
     }
-    if (dataLines.length > 0) frames.push({ event, data: dataLines.join("\n") });
+    if (dataLines.length > 0) frames.push({ event, data: dataLines.join("\n"), ...(id === undefined ? {} : { id }) });
   }
   return { frames, rest: normalized.slice(offset) };
 }
@@ -445,6 +452,9 @@ function createExecutionState(runId: string): ExecutionState {
   });
   return {
     runId,
+    rootRunId: runId,
+    lineage: new Set([runId]),
+    cursors: new Map(),
     outputChunks: [],
     lastEventName: null,
     terminal: null,
@@ -488,8 +498,31 @@ function terminalReceiptForRun(runId: string, value: unknown, fallbackEventName:
   // without an explicit identity are scoped by the parent HTTP/SSE endpoint.
   if (eventName && !eventName.startsWith("run.")) return null;
   const status = extractStatus(record) ?? (eventName?.startsWith("run.") ? eventName.slice(4) : null);
-  if (!status || !TERMINAL_STATUSES.has(status)) return null;
+  if (!status || (!TERMINAL_STATUSES.has(status) && status !== "unrecoverable")) return null;
+  if (record.lineage_settled === false) return null;
   return { runId, status, eventName, payload: record, output: extractOutput(record) };
+}
+
+async function observeRun(ctx: AdapterExecutionContext, state: ExecutionState, value: unknown, fallback: string | null = null): Promise<void> {
+  const record = asRecord(value);
+  if (!record || (extractRunId(record) && extractRunId(record) !== state.runId)) return;
+  const status = extractStatus(record) ?? eventNameFromData(record, fallback)?.replace(/^run\./, "");
+  if (status === "superseded") {
+    const successor = nonEmpty(record.successor_run_id);
+    if (!successor) return; // Poll the parent until its durable reservation is visible.
+    if (state.lineage.has(successor)) throw new Error("Hermes recovery lineage contains a cycle");
+    state.runId = successor;
+    state.lineage.add(successor);
+    await persistProgress(ctx, state);
+    return;
+  }
+  const terminal = terminalReceiptForRun(state.runId, value, fallback);
+  if (terminal) markTerminal(state, terminal);
+}
+
+async function persistProgress(ctx: AdapterExecutionContext, state: ExecutionState): Promise<void> {
+  await ctx.onExecutionProgress?.({ version: 1, rootRunId: state.rootRunId, runId: state.runId,
+    lineage: [...state.lineage], cursors: Object.fromEntries(state.cursors) });
 }
 
 async function handleEvent(
@@ -501,21 +534,31 @@ async function handleEvent(
   const parsed = parseJsonData(frame.data);
   const record = asRecord(parsed);
   const eventName = eventNameFromData(parsed, frame.event);
+  if (extractRunId(record) && extractRunId(record) !== state.runId) return;
+  const runId = state.runId;
+  const sequence = Number(frame.id ?? record?.sequence);
+  const sequenced = Number.isSafeInteger(sequence) && sequence > 0;
+  if (sequenced && sequence <= (state.cursors.get(runId) ?? 0)) return;
   state.lastEventName = eventName;
-  await ctx.onLog(
-    "stdout",
-    `[hermes-gateway:event] run=${state.runId} event=${eventName ?? "message"} data=${stringifyForLog(redactForLog(parsed, [], 0, redactText), 8_000)}\n`,
-  );
+  const sanitized = asRecord(redactForLog(parsed, [], 0, redactText)) ?? {};
+  if (sequenced && ctx.onEvent) {
+    await ctx.onEvent({ eventType: `hermes.${eventName ?? "message"}`, stream: "stdout", payload: sanitized,
+      message: eventName === "message.delta" ? redactText(nonEmpty(record?.delta) ?? nonEmpty(record?.text_delta) ?? "") : undefined,
+      providerSource: { runId, sequence, canonicalPayload: sanitized } });
+  } else {
+    await ctx.onLog("stdout", `[hermes-gateway:event] run=${runId} event=${eventName ?? "message"} data=${stringifyForLog(sanitized, 8_000)}\n`);
+  }
 
   const delta = nonEmpty(record?.delta) ?? nonEmpty(record?.text_delta);
   if (eventName === "message.delta" && delta) {
     const sanitizedDelta = redactText(delta);
     state.outputChunks.push(sanitizedDelta);
-    await ctx.onLog("stdout", sanitizedDelta);
+    if (!sequenced || !ctx.onEvent) await ctx.onLog("stdout", sanitizedDelta);
   }
 
-  const terminal = terminalReceiptForRun(state.runId, parsed, eventName);
-  if (terminal) markTerminal(state, terminal);
+  if (sequenced) state.cursors.set(runId, sequence);
+  await persistProgress(ctx, state);
+  await observeRun(ctx, state, parsed, eventName);
 }
 
 async function delay(ms: number, signal: AbortSignal): Promise<void> {
@@ -550,8 +593,7 @@ async function pollStatus(input: {
         headers: input.headers,
         signal: input.supervised ? AbortSignal.any([input.signal, AbortSignal.timeout(30_000)]) : input.signal,
       });
-      const terminal = terminalReceiptForRun(input.state.runId, status);
-      if (terminal) markTerminal(input.state, terminal);
+      await observeRun(input.ctx, input.state, status);
     } catch (err) {
       if (input.signal.aborted) return;
       await input.ctx.onLog("stderr", `[hermes-gateway] status poll failed: ${redactErrorMessage(err, input.redactText)}\n`);
@@ -569,10 +611,12 @@ async function consumeEvents(input: {
   redactText?: TextRedactor;
 }): Promise<void> {
   while (!input.signal.aborted && !input.state.terminal) {
+    const runId = input.state.runId;
     try {
       const response = await fetch(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.state.runId)}/events`), {
         method: "GET",
-        headers: input.headers,
+        headers: { ...input.headers, ...(input.state.cursors.has(runId)
+          ? { "Last-Event-ID": String(input.state.cursors.get(runId)) } : {}) },
         signal: input.signal,
       });
       if (!response.ok) {
@@ -588,7 +632,7 @@ async function consumeEvents(input: {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
-      while (!input.signal.aborted && !input.state.terminal) {
+      while (!input.signal.aborted && !input.state.terminal && input.state.runId === runId) {
         const { value, done } = await reader.read();
         if (done) {
           if (buffer.trim().length > 0) {
@@ -596,7 +640,7 @@ async function consumeEvents(input: {
             buffer = parsed.rest;
             for (const frame of parsed.frames) {
               await handleEvent(input.ctx, input.state, frame, input.redactText);
-              if (input.state.terminal) break;
+              if (input.state.terminal || input.state.runId !== runId) break;
             }
           }
           break;
@@ -606,9 +650,10 @@ async function consumeEvents(input: {
         buffer = parsed.rest;
         for (const frame of parsed.frames) {
           await handleEvent(input.ctx, input.state, frame, input.redactText);
-          if (input.state.terminal) break;
+          if (input.state.terminal || input.state.runId !== runId) break;
         }
       }
+      await reader.cancel();
     } catch (err) {
       if (input.signal.aborted || input.state.terminal) return;
       await input.ctx.onLog("stderr", `[hermes-gateway] event stream disconnected: ${redactErrorMessage(err, input.redactText)}\n`);
@@ -676,6 +721,10 @@ export function mapFinalResultForTest(input: {
   const sessionId = extractSessionId(payload) ?? input.sessionKey;
   const sessionDisplayId = sessionId ? redactText(sessionId) : null;
   const mapped = terminalResultCode(input.terminal.status);
+  if (input.terminal.status === "unrecoverable") {
+    mapped.errorCode = payload.intervention_reason === "tool_effect_uncertain"
+      ? "hermes_gateway_tool_effect_uncertain" : "hermes_gateway_unrecoverable";
+  }
   const usage = parseUsage(payload);
   const costUsd = parseCostUsd(payload);
   const errorMessage = mapped.errorCode
@@ -707,6 +756,7 @@ export function mapFinalResultForTest(input: {
       output: output ?? "",
       usage: usage ?? null,
       cost_usd: costUsd,
+      ...(payload.intervention_reason ? { intervention_reason: payload.intervention_reason } : {}),
     },
   };
 }
@@ -901,26 +951,33 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   let runId: string | null = null;
   const supervised = binding?.context.lifetime === "wait_for_jobs";
-  const cancellable = supervised || Boolean(ctx.signal);
+  const ownedAdmission = supervised || Boolean(ctx.onExecutionCheckpoint);
+  const cancellable = ownedAdmission || Boolean(ctx.signal);
   const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : null;
   const deadlineExpired = () => deadline !== null && Date.now() >= deadline;
   const checkpoint = executionCheckpoint(baseUrl, runHeaders, requestBody);
   let checkpointPrepared = false;
   try {
     if (cancellable) await ctx.onCancellationReady?.();
-    if (binding || managedMcp) {
+    if (binding || managedMcp || ownedAdmission) {
       const capabilities = await fetchJson(apiUrl(baseUrl, "/v1/capabilities"), {
         method: "GET", headers: runHeaders,
         signal: AbortSignal.timeout(30_000),
       });
       if (binding) requireWorkspaceCapability(capabilities, binding);
       if (managedMcp) requireManagedMcpCapability(capabilities, managedMcp);
+      if (ownedAdmission) {
+        const recovery = parseObject(parseObject(asRecord(capabilities)?.features).runs_recovery);
+        if (recovery.version !== 1 || recovery.durable_lineage_stop !== true || (!supervised && recovery.ordinary_stop_admission !== true)) {
+          throw Object.assign(new Error("Hermes worker lacks durable lineage stop for owned admissions"), { code: "hermes_gateway_recovery_unsupported" });
+        }
+      }
     }
     if (cancellable && ctx.signal?.aborted) {
       return { exitCode: 1, signal: "SIGTERM", timedOut: false, errorCode: "hermes_gateway_cancelled",
         resultJson: { executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString() } } };
     }
-    if (supervised) {
+    if (ownedAdmission) {
       if (!ctx.onExecutionCheckpoint) throw new Error("wait_for_jobs requires host-owned durable execution checkpoints");
       await ctx.onExecutionCheckpoint(checkpoint);
       checkpointPrepared = true;
@@ -932,12 +989,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const create = async (url = createRunUrl) => {
       const receipt = await fetchJson(url, {
         method: "POST", headers: runHeaders, body: requestBody,
-        ...(supervised || managedMcp ? { signal: AbortSignal.timeout(30_000), redirect: "error" } : {}),
+        ...(ownedAdmission || managedMcp ? { signal: AbortSignal.timeout(30_000), redirect: "error" } : {}),
       });
-      if (supervised && !extractRunId(receipt)) throw new Error("Hermes admission acknowledgement has no run_id; retaining ownership.");
+      if (ownedAdmission && !extractRunId(receipt)) throw new Error("Hermes admission acknowledgement has no run_id; retaining ownership.");
       return receipt;
     };
-    const created = supervised ? await admitOwnedRun({
+    const created = ownedAdmission ? await admitOwnedRun({
       create, retryMs: reconnectMs,
       stopAdmission: () => create(apiUrl(baseUrl, "/v1/runs/stop")),
       shouldStop: () => Boolean(ctx.signal?.aborted) || deadlineExpired(),
@@ -1003,6 +1060,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       timeoutMs: deadline === null ? 0 : Math.max(1, deadline - Date.now()), retryMs: reconnectMs,
       stop: () => stopRun({ ctx: observer, baseUrl, headers: eventHeaders, runId, redactText }),
       onStopReceipt: receipt => {
+        const record = asRecord(receipt);
+        if (record && lineageStopSettled(record, state.rootRunId)) {
+          const members = record.lineage as Record<string, unknown>[];
+          const current = members.find((member) => member.run_id === state.runId);
+          const status = current?.status === "superseded" ? "cancelled" : String(current?.status ?? "cancelled");
+          markTerminal(state, { runId: state.runId, status, payload: { ...record, ...current, status } });
+          return;
+        }
         const terminal = terminalReceiptForRun(state.runId, receipt);
         if (terminal) markTerminal(state, terminal);
       },

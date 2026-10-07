@@ -203,6 +203,8 @@ export interface AdapterRuntimeEvent {
   color?: string;
   message?: string;
   payload?: Record<string, unknown>;
+  /** Stable provider receipt; the host deduplicates it in the local run log. */
+  providerSource?: { runId: string; sequence: number; canonicalPayload: Record<string, unknown> };
 }
 
 export interface AdapterExecutionContext {
@@ -218,6 +220,8 @@ export interface AdapterExecutionContext {
    * credentials: the host must encrypt it and must not publish it in events/logs.
    * Rejection means no provider work may start. */
   onExecutionCheckpoint?: (checkpoint: Record<string, unknown>) => Promise<void>;
+  /** Mutable observation state, kept separately from the immutable admission. */
+  onExecutionProgress?: (progress: Record<string, unknown>) => Promise<void>;
   /** Host-owned stop of this run's sandbox during setup or direct CLI execution. Resolves only after
    * provider termination is verified; never accepts an agent-selected lease. */
   stopRemoteStartup?: () => Promise<void>;
