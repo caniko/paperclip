@@ -3287,6 +3287,7 @@ export function createRunnerdCodexAppServerArgs(input: {
   codexCommand?: string;
   readOnlyRoots?: string[];
   commandEnvironmentTransport?: "argv" | "thread";
+  persistedCommandEnvironment?: Record<string, unknown>;
   instructionWorkingCopyRoot?: string;
 }): string[] {
   // The filesystem policy denies HOME and CODEX_HOME to keep credentials and
@@ -3302,6 +3303,7 @@ export function createRunnerdCodexAppServerArgs(input: {
     [...(input.readOnlyRoots ?? []), ...codexExecutableReadOnlyRoots(input.environment ?? {}, input.codexCommand)],
     input.instructionWorkingCopyRoot,
     input.commandEnvironmentTransport ?? "thread",
+    input.persistedCommandEnvironment,
   );
 }
 
@@ -5176,6 +5178,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
             environment: this.options.environment,
             codexHome,
             codexCommand: this.options.codexCommand,
+            persistedCommandEnvironment: record(providerConfig.commandEnvironment),
             // Older profiles retain their explicit argv values. Moving those
             // values to a different channel would change protected launch args.
             commandEnvironmentTransport:

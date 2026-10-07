@@ -178,6 +178,7 @@ export function createIsolatedCodexAppServerArgs(
   // Native runner profiles persist these values and supply them on each
   // thread/start and thread/resume instead of exceeding the runner's argv cap.
   commandEnvironmentTransport: "argv" | "thread" = "argv",
+  persistedCommandEnvironment?: Record<string, unknown>,
 ): string[] {
   const gitRoots = gitFilesystemRoots(source);
   readOnlyRoots = [...new Set([...readOnlyRoots, ...codexNetworkReadOnlyRoots(source)])];
@@ -187,8 +188,15 @@ export function createIsolatedCodexAppServerArgs(
   const hasProjectedEnvironment = inheritedGitHubKeys.length > 0;
   // Codex filters the configured `set` values through include_only as well.
   // Retain the explicit command PATH/HOME/locale settings, not ambient secrets.
-  const commandEnvironment = codexCommandEnvironment(source, instructionWorkingCopyRoot);
-  const shellEnvironmentKeys = [...new Set([...inheritedGitHubKeys, ...Object.keys(commandEnvironment)])].sort();
+  const commandEnvironment = codexCommandEnvironment(source);
+  if (instructionWorkingCopyRoot && source.AGENT_HOME === instructionWorkingCopyRoot) commandEnvironment.AGENT_HOME = instructionWorkingCopyRoot;
+  // Run attachment keeps the base map even when the current environment omits
+  // its keys. AGENT_HOME and credentials must still come from the current run.
+  const persistedKeys = commandEnvironmentTransport === "thread"
+    ? ["PATH", "PATHEXT", "SystemRoot", "WINDIR", "LANG", "LC_ALL", "HOME", "ZDOTDIR", "BASH_ENV"]
+      .filter((key) => typeof persistedCommandEnvironment?.[key] === "string")
+    : [];
+  const shellEnvironmentKeys = [...new Set([...inheritedGitHubKeys, ...Object.keys(commandEnvironment), ...persistedKeys])].sort();
   if (source.PAPERCLIP_GITHUB_LAUNCHER_DIR) readOnlyRoots = [...readOnlyRoots, source.PAPERCLIP_GITHUB_LAUNCHER_DIR];
   const deniedHostRoots = [
     ...new Set(
