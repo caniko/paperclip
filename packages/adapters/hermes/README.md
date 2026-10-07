@@ -201,6 +201,13 @@ incompatible with this protected mode. See
 [`doc/filesystem-workspaces.md`](../../../doc/filesystem-workspaces.md) for the
 configuration, isolation, recovery and qualification contract.
 
+An enrolled managed-only worker's admission refusal ends fresh filesystem
+reservation immediately with `hermes_gateway_managed_mcp_blocked`; it does not
+enter the transient acquisition retry loop. The original durable intent remains
+available for Stop and release reconciliation, including a previously lost grant
+reply. Worker enrollment and fresh controller authorization must be qualified
+before dispatch.
+
 After controller loss, supervised runs use their original encrypted checkpoint
 to stop the original idempotent admission. Recovery does not use the agent's
 current gateway configuration or start a replacement provider. A pending provider
@@ -254,7 +261,7 @@ checkpoint. Lost admission acknowledgements and cancellation retain that ownersh
 until the provider reports terminal parent-run and managed-tool settlement.
 
 Hermes must advertise authenticated version-1 `runs_managed_mcp` with
-`mode: "run_isolated"` on the admitted server host. Each invocation uses a fresh
+`mode: "run_isolated"` on the admitted execution host. Each invocation uses a fresh
 conversation, even after an A/B/A agent sequence. Credential files, profiles, and
 shared session history are not used for delivery; run tokens are redacted from
 adapter logs. Qualify the actual worker connector and teardown before rollout.

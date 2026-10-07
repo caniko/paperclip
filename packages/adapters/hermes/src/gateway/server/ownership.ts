@@ -19,6 +19,12 @@ async function observe(checkpoint: Record<string, unknown>, operation: "reserve"
   if (response.status === 409 && receipt.code === "rejected") {
     throw new FilesystemOwnershipRejectedError("Filesystem authority rejected the ownership request");
   }
+  if (operation === "reserve" && response.status === 403 &&
+      parseObject(receipt.error).code === "hermes_gateway_managed_mcp_blocked") {
+    throw Object.assign(new FilesystemOwnershipRejectedError(
+      "Hermes managed admission blocked filesystem ownership. Ask the operator to qualify worker enrollment and fresh controller authorization before dispatch.",
+    ), { code: "hermes_gateway_managed_mcp_blocked" });
+  }
   if (!response.ok) throw new Error("Filesystem ownership observation is unavailable");
   return receipt;
 }

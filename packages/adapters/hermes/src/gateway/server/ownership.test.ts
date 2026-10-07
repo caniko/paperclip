@@ -121,3 +121,38 @@ it("reports an authoritative refusal and keeps its checkpoint until explicit set
   expect(await reconcileWorkspaceOwnership(checkpoint)).toBe("settled");
   expect(operations).toEqual(["reserve", "stop", "release"]);
 });
+
+it("surfaces managed-worker admission refusal before another reservation and preserves settlement", async () => {
+  const operations: string[] = [];
+  let checkpoint: Record<string, unknown> = {};
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith("/v1/capabilities")) return Response.json({ features: { runs_execution_context: {
+      version: 1, mode: "precondition", backends: ["local"], lifetimes: ["wait_for_jobs"], stop_admission: true,
+      filesystem_ownership: { version: 1, early_intent: true, target_authority: true, controller_release: true },
+    } } });
+    const operation = JSON.parse(String(init?.body)).operation;
+    operations.push(operation);
+    // Bound a failed counterexample: retrying a definitive refusal must not
+    // leave an acquisition loop running after the test fails.
+    return operations.length === 1
+      ? Response.json({ error: { code: "hermes_gateway_managed_mcp_blocked", reason: "private-marker", message: "private-marker" } }, { status: 403 })
+      : Response.json({ state: "settled" });
+  }));
+  const onGranted = vi.fn();
+  const onWaiting = vi.fn();
+  const work = prepareWorkspaceOwnership({
+    runId: "managed-denied", agent: { id: "agent", companyId: "company", name: "Worker", adapterType: "hermes_gateway", adapterConfig: {} },
+    config: { apiBaseUrl: "http://127.0.0.1:8642", apiKey: "fixture", pollIntervalMs: 1 }, context: {},
+    executionTarget: { kind: "local", workspaceRealization: { mode: "in_place", authoritativeRoot: "/data", pathAliases: [], outboundRestorePaths: [] } },
+    policy: { authority: "host", principal: "controller", roots: ["/data"] }, assertActive: async () => {},
+    onCheckpoint: async value => { checkpoint = value; }, onGranted, onWaiting,
+  });
+  await expect(work).rejects.toMatchObject({ code: "hermes_gateway_managed_mcp_blocked",
+    message: "Hermes managed admission blocked filesystem ownership. Ask the operator to qualify worker enrollment and fresh controller authorization before dispatch." });
+  expect(operations).toEqual(["reserve"]);
+  expect(onGranted).not.toHaveBeenCalled();
+  expect(onWaiting).not.toHaveBeenCalled();
+  expect(checkpoint).toHaveProperty("executionContext");
+  expect(await reconcileWorkspaceOwnership(checkpoint)).toBe("settled");
+  expect(operations).toEqual(["reserve", "stop", "release"]);
+});
