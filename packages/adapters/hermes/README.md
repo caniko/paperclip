@@ -273,6 +273,21 @@ conversation, even after an A/B/A agent sequence. Credential files, profiles, an
 shared session history are not used for delivery; run tokens are redacted from
 adapter logs. Qualify the actual worker connector and teardown before rollout.
 
+### Recovery receipt compatibility
+
+Owned admissions require `runs_recovery.admission_binding: 1` in addition to
+durable lineage Stop. The authenticated `/v1/runs/stop` endpoint binds the
+reserved root to SHA-256 digests of the original idempotency key and HTTP body.
+The private checkpoint retains the original request. Recovery verifies those
+digests and every known lineage member from the separately persisted progress.
+An older worker without this capability refuses owned dispatch before admission.
+
+Poll and SSE observations remain scoped to their original run endpoint across
+successor transitions and pending host callbacks. Identical sequenced replays are
+deduplicated; changed payloads and host receipt conflicts request Stop and retain
+ownership until valid lineage settlement. Complete wire-payload digests are
+persisted separately from redacted display content.
+
 ### Compatibility with the old gateway package
 
 `@paperclipai/adapter-hermes-gateway` remains as a deprecated compatibility shim

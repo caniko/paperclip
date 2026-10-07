@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { parseObject } from "@paperclipai/adapter-utils/server-utils";
 
 /** This checkpoint is private. The host seals it before admission so recovery
@@ -6,16 +7,20 @@ export function executionCheckpoint(baseUrl: URL, headers: Record<string, string
   return { version: 1, baseUrl: baseUrl.toString().replace(/\/+$/, ""), headers, body };
 }
 
-export function lineageStopSettled(receipt: Record<string, unknown>, runId: string): boolean {
-  return receipt.run_id === runId && receipt.stop_requested === true && receipt.lineage_settled === true
-    && Array.isArray(receipt.lineage) && receipt.lineage.length > 0
-    && receipt.lineage.every((item) => {
-      const run = parseObject(item);
-      return typeof run.run_id === "string" && ["completed", "failed", "cancelled", "interrupted", "superseded", "unrecoverable"].includes(String(run.status));
-    });
+export function lineageStopSettled(receipt: Record<string, unknown>, runId: string, knownMembers: Iterable<string> = [runId]): boolean {
+  if (!runId.trim() || receipt.run_id !== runId || receipt.stop_requested !== true || receipt.lineage_settled !== true
+    || !Array.isArray(receipt.lineage) || receipt.lineage.length === 0) return false;
+  const members = new Set<string>();
+  for (const item of receipt.lineage) {
+    const run = parseObject(item);
+    if (typeof run.run_id !== "string" || !run.run_id.trim() || run.run_id !== run.run_id.trim() || members.has(run.run_id)
+      || !["completed", "failed", "cancelled", "interrupted", "superseded", "unrecoverable"].includes(String(run.status))) return false;
+    members.add(run.run_id);
+  }
+  return members.has(runId) && [...knownMembers].every(member => members.has(member));
 }
 
-export async function reconcileExecution(checkpoint: Record<string, unknown>): Promise<"pending" | "settled"> {
+export async function reconcileExecution(checkpoint: Record<string, unknown>, progress?: Record<string, unknown>): Promise<"pending" | "settled"> {
   try {
     if (checkpoint.version !== 1 || typeof checkpoint.baseUrl !== "string" || typeof checkpoint.body !== "string") return "pending";
     const headers = parseObject(checkpoint.headers);
@@ -35,9 +40,28 @@ export async function reconcileExecution(checkpoint: Record<string, unknown>): P
     if (!lineageAware && (context.lifetime !== "wait_for_jobs" || capability.version !== 1 || capability.stop_admission !== true)) return "pending";
     // Atomically stop the key without starting missing work. A delayed create
     // sees the same terminal tombstone even if no create was ever acknowledged.
+    // The worker must bind its reserved root to the original authenticated
+    // admission, including a before-create tombstone. Never compare a receipt's
+    // root to itself as the only recovery identity check.
     const receipt = await request("/v1/runs/stop", "POST", checkpoint.body);
     if (typeof receipt.run_id !== "string" || !receipt.run_id) return "pending";
-    if (lineageAware) return lineageStopSettled(receipt, receipt.run_id) ? "settled" : "pending";
+    if (lineageAware) {
+      const admission = parseObject(receipt.admission);
+      const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+      if (recovery.admission_binding !== 1 || admission.version !== 1
+        || admission.key_sha256 !== sha256(String(headers["Idempotency-Key"]).trim())
+        || admission.body_sha256 !== sha256(checkpoint.body)
+        || typeof admission.root_run_id !== "string") return "pending";
+      let knownMembers = [admission.root_run_id];
+      if (progress && Object.keys(progress).length) {
+        if (progress.version !== 1 || progress.rootRunId !== admission.root_run_id
+          || typeof progress.runId !== "string" || !progress.runId.trim()
+          || !Array.isArray(progress.lineage) || !progress.lineage.every(member => typeof member === "string" && member.trim())) return "pending";
+        knownMembers = [...progress.lineage, progress.runId];
+      }
+      return lineageStopSettled(receipt, admission.root_run_id, knownMembers) ? "settled" : "pending";
+    }
+    if ("lineage" in receipt || "lineage_settled" in receipt) return "pending";
     if (["completed", "failed", "cancelled", "interrupted"].includes(String(receipt.status))) return "settled";
     const runPath = `/v1/runs/${encodeURIComponent(receipt.run_id)}`;
     const status = await request(runPath);

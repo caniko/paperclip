@@ -499,7 +499,7 @@ export interface ServerAdapterModule {
   execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult>;
   /** One bounded stop/reconcile attempt using the exact persisted admission.
    * A missing/failed control channel is pending, never proof of settlement. */
-  reconcileExecution?: (checkpoint: Record<string, unknown>) => Promise<"pending" | "settled">;
+  reconcileExecution?: (checkpoint: Record<string, unknown>, progress?: Record<string, unknown>) => Promise<"pending" | "settled">;
   prepareWorkspaceOwnership?: (ctx: WorkspaceOwnershipContext) => Promise<WorkspaceOwnershipIntent>;
   reconcileWorkspaceOwnership?: (checkpoint: Record<string, unknown>) => Promise<"pending" | "settled">;
   testEnvironment(ctx: AdapterEnvironmentTestContext): Promise<AdapterEnvironmentTestResult>;

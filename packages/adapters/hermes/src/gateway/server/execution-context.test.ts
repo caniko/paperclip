@@ -22,7 +22,7 @@ function server(capability: unknown = { version: 1, mode: "precondition", backen
   const fetchMock = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
     if (String(url).endsWith("/v1/capabilities")) {
       return Response.json({ features: { runs_execution_context: capability,
-        runs_recovery: { version: 1, durable_lineage_stop: true, ordinary_stop_admission: true } } });
+        runs_recovery: { version: 1, durable_lineage_stop: true, ordinary_stop_admission: true, admission_binding: 1 } } });
     }
     if (String(url).endsWith("/v1/runs")) {
       bodies.push(JSON.parse(String(init?.body)));

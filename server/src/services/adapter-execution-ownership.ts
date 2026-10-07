@@ -280,8 +280,10 @@ export async function reconcileAdapterExecution(db: Db, input: {
         await input.finalizeWorkspace(record(envelope.checkpoint));
         await recordWorkspaceFinalizationBoundary(db, { companyId: input.companyId, runId: input.runId, leaseId: lease.id });
       }
-      const reconcile = key === KEY ? adapter?.reconcileExecution : adapter?.reconcileWorkspaceOwnership;
-      if (await reconcile?.(record(envelope.checkpoint)) !== "settled") return "pending";
+       const result = key === KEY
+         ? await adapter?.reconcileExecution?.(record(envelope.checkpoint), record(ownership.progress))
+         : await adapter?.reconcileWorkspaceOwnership?.(record(envelope.checkpoint));
+       if (result !== "settled") return "pending";
       if (key === KEY) await settleAdapterExecution(db, { ...input, leaseId: lease.id });
       else await db.update(environmentLeases).set({
         metadata: sql`jsonb_set(${environmentLeases.metadata}, '{workspaceOwnership}',

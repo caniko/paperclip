@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   AdapterExecutionContext,
   AdapterExecutionResult,
@@ -58,6 +59,10 @@ type ExecutionState = {
   rootRunId: string;
   lineage: Set<string>;
   cursors: Map<string, number>;
+  eventDigests: Map<string, Map<number, string>>;
+  protocolError: Error | null;
+  stopping: boolean;
+  activeEvents: number;
   outputChunks: string[];
   lastEventName: string | null;
   terminal: TerminalState | null;
@@ -455,6 +460,10 @@ function createExecutionState(runId: string): ExecutionState {
     rootRunId: runId,
     lineage: new Set([runId]),
     cursors: new Map(),
+    eventDigests: new Map(),
+    protocolError: null,
+    stopping: false,
+    activeEvents: 0,
     outputChunks: [],
     lastEventName: null,
     terminal: null,
@@ -503,51 +512,88 @@ function terminalReceiptForRun(runId: string, value: unknown, fallbackEventName:
   return { runId, status, eventName, payload: record, output: extractOutput(record) };
 }
 
-async function observeRun(ctx: AdapterExecutionContext, state: ExecutionState, value: unknown, fallback: string | null = null): Promise<void> {
+async function observeRun(ctx: AdapterExecutionContext, state: ExecutionState, runId: string, value: unknown, fallback: string | null = null): Promise<void> {
   const record = asRecord(value);
-  if (!record || (extractRunId(record) && extractRunId(record) !== state.runId)) return;
-  const status = extractStatus(record) ?? eventNameFromData(record, fallback)?.replace(/^run\./, "");
+  if (state.runId !== runId || state.protocolError || !record || (extractRunId(record) && extractRunId(record) !== runId)) return;
+  const eventName = eventNameFromData(record, fallback);
+  if (eventName && !eventName.startsWith("run.")) return;
+  const status = extractStatus(record) ?? eventName?.replace(/^run\./, "");
   if (status === "superseded") {
     const successor = nonEmpty(record.successor_run_id);
     if (!successor) return; // Poll the parent until its durable reservation is visible.
-    if (state.lineage.has(successor)) throw new Error("Hermes recovery lineage contains a cycle");
+    if (state.lineage.has(successor)) throw protocolError("Hermes recovery lineage contains a cycle");
     state.runId = successor;
     state.lineage.add(successor);
     await persistProgress(ctx, state);
     return;
   }
-  const terminal = terminalReceiptForRun(state.runId, value, fallback);
+  if (state.stopping || (fallback === null && state.activeEvents > 0)) return;
+  const terminal = terminalReceiptForRun(runId, value, fallback);
   if (terminal) markTerminal(state, terminal);
 }
 
 async function persistProgress(ctx: AdapterExecutionContext, state: ExecutionState): Promise<void> {
-  await ctx.onExecutionProgress?.({ version: 1, rootRunId: state.rootRunId, runId: state.runId,
-    lineage: [...state.lineage], cursors: Object.fromEntries(state.cursors) });
+  try {
+    await ctx.onExecutionProgress?.({ version: 1, rootRunId: state.rootRunId, runId: state.runId,
+      lineage: [...state.lineage], cursors: Object.fromEntries(state.cursors) });
+  } catch {
+    throw protocolError("Host refused the Hermes execution progress receipt");
+  }
+}
+
+function protocolError(message: string): Error {
+  return Object.assign(new Error(message), { code: "hermes_gateway_protocol_error" });
+}
+
+// Persist only a digest of the complete wire payload. Display redaction is lossy
+// and cannot distinguish conflicting replays beyond its truncation boundary.
+function eventDigest(value: unknown): string {
+  const canonical = (item: unknown): unknown => {
+    if (Array.isArray(item)) return item.map(canonical);
+    const record = asRecord(item);
+    return record ? Object.fromEntries(Object.keys(record).sort().map(key => [key, canonical(record[key])])) : item;
+  };
+  return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
 }
 
 async function handleEvent(
   ctx: AdapterExecutionContext,
   state: ExecutionState,
+  runId: string,
   frame: SseFrame,
   redactText: TextRedactor = sanitizeSensitiveText,
 ): Promise<void> {
   const parsed = parseJsonData(frame.data);
   const record = asRecord(parsed);
   const eventName = eventNameFromData(parsed, frame.event);
-  if (extractRunId(record) && extractRunId(record) !== state.runId) return;
-  const runId = state.runId;
+  if (state.runId !== runId || state.protocolError || (extractRunId(record) && extractRunId(record) !== runId)) return;
   const sequence = Number(frame.id ?? record?.sequence);
   const sequenced = Number.isSafeInteger(sequence) && sequence > 0;
-  if (sequenced && sequence <= (state.cursors.get(runId) ?? 0)) return;
+  if ((frame.id !== undefined || record?.sequence !== undefined) && !sequenced) throw protocolError("Invalid Hermes event sequence");
+  if (frame.id !== undefined && record?.sequence !== undefined && Number(frame.id) !== Number(record.sequence)) {
+    throw protocolError("Hermes SSE id and payload sequence disagree");
+  }
+  const digest = eventDigest({ event: eventName, payload: parsed });
+  const seen = state.eventDigests.get(runId) ?? new Map<number, string>();
+  if (sequenced && seen.has(sequence)) {
+    if (seen.get(sequence) !== digest) throw protocolError("Conflicting Hermes event replay");
+    return;
+  }
   state.lastEventName = eventName;
   const sanitized = asRecord(redactForLog(parsed, [], 0, redactText)) ?? {};
   if (sequenced && ctx.onEvent) {
-    await ctx.onEvent({ eventType: `hermes.${eventName ?? "message"}`, stream: "stdout", payload: sanitized,
-      message: eventName === "message.delta" ? redactText(nonEmpty(record?.delta) ?? nonEmpty(record?.text_delta) ?? "") : undefined,
-      providerSource: { runId, sequence, canonicalPayload: sanitized } });
+    try {
+      await ctx.onEvent({ eventType: `hermes.${eventName ?? "message"}`, stream: "stdout", payload: sanitized,
+        message: eventName === "message.delta" ? redactText(nonEmpty(record?.delta) ?? nonEmpty(record?.text_delta) ?? "") : undefined,
+        providerSource: { runId, sequence, canonicalPayload: { version: 1, sha256: digest } } });
+    } catch {
+      throw protocolError("Host refused the Hermes event receipt");
+    }
   } else {
     await ctx.onLog("stdout", `[hermes-gateway:event] run=${runId} event=${eventName ?? "message"} data=${stringifyForLog(sanitized, 8_000)}\n`);
   }
+
+  if (state.runId !== runId || state.protocolError) return;
 
   const delta = nonEmpty(record?.delta) ?? nonEmpty(record?.text_delta);
   if (eventName === "message.delta" && delta) {
@@ -556,9 +602,14 @@ async function handleEvent(
     if (!sequenced || !ctx.onEvent) await ctx.onLog("stdout", sanitizedDelta);
   }
 
-  if (sequenced) state.cursors.set(runId, sequence);
+  if (state.runId !== runId || state.protocolError) return;
+  if (sequenced) {
+    seen.set(sequence, digest);
+    state.eventDigests.set(runId, seen);
+    state.cursors.set(runId, sequence);
+  }
   await persistProgress(ctx, state);
-  await observeRun(ctx, state, parsed, eventName);
+  await observeRun(ctx, state, runId, parsed, eventName);
 }
 
 async function delay(ms: number, signal: AbortSignal): Promise<void> {
@@ -583,18 +634,21 @@ async function pollStatus(input: {
   intervalMs: number;
   supervised?: boolean;
   redactText?: TextRedactor;
+  onProtocolError: (error: Error) => void;
 }): Promise<void> {
   while (!input.signal.aborted && !input.state.terminal) {
     await delay(input.intervalMs, input.signal);
     if (input.signal.aborted || input.state.terminal) break;
+    const runId = input.state.runId;
     try {
-      const status = await fetchJson(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.state.runId)}`), {
+      const status = await fetchJson(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(runId)}`), {
         method: "GET",
         headers: input.headers,
         signal: input.supervised ? AbortSignal.any([input.signal, AbortSignal.timeout(30_000)]) : input.signal,
       });
-      await observeRun(input.ctx, input.state, status);
+      await observeRun(input.ctx, input.state, runId, status);
     } catch (err) {
+      if ((err as HermesHttpError).code === "hermes_gateway_protocol_error") input.onProtocolError(err as Error);
       if (input.signal.aborted) return;
       await input.ctx.onLog("stderr", `[hermes-gateway] status poll failed: ${redactErrorMessage(err, input.redactText)}\n`);
     }
@@ -609,11 +663,20 @@ async function consumeEvents(input: {
   signal: AbortSignal;
   reconnectMs: number;
   redactText?: TextRedactor;
+  onProtocolError: (error: Error) => void;
 }): Promise<void> {
+  const handle = async (runId: string, frame: SseFrame) => {
+    input.state.activeEvents++;
+    try {
+      await handleEvent(input.ctx, input.state, runId, frame, input.redactText);
+    } finally {
+      input.state.activeEvents--;
+    }
+  };
   while (!input.signal.aborted && !input.state.terminal) {
     const runId = input.state.runId;
     try {
-      const response = await fetch(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.state.runId)}/events`), {
+      const response = await fetch(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(runId)}/events`), {
         method: "GET",
         headers: { ...input.headers, ...(input.state.cursors.has(runId)
           ? { "Last-Event-ID": String(input.state.cursors.get(runId)) } : {}) },
@@ -632,14 +695,16 @@ async function consumeEvents(input: {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      try {
       while (!input.signal.aborted && !input.state.terminal && input.state.runId === runId) {
         const { value, done } = await reader.read();
+        if (input.signal.aborted || input.state.terminal || input.state.runId !== runId) break;
         if (done) {
           if (buffer.trim().length > 0) {
             const parsed = parseSseFramesForTest(`${buffer}\n\n`);
             buffer = parsed.rest;
             for (const frame of parsed.frames) {
-              await handleEvent(input.ctx, input.state, frame, input.redactText);
+              await handle(runId, frame);
               if (input.state.terminal || input.state.runId !== runId) break;
             }
           }
@@ -649,12 +714,18 @@ async function consumeEvents(input: {
         const parsed = parseSseFramesForTest(buffer);
         buffer = parsed.rest;
         for (const frame of parsed.frames) {
-          await handleEvent(input.ctx, input.state, frame, input.redactText);
+          await handle(runId, frame);
           if (input.state.terminal || input.state.runId !== runId) break;
         }
       }
-      await reader.cancel();
+      } finally {
+        await reader.cancel();
+      }
     } catch (err) {
+      if ((err as HermesHttpError).code === "hermes_gateway_protocol_error") {
+        input.onProtocolError(err as Error);
+        return;
+      }
       if (input.signal.aborted || input.state.terminal) return;
       await input.ctx.onLog("stderr", `[hermes-gateway] event stream disconnected: ${redactErrorMessage(err, input.redactText)}\n`);
     }
@@ -968,7 +1039,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       if (managedMcp) requireManagedMcpCapability(capabilities, managedMcp);
       if (ownedAdmission) {
         const recovery = parseObject(parseObject(asRecord(capabilities)?.features).runs_recovery);
-        if (recovery.version !== 1 || recovery.durable_lineage_stop !== true || (!supervised && recovery.ordinary_stop_admission !== true)) {
+        if (recovery.version !== 1 || recovery.durable_lineage_stop !== true || recovery.admission_binding !== 1 || (!supervised && recovery.ordinary_stop_admission !== true)) {
           throw Object.assign(new Error("Hermes worker lacks durable lineage stop for owned admissions"), { code: "hermes_gateway_recovery_unsupported" });
         }
       }
@@ -1032,7 +1103,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   await observer.onLog("stdout", `[hermes-gateway] run created: ${runId}\n`);
 
   const state = createExecutionState(runId);
+  state.stopping = ctx.signal?.aborted ?? false;
+  const requestedStop = () => { state.stopping = true; };
+  ctx.signal?.addEventListener("abort", requestedStop, { once: true });
   const controller = new AbortController();
+  const protocolStop = new AbortController();
+  const onProtocolError = (error: Error) => {
+    state.protocolError ??= error;
+    state.stopping = true;
+    protocolStop.abort();
+  };
   const events = consumeEvents({
     ctx: observer,
     baseUrl,
@@ -1041,6 +1121,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     signal: controller.signal,
     reconnectMs,
     redactText,
+    onProtocolError,
   }).catch(() => undefined);
   const polling = pollStatus({
     ctx: observer,
@@ -1051,30 +1132,40 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     intervalMs: pollIntervalMs,
     supervised: cancellable,
     redactText,
+    onProtocolError,
   }).catch(() => undefined);
+
+  const onStopReceipt = (receipt: unknown) => {
+    const record = asRecord(receipt);
+    // A malformed lineage receipt cannot fall through to single-run parsing.
+    if (record && ("lineage" in record || "lineage_settled" in record)) {
+      if (!lineageStopSettled(record, state.rootRunId, state.lineage)) return;
+      const current = (record.lineage as Record<string, unknown>[]).find(member => member.run_id === state.runId)!;
+      const status = current.status === "superseded" ? "cancelled" : String(current.status);
+      markTerminal(state, { runId: state.runId, status, payload: { ...record, ...current, status } });
+      return;
+    }
+    // Owned recovery workers must prove the whole lineage, even for a root-only
+    // admission. Legacy, unowned workers retain their single-run Stop contract.
+    if (ownedAdmission) return;
+    const terminal = terminalReceiptForRun(state.runId, receipt);
+    if (terminal) markTerminal(state, terminal);
+  };
 
   if (cancellable) {
     const timedOutBeforeObservation = deadlineExpired();
     const owned = await waitForOwnedRun({
-      terminal: state.terminalPromise.then(terminal => { controller.abort(); return terminal; }), signal: ctx.signal,
+      terminal: state.terminalPromise.then(terminal => { controller.abort(); return terminal; }),
+      signal: ctx.signal ? AbortSignal.any([ctx.signal, protocolStop.signal]) : protocolStop.signal,
       timeoutMs: deadline === null ? 0 : Math.max(1, deadline - Date.now()), retryMs: reconnectMs,
-      stop: () => stopRun({ ctx: observer, baseUrl, headers: eventHeaders, runId, redactText }),
-      onStopReceipt: receipt => {
-        const record = asRecord(receipt);
-        if (record && lineageStopSettled(record, state.rootRunId)) {
-          const members = record.lineage as Record<string, unknown>[];
-          const current = members.find((member) => member.run_id === state.runId);
-          const status = current?.status === "superseded" ? "cancelled" : String(current?.status ?? "cancelled");
-          markTerminal(state, { runId: state.runId, status, payload: { ...record, ...current, status } });
-          return;
-        }
-        const terminal = terminalReceiptForRun(state.runId, receipt);
-        if (terminal) markTerminal(state, terminal);
-      },
+      stop: () => { state.stopping = true; return stopRun({ ctx: observer, baseUrl, headers: eventHeaders, runId, redactText }); },
+      onStopReceipt,
     });
     controller.abort();
+    ctx.signal?.removeEventListener("abort", requestedStop);
     await Promise.all([events, polling]);
     await ctx.onProviderStopped?.();
+    if (state.protocolError) return errorResult(state.protocolError, redactText);
     const result = mapFinalResultForTest({ terminal: owned.terminal, outputChunks: state.outputChunks,
       sessionKey, strategy, redactText });
     if (binding) result.sessionParams = { ...result.sessionParams, executionContextFingerprint: binding.fingerprint };
@@ -1096,8 +1187,20 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     timeoutTimer = setTimeout(() => resolve("timeout"), timeoutMs);
   });
 
-  const outcome = await Promise.race([state.terminalPromise, timeoutPromise]);
+  const protocolFailure = new Promise<"protocol">((resolve) => {
+    if (protocolStop.signal.aborted) resolve("protocol");
+    else protocolStop.signal.addEventListener("abort", () => resolve("protocol"), { once: true });
+  });
+  const outcome = await Promise.race([state.terminalPromise, timeoutPromise, protocolFailure]);
+  ctx.signal?.removeEventListener("abort", requestedStop);
   if (timeoutTimer) clearTimeout(timeoutTimer);
+  if (outcome === "protocol") {
+    await waitForOwnedRun({ terminal: state.terminalPromise, signal: protocolStop.signal, timeoutMs: 0,
+      retryMs: reconnectMs, stop: () => stopRun({ ctx: observer, baseUrl, headers: eventHeaders, runId, redactText }), onStopReceipt });
+    controller.abort();
+    await Promise.all([events, polling]);
+    return errorResult(state.protocolError!, redactText);
+  }
   controller.abort();
 
   if (outcome === "timeout") {

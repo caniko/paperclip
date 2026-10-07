@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
@@ -20,7 +21,7 @@ it.each(["normal", "lost-admission", "managed-mcp-lost-admission", "failed-loggi
       res.end(JSON.stringify({ features: { runs_execution_context: {
         version: 1, mode: "precondition", backends: ["local"], lifetimes: ["wait_for_jobs"], stop_admission: true,
       }, runs_managed_mcp: { version: 1, enabled: true, mode: "run_isolated", host_id: "worker" },
-        runs_recovery: { version: 1, durable_lineage_stop: true, ordinary_stop_admission: true } } }));
+        runs_recovery: { version: 1, durable_lineage_stop: true, ordinary_stop_admission: true, admission_binding: 1 } } }));
     } else if (req.url === "/v1/runs" || req.url === "/v1/runs/stop") {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -29,6 +30,9 @@ it.each(["normal", "lost-admission", "managed-mcp-lost-admission", "failed-loggi
       if (req.url === "/v1/runs/stop") {
         stops++;
         res.end(JSON.stringify({ run_id: "owned", status: allowSettlement ? "cancelled" : "stopping",
+          admission: { version: 1, root_run_id: "owned",
+            key_sha256: createHash("sha256").update(String(req.headers["idempotency-key"])).digest("hex"),
+            body_sha256: createHash("sha256").update(body).digest("hex") },
           stop_requested: true, lineage_settled: allowSettlement,
           lineage: [{ run_id: "owned", status: allowSettlement ? "cancelled" : "stopping" }] }));
         return;
@@ -139,12 +143,13 @@ it.each([
   let closedObservers = 0;
   let allowSettlement = terminal;
   let cleanup = false;
-  const finalReceipt = { run_id: "owned", status: "cancelled", output: "Owned jobs stopped", usage: { input_tokens: 3, output_tokens: 2 } };
+  const finalReceipt = { run_id: "owned", status: "cancelled", output: "Owned jobs stopped", usage: { input_tokens: 3, output_tokens: 2 },
+    stop_requested: true, lineage_settled: true, lineage: [{ run_id: "owned", status: "cancelled" }] };
   const server = createServer(async (req, res) => {
     if (req.url === "/v1/capabilities") {
       res.end(JSON.stringify({ features: { runs_execution_context: {
         version: 1, mode: "precondition", backends: ["local"], lifetimes: ["wait_for_jobs"], stop_admission: true,
-      }, runs_recovery: { version: 1, durable_lineage_stop: true, ordinary_stop_admission: true } } }));
+      }, runs_recovery: { version: 1, durable_lineage_stop: true, ordinary_stop_admission: true, admission_binding: 1 } } }));
     } else if (req.url === "/v1/runs") {
       for await (const _chunk of req) { /* consume the admission body */ }
       res.writeHead(202).end(JSON.stringify({ run_id: "owned", status: "started" }));

@@ -5,6 +5,15 @@ Run-log events write to the `heartbeat_run_events` table
 Paperclip Telemetry events, and they are not OpenTelemetry exports. A run-log
 event needs no operator endpoint.
 
+## Hermes Provider Run-Log Receipts
+
+Sequenced Hermes SSE frames use provider-run identity and sequence to deduplicate
+local run-log rows. `providerSource.canonicalPayload` contains a version and
+SHA-256 digest of the complete canonical wire payload. Redacted display content
+does not define replay identity. A changed replay is rejected, and the adapter
+requests Stop before releasing execution ownership. These receipts stay in the
+instance database.
+
 ## Native PRP Run-Log Events
 
 The hidden native coordinator writes each validated PRP event to the bound

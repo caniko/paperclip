@@ -140,6 +140,14 @@ describe("legacy settlement PostgreSQL locking", () => {
     expect(lease.metadata).toEqual({ unrelated: "retained", adapterExecution: { state: "pending", version: 1, material, progress } });
     await expect(recordAdapterExecutionProgress(writer, { companyId: randomUUID(), runId: run.id, leaseId, progress }))
       .rejects.toThrow("controller lease");
+    await db.update(heartbeatRuns).set({ controllerBootId: randomUUID() }).where(eq(heartbeatRuns.id, run.id));
+    await expect(recordAdapterExecutionProgress(db, { companyId: run.companyId, runId: run.id, leaseId, progress }))
+      .rejects.toThrow("controller lease");
+    await db.update(heartbeatRuns).set({ controllerBootId: legacyControllerBootId,
+      controllerLeaseExpiresAt: new Date(0) }).where(eq(heartbeatRuns.id, run.id));
+    await expect(recordAdapterExecutionProgress(db, { companyId: run.companyId, runId: run.id, leaseId, progress }))
+      .rejects.toThrow("controller lease");
+    await db.update(heartbeatRuns).set({ controllerLeaseExpiresAt: new Date(Date.now() + 60_000) }).where(eq(heartbeatRuns.id, run.id));
     await settleAdapterExecution(db, { companyId: run.companyId, runId: run.id, leaseId });
     await expect(recordAdapterExecutionProgress(db, { companyId: run.companyId, runId: run.id, leaseId, progress }))
       .rejects.toThrow("pending admission");

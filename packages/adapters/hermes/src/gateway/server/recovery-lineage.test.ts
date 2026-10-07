@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -31,6 +32,7 @@ it.each(["completed", "uncertain", "stop"])(
                 version: 1,
                 durable_lineage_stop: true,
                 ordinary_stop_admission: true,
+                admission_binding: 1,
               },
             },
           }),
@@ -89,6 +91,9 @@ it.each(["completed", "uncertain", "stop"])(
           JSON.stringify({
             run_id: "parent",
             status: "superseded",
+            admission: { version: 1, root_run_id: "parent",
+              key_sha256: createHash("sha256").update("paperclip-lineage").digest("hex"),
+              body_sha256: createHash("sha256").update(String(checkpoints[0].body)).digest("hex") },
             stop_requested: true,
             lineage_settled: allowSettlement,
             lineage: [
