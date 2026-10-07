@@ -1,5 +1,5 @@
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
-import { and, asc, desc, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import { agents, agentWakeupRequests, chatCompletionDeliveries as deliveries, chatTaskHandoffs as handoffs,
   heartbeatRuns, issueComments, issueDocuments, issueThreadInteractions, issues, type Db } from "@paperclipai/db";
 import { instanceSettingsService } from "./instance-settings.js";
@@ -229,7 +229,7 @@ export async function acknowledgeReusedChatCompletionReply(db: Db, input: {
     const [comment] = await tx.select().from(issueComments).where(and(
       eq(issueComments.id, input.commentId), eq(issueComments.companyId, input.companyId),
       eq(issueComments.issueId, input.issueId), eq(issueComments.createdByRunId, run.id),
-      eq(issueComments.authorAgentId, run.agentId),
+      eq(issueComments.authorAgentId, run.agentId), isNull(issueComments.deletedAt),
     )).for("share");
     if (!comment) return;
     const existing = await existingChatCompletionReply(tx, run.id, source.id);
