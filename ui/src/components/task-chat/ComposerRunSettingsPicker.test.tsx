@@ -1,11 +1,10 @@
 // @vitest-environment jsdom
 
 import { act } from "react";
-import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Agent } from "@paperclipai/shared";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { agentsApi } from "@/api/agents";
 import { ComposerRunSettingsPicker } from "./ComposerRunSettingsPicker";
 
@@ -18,27 +17,36 @@ const options = [{ id: "agent:a1", label: "Clippy" }];
 const agents = new Map([[agent.id, agent]]);
 let container: HTMLDivElement | null = null;
 let root: ReturnType<typeof createRoot> | null = null;
-globalThis.ResizeObserver = class {
-  observe() {}
-  disconnect() {}
-  unobserve() {}
-};
-(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+let queryClient: QueryClient | null = null;
+
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("ResizeObserver", class {
+    observe() {}
+    disconnect() {}
+    unobserve() {}
+  });
+});
+
+async function flushTimers() {
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+}
 
 async function click(label: string) {
   const button = document.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)
     ?? [...document.querySelectorAll<HTMLButtonElement>('button[role="option"]')].find((item) => item.textContent?.trim().startsWith(label));
   expect(button).toBeDefined();
-  flushSync(() => button!.click());
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  await act(async () => button!.click());
+  await flushTimers();
 }
 
 function render(onAssigneeChange: (value: string) => void, onSettingsChange: () => void, useCatalog = false) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  flushSync(() => root!.render(<QueryClientProvider client={queryClient}>
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  act(() => root!.render(<QueryClientProvider client={queryClient!}>
     <ComposerRunSettingsPicker companyId="company-1" assigneeValue="agent:a1" currentAssigneeValue="agent:a1"
       options={options} agents={agents} settings={{ model: "gpt-6-sol", effort: "high", fast: true }}
       onAssigneeChange={onAssigneeChange} onSettingsChange={onSettingsChange}
@@ -46,12 +54,23 @@ function render(onAssigneeChange: (value: string) => void, onSettingsChange: () 
   </QueryClientProvider>));
 }
 
-afterEach(() => {
-  vi.restoreAllMocks();
-  flushSync(() => root?.unmount());
-  root = null;
-  container?.remove();
-  container = null;
+afterEach(async () => {
+  try {
+    await act(async () => root?.unmount());
+    queryClient?.clear();
+    // Radix defers focus restoration. Settle it while the JSDOM event realm
+    // and React globals still exist, before the test environment is disposed.
+    await act(async () => { await vi.runOnlyPendingTimersAsync(); });
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    root = null;
+    queryClient = null;
+    container?.remove();
+    container = null;
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
 });
 
 describe("composer assignee picker", () => {
@@ -78,7 +97,7 @@ describe("composer assignee picker", () => {
     expect(input).not.toBeNull();
     const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
     for (const query of ["Engineering Lead", "Codex"]) {
-      flushSync(() => {
+      act(() => {
         setValue.call(input, query);
         input!.dispatchEvent(new Event("input", { bubbles: true }));
       });
@@ -93,7 +112,7 @@ describe("composer assignee picker", () => {
       { id: "gpt-5.5", label: "GPT-5.5" },
     ]);
     render(vi.fn(), vi.fn(), true);
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await flushTimers();
     await click("Select assignee, model and effort");
     await click("Choose exact model");
     const options = [...document.querySelectorAll<HTMLButtonElement>('button[role="option"]')]
@@ -110,7 +129,7 @@ describe("composer assignee picker", () => {
       { id: "private-codex", label: "Private Codex" },
     ]);
     render(vi.fn(), vi.fn(), true);
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await flushTimers();
     expect(loadModels).toHaveBeenCalledWith("company-1", "codex_local", {
       environmentId: null,
       provider: undefined,
