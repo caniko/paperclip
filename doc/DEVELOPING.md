@@ -92,6 +92,12 @@ The vite dev server serves an unbundled module graph. This is fast to reload on 
 
 The preview server binds `0.0.0.0` and accepts any Host, so a tailnet or LAN address (e.g. `http://<host>.ts.net:3101/`) works out of the box. The `/api` proxy sets `x-forwarded-host` and `x-forwarded-proto`, which the server's board mutation guard uses to trust the browser's Origin — mutations from `:3101` succeed against the API on `:3100` without further configuration. An HTTPS tunnel in front of the preview server (ngrok, tailscale funnel) is also supported: the tunnel's `x-forwarded-proto` header is preserved when set.
 
+Static UI mode compresses built JavaScript, CSS, and HTML with Brotli or gzip
+when the browser supports it. Hashed assets retain their immutable cache policy;
+byte-range responses retain their original representation. This reduces initial
+page downloads through bandwidth-limited HTTPS tunnels such as Tailscale Funnel.
+API responses and MCP transports keep their existing compression behavior.
+
 ## Storybook
 
 The board UI Storybook keeps stories and Storybook config under `ui/storybook/` so component review files stay out of the app source routes.
@@ -862,6 +868,8 @@ Agent, project, environment, secret, skill, and workspace config edits are sampl
 
 When effective run config changes, Paperclip may intentionally skip a saved adapter session, refresh persisted workspace runtime config, replace a reused execution workspace, or avoid reusing a sandbox/environment lease. Fresh execution can lose adapter-specific session, workspace, or sandbox state; correctness of the next run's config takes priority over continuity. Plain environment values affect freshness through value hashes; run result JSON and workspace operation logs expose only the non-sensitive freshness decision categories, without storing secret values, full env maps, provider credentials, or private path details.
 
+An explicit `reuse_existing` Git workspace keeps its recorded source repository, including after its project-workspace row is deleted or the project primary changes. The server verifies the original company, project, repository origin, and worktree registration before reuse. It does not attach a deleted association to the new primary. A conflicting explicit project-workspace selection, missing source identity, or an unverified legacy local checkout blocks the run. Restore the original source. Before intentionally clearing the existing-workspace binding to choose a new repository, review and preserve its retained work. Missing worktrees may be reconstructed only from the verified original source; current project defaults are not a fallback.
+
 ## Workspace Git Scan Protection
 
 Paperclip applies one process-wide scheduler to expensive host-side workspace Git enumeration, including changed-file browsing, runtime/finalization cleanliness guards, and adapter sandbox-sync snapshots. The scheduler defaults to two active scans and a bounded queue of 32. Identical buffered scans of the same canonical worktree share one subprocess, while successful changed-file listings are cached for 10 seconds. Streaming snapshot scans have caller-owned sinks, so they use separate jobs in the same queue and are never cached or coalesced. Correctness-sensitive runtime guards bypass the result cache.
@@ -920,7 +928,16 @@ Seed modes:
 
 - `minimal` keeps core app state like companies, projects, issues, comments, approvals, and auth state, preserves schema for all tables, but omits row data from heavy operational history such as heartbeat runs, wake requests, activity logs, runtime services, and agent session state
 - `full` makes a full logical clone of the source instance
-- `--no-seed` creates an empty isolated instance
+- `--no-seed` defers database copying until the worktree is first used
+- `--empty` creates an empty isolated instance, with fresh signing secrets and no deferred copy; use this for synthetic test drives
+
+`--empty` persists a `.paperclip/seed-empty` marker before writing the instance config.
+The CLI and managed runtime provisioner honor it even when a registered source
+instance is present. An explicit successful `worktree reseed`, or a replacement
+`worktree init --force` without `--empty`, clears the choice.
+While that marker exists, startup uses the instance's saved JWT and tool-action
+signing keys even if the shell inherited another instance's keys. Better Auth
+uses its saved key or the fresh instance JWT key. Missing saved keys stop startup.
 
 Seeded worktree instances quarantine copied live execution by default for both `minimal` and `full` seeds. During restore, Paperclip disables copied agent timer heartbeats, resets copied `running` agents to `idle`, blocks and unassigns copied agent-owned `in_progress` issues, and unassigns copied agent-owned `todo`/`in_review` issues. This keeps a freshly booted worktree from starting agents for work already owned by the source instance. Pass `--preserve-live-work` only when you intentionally want the isolated worktree to resume copied assignments.
 
@@ -1019,7 +1036,8 @@ The workspace UI surfaces `Provisioning database`, `Validating clone`, `Ready`, 
 | `--server-port <port>` | Preferred server port |
 | `--db-port <port>` | Preferred embedded Postgres port |
 | `--seed-mode <mode>` | Seed profile: `minimal` or `full` (default: `minimal`) |
-| `--no-seed` | Skip database seeding from the source instance |
+| `--no-seed` | Defer database copying until first use |
+| `--empty` | Create an empty instance with fresh signing secrets and disable automatic copying |
 | `--force` | Replace existing repo-local config and isolated instance data |
 
 Examples:
@@ -1120,7 +1138,8 @@ Managed workspace repair uses this same verified full-reseed contract through `P
 | `--server-port <port>` | Preferred server port |
 | `--db-port <port>` | Preferred embedded Postgres port |
 | `--seed-mode <mode>` | Seed profile: `minimal` or `full` (default: `minimal`) |
-| `--no-seed` | Skip database seeding from the source instance |
+| `--no-seed` | Defer database copying until first use |
+| `--empty` | Create an empty instance with fresh signing secrets and disable automatic copying |
 | `--force` | Replace existing repo-local config and isolated instance data |
 
 Examples:
@@ -1269,6 +1288,15 @@ workspace below the host `HOME` is valid, including the default projectless
 agent workspace. The host `HOME` itself, a directory that contains it, a
 filesystem root, a `CODEX_HOME` overlap, or a canonical path outside the
 assigned workspace is rejected before provider startup.
+
+Fresh remote Codex Runner runs recover from a supported image CLI that is too old
+for the selected model. Preparation selects the closest compatible older model
+of the same class, then the stable Runner default. The task shows a warning with
+the requested model, effective model, and CLI version. Agent and task settings
+stay unchanged. Update the image CLI to restore the requested model on later
+runs. Explicit `PAPERCLIP_RUNNER_REMOTE_CODEX_PATH` and
+`PAPERCLIP_RUNNER_REMOTE_CODEX_NPM_SPEC` settings take precedence. See
+[execution semantics](execution-semantics.md#remote-codex-model-compatibility).
 
 ### Sandbox ACP input delivery
 
