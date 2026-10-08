@@ -179,4 +179,13 @@ test("the mandatory lane executes an immutable harness and verifier outside the 
   assert.match(lane, /COMPOSER_STOP_TRUSTED_REVISION/);
   assert.match(lane, /COMPOSER_STOP_HARNESS_SHA256/);
   assert.match(lane, /COMPOSER_STOP_VERIFIER_SHA256/);
+  assert.match(lane, /working-directory: \.trusted-composer-stop\n\s+run: pnpm install --filter paperclip --frozen-lockfile --ignore-scripts/);
+  assert.match(lane, /working-directory: \.trusted-composer-stop\/packages\/paperclip-runner\n\s+run: \|\n\s+cargo build[^\n]+--bin fake-codex-app-server/);
+  assert.match(lane, /node \.trusted-composer-stop\/node_modules\/@playwright\/test\/cli\.js/);
+  assert.match(lane, /git ls-files -z \| xargs -0 sha256sum/);
+  assert.equal((lane.match(/sha256sum --check/g) ?? []).length, 2);
+  const base = readFileSync(new URL("../../tests/e2e/playwright.config.ts", import.meta.url), "utf8");
+  assert.match(base, /cwd: process\.env\.PAPERCLIP_E2E_SOURCE_ROOT \?\?/);
+  const config = readFileSync(new URL("../../tests/e2e/playwright-composer-stop.config.ts", import.meta.url), "utf8");
+  assert.match(config, /Mandatory native composer Stop requires an absolute candidate source root/);
 });

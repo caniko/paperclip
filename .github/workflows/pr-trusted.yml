@@ -1405,13 +1405,42 @@ jobs:
       PAPERCLIP_E2E_SKIP_LLM: "true"
       PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"
       PAPERCLIP_STOP_REQUIRE_NATIVE: "true"
+      PAPERCLIP_E2E_SOURCE_ROOT: ${{ github.workspace }}
       COMPOSER_STOP_HEAD_REVISION: ${{ github.event.pull_request.head.sha }}
+      COMPOSER_STOP_TRUSTED_REVISION: 5bd0e909be7c226642645efa2c7c34ec0ebb8a21
     steps:
       - name: Checkout exact PR head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
+
+      # Proposed source pin: qualify and review it before promoting the caller.
+      - name: Checkout immutable Stop harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: caniko/paperclip
+          ref: 5bd0e909be7c226642645efa2c7c34ec0ebb8a21
+          path: .trusted-composer-stop
+          persist-credentials: false
+
+      - name: Bind independent harness and verifier source
+        run: |
+          set -euo pipefail
+          test "$(git -C .trusted-composer-stop rev-parse HEAD)" = "$COMPOSER_STOP_TRUSTED_REVISION"
+          (
+            cd .trusted-composer-stop
+            git ls-files -z | xargs -0 sha256sum
+          ) > "$RUNNER_TEMP/composer-stop-harness-manifest.sha256"
+          COMPOSER_STOP_HARNESS_SHA256="$(sha256sum "$RUNNER_TEMP/composer-stop-harness-manifest.sha256" | cut -d' ' -f1)"
+          COMPOSER_STOP_VERIFIER_SHA256="$(sha256sum .trusted-composer-stop/scripts/qualify-composer-stop.mjs | cut -d' ' -f1)"
+          echo "COMPOSER_STOP_HARNESS_SHA256=$COMPOSER_STOP_HARNESS_SHA256" >> "$GITHUB_ENV"
+          echo "COMPOSER_STOP_VERIFIER_SHA256=$COMPOSER_STOP_VERIFIER_SHA256" >> "$GITHUB_ENV"
+          jq -n --arg revision "$COMPOSER_STOP_TRUSTED_REVISION" \
+            --arg harnessSha256 "$COMPOSER_STOP_HARNESS_SHA256" \
+            --arg verifierSha256 "$COMPOSER_STOP_VERIFIER_SHA256" \
+            '{trustedRevision: $revision, harnessSha256: $harnessSha256, verifierSha256: $verifierSha256}' \
+            > "$RUNNER_TEMP/composer-stop-trusted-provenance.json"
 
       - name: Setup Node.js for pnpm bootstrap
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -1470,17 +1499,29 @@ jobs:
           cache-bin: false
           save-if: false
 
-      - name: Build real runner and deterministic provider
+      - name: Install immutable browser harness dependencies
+        working-directory: .trusted-composer-stop
+        run: pnpm install --filter paperclip --frozen-lockfile --ignore-scripts
+
+      - name: Build candidate runner
         working-directory: packages/paperclip-runner
         run: |
-          cargo build --manifest-path runner/Cargo.toml --locked --bin paperclip-runnerd --bin fake-codex-app-server
+          cargo build --manifest-path runner/Cargo.toml --locked --bin paperclip-runnerd
           node --input-type=module <<'JS'
           import { appendFileSync } from "node:fs";
-          import { resolveCargoBinary, resolveCargoTargetDirectory } from "./scripts/cargo-artifacts.mjs";
-          const targetDirectory = resolveCargoTargetDirectory();
-          for (const [name, binary] of [["PAPERCLIP_RUNNER_BINARY", "paperclip-runnerd"], ["PAPERCLIP_STOP_FAKE_CODEX", "fake-codex-app-server"]]) {
-            appendFileSync(process.env.GITHUB_ENV, `${name}=${resolveCargoBinary({ binary, targetDirectory })}\n`);
-          }
+          import { resolveCargoBinary, resolveCargoTargetDirectory } from "../../.trusted-composer-stop/packages/paperclip-runner/scripts/cargo-artifacts.mjs";
+          const targetDirectory = resolveCargoTargetDirectory({ packageRoot: process.cwd() });
+          appendFileSync(process.env.GITHUB_ENV, `PAPERCLIP_RUNNER_BINARY=${resolveCargoBinary({ binary: "paperclip-runnerd", targetDirectory })}\n`);
+          JS
+
+      - name: Build immutable deterministic provider
+        working-directory: .trusted-composer-stop/packages/paperclip-runner
+        run: |
+          cargo build --manifest-path runner/Cargo.toml --locked --bin fake-codex-app-server
+          node --input-type=module <<'JS'
+          import { appendFileSync } from "node:fs";
+          import { resolveCargoBinary } from "./scripts/cargo-artifacts.mjs";
+          appendFileSync(process.env.GITHUB_ENV, `PAPERCLIP_STOP_FAKE_CODEX=${resolveCargoBinary({ binary: "fake-codex-app-server" })}\n`);
           JS
 
       - name: Verify runner Chrome
@@ -1491,7 +1532,11 @@ jobs:
           PAPERCLIP_STOP_CODEX_LOG: ${{ runner.temp }}/composer-stop-provider.log
           PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ runner.temp }}/composer-stop-report.json
           PLAYWRIGHT_JUNIT_OUTPUT_NAME: ${{ runner.temp }}/composer-stop-junit.xml
-        run: pnpm exec playwright test --config tests/e2e/playwright-composer-stop.config.ts --reporter=list,json,junit
+        run: |
+          set -euo pipefail
+          (cd .trusted-composer-stop && sha256sum --check "$RUNNER_TEMP/composer-stop-harness-manifest.sha256")
+          node .trusted-composer-stop/node_modules/@playwright/test/cli.js test \
+            --config .trusted-composer-stop/tests/e2e/playwright-composer-stop.config.ts --reporter=list,json,junit
 
       - name: Qualify exact-head native composer Stop proof
         env:
@@ -1499,6 +1544,9 @@ jobs:
           COMPOSER_STOP_SOURCE_LOCKFILE: ${{ runner.temp }}/composer-stop-source-lock.yaml
           COMPOSER_STOP_EFFECTIVE_LOCKFILE: ${{ runner.temp }}/composer-stop-effective-lock.yaml
         run: |
+          set -euo pipefail
+          (cd .trusted-composer-stop && sha256sum --check "$RUNNER_TEMP/composer-stop-harness-manifest.sha256")
+          test "$(sha256sum .trusted-composer-stop/scripts/qualify-composer-stop.mjs | cut -d' ' -f1)" = "$COMPOSER_STOP_VERIFIER_SHA256"
           python3 - "$PLAYWRIGHT_JUNIT_OUTPUT_NAME" <<'PY'
           import sys
           import xml.etree.ElementTree as ET
@@ -1515,7 +1563,7 @@ jobs:
           export COMPOSER_STOP_REVISION COMPOSER_STOP_PNPM_VERSION
           git show HEAD:pnpm-lock.yaml > "$COMPOSER_STOP_SOURCE_LOCKFILE"
           cp pnpm-lock.yaml "$COMPOSER_STOP_EFFECTIVE_LOCKFILE"
-          node scripts/qualify-composer-stop.mjs "$RUNNER_TEMP/composer-stop-report.json" "$RUNNER_TEMP/composer-stop-receipt.json"
+          node .trusted-composer-stop/scripts/qualify-composer-stop.mjs "$RUNNER_TEMP/composer-stop-report.json" "$RUNNER_TEMP/composer-stop-receipt.json"
 
       - name: Retain native composer Stop evidence
         if: always()
@@ -1532,7 +1580,9 @@ jobs:
             ${{ runner.temp }}/composer-stop-receipt.json
             ${{ runner.temp }}/composer-stop-source-lock.yaml
             ${{ runner.temp }}/composer-stop-effective-lock.yaml
-            tests/e2e/test-results/
+            ${{ runner.temp }}/composer-stop-harness-manifest.sha256
+            ${{ runner.temp }}/composer-stop-trusted-provenance.json
+            .trusted-composer-stop/tests/e2e/test-results/
 
   e2e:
     # Preserve the legacy required-check name while the specs run sharded
