@@ -154,6 +154,19 @@ const support = await getEmbeddedPostgresTestSupport();
       await rm(cwd, { recursive: true, force: true });
     }
   }, 30_000);
+  it("keeps a deleted reused reply queued for another completion turn", async () => {
+    const f = await seed(); await f.finish(); const run = await f.run();
+    const reply = await issueService(db).addComment(f.sourceId, "Ready", { agentId: f.agentId, runId: run.id });
+    await db.update(issueComments).set({ deletedAt: new Date() }).where(eq(issueComments.id, reply.id));
+    await acknowledgeReusedChatCompletionReply(db, {
+      companyId: f.companyId, issueId: f.sourceId, runId: run.id, commentId: reply.id,
+    });
+    expect(await f.rows()).toMatchObject([{ status: "queued", responseCommentId: null }]);
+    await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, run.id));
+    await f.due(); await f.service.sweepPending();
+    expect(f.wakeup).toHaveBeenCalledTimes(2);
+    expect(await f.rows()).toMatchObject([{ status: "queued", responseCommentId: null, attempts: 1 }]);
+  });
   it.each(["company", "issue", "run", "comment", "agent", "reset", "reopen"])("does not acknowledge a reused reply with mismatched %s", async mismatch => {
     const f = await seed(); await f.finish(); const run = await f.run();
     const reply = await issueService(db).addComment(f.sourceId, "Ready", { agentId: f.agentId, runId: run.id });
