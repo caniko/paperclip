@@ -4596,17 +4596,13 @@ it.each(["held-ack", "lost-ack", "rejected-attach"] as const)(
       const runnerPid = bundle.evidence().runnerPid;
       providerPid = bundle.evidence().codexPid;
       const rotations: (typeof core.store.state)[] = [];
-      const commit = core.store.commit.bind(core.store);
-      vi.spyOn(core.store, "commit").mockImplementation((candidate) => {
-        // Authentication can activate the next authority before the attach
-        // result observer runs. Capture retired state at its durable boundary.
-        const retired =
-          candidate.identity.runId !== core.store.state.identity.runId
-            ? structuredClone(core.store.state)
-            : null;
-        commit(candidate);
-        if (retired) rotations.push(retired);
-      });
+      const rotate = core.rotateRunIdentity.bind(core);
+      vi.spyOn(core, "rotateRunIdentity").mockImplementation(
+        (identity, template) => {
+          rotations.push(structuredClone(core.store.state));
+          return rotate(identity, template);
+        },
+      );
       if (mode === "rejected-attach") {
         const queue = core.queueCommand.bind(core);
         vi.spyOn(core, "queueCommand").mockImplementation(
