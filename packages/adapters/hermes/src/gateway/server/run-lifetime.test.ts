@@ -7,6 +7,27 @@ import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { execute } from "./execute.js";
 import { reconcileExecution } from "./recovery.js";
 
+it("refuses cancellation without durable admission ownership before remote dispatch", async () => {
+  const fetch = vi.spyOn(globalThis, "fetch");
+  const ready = vi.fn(async () => {});
+  const dispatch = vi.fn();
+  try {
+    const result = await execute({
+      runId: "unowned-cancellation", signal: new AbortController().signal,
+      onCancellationReady: ready, onDispatch: dispatch, onLog: async () => {},
+      agent: { id: "agent", companyId: "company", name: "Worker", adapterType: "hermes_gateway", adapterConfig: {} },
+      config: { apiBaseUrl: "http://127.0.0.1:8642", apiKey: "fixture" }, context: {},
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+    });
+    expect(result.errorCode).toBe("hermes_gateway_checkpoint_required");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(ready).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+  } finally {
+    fetch.mockRestore();
+  }
+});
+
 it.each(["normal", "lost-admission", "ordinary-lost-admission", "ordinary-stalled-admission", "managed-mcp-lost-admission", "failed-logging", "child-completion", "pre-admission-cancel", "rejected-admission"])("retains cancellation ownership through %s and unknown stop status", async (failure) => {
   const managed = failure === "managed-mcp-lost-admission";
   const ordinary = failure.startsWith("ordinary-");
