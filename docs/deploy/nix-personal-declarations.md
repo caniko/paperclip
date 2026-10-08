@@ -95,10 +95,13 @@ reconciler. The host selects the evaluated manifest, not a mutable file in the
 user's home. Changing the personal manifest takes effect when the selected system
 controller is rebuilt and restarted.
 
-The bridge rejects a missing user or manifest. It also rejects host-side
-extensions and overrides of the selected manifest, including `mkForce`. Declare
-all resource fields in the selected personal manifest. A controller without a
-Home Manager selection can use the normal system `manifest` option directly.
+The bridge rejects a missing user or manifest. It also rejects extensions and
+overrides at `services.paperclip.instances.<name>.manifest`, including `mkForce`.
+Declare all resource fields in the selected personal manifest. Normal Nix module
+composition of `home-manager.users.<user>.programs.paperclip.deployments.<name>`
+is allowed: the bridge selects that final evaluated value, not its author or
+module provenance. A controller without a Home Manager selection can use the
+normal system `manifest` option directly.
 
 System service identities, filesystem access, worker configuration, credentials,
 and database settings belong to NixOS. Paperclip owns application users,
