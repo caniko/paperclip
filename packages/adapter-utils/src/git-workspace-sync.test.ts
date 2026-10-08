@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { workspacePaths } from "./workspace-manifest.js";
 import { runWorkspaceGitProcess } from "./workspace-git-stream.js";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   buildRemoteGitDeltaBundleScript,
@@ -28,6 +28,7 @@ import {
   setExpensiveWorkspaceGitExecutor,
   withShallowGitWorkspaceClone,
 } from "./git-workspace-sync.js";
+import { vi } from "vitest";
 
 const execFile = promisify(execFileCallback);
 
