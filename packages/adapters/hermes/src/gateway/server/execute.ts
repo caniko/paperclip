@@ -579,6 +579,9 @@ async function handleEvent(
     if (seen.get(sequence) !== digest) throw protocolError("Conflicting Hermes event replay");
     return;
   }
+  if (sequenced && sequence !== (state.cursors.get(runId) ?? 0) + 1) {
+    throw protocolError("Noncontiguous Hermes event sequence");
+  }
   state.lastEventName = eventName;
   const sanitized = asRecord(redactForLog(parsed, [], 0, redactText)) ?? {};
   if (sequenced && ctx.onEvent) {
