@@ -198,7 +198,7 @@ const embeddedPostgresSupport = externalTestDatabaseUrl
   ? { supported: true }
   : await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported
-  ? describe.sequential
+  ? describe
   : describe.skip;
 
 if (!embeddedPostgresSupport.supported) {
@@ -1048,7 +1048,19 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     try {
       await Promise.all([...fixtureServices].map((service) => service.shutdown()));
     } finally {
-      await retireFixtureState([...fixtureCompanies]);
+      const companyIds = [...fixtureCompanies];
+      await retireFixtureState(companyIds);
+      if (companyIds.length > 0) {
+        // Pausing an endpoint does not remove its rows from global recovery
+        // selectors. After every assertion and worker shutdown, settle leftover
+        // fixture work so later cases cannot claim its leases or retry its I/O.
+        await db.update(chatActions).set({ status: "cancelled" })
+          .where(and(inArray(chatActions.companyId, companyIds), notInArray(chatActions.status, ["processed", "cancelled"])));
+        await db.update(chatDeliveries).set({ state: "failed", nextAttemptAt: null })
+          .where(and(inArray(chatDeliveries.companyId, companyIds), inArray(chatDeliveries.state, ["received", "processing", "retry"])));
+        await db.update(chatPublications).set({ state: "cancelled", nextAttemptAt: null })
+          .where(and(inArray(chatPublications.companyId, companyIds), inArray(chatPublications.state, ["pending", "awaiting_consent", "streaming", "retry"])));
+      }
       fixtureServices.clear();
       fixtureCompanies.clear();
     }
@@ -1076,7 +1088,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     await db.insert(companies).values({
       id: companyId,
       name: `Chat Test ${companyId.slice(0, 8)}`,
-      issuePrefix: `C${companyId.replaceAll("-", "").slice(0, 7).toUpperCase()}`,
+      issuePrefix: `C${companyId.replace(/-/g, "").toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
     });
     const now = new Date();
@@ -7667,6 +7679,8 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     ).toBe(1);
     expect(deferred).toHaveLength(1);
 
+    // The production reorder window is 750 ms; allow the subsequent database
+    // drain to finish on loaded CI instead of sharing the default one-second budget.
     deferred.shift()?.();
     await vi.waitFor(async () => {
       const rows = await db
@@ -7674,7 +7688,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         .from(chatConversations)
         .where(eq(chatConversations.endpointId, endpoint.id));
       expect(rows).toHaveLength(1);
-    });
+    }, { timeout: 10_000 });
     const [conversation] = await db
       .select()
       .from(chatConversations)
@@ -7690,7 +7704,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         "unmentioned follow-up delivered first",
       ]);
       expect(wakeup).toHaveBeenCalledTimes(2);
-    });
+    }, { timeout: 10_000 });
     await service.shutdown();
   });
 
@@ -15986,7 +16000,12 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
   it("reorders rapid Slack callbacks by provider time before one conversation drain", async () => {
     const fixture = await seedCompany();
     const runtime = new FakeChatSdkRuntime();
-    const deferred: Array<() => void> = [];
+    const deferred: Array<() => void | Promise<void>> = [];
+    let releaseFirstDelivery!: () => void;
+    let signalFirstDelivery!: () => void;
+    const firstDeliveryEntered = new Promise<void>((resolve) => { signalFirstDelivery = resolve; });
+    const firstDeliveryReleased = new Promise<void>((resolve) => { releaseFirstDelivery = resolve; });
+    let firstDelivery = true;
     const wakeup = vi.fn(async () => ({ accepted: true }));
     const service = chatChannelService(db, {
       deferWebhookProcessing: true,
@@ -15995,6 +16014,12 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       publicBaseUrl: "https://paperclip.example",
       runtime: runtime as unknown as ChatSdkRuntime,
       scheduleDeferredWork: (task) => deferred.push(task),
+      reachAuthorizationBarrier: async () => {
+        if (!firstDelivery) return;
+        firstDelivery = false;
+        signalFirstDelivery();
+        await firstDeliveryReleased;
+      },
     });
     const endpoint = await service.create(
       fixture.companyId,
@@ -16113,69 +16138,54 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       publicBaseUrl: "https://paperclip.example",
       runtime: new FakeChatSdkRuntime() as unknown as ChatSdkRuntime,
     });
-    deferred.shift()?.();
-    // Simulate another server process reconciling the same durable rows at
-    // the same time as the webhook process's deferred drain.
-    await competingService.processPendingDeliveries();
-    await vi.waitFor(async () => {
-      const rows = await db
+    let drainSettled = false;
+    const draining = Promise.resolve(deferred.shift()?.()).then(() => { drainSettled = true; });
+    try {
+      // Hold the deferred owner after it acquires the conversation lease. The
+      // competing sweep must finish without overtaking that owner.
+      await firstDeliveryEntered;
+      await competingService.processPendingDeliveries();
+      expect(drainSettled).toBe(false);
+      expect(wakeup.mock.calls.filter((call) => call[0] === fixture.assignedAgentId)).toHaveLength(0);
+      releaseFirstDelivery();
+      await draining;
+      expect(drainSettled).toBe(true);
+      const conversations = await db
         .select()
         .from(chatConversations)
         .where(eq(chatConversations.endpointId, endpoint.id));
-      expect(rows).toHaveLength(1);
-    });
-    const [conversation] = await db
-      .select()
-      .from(chatConversations)
-      .where(eq(chatConversations.endpointId, endpoint.id));
-    await vi.waitFor(async () => {
-      const rows = await db
-        .select({ id: issueComments.id })
+      expect(conversations).toHaveLength(1);
+      const [conversation] = conversations;
+      const comments = await db
+        .select({ id: issueComments.id, body: issueComments.body })
         .from(issueComments)
-        .where(eq(issueComments.issueId, conversation.issueId));
-      expect(rows).toHaveLength(8);
-    });
-    const comments = await db
-      .select({ id: issueComments.id, body: issueComments.body })
-      .from(issueComments)
-      .where(eq(issueComments.issueId, conversation.issueId))
-      .orderBy(asc(issueComments.createdAt), asc(issueComments.id));
-    expect(comments.map((comment) => comment.body)).toEqual([
-      "@maya acknowledge quickly",
-      "follow-up 3",
-      "follow-up 4",
-      "follow-up 5",
-      "and include the rollback status",
-      "follow-up 6",
-      "follow-up 7",
-      "follow-up 8",
-    ]);
-    // Comment admission commits before the durable wake. Wait for this
-    // company's last wake too, not merely its already-visible last comment.
-    // The competing sweep may legitimately reconcile another fixture company.
-    await vi.waitFor(() => {
-      const calls = wakeup.mock.calls.filter(
-        (call) => call[0] === fixture.assignedAgentId,
-      );
+        .where(eq(issueComments.issueId, conversation.issueId))
+        .orderBy(asc(issueComments.createdAt), asc(issueComments.id));
+      expect(comments.map((comment) => comment.body)).toEqual([
+        "@maya acknowledge quickly",
+        "follow-up 3",
+        "follow-up 4",
+        "follow-up 5",
+        "and include the rollback status",
+        "follow-up 6",
+        "follow-up 7",
+        "follow-up 8",
+      ]);
+      // Joining the owner includes all comment admissions, durable wakeups and
+      // lease release. These assertions do not race a one-second polling budget.
+      expect(comments).toHaveLength(8);
+      const calls = wakeup.mock.calls.filter((call) => call[0] === fixture.assignedAgentId);
       expect(calls).toHaveLength(8);
-      expect(calls.map((call) => call[1]?.payload?.wakeCommentId)).toEqual(
-        comments.map((comment) => comment.id),
-      );
-    });
-    // The last comment and wakeup commit inside the lease. Under full-suite
-    // load the assertions above can observe those effects one microtask before
-    // the deferred owner's `finally` deletes its lease. Require prompt eventual
-    // release; a real leak would remain for the much longer lease TTL.
-    await vi.waitFor(async () => {
+      expect(calls.map((call) => call[1]?.payload?.wakeCommentId)).toEqual(comments.map((comment) => comment.id));
       expect(
-        await db
-          .select()
-          .from(chatEndpointLeases)
-          .where(eq(chatEndpointLeases.endpointId, endpoint.id)),
+        await db.select().from(chatEndpointLeases).where(eq(chatEndpointLeases.endpointId, endpoint.id)),
       ).toHaveLength(0);
-    });
-    await competingService.shutdown();
-    await service.shutdown();
+    } finally {
+      releaseFirstDelivery();
+      await draining;
+      await competingService.shutdown();
+      await service.shutdown();
+    }
   });
 
   it("stops a conversation drain after its lease renewal fails", async () => {
@@ -20818,6 +20828,10 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       trigger: "subscribed_message",
     });
 
+    // Keep this ordering assertion independent of database/CI wall-clock speed.
+    // The next drain below explicitly makes both deliveries due.
+    await db.update(chatDeliveries).set({ nextAttemptAt: new Date(Date.now() + 60_000) })
+      .where(and(eq(chatDeliveries.endpointId, endpoint.id), inArray(chatDeliveries.state, ["received", "retry"])));
     await service.processPendingDeliveries();
     expect(wakeup).not.toHaveBeenCalled();
     await db
@@ -56157,9 +56171,13 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     "leased",
     "wrong_thread",
     "source_edited",
-  ])(
-    "retries only the original pre-provider Telegram request after exact cleanup: %s",
-    async (mode) => {
+    "different_error",
+  ].flatMap((mode) => [
+    "runner_state_identity_mismatch",
+    "runner_state_identity_mismatch: prior_owner_active",
+  ].map((errorMessage) => ({ mode, errorMessage }))))(
+    "retries only the original pre-provider Telegram request after exact cleanup: $mode ($errorMessage)",
+    async ({ mode, errorMessage }) => {
       const context = await committedChatResponseRecoveryFixture("telegram");
       const providerAccount =
         mode === "null_account"
@@ -56286,7 +56304,9 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
           agentId: context.fixture.assignedAgentId,
           status: "failed",
           errorCode: "adapter_failed",
-          error: "runner_state_identity_mismatch",
+          error: mode === "different_error"
+            ? errorMessage.replace("runner_state_identity_mismatch", "runner_state_identity_mismatch_other")
+            : errorMessage,
           finishedAt: new Date(),
           wakeupRequestId: action.id,
           runtimeMode: "native",
@@ -60615,19 +60635,23 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
             db
               .select({ id: issueComments.id })
               .from(issueComments)
-              .where(eq(issueComments.companyId, fixture.companyId)),
+              .where(eq(issueComments.companyId, fixture.companyId))
+              .orderBy(issueComments.id),
             db
               .select({ id: issues.id })
               .from(issues)
-              .where(eq(issues.companyId, fixture.companyId)),
+              .where(eq(issues.companyId, fixture.companyId))
+              .orderBy(issues.id),
             db
               .select({ id: heartbeatRuns.id })
               .from(heartbeatRuns)
-              .where(eq(heartbeatRuns.companyId, fixture.companyId)),
+              .where(eq(heartbeatRuns.companyId, fixture.companyId))
+              .orderBy(heartbeatRuns.id),
             db
               .select({ id: chatPublications.id })
               .from(chatPublications)
-              .where(eq(chatPublications.endpointId, endpoint.id)),
+              .where(eq(chatPublications.endpointId, endpoint.id))
+              .orderBy(chatPublications.id),
           ]);
         const baseline = await unchangedRows();
         const wakeupCount = wakeup.mock.calls.length;
@@ -61893,8 +61917,8 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     ).resolves.toMatchObject({ ok: true });
     expect(deferred).toHaveLength(1);
     await drainDeferred();
-    await vi.waitFor(() => expect(deferred).toHaveLength(1));
-    await drainDeferred();
+    // Awaiting each callback also drains the lifecycle work it queues.
+    expect(deferred).toHaveLength(0);
     await vi.waitFor(async () => {
       await expect(
         db
@@ -69057,7 +69081,11 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       },
     );
 
-    it("retries an unknown subscription mutation after restart using freshly observed options, not a recovered confirmation flag", async () => {
+    it("retries an unknown subscription mutation after restart using freshly observed options, not a recovered confirmation flag", async ({ onTestFailed }) => {
+      let phase = "create fixture";
+      onTestFailed(() => {
+        console.error(`Telegram subscription recovery failed during: ${phase}`);
+      });
       const lane = await draftFixture();
       try {
         await db
@@ -69074,6 +69102,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
             throw new Error("Synthetic unknown subscription response");
           return undefined;
         });
+        phase = "first subscription attempt";
         await lane.processSubscriptionAttempt();
         const [action] = await db
           .select()
@@ -69089,17 +69118,28 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
           status: "failed",
           result: { retryable: true, providerConfirmed: false },
         });
+        // Keep the retry pending until the explicit post-restart transition below.
+        // A busy runner can otherwise exhaust the real one-second backoff here.
+        await db
+          .update(chatActions)
+          .set({
+            result: { ...action!.result, retryAt: "2099-01-01T00:00:00.000Z" },
+          })
+          .where(eq(chatActions.id, action!.id));
+        phase = "ordinary publication before restart";
         expect((await lane.send("unknown-subscription"))?.state).toBe(
           "published",
         );
         expect(lane.requests).toHaveLength(1);
         expect(lane.requests[0]!.method.endsWith("Draft")).toBe(false);
+        phase = "pending recovery before restart";
         await lane.context.service.processPendingDeliveries();
         expect(
           lane.maintenanceRequests.filter(
             ({ method }) => method === "setWebhook",
           ),
         ).toHaveLength(1);
+        phase = "restart";
         await lane.restart();
         lane.setSubscriptionInfo({
           allowed_updates: ["message", "chat_member"],
@@ -69115,10 +69155,12 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
             },
           })
           .where(eq(chatActions.id, action!.id));
+        phase = "concurrent recovery after restart";
         await Promise.all([
           lane.context.service.processPendingDeliveries(),
           lane.context.service.processPendingDeliveries(),
         ]);
+        phase = "verify recovered subscription";
         const mutations = lane.maintenanceRequests.filter(
           ({ method }) => method === "setWebhook",
         );
@@ -69148,9 +69190,11 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
               200,
             );
         });
+        phase = "publication after subscription recovery";
         expect((await lane.send("repaired-after-unknown"))?.state).toBe(
           "cancelled",
         );
+        phase = "close fixture";
       } finally {
         await lane.close();
       }
