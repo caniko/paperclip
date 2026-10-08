@@ -2080,6 +2080,16 @@ remove stale instructions after edits or access revocation. See
 [Connection instructions](connections/CONNECTION-INSTRUCTIONS.md) for contracts,
 UI conventions, custom adapter integration, and initial memory templates.
 
+### Remote Codex model compatibility
+
+Fresh remote Codex Runner preparation can replace a model whose verified CLI
+minimum exceeds the supported image CLI version. It selects a compatible older
+model in the same class, then the stable Runner default, and saves that effective
+model before checkpoint selection. A visible task warning and local run-log event
+record the substitution. This does not change agent settings, rewrite admitted
+executions, or bypass artifact, ownership, permission, and budget gates. See
+[remote Codex compatibility](execution-semantics.md#remote-codex-model-compatibility).
+
 ### Native provider capacity retry
 
 Committed, run-bound Codex `serverOverloaded` terminal failures display the model
