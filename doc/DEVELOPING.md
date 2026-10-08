@@ -1289,6 +1289,15 @@ agent workspace. The host `HOME` itself, a directory that contains it, a
 filesystem root, a `CODEX_HOME` overlap, or a canonical path outside the
 assigned workspace is rejected before provider startup.
 
+Fresh remote Codex Runner runs recover from a supported image CLI that is too old
+for the selected model. Preparation selects the closest compatible older model
+of the same class, then the stable Runner default. The task shows a warning with
+the requested model, effective model, and CLI version. Agent and task settings
+stay unchanged. Update the image CLI to restore the requested model on later
+runs. Explicit `PAPERCLIP_RUNNER_REMOTE_CODEX_PATH` and
+`PAPERCLIP_RUNNER_REMOTE_CODEX_NPM_SPEC` settings take precedence. See
+[execution semantics](execution-semantics.md#remote-codex-model-compatibility).
+
 ### Sandbox ACP input delivery
 
 The legacy sandbox process bridge retries recognized Daytona and Cloudflare
