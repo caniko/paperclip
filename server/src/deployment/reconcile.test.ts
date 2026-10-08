@@ -116,6 +116,36 @@ it("plans without writes, bootstraps once and preserves identities, pauses and s
   expect(JSON.stringify(plan)).not.toContain("fixture-only");
 }, 90000);
 
+it.each(["manual", "budget"])("reenables declarations without resuming %s pauses", async (pauseReason) => {
+  const declaration = { ...structuredClone(manifest), owner: `enablement-${pauseReason}`, taskBridges: {} };
+  declaration.companies.example.fields.name = `Enablement ${pauseReason}`;
+  const first = await reconcile(declaration);
+  const agentId = first.bindings["agent/worker"];
+  const routineId = first.bindings["routine/daily"];
+  await db.update(agents).set({ status: "paused", pauseReason, spentMonthlyCents: 123 }).where(eq(agents.id, agentId));
+  await db.update(routines).set({ status: "paused" }).where(eq(routines.id, routineId));
+  const disabled = { ...declaration,
+    agents: { worker: { ...declaration.agents.worker, enabled: false } },
+    routines: { daily: { ...declaration.routines.daily, enabled: false } },
+  };
+  expect((await reconcile(disabled)).bindings).toEqual(first.bindings);
+  await expect(db.update(agents).set({ status: "idle" }).where(eq(agents.id, agentId))).rejects.toThrow();
+  await expect(db.update(routines).set({ status: "active" }).where(eq(routines.id, routineId))).rejects.toThrow();
+  const enabled = { ...disabled,
+    agents: { worker: { ...disabled.agents.worker, enabled: true } },
+    routines: { daily: { ...disabled.routines.daily, enabled: true } },
+  };
+  expect((await reconcile(enabled)).bindings).toEqual(first.bindings);
+  expect((await db.select().from(agents).where(eq(agents.id, agentId)))[0])
+    .toMatchObject({ status: "paused", pauseReason, spentMonthlyCents: 123 });
+  expect((await db.select().from(routines).where(eq(routines.id, routineId)))[0].status).toBe("paused");
+  await db.update(agents).set({ status: "idle", pauseReason: null }).where(eq(agents.id, agentId));
+  await db.update(routines).set({ status: "active" }).where(eq(routines.id, routineId));
+  expect((await reconcile(enabled)).differences).toEqual([]);
+  expect((await db.select().from(agents).where(eq(agents.id, agentId)))[0].status).toBe("idle");
+  expect((await db.select().from(routines).where(eq(routines.id, routineId)))[0].status).toBe("active");
+});
+
 it("preserves existing and later operator membership decisions for adopted companies", async () => {
   await reconcile({ version: 1, owner: "adopt-membership", companies: {} });
   const [account] = await db.select().from(authAccounts);
