@@ -28,10 +28,22 @@ between creation and expiry. Every required artifact uses `retention-days: 31`.
 The repository and organization must permit at least 31 days before execution.
 Changing a workflow setting alone does not prove artifact retention.
 
+The live PR head and base must both match the triggering event. A moved base
+rejects the run before application execution, even when its head is unchanged.
+Initialization writes `source.json` on refusal, retaining the event identities,
+actual attempt, observed checkout, available lockfile hashes, and the refusal
+reason with `initialized: false`. The failing step still fails. Sealing binds
+that source record and its raw logs; an incomplete initialization cannot produce
+mandatory GREEN or expected RED. Empty or malformed reports stay hash-bound in
+failed receipts. Provider-retention refusals also write a readback receipt with
+the observed metadata and rejection reason before returning failure.
+
 Failed evidence remains available. A retry cannot qualify: fix the source,
-publish a successor, and obtain an attempt-1 run. Superseded-head evidence is
-historical. Receipts stay `qualified: false` until an independent final review
-accepts all required checks and artifact bindings.
+publish a successor, and obtain an attempt-1 run. Superseded-head or base evidence
+is historical. Receipts stay `qualified: false` until an independent final review
+accepts all required checks and artifact bindings. The hosted regression lane
+tests initialization refusals, failed-report custody and retention refusals; these
+receipt checks do not replace the mandatory application or native qualification.
 
 The existing PR, native composer Stop, and Nix renderer workflows remain
 required companion evidence. An application pass does not qualify a different
