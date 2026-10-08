@@ -287,6 +287,7 @@ import {
   projectPaperclipRunnerTaskConfig,
   resolvePaperclipRunnerNativeProviderInput,
 } from "./native-runtime/provider-profile.js";
+import { readRemoteCodexModelCliVersion } from "./native-runtime/codex-model-fallback.js";
 import {
   buildNativeHeartbeatPreparationSpans,
   buildNativeWakeIngressSpan,
@@ -9638,6 +9639,39 @@ export function postWorkspaceReadyComment(input: {
       metadata: buildWorkspaceReadyMetadata(workspaceReadyInput),
     },
   );
+}
+
+export async function postNativeModelFallbackWarning(input: {
+  issuesSvc: Pick<ReturnType<typeof issueService>, "addComment">;
+  onEvent: (event: AdapterRuntimeEvent) => Promise<void>;
+  issueId: string;
+  runId: string;
+  requestedModel: string | null;
+  effectiveModel: string | null;
+  codexCliVersion: string;
+}): Promise<void> {
+  const message = `Using ${input.effectiveModel} because the sandbox's Codex ${input.codexCliVersion} does not support ${input.requestedModel}. Work will continue with the compatible model. Update the sandbox's Codex CLI to use the requested model.`;
+  await input.onEvent({
+    eventType: "runner.model_fallback",
+    stream: "system",
+    level: "warn",
+    message,
+    payload: {
+      requestedModel: input.requestedModel,
+      effectiveModel: input.effectiveModel,
+      codexCliVersion: input.codexCliVersion,
+    },
+  });
+  await input.issuesSvc.addComment(input.issueId, message, { runId: input.runId }, {
+    authorType: "system",
+    presentation: {
+      kind: "system_notice",
+      tone: "warning",
+      title: `Using ${input.effectiveModel}`,
+      density: "compact",
+      detailsDefaultOpen: false,
+    },
+  });
 }
 
 function isTruthyRuntimeEnvValue(value: string | undefined) {
@@ -24501,6 +24535,38 @@ export function heartbeatService(
               instructionWorkingCopy: instructionCopy ? { rootPath: instructionCopy.executionRoot, entryPath: instructionCopy.entryFile, ...(isAgentDirectoryCopy(instructionCopy) ? { kind: "agent_files" as const } : {}) } : undefined,
             });
             getNativeFreshSessionHandoff = nativeReviewRequest ? undefined : getFreshSessionHandoff;
+            const nativeProviderConfig = nativeRuntimeResolution.profile.backend === "codex_app_server"
+              || nativeRuntimeResolution.profile.backend === "opencode_server"
+              ? projectPaperclipRunnerTaskConfig(
+                  nativeRuntimeResolution.profile.backend,
+                  agent.adapterConfig,
+                  issueAssigneeOverrides?.adapterConfig,
+                  managedAiRuntime ? readNonEmptyString(resolvedConfig.model) ?? undefined : undefined,
+                )
+              : agent.adapterConfig;
+            const requestedNativeProvider = resolvePaperclipRunnerNativeProviderInput({
+              backend: nativeRuntimeResolution.profile.backend,
+              adapterConfig: nativeProviderConfig, managedProfile, agentCoreProfile, dotBinding,
+            });
+            const codexCliVersion = agent.adapterType === "paperclip_runner" && requestedNativeProvider.provider === "codex"
+              ? await readRemoteCodexModelCliVersion({
+                  model: requestedNativeProvider.model,
+                  target: executionTarget,
+                  remoteCodexPath: runtimeEnv.PAPERCLIP_RUNNER_REMOTE_CODEX_PATH,
+                  remoteCodexNpmSpec: runtimeEnv.PAPERCLIP_RUNNER_REMOTE_CODEX_NPM_SPEC,
+                }) : null;
+            const nativeProvider = codexCliVersion
+              ? resolvePaperclipRunnerNativeProviderInput({
+                  backend: nativeRuntimeResolution.profile.backend,
+                  adapterConfig: nativeProviderConfig, codexCliVersion, managedProfile, agentCoreProfile, dotBinding,
+                }) : requestedNativeProvider;
+            if (nativeProvider.model !== requestedNativeProvider.model) {
+              await postNativeModelFallbackWarning({
+                issuesSvc, onEvent: onAdapterEvent, issueId: issueRef.id, runId: run.id,
+                requestedModel: requestedNativeProvider.model, effectiveModel: nativeProvider.model,
+                codexCliVersion: codexCliVersion!,
+              });
+            }
             const buildExecution = ({ normalizedSessionId, resumedSession }: { normalizedSessionId: string; resumedSession: boolean }) =>
                   buildNativeExecutionInput({
                     agentKeyId: agentIdentity?.keyId,
@@ -24575,21 +24641,7 @@ export function heartbeatService(
                               : {},
                           }
                         : null,
-                    ...resolvePaperclipRunnerNativeProviderInput({
-                      backend: nativeRuntimeResolution.profile.backend,
-                      adapterConfig: nativeRuntimeResolution.profile.backend === "codex_app_server"
-                        || nativeRuntimeResolution.profile.backend === "opencode_server"
-                        ? projectPaperclipRunnerTaskConfig(
-                            nativeRuntimeResolution.profile.backend,
-                            agent.adapterConfig,
-                            issueAssigneeOverrides?.adapterConfig,
-                            managedAiRuntime ? readNonEmptyString(resolvedConfig.model) ?? undefined : undefined,
-                          )
-                        : agent.adapterConfig,
-                      managedProfile,
-                      agentCoreProfile,
-                      dotBinding,
-                    }),
+                    ...nativeProvider,
                     lifecyclePolicy: effectiveLifecyclePolicy,
                     interactionResponses,
                     completionContract: {
