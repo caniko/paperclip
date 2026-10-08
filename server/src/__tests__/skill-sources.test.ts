@@ -280,6 +280,44 @@ describe.skipIf(!support.supported)('skill source persistence', () => {
     expect((await service.detail(companyId, created.source.id)).entries.find(entry => entry.path === 'added/SKILL.md')?.skillId).toBeNull();
   });
 
+  it('refreshes allowed siblings without authorizing an untouched installed skill', async () => {
+    const service = skillSourceService(db), skills = companySkillService(db);
+    files = { 'stable/SKILL.md': md('stable'), 'changed/SKILL.md': md('changed') }; commit = sha;
+    const created = await service.create(companyId, { repositoryUrl: 'https://github.com/acme/skills', trackingRef: 'unchanged-policy', commitSha: sha, selectedPaths: Object.keys(files) }, context);
+    const stable = created.imported.find(skill => skill.metadata?.skillSourcePath === 'stable/SKILL.md')!;
+    const changed = created.imported.find(skill => skill.id !== stable.id)!;
+    const before = (await skills.getById(companyId, stable.id))!;
+    files['changed/SKILL.md'] = md('changed again'); commit = 'f'.repeat(40);
+    const authorize = vi.fn<SkillSourceContext['authorize']>(async (action, resource) => {
+      if (action === 'skills.update' && resource.skillId === stable.id) throw new Error('untouched skill is protected');
+    });
+    const refreshed = await service.refresh(companyId, created.source.id, { ...context, authorize });
+    expect(refreshed.updated.map(skill => skill.id)).toEqual([changed.id]);
+    expect(refreshed.unchanged).toBe(1);
+    expect(authorize).not.toHaveBeenCalledWith('skills.update', expect.objectContaining({ skillId: stable.id }));
+    expect(authorize).toHaveBeenCalledWith('skills.update', expect.objectContaining({ skillId: changed.id }));
+    expect(await skills.getById(companyId, stable.id)).toMatchObject({ currentVersionId: before.currentVersionId, metadata: before.metadata, updatedAt: before.updatedAt });
+  });
+
+  it('authorizes excluded installed skills before disconnect changes their metadata', async () => {
+    const service = skillSourceService(db), skills = companySkillService(db);
+    files = { 'protected/SKILL.md': md('protected') }; commit = sha;
+    const created = await service.create(companyId, { repositoryUrl: 'https://github.com/acme/skills', trackingRef: 'disconnect-policy', commitSha: sha, selectedPaths: Object.keys(files) }, context);
+    const skill = created.imported[0]!;
+    const excluded = await service.refresh(companyId, created.source.id, context, { revision: created.source.revision, selectedPaths: [], excludedFolders: [] });
+    // An excluded entry can retain stale installed-state metadata after recovery.
+    const before = (await skills.getById(companyId, skill.id))!;
+    const metadata = { ...before.metadata, skillSourceState: 'update_failed' };
+    await db.update(companySkills).set({ metadata }).where(eq(companySkills.id, skill.id));
+    const authorize = vi.fn<SkillSourceContext['authorize']>(async (action, resource) => {
+      if (action === 'skills.edit' && resource.skillId === skill.id) throw new Error('protected excluded skill');
+    });
+    await expect(service.disconnect(companyId, created.source.id, { ...context, authorize })).rejects.toThrow('protected excluded skill');
+    expect(authorize).toHaveBeenCalledWith('skills.edit', expect.objectContaining({ skillId: skill.id }));
+    expect((await skills.getById(companyId, skill.id))?.metadata).toEqual(metadata);
+    expect(await service.detail(companyId, created.source.id)).toMatchObject({ enabled: true, revision: excluded.source.revision });
+  });
+
   it('authorizes previews before any provider read and uses the current caller connection', async () => {
     const service = skillSourceService(db);
     const input = { repositoryUrl: 'https://github.com/acme/skills', connectionId: randomUUID(), commitSha: sha, skillPath: 'SKILL.md', filePath: 'SKILL.md' };
