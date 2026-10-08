@@ -87,7 +87,7 @@ export interface NativeWorkspaceSyncReference {
 export interface PreparedNativeWorkspaceSync {
   mode: WorkspaceInboundMode;
   reference: NativeWorkspaceSyncReference;
-  restoreWorkspace(): Promise<void>;
+  restoreWorkspace(assertOwnership?: () => Promise<void>): Promise<void>;
   cleanup(): Promise<void>;
 }
 
@@ -680,6 +680,7 @@ async function writeRemoteStamp(input: {
 async function remoteStampMatches(input: {
   target: Extract<AdapterExecutionTarget, { transport: "sandbox" }>;
   expected: Record<string, unknown>;
+  gitSnapshot?: GitWorkspaceSnapshot | null;
 }): Promise<boolean> {
   if (!input.target.runner) return false;
   const stampPath = path.posix.join(
@@ -688,11 +689,26 @@ async function remoteStampMatches(input: {
     "paperclip-runner",
     REMOTE_STAMP_NAME,
   );
+  // File hashes do not detect empty commits or branch changes. A fresh host
+  // snapshot may authorize replacement only if the retained sandbox actually
+  // starts from that same Git identity, including each managed repository.
+  const gitChecks: string[] = [];
+  const checkGit = (remoteDir: string, snapshot: GitWorkspaceSnapshot) => {
+    const git = `git -C ${shellQuote(remoteDir)}`;
+    gitChecks.push(`test "$(${git} rev-parse HEAD)" = ${shellQuote(snapshot.headCommit)}`);
+    gitChecks.push(snapshot.branchName === null
+      ? `(${git} symbolic-ref --quiet HEAD >/dev/null 2>&1; test $? -eq 1)`
+      : `test "$(${git} symbolic-ref --quiet --short HEAD)" = ${shellQuote(snapshot.branchName)}`);
+    for (const repository of snapshot.repositories ?? []) {
+      checkGit(path.posix.join(remoteDir, repository.path), repository.snapshot);
+    }
+  };
+  if (input.gitSnapshot) checkGit(input.target.remoteCwd, input.gitSnapshot);
   const result = await input.target.runner.execute({
     command: input.target.shellCommand ?? "sh",
     args: [
       "-c",
-      `test -f ${shellQuote(stampPath)} && cat ${shellQuote(stampPath)}`,
+      [...gitChecks, `test -f ${shellQuote(stampPath)}`, `cat ${shellQuote(stampPath)}`].join(" && "),
     ],
     cwd: "/",
     timeoutMs: 15_000,
@@ -772,8 +788,10 @@ async function finalizePreparedRuntime(input: {
   target: Extract<AdapterExecutionTarget, { transport: "sandbox" }>;
   runtime: PreparedAdapterExecutionTargetRuntime;
   descriptor: NativeWorkspaceSyncDescriptor;
+  assertOwnership?: () => Promise<void>;
 }): Promise<NativeWorkspaceSyncReference> {
   await input.runtime.restoreWorkspace();
+  await input.assertOwnership?.();
   const finalSnapshot =
     await import("@paperclipai/adapter-utils/workspace-restore-merge").then(
       ({ captureDirectorySnapshot }) =>
@@ -796,6 +814,7 @@ async function finalizePreparedRuntime(input: {
     finalizedAt: new Date().toISOString(),
     finalHostSha256,
   };
+  await input.assertOwnership?.();
   const reference = await writeDescriptor(finalizedDescriptor);
   await persistRunReference(input.db, input.runId, reference);
   await persistLeaseStamp({
@@ -932,7 +951,7 @@ export async function prepareNativeWorkspaceSync(input: {
       );
       const verifiedWarmAdoption =
         priorStamp.hostSha256 === currentHostSha256 &&
-        (await remoteStampMatches({ target, expected: priorStamp }));
+        (await remoteStampMatches({ target, expected: priorStamp, gitSnapshot: currentSnapshot.gitSnapshot }));
       if (verifiedWarmAdoption) {
         mode = "adopt_remote";
       } else {
@@ -993,7 +1012,7 @@ export async function prepareNativeWorkspaceSync(input: {
     get reference() {
       return reference;
     },
-    restoreWorkspace: async () => {
+    restoreWorkspace: async (assertOwnership) => {
       if (!restorePromise) {
         restorePromise = finalizePreparedRuntime({
           db: input.db,
@@ -1001,6 +1020,7 @@ export async function prepareNativeWorkspaceSync(input: {
           target,
           runtime: preparedRuntime,
           descriptor,
+          assertOwnership,
         })
           .then((finalizedReference) => {
             reference = finalizedReference;
@@ -1025,6 +1045,7 @@ export async function resumeNativeWorkspaceSync(input: {
   db: Db;
   runId: string;
   target: AdapterExecutionTarget;
+  assertOwnership?: () => Promise<void>;
 }): Promise<boolean> {
   if (input.target.kind !== "remote" || input.target.transport !== "sandbox") {
     throw new Error("workspace_sync_out_unrecoverable");
@@ -1049,6 +1070,7 @@ export async function resumeNativeWorkspaceSync(input: {
   ) {
     throw new Error("workspace_sync_out_unrecoverable");
   }
+  await input.assertOwnership?.();
   if (
     existing.descriptor.state === "finalized" &&
     existing.descriptor.finalHostSha256
@@ -1083,6 +1105,7 @@ export async function resumeNativeWorkspaceSync(input: {
     target: input.target,
     runtime,
     descriptor: existing.descriptor,
+    assertOwnership: input.assertOwnership,
   });
   return true;
 }
