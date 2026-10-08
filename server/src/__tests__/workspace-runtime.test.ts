@@ -63,6 +63,8 @@ import {
   isLocalServiceProcessInWorkspace,
   readLocalServiceProcessCwd,
   readLocalServicePortOwner,
+  listLocalServiceRegistryRecords,
+  terminateLocalService,
   writeLocalServiceRegistryRecord,
 } from "../services/local-service-supervisor.ts";
 import {
@@ -7021,6 +7023,176 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     };
   }
 
+  it("retains an unhealthy shared runtime leased by another run when starting its replacement", async () => {
+    const fixture = await createRuntimeFixture({ workspaceModes: ["shared_workspace"] });
+    const cleanupRuntimeHome = await createRuntimeHome();
+    const workspace = fixture.workspaces[0]!;
+    const runs = [randomUUID(), randomUUID()];
+    await db.insert(heartbeatRuns).values(runs.map(id => ({ id, companyId: fixture.companyId, agentId: fixture.agentId, status: "running" })));
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("let healthy=true;require('node:http').createServer((req,res)=>{if(req.url==='/fail'){healthy=false;res.end('armed');return;}res.statusCode=healthy?200:503;res.end('ok')}).listen(Number(process.env.PORT),'127.0.0.1')")}`;
+    const config = { workspaceRuntime: { services: [{ name: "owned-shared", command, port: { type: "auto" },
+      readiness: { type: "http", urlTemplate: "http://127.0.0.1:{{port}}", timeoutSec: 5, intervalMs: 25 },
+      expose: { urlTemplate: "http://127.0.0.1:{{port}}" }, lifecycle: "shared", reuseScope: "project_workspace",
+      stopPolicy: { type: "on_run_finish" } }] } };
+    const input = { db, agent: fixture.actor, issue: null, workspace: fixture.realizedWorkspace(workspace), executionWorkspaceId: workspace.id,
+      config, adapterEnv: {} };
+    try {
+      runs.forEach(id => leasedRunIds.add(id));
+      const [first] = await ensureRuntimeServicesForRun({ ...input, runId: runs[0]! });
+      await fetch(`${first!.url}/fail`);
+      const [second] = await ensureRuntimeServicesForRun({ ...input, runId: runs[1]! });
+      expect(second!.id).not.toBe(first!.id);
+      expect(second!.providerRef).not.toBe(first!.providerRef);
+      expect(() => process.kill(Number(first!.providerRef), 0)).not.toThrow();
+      const [original] = await db.select().from(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.id, first!.id));
+      expect(original).toMatchObject({ status: "running", providerRef: first!.providerRef, startedByRunId: runs[0] });
+      await releaseRuntimeServicesForRun(runs[0]!);
+      leasedRunIds.delete(runs[0]!);
+      await expect(fetch(second!.url!)).resolves.toMatchObject({ ok: true });
+      expect(await db.select().from(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.id, second!.id)))
+        .toEqual([expect.objectContaining({ status: "running", providerRef: second!.providerRef, startedByRunId: runs[1] })]);
+    } finally {
+      for (const id of runs) { await releaseRuntimeServicesForRun(id); leasedRunIds.delete(id); }
+      await resetRuntimeServicesForTests({ terminateProcesses: true });
+      for (const id of runs) await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, id));
+      await cleanupRuntimeHome();
+      await fixture.cleanup();
+    }
+  }, 20_000);
+
+  it("validates shared project-runtime ownership by declared scope without repinning the original execution workspace", async () => {
+    const fixture = await createRuntimeFixture({ workspaceModes: ["shared_workspace", "shared_workspace"] });
+    const cleanupRuntimeHome = await createRuntimeHome();
+    const firstWorkspace = fixture.workspaces[0]!, secondWorkspace = fixture.workspaces[1]!;
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("require('node:http').createServer((_req,res)=>res.end('ok')).listen(Number(process.env.PORT),'127.0.0.1')")}`;
+    const config = { workspaceRuntime: { services: [{ name: "owned-shared", command, port: { type: "auto" },
+      readiness: { type: "http", urlTemplate: "http://127.0.0.1:{{port}}", timeoutSec: 5, intervalMs: 25 },
+      expose: { urlTemplate: "http://127.0.0.1:{{port}}" }, lifecycle: "shared", reuseScope: "project_workspace",
+      stopPolicy: { type: "manual" } }] } };
+    const input = { db, actor: fixture.actor, issue: null, workspace: fixture.realizedWorkspace(firstWorkspace), config, adapterEnv: {} };
+    try {
+      const [first] = await startRuntimeServicesForWorkspaceControl({ ...input, executionWorkspaceId: firstWorkspace.id });
+      const [second] = await startRuntimeServicesForWorkspaceControl({ ...input, executionWorkspaceId: secondWorkspace.id });
+      expect(second).toMatchObject({ id: first!.id, reused: true, providerRef: first!.providerRef });
+      const rows = await db.select().from(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.companyId, fixture.companyId));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: first!.id, executionWorkspaceId: firstWorkspace.id, projectWorkspaceId: fixture.projectWorkspaceId });
+    } finally {
+      await resetRuntimeServicesForTests({ terminateProcesses: true });
+      await cleanupRuntimeHome();
+      await fixture.cleanup();
+    }
+  }, 15_000);
+
+  it("preserves the committed reservation handle when post-provision hostname and broker cleanup fail", async () => {
+    const fixture = await createRuntimeFixture();
+    const cleanupRuntimeHome = await createRuntimeHome();
+    const workspace = fixture.workspaces[0]!;
+    const command = `${JSON.stringify(process.execPath)} -e 'process.exit(0)'`;
+    let reservedPorts: number[] = [];
+    setWorkspaceRuntimeExposureDepsForTests({
+      broker: { async reserve(_runtimeId, listeners) { reservedPorts = listeners.map(listener => listener.port);
+        return { handle: "retained-private-handle-1234", reservedPorts }; },
+        async expose() { throw new Error("Fixture must never expose"); }, async remove() { throw new Error("Fixture cleanup unavailable"); }, async list() { return []; } },
+      isPortAvailable: async () => true, isBrokerAvailable: async () => true, resolveHostname: async () => { throw new Error("Fixture hostname unavailable"); },
+      probeHealth: async () => false, now: () => new Date().toISOString(),
+    });
+    try {
+      await expect(startRuntimeServicesForWorkspaceControl({ db, actor: fixture.actor, issue: null,
+        workspace: fixture.realizedWorkspace(workspace), executionWorkspaceId: workspace.id,
+        config: { ...httpsRuntimeConfig(command), runtimeProvisionCommand: command }, adapterEnv: {} }))
+        .rejects.toThrow("MagicDNS hostname unavailable");
+      const rows = await db.select().from(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.companyId, fixture.companyId));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ status: "failed", exposureHandle: "retained-private-handle-1234", port: reservedPorts[0] });
+      expect(rows[0]!.exposure).not.toBeNull();
+    } finally {
+      await resetRuntimeServicesForTests({ terminateProcesses: true });
+      await cleanupRuntimeHome();
+      await fixture.cleanup();
+    }
+  }, 15_000);
+
+  it.each([false, true])("preserves a cold-registry auto-port owner when adoption rejects it (provision=%s)", async provision => {
+    const fixture = await createRuntimeFixture({ workspaceModes: ["shared_workspace"] });
+    const cleanupRuntimeHome = await createRuntimeHome();
+    const workspace = fixture.workspaces[0]!;
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("require('node:http').createServer((_req,res)=>res.end('ok')).listen(Number(process.env.PORT),'127.0.0.1')")}`;
+    const config = { workspaceRuntime: { services: [{ name: "cold-registry", command, port: { type: "auto" },
+      readiness: { type: "http", urlTemplate: "http://127.0.0.1:{{port}}", timeoutSec: 5, intervalMs: 25 },
+      expose: { urlTemplate: "http://127.0.0.1:{{port}}" }, lifecycle: "shared", reuseScope: "project_workspace",
+      stopPolicy: { type: "manual" } }] } };
+    const input = { db, actor: fixture.actor, issue: null, workspace: fixture.realizedWorkspace(workspace),
+      executionWorkspaceId: workspace.id, config, adapterEnv: {} };
+    let originalRegistry: Awaited<ReturnType<typeof listLocalServiceRegistryRecords>>[number] | undefined;
+    try {
+      const [first] = await startRuntimeServicesForWorkspaceControl(input);
+      originalRegistry = (await listLocalServiceRegistryRecords()).find(record => record.runtimeServiceId === first!.id);
+      expect(originalRegistry).toBeDefined();
+      const [original] = await db.select().from(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.id, first!.id));
+      // Keep the real backend and original registry alive while forgetting only
+      // this test controller's in-memory runtime maps, as on a cold restore.
+      await resetRuntimeServicesForTests();
+      const [replacement] = await startRuntimeServicesForWorkspaceControl({ ...input,
+        config: provision ? { ...config, runtimeProvisionCommand: `${JSON.stringify(process.execPath)} -e 'process.exit(0)'` } : config });
+      expect(replacement!.id).not.toBe(first!.id);
+      expect(replacement!.providerRef).not.toBe(first!.providerRef);
+      expect(replacement!.port).not.toBe(first!.port);
+      expect(() => process.kill(Number(first!.providerRef), 0)).not.toThrow();
+      expect(await db.select().from(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.id, first!.id))).toEqual([original]);
+      await expect(fetch(first!.url!)).resolves.toMatchObject({ ok: true });
+      await expect(fetch(replacement!.url!)).resolves.toMatchObject({ ok: true });
+    } finally {
+      await resetRuntimeServicesForTests({ terminateProcesses: true });
+      if (originalRegistry) await terminateLocalService(originalRegistry);
+      await cleanupRuntimeHome();
+      await fixture.cleanup();
+    }
+  }, 20_000);
+
+  it("reauthorizes the actual adopted registry ID before changing an explicitly selected runtime", async () => {
+    const fixture = await createRuntimeFixture({ workspaceModes: ["shared_workspace"] });
+    const foreign = await createRuntimeFixture({ workspaceModes: ["shared_workspace"] });
+    const cleanupRuntimeHome = await createRuntimeHome();
+    const workspace = fixture.workspaces[0]!;
+    const portProbe = net.createServer();
+    await new Promise<void>(resolve => portProbe.listen(0, "127.0.0.1", resolve));
+    const address = portProbe.address() as net.AddressInfo;
+    await new Promise<void>((resolve, reject) => portProbe.close(error => error ? reject(error) : resolve()));
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("require('node:http').createServer((_req,res)=>res.end('ok')).listen(Number(process.env.PORT),'127.0.0.1')")}`;
+    const config = { workspaceRuntime: { services: [{ name: "pin-validated", command, port: address.port,
+      readiness: { type: "http", urlTemplate: "http://127.0.0.1:{{port}}", timeoutSec: 5, intervalMs: 25 },
+      expose: { urlTemplate: "http://127.0.0.1:{{port}}" }, lifecycle: "shared", reuseScope: "project_workspace",
+      stopPolicy: { type: "manual" } }] } };
+    const input = { db, actor: fixture.actor, issue: null, workspace: fixture.realizedWorkspace(workspace),
+      executionWorkspaceId: workspace.id, config, adapterEnv: {} };
+    let originalRegistry: Awaited<ReturnType<typeof listLocalServiceRegistryRecords>>[number] | undefined;
+    try {
+      const [first] = await startRuntimeServicesForWorkspaceControl(input);
+      originalRegistry = (await listLocalServiceRegistryRecords()).find(record => record.runtimeServiceId === first!.id);
+      expect(originalRegistry).toBeDefined();
+      const [foreignRow] = await db.insert(workspaceRuntimeServices).values({ id: randomUUID(), companyId: foreign.companyId,
+        scopeType: "project_workspace", scopeId: foreign.projectWorkspaceId, projectWorkspaceId: foreign.projectWorkspaceId,
+        executionWorkspaceId: foreign.workspaces[0]!.id, serviceName: "Foreign retained owner", status: "running",
+        lifecycle: "shared", provider: "local_process", providerRef: first!.providerRef }).returning();
+      await resetRuntimeServicesForTests();
+      // An explicit selected ID skips raw-hint discovery. Actual adoption must
+      // still validate the registry's different identity before touching it.
+      await writeLocalServiceRegistryRecord({ ...originalRegistry!, runtimeServiceId: foreignRow.id });
+      await expect(startRuntimeServicesForWorkspaceControl({ ...input, runtimeServiceId: randomUUID() }))
+        .rejects.toThrow("Runtime ownership changed");
+      expect(await db.select().from(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.id, foreignRow.id))).toEqual([foreignRow]);
+      expect(() => process.kill(Number(first!.providerRef), 0)).not.toThrow();
+      await expect(fetch(first!.url!)).resolves.toMatchObject({ ok: true });
+    } finally {
+      await resetRuntimeServicesForTests({ terminateProcesses: true });
+      if (originalRegistry) await terminateLocalService(originalRegistry);
+      await cleanupRuntimeHome();
+      await fixture.cleanup();
+      await foreign.cleanup();
+    }
+  }, 20_000);
+
   it("waits for every managed process-tree listener before requesting HTTPS exposure", async () => {
     const fixture = await createRuntimeFixture();
     const cleanupRuntimeHome = await createRuntimeHome();
@@ -7632,7 +7804,12 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
         .select()
         .from(workspaceRuntimeServices)
         .where(eq(workspaceRuntimeServices.executionWorkspaceId, workspace.id));
-      expect(rows.every((row) => row.port === occupiedPort)).toBe(true);
+      // A committed start intent precedes port acquisition. Strict rejection
+      // must not publish the unrelated occupied port as an owned resource.
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ port: null, providerRef: null, url: null, exposureHandle: null, backendUrl: null });
+      expect(occupant.listening).toBe(true);
+      expect(await listLocalServiceRegistryRecords()).toEqual([]);
     } finally {
       await closeNetServer(occupant);
       await stopRuntimeServicesForExecutionWorkspace({

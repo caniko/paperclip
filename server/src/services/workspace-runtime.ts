@@ -8,7 +8,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AdapterRuntimeServiceReport } from "@paperclipai/adapter-utils";
 import type { Db } from "@paperclipai/db";
-import { executionWorkspaces, issueComments, issues, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
+import { companies, executionWorkspaces, issueComments, issues, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
 import {
   DEFAULT_TAILSCALE_HTTPS_EXPOSURE,
   deriveViteHmrPort,
@@ -32,7 +32,7 @@ import {
   type WorkspaceRuntimeDesiredState,
   type WorkspaceRuntimeServiceStateMap,
 } from "@paperclipai/shared";
-import { and, desc, eq, gte, inArray, isNull, lte, ne, or } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { asNumber, asString, parseObject, renderTemplate } from "../adapters/utils.js";
 import { conflict } from "../errors.js";
 import { resolveHomeAwarePath } from "../home-paths.js";
@@ -56,6 +56,7 @@ import {
   readLocalServiceProcessCwd,
   readLocalServiceProcessGroupId,
   readLocalServicePortOwner,
+  readLocalServiceRegistryRecord,
   removeLocalServiceRegistryRecord,
   terminateLocalService,
   touchLocalServiceRegistryRecord,
@@ -5542,6 +5543,17 @@ async function persistRuntimeServiceRecord(db: Db | undefined, record: RuntimeSe
     });
 }
 
+/** Failure bookkeeping may be based on a pre-resource provisioning snapshot.
+ * Preserve handles/process references that subsequent owning work already saved. */
+async function persistRuntimeServiceFailure(db: Db | undefined, record: RuntimeServiceRecord) {
+  if (!db) return;
+  const rows = await db.update(workspaceRuntimeServices).set({ status: record.status, healthStatus: record.healthStatus,
+    lastUsedAt: new Date(record.lastUsedAt), stoppedAt: record.stoppedAt ? new Date(record.stoppedAt) : null, updatedAt: new Date() })
+    .where(and(eq(workspaceRuntimeServices.id, record.id), eq(workspaceRuntimeServices.companyId, record.companyId)))
+    .returning({ id: workspaceRuntimeServices.id });
+  if (rows.length !== 1) throw conflict("Runtime recovery record disappeared during failure bookkeeping.");
+}
+
 async function findStoppedRuntimeServiceReuseCandidate(input: {
   db?: Db;
   companyId: string;
@@ -5696,6 +5708,8 @@ type StartLocalRuntimeServiceInput = {
   provisionCoordinator?: RuntimeProvisionCoordinator;
   preparedProvisioningRecord?: RuntimeServiceRecord | null;
   runtimeServiceId?: string;
+  // A retained registry owner fences deletion but does not select a replacement's ID.
+  runtimeAdoptionHintId?: string;
   allowFixedPortFallback?: boolean;
   excludedPorts?: ReadonlySet<number>;
   reuseKey: string | null;
@@ -5917,6 +5931,80 @@ function createProvisioningRuntimeServiceRecord(
   };
 }
 
+/** Commit a company-first recovery pointer before provisioning, adoption,
+ * reservation or spawn. Existing rows are retained byte-for-byte here: public
+ * status cannot establish that an earlier owner is settled. All such rows keep
+ * company retirement blocked until the full ownership lifecycle is qualified.
+ * This must run on the ordinary DB handle, never an enclosing start transaction. */
+async function retainRuntimeStartOwnership(input: StartLocalRuntimeServiceInput): Promise<StartLocalRuntimeServiceInput> {
+  if (!input.db) return input;
+  const db = input.db;
+  const identity = resolveRuntimeServiceReuseIdentity({ service: input.service, workspace: input.workspace,
+    agent: input.agent, issue: input.issue, adapterEnv: input.adapterEnv, scopeType: input.scopeType, scopeId: input.scopeId });
+  const existingId = !input.runtimeServiceId && input.reuseKey ? runtimeServicesByReuseKey.get(input.reuseKey) : null;
+  const existing = existingId ? runtimeServicesById.get(existingId) : null;
+  // This lookup only reads original registry bytes. Adoption/health actions still
+  // occur after the DB barrier; an owned unhealthy runtime is never a replacement.
+  const registry = input.runtimeServiceId || existing ? null : await readLocalServiceRegistryRecord(createLocalServiceKey({
+    profileKind: "workspace-runtime", serviceName: identity.serviceName, cwd: identity.serviceCwd, command: identity.command,
+    envFingerprint: input.reuseKey ?? identity.envFingerprint, port: identity.identityPort,
+    scope: { scopeType: input.scopeType, scopeId: input.scopeId, executionWorkspaceId: input.executionWorkspaceId ?? null, reuseKey: input.reuseKey },
+  }));
+  const registryOwner = registry?.runtimeServiceId ? runtimeServicesById.get(registry.runtimeServiceId) : null;
+  const registryId = registryOwner?.leaseRunIds.size ? null : registry?.runtimeServiceId;
+  return db.transaction(async tx => {
+    const txDb = tx as unknown as Db;
+    await lockWorkspaceRuntimeStartParents(txDb, { actor: input.agent, workspace: input.workspace,
+      executionWorkspaceId: input.executionWorkspaceId });
+    if (existing) {
+      // A project-scoped owner retains its original execution-workspace pin when
+      // another invocation uses it. Validate its declared reuse scope, without
+      // handing its ID to a replacement if health lookup later rejects reuse.
+      if (existing.companyId !== input.agent.companyId) throw conflict("Runtime ownership changed before reuse.");
+      await tx.insert(workspaceRuntimeServices).values(toPersistedWorkspaceRuntimeService(existing))
+        .onConflictDoNothing({ target: workspaceRuntimeServices.id });
+      const [owner] = await tx.select({ scopeType: workspaceRuntimeServices.scopeType, scopeId: workspaceRuntimeServices.scopeId,
+        companyId: workspaceRuntimeServices.companyId, reuseKey: workspaceRuntimeServices.reuseKey }).from(workspaceRuntimeServices)
+        .where(eq(workspaceRuntimeServices.id, existing.id)).for("update");
+      if (!owner || owner.companyId !== input.agent.companyId || owner.scopeType !== input.scopeType
+        || owner.scopeId !== input.scopeId || owner.reuseKey !== input.reuseKey) throw conflict("Runtime ownership changed before reuse.");
+      return input;
+    }
+    const stopped = input.runtimeServiceId || registryId ? null : await findStoppedRuntimeServiceReuseCandidate({ db: txDb,
+      companyId: input.agent.companyId, reuseKey: input.reuseKey, serviceName: identity.serviceName,
+      command: identity.command, cwd: identity.serviceCwd, scopeType: input.scopeType, scopeId: input.scopeId });
+    const runtimeServiceId = input.runtimeServiceId ?? registryId ?? stopped?.id ?? randomUUID();
+    const guarded = { ...input, runtimeServiceId };
+    const record = createProvisioningRuntimeServiceRecord(guarded, identity);
+    record.status = "starting";
+    // Intent is not a port reservation. Only the allocator's selected port may
+    // enter the reservation ledger; preclaiming a configured preference here
+    // would force every sibling to skip an otherwise free preferred port.
+    record.port = null;
+    if (registryId && !input.runtimeServiceId && registry) {
+      // Retain the original resource, including the absent-row legacy case.
+      // Only actual adoption may publish this ID as the invocation's runtime.
+      record.providerRef = String(registry.pid);
+      record.processGroupId = registry.processGroupId;
+      record.port = registry.port;
+      record.url = registry.url;
+      record.backendUrl = registry.url;
+      record.startedAt = registry.startedAt;
+    }
+    await tx.insert(workspaceRuntimeServices).values(toPersistedWorkspaceRuntimeService(record))
+      .onConflictDoNothing({ target: workspaceRuntimeServices.id });
+    const [retained] = await tx.select({ companyId: workspaceRuntimeServices.companyId,
+      projectWorkspaceId: workspaceRuntimeServices.projectWorkspaceId, executionWorkspaceId: workspaceRuntimeServices.executionWorkspaceId })
+      .from(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.id, runtimeServiceId)).for("update");
+    if (!retained || retained.companyId !== input.agent.companyId
+      || retained.projectWorkspaceId !== input.workspace.workspaceId
+      || retained.executionWorkspaceId !== (input.executionWorkspaceId ?? null)) {
+      throw conflict("Runtime ownership changed before activation. Retain the original recovery records.");
+    }
+    return registryId && !input.runtimeServiceId ? { ...input, runtimeAdoptionHintId: registryId } : guarded;
+  });
+}
+
 async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): Promise<LocalRuntimeServiceStart> {
   const leaseRunId = input.leaseRunId === undefined ? input.runId : input.leaseRunId;
   const startedByRunId = input.startedByRunId === undefined ? input.runId : input.startedByRunId;
@@ -6018,7 +6106,14 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
       url: identityBackendUrl,
     }));
   }
-  const runtimeId = input.runtimeServiceId ?? stoppedReuseCandidate?.id ?? randomUUID();
+  const runtimeId = input.runtimeServiceId
+    ?? (stoppedReuseCandidate?.id === input.runtimeAdoptionHintId ? null : stoppedReuseCandidate?.id)
+    ?? randomUUID();
+  if (exposureConfig && input.runtimeAdoptionHintId && !input.runtimeServiceId) {
+    // A broker reservation belongs to a fresh activation, never the retained
+    // registry hint. Commit its own recovery pointer before the reserve call.
+    await retainRuntimeStartOwnership({ ...input, runtimeServiceId: runtimeId, runtimeAdoptionHintId: undefined });
+  }
   // An exposed runtime always takes its port from the dedicated broker range, so
   // a configured or previously used port is a *preference*, not a constraint. It
   // is honored when it is already an allowlisted app port whose HMR companion is
@@ -6043,6 +6138,15 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
         preferredAppPort: stoppedReuseCandidate?.port ?? (explicitPort > 0 ? explicitPort : null),
       })
     : null;
+  if (reservedExposure && input.db) {
+    // The start-intent row is already committed. Persist this returned private
+    // cleanup handle before hostname resolution, registry adoption, or binding.
+    const rows = await input.db.update(workspaceRuntimeServices).set({ port: reservedExposure.appPort,
+      exposure: reservedExposure.status, exposureHandle: reservedExposure.handle, status: "starting", stoppedAt: null })
+      .where(and(eq(workspaceRuntimeServices.id, runtimeId), eq(workspaceRuntimeServices.companyId, input.agent.companyId)))
+      .returning({ id: workspaceRuntimeServices.id });
+    if (rows.length !== 1) throw conflict("Runtime ownership changed before exposure reservation publication.");
+  }
   // Loopback port this start claimed in-process for its own duration (PAP-17249). A bare
   // `listen(0)` probe is closed before the child binds, so the kernel is free to hand the same
   // candidate to a sibling start; holding the claim until the child owns the port — or until the
@@ -6109,9 +6213,10 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
         .remove(runtimeId, reservedExposure.handle)
         .catch(() => undefined);
       // The reservation deliberately keeps the winning pair's in-process claim for
-      // the caller to release on stop/teardown. No runtime record exists yet, so
-      // that teardown path can never run for this pair — releasing the broker
-      // reservation alone would leave the claim held. A hostname outage would then
+      // the caller to release on stop/teardown. No in-memory runtime is registered
+      // yet, so releasing the broker reservation alone would leave the claim held.
+      // The committed recovery row retains the private handle on cleanup ambiguity.
+      // A hostname outage would otherwise
       // burn one pair per attempt, and a retry storm inside the claim TTL would
       // report the range exhausted rather than the real cause.
       exposurePortPairClaims.release({
@@ -6230,7 +6335,7 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
       reuseKey: input.reuseKey,
     },
   });
-  const adoptedRecord = exposureConfig ? null : await findAdoptableLocalService({
+  const adoptionCandidate = exposureConfig ? null : await findAdoptableLocalService({
     serviceKey,
     profileKind: "workspace-runtime",
     serviceName,
@@ -6240,7 +6345,19 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     port: port ?? identityPort,
     url: backendUrl,
   });
+  const adoptionOwner = adoptionCandidate?.runtimeServiceId ? runtimeServicesById.get(adoptionCandidate.runtimeServiceId) : null;
+  const adoptedRecord = adoptionOwner?.leaseRunIds.size ? null : adoptionCandidate;
   if (adoptedRecord) {
+    const adoptedId = adoptedRecord.runtimeServiceId ?? runtimeId;
+    try {
+      // Registry inspection can return an identity different from a requested
+      // ID or retained hint. Recheck the actual owner before termination or
+      // publication; a prior claim for another ID never authorizes adoption.
+      await retainRuntimeStartOwnership({ ...input, runtimeServiceId: adoptedId, runtimeAdoptionHintId: undefined });
+    } catch (error) {
+      releasePortReservation(reservedPort);
+      throw error;
+    }
     const adoptedUrl = adoptedRecord.url ?? backendUrl;
     if (!(await isRuntimeServiceUrlHealthy(adoptedUrl, {
       db: input.db,
@@ -6256,7 +6373,7 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
       releasePortReservation(reservedPort);
       return {
         record: {
-          id: adoptedRecord.runtimeServiceId ?? randomUUID(),
+          id: adoptedId,
           companyId: input.agent.companyId,
           projectId: input.workspace.projectId,
           projectWorkspaceId: input.workspace.workspaceId,
@@ -6340,6 +6457,18 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     }
   }
   const claimedIdentityPort = conflictPort && conflictPort !== reservedPort ? conflictPort : null;
+
+  if (input.runtimeAdoptionHintId && !input.runtimeServiceId) {
+    try {
+      // Rejected adoption leaves the original row intact. A replacement gets a
+      // distinct committed intent before filesystem preparation or process spawn.
+      await retainRuntimeStartOwnership({ ...input, runtimeServiceId: runtimeId, runtimeAdoptionHintId: undefined });
+    } catch (error) {
+      releasePortReservation(reservedPort);
+      releasePortReservation(claimedIdentityPort);
+      throw error;
+    }
+  }
 
   const nowIso = new Date().toISOString();
   const record: RuntimeServiceRecord = {
@@ -6714,10 +6843,16 @@ async function prepareRuntimeProvisioning(
 ): Promise<RuntimeServiceRecord | null> {
   const runtimeProvisionCommand = asString(input.runtimeProvisionCommand, "").trim();
   if (!runtimeProvisionCommand) return null;
+  input = await retainRuntimeStartOwnership(input);
   const coordinator = input.provisionCoordinator ?? createRuntimeProvisionCoordinator();
   if (coordinator.promise) {
     await coordinator.promise;
     return null;
+  }
+  if (input.runtimeAdoptionHintId && !input.runtimeServiceId) {
+    // Provisioning has not adopted the hinted resource. Its writes and shell
+    // ownership must use a distinct row rather than overwrite the old backend.
+    input = await retainRuntimeStartOwnership({ ...input, runtimeServiceId: randomUUID(), runtimeAdoptionHintId: undefined });
   }
 
   const identity = resolveRuntimeServiceReuseIdentity({
@@ -6752,7 +6887,7 @@ async function prepareRuntimeProvisioning(
     provisioningRecord.healthStatus = "unhealthy";
     provisioningRecord.lastUsedAt = nowIso;
     provisioningRecord.stoppedAt = nowIso;
-    await persistRuntimeServiceRecord(input.db, provisioningRecord).catch(() => undefined);
+    await persistRuntimeServiceFailure(input.db, provisioningRecord).catch(() => undefined);
     if (input.onLog) {
       await input.onLog(
         "stderr",
@@ -6767,6 +6902,7 @@ async function startLocalRuntimeService(
   input: StartLocalRuntimeServiceInput,
   options?: { deferReadiness?: boolean },
 ): Promise<LocalRuntimeServiceStart> {
+  input = await retainRuntimeStartOwnership(input);
   const runtimeProvisionCommand = asString(input.runtimeProvisionCommand, "").trim();
   const provisioningRecord = input.preparedProvisioningRecord === undefined
     ? await prepareRuntimeProvisioning(input)
@@ -6793,11 +6929,7 @@ async function startLocalRuntimeService(
         if (runtimeProvisionCommand) {
           await persistRuntimeServiceRecord(input.db, started.record);
         }
-        if (provisioningRecord && started.record.id !== provisioningRecord.id && input.db) {
-          await input.db
-            .delete(workspaceRuntimeServices)
-            .where(eq(workspaceRuntimeServices.id, provisioningRecord.id));
-        }
+        // A different adopted ID cannot erase this activation's recovery pointer.
         if (!deferReadiness) {
           await started.readiness;
         }
@@ -6835,7 +6967,7 @@ async function startLocalRuntimeService(
       provisioningRecord.healthStatus = "unhealthy";
       provisioningRecord.lastUsedAt = nowIso;
       provisioningRecord.stoppedAt = nowIso;
-      await persistRuntimeServiceRecord(input.db, provisioningRecord).catch(() => undefined);
+      await persistRuntimeServiceFailure(input.db, provisioningRecord).catch(() => undefined);
     }
     throw error;
   }
@@ -7349,6 +7481,10 @@ async function ensureRuntimeServicesForRunInvocation(
         scopeId,
       }).reuseKey;
 
+      const retained = await retainRuntimeStartOwnership({ db: input.db, runId: input.runId, agent: input.agent,
+        issue: input.issue, workspace: input.workspace, executionWorkspaceId: input.executionWorkspaceId,
+        adapterEnv: input.adapterEnv, service, reuseKey, scopeType, scopeId });
+
       if (reuseKey) {
         const existing = await findHealthyRunningRuntimeService(reuseKey);
         if (existing) {
@@ -7369,6 +7505,7 @@ async function ensureRuntimeServicesForRunInvocation(
 
       const started = await startLocalRuntimeService({
         db: input.db,
+        runtimeServiceId: retained.runtimeServiceId,
         runId: input.runId,
         agent: input.agent,
         issue: input.issue,
@@ -7557,11 +7694,13 @@ async function startRuntimeServicesForWorkspaceControlUnlocked(
       record: RuntimeServiceRecord;
     } | null;
     excludedPorts?: ReadonlySet<number>;
+    startedServiceIds?: string[];
+    pendingReadiness?: PendingRuntimeServiceReadiness[];
   },
 ): Promise<WorkspaceControlStartBatch> {
   const refs: RuntimeServiceRef[] = [];
-  const pendingReadiness: PendingRuntimeServiceReadiness[] = [];
-  const startedServiceIds: string[] = [];
+  const pendingReadiness = options?.pendingReadiness ?? [];
+  const startedServiceIds = options?.startedServiceIds ?? [];
   const requestedRuntimeServiceId = rawServices.length === 1 ? input.runtimeServiceId : null;
 
   for (const service of rawServices) {
@@ -7583,15 +7722,14 @@ async function startRuntimeServicesForWorkspaceControlUnlocked(
       scopeId,
     }).reuseKey;
 
+    const retained = await retainRuntimeStartOwnership({ db: persistenceDb, runId: invocationId, leaseRunId: null, startedByRunId: null,
+      agent: input.actor, issue: input.issue, workspace: input.workspace, executionWorkspaceId: input.executionWorkspaceId,
+      adapterEnv: input.adapterEnv, service, reuseKey, scopeType, scopeId,
+      runtimeServiceId: options?.preparedProvisioning?.service === service ? options.preparedProvisioning.record.id : requestedRuntimeServiceId ?? undefined });
+
     if (reuseKey) {
       const existing = await findHealthyRunningRuntimeService(reuseKey);
       if (existing && (!requestedRuntimeServiceId || existing.id === requestedRuntimeServiceId)) {
-        const prepared = options?.preparedProvisioning;
-        if (prepared?.service === service && prepared.record.id !== existing.id && persistenceDb) {
-          await persistenceDb
-            .delete(workspaceRuntimeServices)
-            .where(eq(workspaceRuntimeServices.id, prepared.record.id));
-        }
         existing.lastUsedAt = new Date().toISOString();
         existing.stoppedAt = null;
         clearIdleTimer(existing);
@@ -7627,7 +7765,7 @@ async function startRuntimeServicesForWorkspaceControlUnlocked(
           : undefined,
       allowFixedPortFallback: options?.allowFixedPortFallback,
       excludedPorts: options?.excludedPorts,
-      runtimeServiceId: requestedRuntimeServiceId ?? undefined,
+      runtimeServiceId: retained.runtimeServiceId,
       reuseKey,
       scopeType,
       scopeId,
@@ -7644,7 +7782,7 @@ async function startRuntimeServicesForWorkspaceControlUnlocked(
 
     if (options?.deferReadiness && started.record.status === "starting" && !started.record.reused) {
       // Attach a rejection handler immediately; the caller awaits the same promise after
-      // the DB transaction commits, but transaction failures may skip that wait path.
+      // the batch returns, but a later service failure may skip that wait path.
       started.readiness.catch(() => undefined);
       pendingReadiness.push({ ...started, service });
       startedServiceIds.push(started.record.id);
@@ -7656,8 +7794,13 @@ async function startRuntimeServicesForWorkspaceControlUnlocked(
 
 async function lockWorkspaceRuntimeStartParents(
   db: Db,
-  input: StartRuntimeServicesForWorkspaceControlInput,
+  input: Pick<StartRuntimeServicesForWorkspaceControlInput, "actor" | "workspace" | "executionWorkspaceId">,
 ) {
+  await db.execute(sql`set local lock_timeout = '5s'`);
+  await db.execute(sql`set local statement_timeout = '15s'`);
+  const [company] = await db.select({ id: companies.id, status: companies.status }).from(companies)
+    .where(eq(companies.id, input.actor.companyId)).for("key share");
+  if (!company || company.status === "archived") throw conflict("Company is unavailable for runtime activation.");
   let allowFixedPortFallback = false;
   if (input.executionWorkspaceId) {
     const [lockedExecutionWorkspace] = await db
@@ -7781,11 +7924,15 @@ async function startRuntimeServicesForWorkspaceControlInvocation(
           scopeType,
           scopeId,
         }).reuseKey;
+        const retained = await retainRuntimeStartOwnership({ db: input.db, runId: invocationId, leaseRunId: null, startedByRunId: null,
+          agent: input.actor, issue: input.issue, workspace: input.workspace, executionWorkspaceId: input.executionWorkspaceId,
+          adapterEnv: input.adapterEnv, service, reuseKey, scopeType, scopeId });
         const existing = await findHealthyRunningRuntimeService(reuseKey);
         if (existing) continue;
 
         const record = await prepareRuntimeProvisioning({
           db: input.db,
+          runtimeServiceId: retained.runtimeServiceId,
           runId: invocationId,
           leaseRunId: null,
           startedByRunId: null,
@@ -7812,25 +7959,14 @@ async function startRuntimeServicesForWorkspaceControlInvocation(
     await input.db.transaction(async (tx) => {
       const txDb = tx as unknown as Db;
       allowFixedPortFallback = await lockWorkspaceRuntimeStartParents(txDb, input);
-
-      // Branch reconciliation takes these same parent row locks before mutating
-      // a recorded branch. Persisting a `starting` service row before commit closes
-      // the process-start window without holding the DB transaction for readiness.
-      startBatch = await startRuntimeServicesForWorkspaceControlUnlocked(
-        { ...input, db: txDb },
-        rawServices,
-        invocationId,
-        txDb,
-        input.db,
-        {
-          deferReadiness: true,
-          allowFixedPortFallback,
-          runtimeProvisionCommand,
-          runtimeProvisionKind: runtimeProvision.kind,
-          provisionCoordinator,
-          preparedProvisioning,
-        },
-      );
+    });
+    // Each service commits its starting recovery row under the same parent locks
+    // before acquiring resources. Filesystem, process and broker work use the
+    // ordinary DB handle outside these short transactions.
+    startBatch = await startRuntimeServicesForWorkspaceControlUnlocked(input, rawServices, invocationId, input.db, input.db, {
+      deferReadiness: true, allowFixedPortFallback, runtimeProvisionCommand, runtimeProvisionKind: runtimeProvision.kind,
+      provisionCoordinator, preparedProvisioning, startedServiceIds: startBatch.startedServiceIds,
+      pendingReadiness: startBatch.pendingReadiness,
     });
 
     // Readiness never uses the transaction-scoped DB handle. A late bind collision is
@@ -7888,19 +8024,9 @@ async function startRuntimeServicesForWorkspaceControlInvocation(
             if (!canRetryDeferredPortBindCollision(pending!.service, retryAllowsFixedPortFallback)) {
               throw error;
             }
-            retryBatch = await startRuntimeServicesForWorkspaceControlUnlocked(
-              { ...input, db: txDb },
-              [pending!.service],
-              invocationId,
-              txDb,
-              input.db,
-              {
-                deferReadiness: true,
-                allowFixedPortFallback: retryAllowsFixedPortFallback,
-                provisionCoordinator,
-                excludedPorts,
-              },
-            );
+          });
+          retryBatch = await startRuntimeServicesForWorkspaceControlUnlocked(input, [pending.service], invocationId, input.db, input.db, {
+            deferReadiness: true, allowFixedPortFallback: retryAllowsFixedPortFallback, provisionCoordinator, excludedPorts,
           });
           allowFixedPortFallback = retryAllowsFixedPortFallback;
           for (const serviceId of retryBatch.startedServiceIds) {
@@ -7924,13 +8050,14 @@ async function startRuntimeServicesForWorkspaceControlInvocation(
     for (const serviceId of startBatch.startedServiceIds) {
       await stopRuntimeService(serviceId).catch(() => undefined);
     }
+    await Promise.allSettled(startBatch.pendingReadiness.map(pending => pending.readiness));
     if (preparedProvisioning && startBatch.startedServiceIds.length === 0) {
       const nowIso = new Date().toISOString();
       preparedProvisioning.record.status = "failed";
       preparedProvisioning.record.healthStatus = "unhealthy";
       preparedProvisioning.record.lastUsedAt = nowIso;
       preparedProvisioning.record.stoppedAt = nowIso;
-      await persistRuntimeServiceRecord(input.db, preparedProvisioning.record).catch(() => undefined);
+      await persistRuntimeServiceFailure(input.db, preparedProvisioning.record).catch(() => undefined);
     }
     throw error;
   }
@@ -8344,6 +8471,18 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
   let backfilled = 0;
   const driftedRuntimeServiceIds = new Set(exposureReservationDrift.map((entry) => entry.runtimeServiceId));
   for (const row of rows) {
+    // Startup adoption begins from an already durable recovery row. Revalidate
+    // company first, then the original row, before any registry mutation. A
+    // disappeared scope never authorizes adopting a surviving process.
+    const retained = await db.transaction(async tx => {
+      await tx.execute(sql`set local lock_timeout = '5s'`);
+      const [company] = await tx.select({ id: companies.id }).from(companies).where(eq(companies.id, row.companyId)).for("key share");
+      if (!company) return false;
+      const [runtime] = await tx.select({ id: workspaceRuntimeServices.id }).from(workspaceRuntimeServices)
+        .where(and(eq(workspaceRuntimeServices.id, row.id), eq(workspaceRuntimeServices.companyId, row.companyId))).for("update");
+      return Boolean(runtime);
+    });
+    if (!retained) continue;
     // PAP-17419: this row's reserved pair is live, or Serve-mapped, under an
     // identity that is not this row's. Every branch below is unsafe for such a
     // row — cleanup would remove a mapping that is now someone else's, adoption
