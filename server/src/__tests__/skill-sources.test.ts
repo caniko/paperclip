@@ -332,8 +332,8 @@ describe.skipIf(!support.supported)('skill source persistence', () => {
     const refreshed = await service.refresh(companyId, created.source.id, { ...context, authorize });
     expect(refreshed.updated.map(skill => skill.id)).toEqual([changed.id]);
     expect(refreshed.unchanged).toBe(1);
-    expect(authorize).not.toHaveBeenCalledWith('skills.update', expect.objectContaining({ skillId: stable.id }));
-    expect(authorize).toHaveBeenCalledWith('skills.update', expect.objectContaining({ skillId: changed.id }));
+    expect(authorize.mock.calls.some(([action, resource]) => action === 'skills.update' && resource.skillId === stable.id)).toBe(false);
+    expect(authorize).toHaveBeenCalledWith('skills.update', expect.objectContaining({ skillId: changed.id }), expect.anything());
     expect(await skills.getById(companyId, stable.id)).toMatchObject({ currentVersionId: before.currentVersionId, metadata: before.metadata, updatedAt: before.updatedAt });
   });
 
@@ -351,7 +351,7 @@ describe.skipIf(!support.supported)('skill source persistence', () => {
       if (action === 'skills.edit' && resource.skillId === skill.id) throw new Error('protected excluded skill');
     });
     await expect(service.disconnect(companyId, created.source.id, { ...context, authorize })).rejects.toThrow('protected excluded skill');
-    expect(authorize).toHaveBeenCalledWith('skills.edit', expect.objectContaining({ skillId: skill.id }));
+    expect(authorize).toHaveBeenCalledWith('skills.edit', expect.objectContaining({ skillId: skill.id }), expect.anything());
     expect((await skills.getById(companyId, skill.id))?.metadata).toEqual(metadata);
     expect(await service.detail(companyId, created.source.id)).toMatchObject({ enabled: true, revision: excluded.source.revision });
   });
@@ -397,7 +397,7 @@ describe.skipIf(!support.supported)('skill source persistence', () => {
     });
     const selection = kind === 'deselected' ? { revision: created.source.revision, selectedPaths: [], excludedFolders: [] } : undefined;
     await expect(service.refresh(companyId, created.source.id, { ...context, authorize }, selection)).rejects.toThrow('protected skill');
-    expect(authorize).toHaveBeenCalledWith('skills.update', expect.objectContaining({ skillId: skill.id }));
+    expect(authorize).toHaveBeenCalledWith('skills.update', expect.objectContaining({ skillId: skill.id }), expect.anything());
     expect((await skills.getById(companyId, skill.id))?.metadata?.skillSourceState).toBe('synced');
     expect((await service.detail(companyId, created.source.id)).revision).toBe(created.source.revision);
     expect((await service.detail(companyId, created.source.id)).entries[0]).toMatchObject({ present: true, selection: 'selected' });
