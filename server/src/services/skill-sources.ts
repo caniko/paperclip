@@ -50,11 +50,18 @@ export function skillSourceService(db: Db) {
   }
   async function authorizeScan(source: SourceRow, scan: ScannedSkillSource, selectedPaths: string[], context: SkillSourceContext) {
     const previous = await db.select().from(entries).where(and(eq(entries.companyId, source.companyId), eq(entries.sourceId, source.id)));
+    // publish() also changes installed metadata for invalid, absent and excluded
+    // paths. Per-skill policy applies to those mutations, not just new versions.
+    for (const entry of previous) {
+      const skill = entry.skillId ? await skills.getById(source.companyId, entry.skillId) : null;
+      if (skill) await context.authorize('skills.update', { sourceType: 'git', sourceLocator: source.repositoryUrl, skillId: skill.id, skillKey: skill.key });
+    }
     for (const candidate of scan.skills.filter(candidate => selectedPaths.includes(candidate.path) && !candidate.error)) {
       const old = previous.find(entry => entry.path === candidate.path);
       const skill = old?.skillId ? await skills.getById(source.companyId, old.skillId) : null;
-      await context.authorize(skill ? 'skills.update' : 'skills.import', {
-        sourceType: 'git', sourceLocator: source.repositoryUrl, ...(skill ? { skillId: skill.id, skillKey: skill.key } : { skillKey: newSkillKey(scan, candidate.path, candidate.name, source.id) }),
+      if (skill) continue;
+      await context.authorize('skills.import', {
+        sourceType: 'git', sourceLocator: source.repositoryUrl, skillKey: newSkillKey(scan, candidate.path, candidate.name, source.id),
       });
     }
   }
