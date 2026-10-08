@@ -2,10 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { qualifyComposerStop } from "../qualify-composer-stop.mjs";
+import { stageComposerCandidate } from "../composer-candidate-stage.mjs";
 
 const provenance = {
   revision: "a".repeat(40), headRevision: "a".repeat(40),
@@ -185,6 +187,9 @@ test("the mandatory lane executes an immutable harness and verifier outside the 
   assert.match(lane, /git ls-files -z -- tests\/e2e scripts\/qualify-composer-stop\.mjs/);
   assert.match(lane, /packages\/paperclip-runner package\.json pnpm-lock\.yaml/);
   assert.match(lane, /pnpm-workspace\.yaml \.npmrc \.cargo patches \| xargs -0 sha256sum/);
+  for (const helper of ["composer-candidate-stage", "composer-candidate-sandbox", "composer-provider-bridge", "grok-public-install-sandbox"]) {
+    assert.ok(lane.includes(`scripts/${helper}.mjs`), `missing trusted executable closure: ${helper}`);
+  }
   assert.equal((lane.match(/sha256sum --check/g) ?? []).length, 2);
   const base = readFileSync(new URL("../../tests/e2e/playwright.config.ts", import.meta.url), "utf8");
   assert.match(base, /cwd: process\.env\.PAPERCLIP_E2E_SOURCE_ROOT \?\?/);
@@ -192,7 +197,25 @@ test("the mandatory lane executes an immutable harness and verifier outside the 
   assert.match(config, /Mandatory native composer Stop requires an absolute candidate source root/);
 });
 
-test("candidate dependency execution cannot rewrite trusted verifier, tools or provenance", (t) => {
+test("candidate staging retains exact committed source and excludes untracked trusted state", (t) => {
+  const source = fileURLToPath(new URL("../../", import.meta.url));
+  const directory = mkdtempSync(join(tmpdir(), "composer-stop-staging-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const untracked = mkdtempSync(join(source, ".composer-staging-untracked-"));
+  t.after(() => rmSync(untracked, { recursive: true, force: true }));
+  writeFileSync(join(untracked, "trusted-provenance.json"), "host-only fixture state");
+  const head = spawnSync("git", ["-C", source, "rev-parse", "HEAD"], { encoding: "utf8" });
+  assert.equal(head.status, 0, head.stderr);
+  const revision = head.stdout.trim();
+  const candidate = stageComposerCandidate({ source, revision, temporaryDirectory: directory });
+  assert.equal(readFileSync(join(candidate, "package.json"), "utf8"),
+    spawnSync("git", ["-C", source, "show", `${revision}:package.json`], { encoding: "utf8" }).stdout);
+  for (const path of [".git", ".trusted-composer-stop", "node_modules", basename(untracked)]) assert.equal(existsSync(join(candidate, path)), false, path);
+  assert.throws(() => stageComposerCandidate({ source, revision: "0".repeat(40), temporaryDirectory: directory }), /not the declared PR head/);
+  assert.throws(() => stageComposerCandidate({ source, revision, temporaryDirectory: source }), /outside the source workspace/);
+});
+
+test("candidate dependency and compiler execution cannot rewrite trusted verifier, tools or provenance", { timeout: 300000 }, (t) => {
   const workflow = readFileSync(new URL("../../.github/workflows/pr-trusted.yml", import.meta.url), "utf8");
   const lane = workflow.split("  native_composer_stop:")[1].split("\n  e2e:")[0];
   const install = lane.split("      - name: Install dependencies\n")[1]?.split("      - name:")[0];
@@ -201,30 +224,70 @@ test("candidate dependency execution cannot rewrite trusted verifier, tools or p
     .split("\n").map(line => line.replace(/^ {10}/, "")).join("\n");
   const directory = mkdtempSync(join(tmpdir(), "composer-stop-candidate-isolation-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const tools = join(directory, "fixture-tools");
   const runtime = join(directory, "trusted-runtime");
   const trusted = join(directory, ".trusted-composer-stop");
-  for (const path of [tools, runtime, join(trusted, "scripts"), join(trusted, "node_modules")]) mkdirSync(path, { recursive: true });
+  for (const path of [runtime, join(trusted, "scripts"), join(trusted, "node_modules")]) mkdirSync(path, { recursive: true });
+  for (const name of ["composer-candidate-stage.mjs", "composer-candidate-sandbox.mjs", "grok-public-install-sandbox.mjs"]) {
+    copyFileSync(new URL(`../${name}`, import.meta.url), join(trusted, "scripts", name));
+  }
   const targets = [join(trusted, "scripts", "qualify-composer-stop.mjs"), join(trusted, "node_modules", "browser-tool.mjs"),
     join(runtime, "composer-stop-harness-manifest.sha256"), join(runtime, "trusted-github-env")];
   for (const path of targets) writeFileSync(path, "independently trusted bytes\n");
   const attack = `import { writeFileSync } from "node:fs";
     for (const target of ${JSON.stringify(targets)}) {
       try { writeFileSync(target, "candidate-controlled forged acceptance\\n"); } catch {}
-    }`;
-  // No dependencies or real provider are required. Both the host shim and a
-  // future isolated pnpm invocation execute the same hostile lifecycle fixture.
+    }
+    writeFileSync('.install-executed', 'real pnpm lifecycle ran');`;
+  // Exercise the actual workflow command, not a host pnpm shim. Missing Docker,
+  // a failed installation or a lifecycle that never executes is not a pass.
   for (const source of [directory, join(directory, ".candidate")]) {
     mkdirSync(source, { recursive: true });
     writeFileSync(join(source, "attack.mjs"), attack);
     writeFileSync(join(source, "package.json"), JSON.stringify({ name: "candidate-isolation-fixture", version: "1.0.0", scripts: { postinstall: "node attack.mjs" } }));
+    writeFileSync(join(source, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\nimporters:\n  .: {}\n");
   }
-  writeFileSync(join(tools, "pnpm"), `#!/bin/sh\nexec node ${JSON.stringify(join(directory, "attack.mjs"))}\n`, { mode: 0o755 });
   const result = spawnSync("bash", ["-c", command.replaceAll("${{ github.workspace }}", directory)], {
-    cwd: directory, encoding: "utf8", timeout: 20000,
-    env: { ...process.env, PATH: `${tools}:${process.env.PATH}`, GITHUB_WORKSPACE: directory,
+    cwd: directory, encoding: "utf8", timeout: 150000,
+    env: { ...process.env, GITHUB_WORKSPACE: directory, COMPOSER_STOP_CANDIDATE_ROOT: join(directory, ".candidate"),
       RUNNER_TEMP: runtime, GITHUB_ENV: targets[3] },
   });
   assert.equal(result.status, 0, `candidate fixture must actually execute: ${result.stderr}`);
+  assert.equal(readFileSync(join(directory, ".candidate", ".install-executed"), "utf8"), "real pnpm lifecycle ran");
   for (const path of targets) assert.equal(readFileSync(path, "utf8"), "independently trusted bytes\n", `candidate changed trusted state: ${path}`);
+  const runner = join(directory, ".candidate", "packages", "paperclip-runner", "runner");
+  mkdirSync(join(runner, "src"), { recursive: true });
+  writeFileSync(join(runner, "Cargo.toml"), '[package]\nname = "paperclip-runnerd"\nversion = "0.1.0"\nedition = "2021"\n');
+  writeFileSync(join(runner, "Cargo.lock"), 'version = 4\n[[package]]\nname = "paperclip-runnerd"\nversion = "0.1.0"\n');
+  writeFileSync(join(runner, "src", "main.rs"), "fn main() {}\n");
+  writeFileSync(join(runner, "build.rs"), `fn main() {
+    for path in [${targets.map(path => JSON.stringify(path)).join(",")}] {
+      let _ = std::fs::write(path, b"candidate-controlled forged acceptance\\n");
+    }
+    std::fs::write(".build-executed", "real Cargo build script ran").unwrap();
+  }`);
+  const build = lane.split("      - name: Build candidate runner\n")[1]?.split("      - name:")[0];
+  assert.ok(build, "retain a candidate compilation boundary that can be exercised");
+  const buildCommand = build.match(/        run: \|\n([\s\S]*)/)[1]
+    .split("\n").map(line => line.replace(/^ {10}/, "")).join("\n");
+  const compiled = spawnSync("bash", ["-c", buildCommand], {
+    cwd: directory, encoding: "utf8", timeout: 120000,
+    env: { ...process.env, COMPOSER_STOP_CANDIDATE_ROOT: join(directory, ".candidate"), GITHUB_ENV: targets[3] },
+  });
+  assert.equal(compiled.status, 0, `Cargo fixture must actually execute: ${compiled.stderr}`);
+  assert.equal(readFileSync(join(runner, ".build-executed"), "utf8"), "real Cargo build script ran");
+  for (const path of targets) assert.equal(readFileSync(path, "utf8"), "independently trusted bytes\n", `compiler changed trusted state: ${path}`);
+});
+
+test("the proposed caller refuses acceptance before host execution when isolated runtime is absent", (t) => {
+  const workflow = readFileSync(new URL("../../.github/workflows/pr-trusted.yml", import.meta.url), "utf8");
+  const step = workflow.split("      - name: Run mandatory composer Stop acceptance")[1].split("      - name:")[0];
+  const command = step.match(/        run: \|\n([\s\S]*)/)[1]
+    .split("\n").map(line => line.replace(/^ {10}/, "")).join("\n");
+  const directory = mkdtempSync(join(tmpdir(), "composer-stop-runtime-refusal-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const result = spawnSync("bash", ["-c", command], { cwd: directory, encoding: "utf8",
+    env: { ...process.env, COMPOSER_STOP_CONTAINER_ID: "" }, timeout: 10000 });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /requires isolated container runtime and trusted PID integration/);
+  assert.doesNotMatch(result.stderr, /No such file or directory/);
 });

@@ -1407,7 +1407,7 @@ jobs:
       PAPERCLIP_STOP_REQUIRE_NATIVE: "true"
       PAPERCLIP_E2E_SOURCE_ROOT: ${{ github.workspace }}
       COMPOSER_STOP_HEAD_REVISION: ${{ github.event.pull_request.head.sha }}
-      COMPOSER_STOP_TRUSTED_REVISION: 5bd0e909be7c226642645efa2c7c34ec0ebb8a21
+      COMPOSER_STOP_TRUSTED_REVISION: 2dad421e016effb875ee64518851727ae2d2decc
     steps:
       - name: Checkout exact PR head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1420,7 +1420,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: caniko/paperclip
-          ref: 5bd0e909be7c226642645efa2c7c34ec0ebb8a21
+          ref: 2dad421e016effb875ee64518851727ae2d2decc
           path: .trusted-composer-stop
           persist-credentials: false
 
@@ -1431,6 +1431,8 @@ jobs:
           (
             cd .trusted-composer-stop
             git ls-files -z -- tests/e2e scripts/qualify-composer-stop.mjs \
+              scripts/composer-candidate-stage.mjs scripts/composer-candidate-sandbox.mjs \
+              scripts/composer-provider-bridge.mjs scripts/grok-public-install-sandbox.mjs \
               packages/paperclip-runner package.json pnpm-lock.yaml \
               pnpm-workspace.yaml .npmrc .cargo patches | xargs -0 sha256sum
           ) > "$RUNNER_TEMP/composer-stop-harness-manifest.sha256"
@@ -1459,62 +1461,20 @@ jobs:
         with:
           version: 9.15.4
 
-      - name: Locate pnpm store
-        id: pnpm_store
-        run: |
-          echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-          echo "arch=$(node -p 'process.arch')" >> "$GITHUB_OUTPUT"
-
-      - name: Restore pnpm store (read only)
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ steps.pnpm_store.outputs.path }}
-          key: node-cache-${{ runner.os }}-${{ steps.pnpm_store.outputs.arch }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: node-cache-${{ runner.os }}-${{ steps.pnpm_store.outputs.arch }}-pnpm-
-
-      - name: Install dependencies
-        run: |
-          if ! pnpm install --frozen-lockfile; then
-            echo '::notice title=Lockfile::checked-in lockfile is stale; resolving it inline'
-            pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
-            pnpm install --frozen-lockfile
-          fi
-
-      - name: Select the pinned Runner Rust toolchain
-        working-directory: packages/paperclip-runner
-        run: |
-          set -euo pipefail
-          rustup show
-          toolchain="$(rustup show active-toolchain | awk '{print $1}')"
-          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
-          extra_toolchains="$(rustup toolchain list | awk '{print $1}' | grep -vx "$toolchain" || true)"
-          if [ -n "$extra_toolchains" ]; then
-            echo "$extra_toolchains" | xargs -n1 rustup toolchain uninstall
-          fi
-
-      - name: Restore Runner Rust dependencies (read only)
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: packages/paperclip-runner/runner -> target
-          shared-key: release-runner-v1
-          cache-workspace-crates: false
-          cache-bin: false
-          save-if: false
-
       - name: Install immutable browser harness dependencies
         working-directory: .trusted-composer-stop
         run: pnpm install --filter paperclip --frozen-lockfile --ignore-scripts
 
-      - name: Build candidate runner
-        working-directory: packages/paperclip-runner
+      - name: Stage only exact committed candidate source
+        run: node .trusted-composer-stop/scripts/composer-candidate-stage.mjs stage
+
+      - name: Install dependencies
         run: |
-          cargo build --manifest-path runner/Cargo.toml --locked --bin paperclip-runnerd
-          node --input-type=module <<'JS'
-          import { appendFileSync } from "node:fs";
-          import { resolveCargoBinary, resolveCargoTargetDirectory } from "../../.trusted-composer-stop/packages/paperclip-runner/scripts/cargo-artifacts.mjs";
-          const targetDirectory = resolveCargoTargetDirectory({ packageRoot: process.cwd() });
-          appendFileSync(process.env.GITHUB_ENV, `PAPERCLIP_RUNNER_BINARY=${resolveCargoBinary({ binary: "paperclip-runnerd", targetDirectory })}\n`);
-          JS
+          node .trusted-composer-stop/scripts/composer-candidate-stage.mjs install "$COMPOSER_STOP_CANDIDATE_ROOT"
+
+      - name: Build candidate runner
+        run: |
+          node .trusted-composer-stop/scripts/composer-candidate-stage.mjs build "$COMPOSER_STOP_CANDIDATE_ROOT"
 
       - name: Build immutable deterministic provider
         working-directory: .trusted-composer-stop/packages/paperclip-runner
@@ -1536,6 +1496,9 @@ jobs:
           PLAYWRIGHT_JUNIT_OUTPUT_NAME: ${{ runner.temp }}/composer-stop-junit.xml
         run: |
           set -euo pipefail
+          # Preparation isolation is not runtime acceptance. Never fall back to
+          # launching the candidate on the host while runtime/PID wiring is absent.
+          : "${COMPOSER_STOP_CONTAINER_ID:?Mandatory native composer Stop requires isolated container runtime and trusted PID integration}"
           (cd .trusted-composer-stop && sha256sum --check "$RUNNER_TEMP/composer-stop-harness-manifest.sha256")
           node .trusted-composer-stop/node_modules/@playwright/test/cli.js test \
             --config .trusted-composer-stop/tests/e2e/playwright-composer-stop.config.ts --reporter=list,json,junit
