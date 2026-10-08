@@ -30,8 +30,14 @@ export function stageComposerCandidate({ source, revision, temporaryDirectory })
 
 export function runComposerCandidatePhase({ candidate, phase }) {
   const commands = {
-    install: ["npm", "exec", "--yes", "--package=pnpm@9.15.4", "--", "sh", "-c",
-      "pnpm install --frozen-lockfile || { pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile && pnpm install --frozen-lockfile; }"],
+    // Do not execute an npm-exec shell shim from its ephemeral cache. Bootstrap
+    // pinned pnpm in candidate-only storage and use the image's Node interpreter.
+    // Only this tool bootstrap ignores scripts; candidate lifecycle still runs.
+    install: ["sh", "-c",
+      "npm install --prefix /candidate/.composer-tools --ignore-scripts --no-save --package-lock=false pnpm@9.15.4 && " +
+      "{ node /candidate/.composer-tools/node_modules/pnpm/bin/pnpm.cjs install --frozen-lockfile || " +
+      "{ node /candidate/.composer-tools/node_modules/pnpm/bin/pnpm.cjs install --resolution-only --ignore-scripts --no-frozen-lockfile && " +
+      "node /candidate/.composer-tools/node_modules/pnpm/bin/pnpm.cjs install --frozen-lockfile; }; }"],
     build: ["env", "CARGO_TARGET_DIR=/candidate/.composer-native-target", "cargo", "build",
       "--manifest-path", "packages/paperclip-runner/runner/Cargo.toml", "--locked", "--bin", "paperclip-runnerd"],
   };
