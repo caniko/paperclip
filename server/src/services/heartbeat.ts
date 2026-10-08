@@ -9924,7 +9924,10 @@ export function heartbeatService(
   // the original release function did before its writes moved into that
   // module: publish + dispatch a promoted or recovery run, log a reopened
   // issue's activity entry.
-  async function applyWakeQueuePostCommitEffects(effects: WakeQueuePostCommitEffect[]) {
+  async function applyWakeQueuePostCommitEffects(
+    effects: WakeQueuePostCommitEffect[],
+    queueOptions: Pick<CancelRunOptions, "skipQueuedRunStart" | "deferredQueuedRunStarts"> = {},
+  ) {
     for (const effect of effects) {
       if (effect.kind === "conversation_retry_requested") {
         const [source] = await db.select().from(heartbeatRuns).where(and(
@@ -9949,7 +9952,11 @@ export function heartbeatService(
             wakeupRequestId: effect.run.wakeupRequestId,
           },
         });
-        await startNextQueuedRunForAgent(effect.run.agentId);
+        if (queueOptions.skipQueuedRunStart) {
+          queueOptions.deferredQueuedRunStarts?.add(effect.run.agentId);
+        } else {
+          await startNextQueuedRunForAgent(effect.run.agentId);
+        }
       } else {
         await logActivity(db, {
           companyId: effect.companyId,
@@ -17087,6 +17094,7 @@ export function heartbeatService(
     dailyCapBlock: NonNullable<
       Awaited<ReturnType<typeof getHeartbeatDailyCapBlock>>
     >,
+    queueOptions: Pick<CancelRunOptions, "skipQueuedRunStart" | "deferredQueuedRunStarts"> = {},
   ) {
     const now = new Date();
     const reason =
@@ -17127,6 +17135,7 @@ export function heartbeatService(
 
     await releaseIssueExecutionAndPromote(cancelled, {
       suppressImmediateRecovery: true,
+      ...queueOptions,
     });
 
     return cancelled;
@@ -17560,7 +17569,7 @@ export function heartbeatService(
   async function claimQueuedRun(
     run: typeof heartbeatRuns.$inferSelect,
     companyAgents?: AgentOrgRow[],
-    queueOptions: Pick<CancelRunOptions, "skipQueuedRunStart"> = {},
+    queueOptions: Pick<CancelRunOptions, "skipQueuedRunStart" | "deferredQueuedRunStarts"> = {},
   ) {
     if (run.status !== "queued") return run;
     const agent = await getAgent(run.agentId);
@@ -17608,7 +17617,7 @@ export function heartbeatService(
       },
     );
     if (dailyCapBlock) {
-      await cancelQueuedRunForHeartbeatDailyCap(run, dailyCapBlock);
+      await cancelQueuedRunForHeartbeatDailyCap(run, dailyCapBlock, queueOptions);
       return null;
     }
 
@@ -20255,6 +20264,7 @@ export function heartbeatService(
     // Cancelled after the start lock is released: cancelRunInternal promotes the
     // agent's next queued run, which takes this same lock.
     const rejectedClaims: Array<{ run: typeof heartbeatRuns.$inferSelect; err: HttpError }> = [];
+    const deferredQueuedRunStarts = new Set<string>();
 
     return withAgentStartLock(agentId, async () => {
       const agent = await getAgent(agentId);
@@ -20266,7 +20276,7 @@ export function heartbeatService(
             agentId,
             `Cancelled because the agent is not invokable: ${invokability.reason}`,
             "cancelled",
-            { skipQueuedRunStart: true },
+            { skipQueuedRunStart: true, deferredQueuedRunStarts },
           );
         }
         return [];
@@ -20372,6 +20382,7 @@ export function heartbeatService(
         try {
           claimed = await claimQueuedRun(queuedRun, companyAgents, {
             skipQueuedRunStart: true,
+            deferredQueuedRunStarts,
           });
         } catch (err) {
           if (isPermanentClaimRejection(err)) {
@@ -20408,7 +20419,13 @@ export function heartbeatService(
         });
       }
       return claimedRuns;
-    }).finally(() => cancelRejectedQueuedRuns(rejectedClaims));
+    }).finally(async () => {
+      await cancelRejectedQueuedRuns(rejectedClaims);
+      // The start lock is released before dispatching either same-agent or peer wakes.
+      for (const promotedAgentId of deferredQueuedRunStarts) {
+        await startNextQueuedRunForAgent(promotedAgentId);
+      }
+    });
   }
 
   // Await every background heartbeat execution that is currently in flight. A
@@ -27148,7 +27165,7 @@ export function heartbeatService(
 
   async function releaseIssueExecutionAndPromote(
     run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId">,
-    options: { suppressImmediateRecovery?: boolean } = {},
+    options: Pick<CancelRunOptions, "suppressImmediateRecovery" | "skipQueuedRunStart" | "deferredQueuedRunStarts"> = {},
   ) {
     try {
       const source = await getRun(run.id);
@@ -27160,7 +27177,7 @@ export function heartbeatService(
         // while continuation classification blocks periodic generic retries.
         suppressImmediateRecovery: options.suppressImmediateRecovery || isAiAuthenticationBlocked(source),
       });
-      await applyWakeQueuePostCommitEffects(postCommitEffects);
+      await applyWakeQueuePostCommitEffects(postCommitEffects, options);
       const completed = await getRun(run.id);
       const issueId = readNonEmptyString(completed?.contextSnapshot?.issueId)
         ?? readNonEmptyString(completed?.contextSnapshot?.taskId) ?? completed?.nativeIssueId;
@@ -29788,6 +29805,8 @@ export function heartbeatService(
     suppressImmediateRecovery?: boolean;
     /** The caller already holds the agent start lock and advances this queue. */
     skipQueuedRunStart?: boolean;
+    /** Promotions to dispatch after that caller releases its start lock. */
+    deferredQueuedRunStarts?: Set<string>;
     /** The owning preparer releases the issue after its finally cleanup settles. */
     deferIssueRelease?: boolean;
   };
@@ -30126,6 +30145,8 @@ export function heartbeatService(
         if (!options.deferIssueRelease && !preparerWillReleaseIssue) {
           await releaseIssueExecutionAndPromote(cancelled, {
             suppressImmediateRecovery: options.suppressImmediateRecovery,
+            skipQueuedRunStart: options.skipQueuedRunStart,
+            deferredQueuedRunStarts: options.deferredQueuedRunStarts,
           });
         }
         await finalizeAgentStatus(run.agentId, "cancelled", undefined, {
@@ -30145,7 +30166,7 @@ export function heartbeatService(
     agentId: string,
     reason = "Cancelled due to agent pause",
     errorCode = "cancelled",
-    queueOptions: Pick<CancelRunOptions, "skipQueuedRunStart"> = {},
+    queueOptions: Pick<CancelRunOptions, "skipQueuedRunStart" | "deferredQueuedRunStarts"> = {},
   ) {
     const agent = await getAgent(agentId);
     const runs = await db
@@ -30212,7 +30233,7 @@ export function heartbeatService(
           });
         }
         runningProcesses.delete(run.id);
-        await releaseIssueExecutionAndPromote(run);
+        await releaseIssueExecutionAndPromote(run, queueOptions);
       } finally {
         stopOwnership?.release();
       }
