@@ -195,7 +195,7 @@ function registerModuleMocks() {
   });
 
   vi.doMock("../services/index.js", () => ({
-    accessService: () => mockAccessService,
+    accessService: mockAccessServiceFactory,
     agentService: () => mockAgentService,
     companySkillService: () => mockCompanySkillService,
     issueService: () => mockIssueService,
