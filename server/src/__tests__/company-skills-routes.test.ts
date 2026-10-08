@@ -2,6 +2,7 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { hoistModuleGraph } from "./helpers/hoist-module-graph.js";
+import type { SkillSourceContext } from "../services/skill-sources.js";
 
 const mockSkillSourceService = vi.hoisted(() => ({ sourceForSkill: vi.fn(), importFromUrl: vi.fn(), discover: vi.fn() }));
 
@@ -63,6 +64,8 @@ const mockCompanySkillPolicyService = vi.hoisted(() => ({
   resolveAgentPrincipal: vi.fn(),
   evaluate: vi.fn(),
 }));
+const mockAccessServiceFactory = vi.hoisted(() => vi.fn(() => mockAccessService));
+const mockSkillPolicyServiceFactory = vi.hoisted(() => vi.fn(() => mockCompanySkillPolicyService));
 
 const mockIssueService = vi.hoisted(() => ({
   create: vi.fn(),
@@ -146,7 +149,7 @@ function registerModuleMocks() {
   }));
 
   vi.doMock("../services/access.js", () => ({
-    accessService: () => mockAccessService,
+    accessService: mockAccessServiceFactory,
   }));
 
   vi.doMock("../services/activity-log.js", () => ({
@@ -175,7 +178,7 @@ function registerModuleMocks() {
     );
     return {
       ...actual,
-      companySkillPolicyService: () => mockCompanySkillPolicyService,
+      companySkillPolicyService: mockSkillPolicyServiceFactory,
     };
   });
 
@@ -1363,6 +1366,33 @@ describe("company skill mutation permissions", () => {
       sourceType: "github",
       skillRef: "vercel-labs/agent-browser/find-skills",
     });
+  });
+
+  it("binds source access, agent principal and policy evaluation to the supplied transaction", async () => {
+    const tx = {} as NonNullable<Parameters<SkillSourceContext["authorize"]>[2]>;
+    const decide = vi.fn().mockResolvedValue(allowSkillChangeDecision());
+    const resolveAgentPrincipal = vi.fn().mockResolvedValue({ type: "agent", id: "agent-1", role: "engineer" });
+    const evaluate = vi.fn().mockResolvedValue({ allowed: true });
+    mockAccessServiceFactory.mockReturnValueOnce(mockAccessService).mockReturnValueOnce({ ...mockAccessService, decide });
+    mockSkillPolicyServiceFactory.mockReturnValueOnce(mockCompanySkillPolicyService).mockReturnValueOnce({ resolveAgentPrincipal, evaluate });
+    mockSkillSourceService.discover.mockImplementation(async (_input, context: SkillSourceContext) => {
+      await context.authorize("skills.import", { sourceType: "git", sourceLocator: "https://github.com/acme/skills" }, tx);
+      return { candidates: [] };
+    });
+    await request(createApp({ type: "agent", agentId: "agent-1", companyId: "company-1", source: "agent_key" }))
+      .post("/api/companies/company-1/skill-sources/discover")
+      .send({ repositoryUrl: "https://github.com/acme/skills" })
+      .expect(200);
+    expect(mockAccessServiceFactory).toHaveBeenCalledTimes(2);
+    expect(mockAccessServiceFactory).toHaveBeenLastCalledWith(tx);
+    expect(mockSkillPolicyServiceFactory).toHaveBeenCalledTimes(2);
+    expect(mockSkillPolicyServiceFactory).toHaveBeenLastCalledWith(tx);
+    expect(decide).toHaveBeenCalledWith(expect.objectContaining({ resource: { type: "company", companyId: "company-1" } }));
+    expect(resolveAgentPrincipal).toHaveBeenCalledWith("company-1", "agent-1");
+    expect(evaluate).toHaveBeenCalledWith(expect.objectContaining({ companyId: "company-1", action: "skills.import" }));
+    expect(mockAccessService.decide).not.toHaveBeenCalled();
+    expect(mockCompanySkillPolicyService.resolveAgentPrincipal).not.toHaveBeenCalled();
+    expect(mockCompanySkillPolicyService.evaluate).not.toHaveBeenCalled();
   });
 
   it('streams discovery updates and a final result while retaining JSON compatibility', async () => {

@@ -165,9 +165,9 @@ export function companySkillRoutes(db: Db) {
     return { type: "system" as const };
   }
 
-  async function skillPolicyPrincipal(req: Request, companyId: string): Promise<SkillPolicyPrincipal> {
+  async function skillPolicyPrincipal(req: Request, companyId: string, policies = skillPolicies): Promise<SkillPolicyPrincipal> {
     if (req.actor.type === "agent" && req.actor.agentId) {
-      return skillPolicies.resolveAgentPrincipal(companyId, req.actor.agentId);
+      return policies.resolveAgentPrincipal(companyId, req.actor.agentId);
     }
     if (req.actor.type === "board") {
       return { type: "board", id: req.actor.userId ?? "board", role: "board" };
@@ -210,6 +210,7 @@ export function companySkillRoutes(db: Db) {
     companyId: string,
     action: SkillPolicyAction,
     resource: SkillPolicyResourceInput = {},
+    database: Db = db,
   ) {
     if (req.actor.type === "none") {
       throw unauthorized("Authentication required");
@@ -218,7 +219,8 @@ export function companySkillRoutes(db: Db) {
       throw forbidden("Agent key cannot access another company", { code: "skill_company_boundary_denied" });
     }
     assertCompanyAccess(req, companyId);
-    const platformDecision = await access.decide({
+    const policies = database === db ? skillPolicies : companySkillPolicyService(database);
+    const platformDecision = await (database === db ? access : accessService(database)).decide({
       actor: req.actor,
       action: "skill_config:update",
       resource: { type: "company", companyId },
@@ -238,9 +240,9 @@ export function companySkillRoutes(db: Db) {
       });
     }
     const resolvedResource = typeof resource === "function" ? await resource() : await resource;
-    const policyDecision = await skillPolicies.evaluate({
+    const policyDecision = await policies.evaluate({
       companyId,
-      principal: await skillPolicyPrincipal(req, companyId),
+      principal: await skillPolicyPrincipal(req, companyId, policies),
       action,
       resource: resolvedResource,
     });
@@ -303,7 +305,7 @@ export function companySkillRoutes(db: Db) {
     const result = await operation({
       actor: skillActor(req),
       read: connectionId => skillSourceGitHubReader(db, companyId, req.actor, connectionId),
-      authorize: (action, resource) => assertCanMutateCompanySkills(req, companyId, action, resource),
+      authorize: (action, resource, tx) => assertCanMutateCompanySkills(req, companyId, action, resource, tx ? tx as unknown as Db : db),
       audit: async (tx, sourceId, action, details) => {
         const { publication } = await persistActivity(tx as unknown as Db, { ...actor, companyId, action, entityType: "company_skill_source", entityId: sourceId, details });
         publications.push(publication);

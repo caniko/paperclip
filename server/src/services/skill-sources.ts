@@ -14,7 +14,7 @@ type SourceRow = typeof sources.$inferSelect;
 export type SkillSourceContext = {
   actor: { type: 'user' | 'agent' | 'system'; userId?: string | null; agentId?: string | null };
   read: (connectionId: string | null) => GitHubRead;
-  authorize: (action: 'skills.import' | 'skills.update' | 'skills.edit', resource: { skillId?: string; skillKey?: string; sourceType: 'git'; sourceLocator: string }) => Promise<void>;
+  authorize: (action: 'skills.import' | 'skills.update' | 'skills.edit', resource: { skillId?: string; skillKey?: string; sourceType: 'git'; sourceLocator: string }, tx?: Tx) => Promise<void>;
   audit: (tx: Tx, sourceId: string, action: string, details: Record<string, unknown>) => Promise<void>;
 };
 const scope = (companyId: string, id: string) => and(eq(sources.companyId, companyId), eq(sources.id, id));
@@ -92,11 +92,11 @@ export function skillSourceService(db: Db) {
         const changed = !current?.currentVersionId || current.metadata?.snapshotHash !== hash;
         // Authorize the installed write in this transaction, not untouched siblings.
         if (current && (changed || current.metadata?.skillSourceState !== 'synced')) {
-          await context.authorize('skills.update', { sourceType: 'git', sourceLocator: source.repositoryUrl, skillId: current.id, skillKey: current.key });
+          await context.authorize('skills.update', { sourceType: 'git', sourceLocator: source.repositoryUrl, skillId: current.id, skillKey: current.key }, tx);
         }
         if (current && changed) await tx.update(companySkills).set(values).where(and(eq(companySkills.companyId, source.companyId), eq(companySkills.id, current.id)));
         else if (!current) {
-          await context.authorize('skills.import', { sourceType: 'git', sourceLocator: scan.repositoryUrl, skillKey: key });
+          await context.authorize('skills.import', { sourceType: 'git', sourceLocator: scan.repositoryUrl, skillKey: key }, tx);
           const [created] = await tx.insert(companySkills).values({ ...values, companyId: source.companyId, key, slug, installCount: 1 }).returning({ id: companySkills.id });
           skillId = created!.id;
         }
@@ -112,7 +112,7 @@ export function skillSourceService(db: Db) {
           (current ? updated : imported).push(installed);
         } else unchanged++;
       } else if (current) {
-        await context.authorize('skills.update', { sourceType: 'git', sourceLocator: source.repositoryUrl, skillId: current.id, skillKey: current.key });
+        await context.authorize('skills.update', { sourceType: 'git', sourceLocator: source.repositoryUrl, skillId: current.id, skillKey: current.key }, tx);
         await tx.update(companySkills).set({ metadata: { ...current.metadata, skillSourceId: source.id, skillSourcePath: candidate.path,
           skillSourceState: selection !== 'selected' ? 'not_syncing' : 'update_failed' } }).where(and(eq(companySkills.companyId, source.companyId), eq(companySkills.id, current.id)));
       }
@@ -126,7 +126,7 @@ export function skillSourceService(db: Db) {
       if (old.skillId) {
         const current = await skills.getById(source.companyId, old.skillId, tx);
         if (current) {
-          await context.authorize('skills.update', { sourceType: 'git', sourceLocator: source.repositoryUrl, skillId: current.id, skillKey: current.key });
+          await context.authorize('skills.update', { sourceType: 'git', sourceLocator: source.repositoryUrl, skillId: current.id, skillKey: current.key }, tx);
           await tx.update(companySkills).set({ metadata: { ...current.metadata, skillSourceId: source.id, skillSourcePath: old.path, skillSourceState: 'removed' } }).where(and(eq(companySkills.companyId, source.companyId), eq(companySkills.id, old.skillId)));
         }
       }
@@ -200,7 +200,7 @@ export function skillSourceService(db: Db) {
         if (!entry.skillId) continue;
         const skill = await skills.getById(companyId, entry.skillId, tx);
         if (skill) {
-          await context.authorize('skills.edit', { sourceType: 'git', sourceLocator: source.repositoryUrl, skillId: skill.id, skillKey: skill.key });
+          await context.authorize('skills.edit', { sourceType: 'git', sourceLocator: source.repositoryUrl, skillId: skill.id, skillKey: skill.key }, tx);
           await tx.update(companySkills).set({ metadata: { ...skill.metadata, skillSourceId: id, skillSourceState: 'not_syncing' } }).where(and(eq(companySkills.companyId, companyId), eq(companySkills.id, skill.id)));
         }
       }
@@ -211,7 +211,9 @@ export function skillSourceService(db: Db) {
   async function importFromUrl(companyId: string, input: string, context: SkillSourceContext) {
     const parsed = parseSkillImportSourceInput(input);
     const url = new URL(parsed.resolvedSource);
-    const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+    let parts: string[];
+    try { parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent); }
+    catch { throw unprocessable('Use a GitHub repository, folder, or SKILL.md URL.'); }
     const repositoryUrl = `https://github.com/${parts[0]}/${parts[1]!.replace(/\.git$/i, '')}`.toLowerCase();
     const previous = (await list(companyId)).filter(source => source.repositoryUrl.toLowerCase() === repositoryUrl);
     let trackingRef: string | undefined;
