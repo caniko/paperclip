@@ -12,6 +12,8 @@ export interface PutObjectInput {
 
 export interface GetObjectInput {
   objectKey: string;
+  // S3 reads cancel pending requests and their response streams.
+  signal?: AbortSignal;
   range?: {
     start: number;
     end: number;
@@ -43,6 +45,8 @@ export interface StorageProvider {
 }
 
 export type PutFileInput = {
+  /** Server-allocated, company-prefixed key for durable idempotent uploads. Never accept from client input. */
+  objectKey?: string;
   companyId: string;
   namespace: string;
   originalFilename: string | null;
