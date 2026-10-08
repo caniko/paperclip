@@ -22,6 +22,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { resetCompanyFixtures } from "./helpers/company-fixtures.js";
 import {
   MAX_TURN_CONTINUATION_RETRY_REASON,
   MAX_TURN_CONTINUATION_WAKE_REASON,
@@ -88,45 +89,6 @@ async function waitForCondition(fn: () => Promise<boolean>, timeoutMs = 3_000) {
   return fn();
 }
 
-async function cleanupHeartbeatInvalidationFixture(db: ReturnType<typeof createDb>) {
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    try {
-      await db.execute(sql.raw(`
-        TRUNCATE TABLE
-          "company_skills",
-          "issue_comments",
-          "issue_documents",
-          "document_revisions",
-          "documents",
-          "issue_relations",
-          "issue_tree_holds",
-          "issues",
-          "heartbeat_run_events",
-          "cost_events",
-          "activity_log",
-          "heartbeat_runs",
-          "agent_wakeup_requests",
-          "agent_runtime_state",
-          "agents",
-          "companies"
-        RESTART IDENTITY CASCADE
-      `));
-      return;
-    } catch (error) {
-      const isLateCommentRace =
-        error instanceof Error &&
-        error.message.includes("issue_comments_issue_id_issues_id_fk");
-      if (!isLateCommentRace || attempt === 9) {
-        throw error;
-      }
-
-      // Heartbeat completion can write issue-thread comments shortly after the
-      // run leaves queued/running. Retry the dependent deletes once those land.
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
-}
-
 type SeedOptions = {
   agentName?: string;
   agentRole?: string;
@@ -169,6 +131,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await heartbeat.drainActiveRunExecutions();
     beforeContinuationDispatchCheck = null;
     afterContinuationDispatchCheck = null;
     mockAdapterExecute.mockReset();
@@ -196,11 +159,14 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    if (idlePolls < 3) throw new Error("Stale-queue fixture did not establish heartbeat settlement; retain its database");
     await new Promise((resolve) => setTimeout(resolve, 50));
-    await cleanupHeartbeatInvalidationFixture(db);
+    await heartbeat.drainActiveRunExecutions();
+    await resetCompanyFixtures(db);
   });
 
   afterAll(async () => {
+    await heartbeat.drainActiveRunExecutions();
     await tempDb?.cleanup();
   });
 

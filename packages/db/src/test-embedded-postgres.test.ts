@@ -1,9 +1,12 @@
 import fs from "node:fs";
-import { afterEach, describe, expect, it } from "vitest";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   __embeddedPostgresStartMaxAttemptsForTests as MAX_ATTEMPTS,
   __setEmbeddedPostgresCtorProviderForTests,
   __startEmbeddedPostgresWithRetryForTests as startWithRetry,
+  __stopEmbeddedPostgresForTests as stop,
 } from "./test-embedded-postgres.js";
 
 // A fake embedded-postgres constructor. It records every constructed instance so
@@ -109,5 +112,39 @@ describe("startEmbeddedPostgresWithRetry", () => {
     // The thrown message carries the captured Postgres output, not only the
     // generic "embedded Postgres startup failed" text.
     expect((error as Error).message).toContain("Address already in use");
+  });
+});
+
+describe("embedded Postgres fixture settlement", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("rejects a shutdown deadline while retaining data until the process settles", async () => {
+    vi.useFakeTimers();
+    const dataDir = fs.mkdtempSync(join(tmpdir(), "paperclip-stop-timeout-"));
+    let exit!: () => void;
+    const exited = new Promise<void>(resolve => { exit = resolve; });
+    const cleanup = () => fs.rmSync(dataDir, { recursive: true, force: true });
+    const outcome = stop({ initialise: async () => {}, start: async () => {}, stop: () => exited }, cleanup)
+      .then(() => null, error => error);
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await outcome).toBeInstanceOf(Error);
+      expect(fs.existsSync(dataDir)).toBe(true);
+    } finally {
+      exit();
+      await exited;
+      await Promise.resolve();
+      cleanup();
+    }
+  });
+
+  it("retains recovery data when stopping rejects without establishing process exit", async () => {
+    const dataDir = fs.mkdtempSync(join(tmpdir(), "paperclip-stop-failure-"));
+    const cleanup = () => fs.rmSync(dataDir, { recursive: true, force: true });
+    try {
+      await expect(stop({ initialise: async () => {}, start: async () => {}, stop: async () => { throw new Error("Exit not established"); } }, cleanup))
+        .rejects.toThrow("Exit not established");
+      expect(fs.existsSync(dataDir)).toBe(true);
+    } finally { cleanup(); }
   });
 });

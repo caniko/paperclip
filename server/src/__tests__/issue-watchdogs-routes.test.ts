@@ -30,7 +30,7 @@ import { issueRoutes } from "../routes/issues.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 import { taskWatchdogService } from "../services/task-watchdogs.js";
-import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
+import { cancelFixtureHeartbeatRuns } from "./helpers/drain-heartbeat-runs.js";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -76,7 +76,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
   afterEach(async () => {
     mockAdapterExecute.mockClear();
     runningProcesses.clear();
-    await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
+    await cancelFixtureHeartbeatRuns(db, heartbeatService(db), (await db.select({ id: companies.id }).from(companies)).map(row => row.id));
     await db.delete(activityLog);
     await db.delete(issueComments);
     await db.delete(heartbeatRunEvents);

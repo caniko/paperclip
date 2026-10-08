@@ -15,7 +15,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
+import { cancelFixtureHeartbeatRuns } from "./helpers/drain-heartbeat-runs.js";
 
 const mockTelemetryClient = vi.hoisted(() => ({ track: vi.fn() }));
 const mockTrackAgentTaskRun = vi.hoisted(() => vi.fn());
@@ -57,7 +57,7 @@ describeEmbeddedPostgres("heartbeat lock release on cross-agent reassignment", (
   }, 60_000);
 
   afterEach(async () => {
-    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    await cancelFixtureHeartbeatRuns(db, heartbeat, (await db.select({ id: companies.id }).from(companies)).map(row => row.id));
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);

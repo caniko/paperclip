@@ -125,6 +125,8 @@ export interface PluginJobScheduler {
    * naturally. The tick loop simply stops firing.
    */
   stop(): void;
+  /** Await already-started ticks, job dispatches, and registry operations. */
+  drain(): Promise<void>;
 
   /**
    * Register a plugin with the scheduler.
@@ -226,6 +228,12 @@ export function createPluginJobScheduler(
 
   /** Set of job IDs currently being executed (for overlap prevention). */
   const activeJobs = new Set<string>();
+  const pendingOperations = new Set<Promise<unknown>>();
+  function trackOperation<T>(operation: Promise<T>): Promise<T> {
+    pendingOperations.add(operation);
+    void operation.then(() => pendingOperations.delete(operation), () => pendingOperations.delete(operation));
+    return operation;
+  }
 
   /** Total number of ticks since start. */
   let tickCount = 0;
@@ -490,7 +498,7 @@ export function createPluginJobScheduler(
     });
 
     // Dispatch in background — don't block the caller
-    void dispatchManualRun(job, run.id, trigger);
+    void trackOperation(dispatchManualRun(job, run.id, trigger));
 
     return { runId: run.id, jobId };
   }
@@ -696,7 +704,7 @@ export function createPluginJobScheduler(
 
     running = true;
     tickTimer = setInterval(() => {
-      void tick();
+      void trackOperation(tick());
     }, tickIntervalMs);
 
     log.info(
@@ -743,10 +751,13 @@ export function createPluginJobScheduler(
   return {
     start,
     stop,
-    registerPlugin,
-    unregisterPlugin,
-    triggerJob,
-    tick,
+    async drain() {
+      while (pendingOperations.size) await Promise.allSettled([...pendingOperations]);
+    },
+    registerPlugin: (pluginId) => trackOperation(registerPlugin(pluginId)),
+    unregisterPlugin: (pluginId) => trackOperation(unregisterPlugin(pluginId)),
+    triggerJob: (jobId, trigger) => trackOperation(triggerJob(jobId, trigger)),
+    tick: () => trackOperation(tick()),
     diagnostics,
   };
 }

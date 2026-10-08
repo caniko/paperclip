@@ -12,6 +12,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { resetCompanyFixtures } from "./helpers/company-fixtures.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { runningProcesses } from "../adapters/index.ts";
 
@@ -63,10 +64,11 @@ describeEmbeddedPostgres("heartbeat queued-run claim isolation", () => {
     mockAdapterExecute.mockClear();
     runningProcesses.clear();
     // Executed runs write to many company-scoped tables; clear them all.
-    await db.execute(sql`truncate table ${companies} cascade`);
+    await resetCompanyFixtures(db);
   });
 
   afterAll(async () => {
+    await heartbeat.drainActiveRunExecutions();
     await tempDb?.cleanup();
   });
 

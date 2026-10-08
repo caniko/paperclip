@@ -22,7 +22,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
+import { cancelFixtureHeartbeatRuns } from "./helpers/drain-heartbeat-runs.js";
 import { heartbeatService, resolveHeartbeatSchedulingSuppression } from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 
@@ -74,7 +74,7 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
     // service tracks in-flight run and wakeup promises in module state shared
     // across service instances, so a fresh instance here drains the runs the
     // per-test instances dispatched.
-    await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
+    await cancelFixtureHeartbeatRuns(db, heartbeatService(db), (await db.select({ id: companies.id }).from(companies)).map(row => row.id));
     await db.delete(issueComments);
     await db.delete(issueDocuments);
     await db.delete(documentRevisions);

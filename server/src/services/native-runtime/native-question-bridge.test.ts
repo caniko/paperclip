@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 
 import {
   activityLog,
@@ -28,6 +28,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "../../__tests__/helpers/embedded-postgres.js";
 import { drainHeartbeatRunsToQuiescence } from "../../__tests__/helpers/drain-heartbeat-runs.js";
+import { resetCompanyFixtures } from "../../__tests__/helpers/company-fixtures.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import {
   deliverNativeQuestionResponse,
@@ -75,6 +76,7 @@ describeEmbeddedPostgres("native question bridge", () => {
   let runId: string;
   let sessionId: string;
   let runnerInstanceId: string;
+  const syntheticRunIds = new Set<string>();
 
   beforeAll(async () => {
     temporary = await startEmbeddedPostgresTestDatabase("paperclip-native-question-");
@@ -88,20 +90,17 @@ describeEmbeddedPostgres("native question bridge", () => {
     // heartbeat.ts), so that dispatch can still be writing heartbeat_runs,
     // issues, or activity_log rows when this hook starts. Drain every
     // in-flight run to quiescence first, or its late write races the
-    // TRUNCATE below and can deadlock.
-    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    // fixture deletion below and can deadlock.
+    await heartbeat.drainActiveRunExecutions();
     nativeQuestionBridgeInternals.resetForTests();
-    await db.execute(sql.raw(`
-      TRUNCATE TABLE
-        "activity_log",
-        "issue_thread_interactions",
-        "heartbeat_runs",
-        "agent_wakeup_requests",
-        "issues",
-        "agents",
-        "companies"
-      RESTART IDENTITY CASCADE
-    `));
+    // seed() inserts a synthetic running row without starting an executor.
+    // Its command targets/authorities are released by the tests above; close
+    // only that row before demanding settlement of any actual dispatched work.
+    if (syntheticRunIds.size) await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date() })
+      .where(and(inArray(heartbeatRuns.id, [...syntheticRunIds]), inArray(heartbeatRuns.status, ["queued", "running"])));
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    await resetCompanyFixtures(db);
+    syntheticRunIds.clear();
   });
 
   afterAll(async () => {
@@ -114,6 +113,7 @@ describeEmbeddedPostgres("native question bridge", () => {
     issueId = randomUUID();
     agentId = randomUUID();
     runId = randomUUID();
+    syntheticRunIds.add(runId);
     sessionId = randomUUID();
     runnerInstanceId = randomUUID();
     await db.insert(companies).values({
@@ -451,6 +451,7 @@ describeEmbeddedPostgres("native question bridge", () => {
     const queueCommand = vi.fn();
     const release = registerNativeQuestionCommandTarget({ binding: { companyId, issueId, runId, agentId }, queueCommand });
     const targetRunId = randomUUID();
+    syntheticRunIds.add(targetRunId); // mocked wakeup below inserts a row, never an executor
     const wakeup = vi.fn(async () => db.insert(heartbeatRuns).values({ id: targetRunId, companyId, agentId, status: "queued",
       contextSnapshot: { issueId } }).returning().then(rows => rows[0]!));
     const service = questionResponseDeliveryService(db, { heartbeat: { wakeup } as never,

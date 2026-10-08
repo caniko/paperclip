@@ -67,6 +67,8 @@ export interface PluginJobCoordinator {
    * Removes all event subscriptions added by `start()`.
    */
   stop(): void;
+  /** Await lifecycle handlers that were started before stop(). */
+  drain(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,19 +217,24 @@ export function createPluginJobCoordinator(
   // -----------------------------------------------------------------------
 
   let attached = false;
+  const pendingHandlers = new Set<Promise<void>>();
+  function trackHandler(handler: Promise<void>) {
+    pendingHandlers.add(handler);
+    void handler.then(() => pendingHandlers.delete(handler), () => pendingHandlers.delete(handler));
+  }
 
   // We need stable references for on/off since the lifecycle manager
   // uses them for matching. We wrap the async handlers in sync wrappers
   // that fire-and-forget (swallowing unhandled rejections via the try/catch
   // inside each handler).
   const boundOnLoaded = (payload: { pluginId: string; pluginKey: string }) => {
-    void onPluginLoaded(payload);
+    trackHandler(onPluginLoaded(payload));
   };
   const boundOnDisabled = (payload: { pluginId: string; pluginKey: string; reason?: string }) => {
-    void onPluginDisabled(payload);
+    trackHandler(onPluginDisabled(payload));
   };
   const boundOnUnloaded = (payload: { pluginId: string; pluginKey: string; removeData: boolean }) => {
-    void onPluginUnloaded(payload);
+    trackHandler(onPluginUnloaded(payload));
   };
 
   // -----------------------------------------------------------------------
@@ -235,6 +242,9 @@ export function createPluginJobCoordinator(
   // -----------------------------------------------------------------------
 
   return {
+    async drain() {
+      while (pendingHandlers.size) await Promise.allSettled([...pendingHandlers]);
+    },
     start(): void {
       if (attached) return;
       attached = true;

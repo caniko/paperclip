@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issues, projects, projectWorkspaces, activityLog, issueComments, assets, goals, approvals, documents, documentRevisions, issueDocuments, issueRelations, issueThreadInteractions, connectionIntentDeliveries, toolApplications, toolConnections, toolConnectionInstalls, connectionGrants, toolCatalogEntries, toolProfiles, toolProfileBindings } from "@paperclipai/db";
 import { documentService } from "../../services/documents.js";
 import { connectionIntentService } from "../../services/connection-intents.js";
@@ -14,9 +14,47 @@ import { createLocalDiskStorageProvider } from "../../storage/local-disk-provide
 import { createStorageService } from "../../storage/service.js";
 import { setupRunnerPrpWebSocketServer, runnerPrpWebSocketInternals } from "../../realtime/runner-prp-ws.js";
 import { PaperclipRunnerToolAuthority } from "../../services/native-runtime/paperclip-runner-tool-authority.js";
+import { heartbeatService } from "../../services/heartbeat.js";
+import { resetCompanyFixtures } from "./company-fixtures.js";
 
 export type RunnerConnectionScenario = "fresh" | "pending" | "declined" | "custom" | "foreign" | "stale_owner" | "ready";
 const CONNECTION_SCENARIOS: readonly RunnerConnectionScenario[] = ["fresh", "pending", "declined", "custom", "foreign", "stale_owner", "ready"];
+
+/** A response abort is not evidence that its async route has settled. */
+export function createRunnerFixtureHttpTracker() {
+  let acceptingRequests = true;
+  let failedRequestSettlement = false;
+  const pendingRequests = new Set<Promise<void>>();
+  return {
+    resume() { acceptingRequests = true; },
+    dispatch(req: IncomingMessage, res: ServerResponse,
+      route: (req: IncomingMessage, res: ServerResponse) => void) {
+      if (!acceptingRequests) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end('{"error":"Fixture lifecycle is settling"}');
+        return;
+      }
+      const completed = new Promise<void>(resolve => {
+        const settled = () => {
+          res.off("finish", settled);
+          res.off("close", settled);
+          if (!res.writableFinished) failedRequestSettlement = true;
+          resolve();
+        };
+        res.once("finish", settled);
+        res.once("close", settled);
+      });
+      pendingRequests.add(completed);
+      void completed.then(() => pendingRequests.delete(completed));
+      route(req, res);
+    },
+    async stopAndDrain() {
+      acceptingRequests = false;
+      while (pendingRequests.size) await Promise.all([...pendingRequests]);
+      if (failedRequestSettlement) throw new Error("Runner fixture HTTP work did not establish settlement; retain its database");
+    },
+  };
+}
 
 /** Disposable real routes, database and storage. A fresh company isolates each attempt. */
 export async function startRunnerApiTestServer(options: {
@@ -26,15 +64,20 @@ export async function startRunnerApiTestServer(options: {
   const temporary = await startEmbeddedPostgresTestDatabase("paperclip-api-eval-db-");
   const db = createDb(temporary.connectionString);
   const storage = createStorageService(createLocalDiskStorageProvider(join(root, "storage")));
-  const app = await createApp(db, {
+  const instanceId = `eval-${randomUUID()}`;
+  const createTestApp = () => createApp(db, {
     uiMode: "none", serverPort: 0, storageService: storage,
     deploymentMode: options.deploymentMode ?? "authenticated", deploymentExposure: "private",
     allowedHostnames: ["127.0.0.1"], bindHost: "127.0.0.1", authReady: true,
-    companyDeletionEnabled: false, instanceId: `eval-${randomUUID()}`,
+    companyDeletionEnabled: false, instanceId,
     localPluginDir: join(root, "plugins"), managedPluginAutoInstall: [],
     decisionServiceOptions: { wakeOriginAgent: async () => undefined },
   });
-  const http = createServer(app);
+  let app = await createTestApp();
+  const httpTracker = createRunnerFixtureHttpTracker();
+  const http = createServer((req, res) => {
+    httpTracker.dispatch(req, res, (req, res) => app(req, res));
+  });
   const sockets = new Set<import("node:net").Socket>();
   http.on("connection", socket => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); });
   await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
@@ -42,30 +85,31 @@ export async function startRunnerApiTestServer(options: {
   if (!address || typeof address === "string") throw new Error("Missing eval listener");
   const apiUrl = `http://127.0.0.1:${address.port}`;
   setupRunnerPrpWebSocketServer(http, { apiUrl });
+  async function settleApp() {
+    const drained = httpTracker.stopAndDrain();
+    http.closeIdleConnections();
+    await drained;
+    const runs = await db.select({ companyId: heartbeatRuns.companyId, runId: heartbeatRuns.id }).from(heartbeatRuns);
+    if (runs.some(run => runnerPrpWebSocketInternals.activeRegistration(run))) {
+      throw new Error("Runner fixture still has a live authority; settle it before reset or disposal");
+    }
+    await app.locals.paperclipShutdown();
+    await heartbeatService(db).drainActiveRunExecutions();
+  }
   return {
     db, root, apiUrl, storage,
     async fixture(options: { mode?: "standard" | "ask" | "planning"; apiToolsEnabled?: boolean; reset?: boolean; conversation?: boolean; connectionScenario?: RunnerConnectionScenario; contextSnapshot?: Record<string, unknown>; disableWakeOnDemand?: boolean } = {}) {
       if (options.connectionScenario !== undefined && !CONNECTION_SCENARIOS.includes(options.connectionScenario)) throw new Error(`Unknown connection eval scenario: ${String(options.connectionScenario)}`);
       // This DB is created inside this helper, never supplied by a caller. Paid
       // paired runs reset it between attempts so modeled IDs and data match.
-      // The helper's own app runs background sweeps against this DB, and one
-      // can hold row locks when the reset fires; Postgres then picks a
-      // deadlock victim (observed against TRUNCATE in CI on 2026-09-10). The
-      // loser's transaction rolls back the moment it is chosen, so a short
-      // bounded retry makes the reset deterministic instead of flaky.
+      // Stop the previous attempt's app services and drain tracked heartbeat
+      // work before deleting its graph. Restart services against the same DB
+      // and listener so paired attempts retain their deterministic identities.
       if (options.reset) {
-        for (let attempt = 0; ; attempt += 1) {
-          try {
-            await db.execute(sql`TRUNCATE companies CASCADE`);
-            break;
-          } catch (error) {
-            const code =
-              (error as { code?: string }).code ??
-              (error as { cause?: { code?: string } }).cause?.code;
-            if (attempt >= 4 || code !== "40P01") throw error;
-            await new Promise((resolve) => setTimeout(resolve, 100));
-          }
-        }
+        await settleApp();
+        await resetCompanyFixtures(db);
+        app = await createTestApp();
+        httpTracker.resume();
       }
       const id = (key: string) => {
         if (!options.reset) return randomUUID();
@@ -178,8 +222,8 @@ export async function startRunnerApiTestServer(options: {
       };
     },
     async close() {
+      await settleApp();
       runnerPrpWebSocketInternals.resetForTests();
-      await app.locals.paperclipShutdown();
       for (const socket of sockets) socket.destroy();
       http.closeAllConnections();
       await new Promise<void>((resolve) => http.close(() => resolve()));

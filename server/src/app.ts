@@ -1145,6 +1145,14 @@ export async function createApp(
 
   app.use(errorHandler);
 
+  // Clearing timers prevents future work but does not settle their current
+  // callbacks. Retain every startup/sweep promise through orderly shutdown.
+  const backgroundTasks = new Set<Promise<unknown>>();
+  let backgroundShuttingDown = false;
+  const trackBackgroundTask = (task: Promise<unknown>) => {
+    backgroundTasks.add(task);
+    void task.then(() => backgroundTasks.delete(task), () => backgroundTasks.delete(task));
+  };
   jobCoordinator.start();
   scheduler.start();
   let feedbackExportShuttingDown = false;
@@ -1175,12 +1183,12 @@ export async function createApp(
 
   feedbackExportTimer = opts.feedbackExportService
     ? setInterval(() => {
-        void flushPendingFeedbackExports();
+        if (!backgroundShuttingDown) trackBackgroundTask(flushPendingFeedbackExports());
       }, FEEDBACK_EXPORT_FLUSH_INTERVAL_MS)
     : null;
   feedbackExportTimer?.unref?.();
   if (opts.feedbackExportService) {
-    void flushPendingFeedbackExports();
+    trackBackgroundTask(flushPendingFeedbackExports());
   }
   emailChannels.start();
   const flushChatPublications = async () => {
@@ -1224,7 +1232,8 @@ export async function createApp(
   // shape as the feedback export flush above.
   const importTransferSpoolRoot = resolveDefaultImportTransferSpoolRoot();
   const sweepImportTransferSpools = () => {
-    sweepAbandonedImportTransferSpools(db, importTransferSpoolRoot)
+    if (backgroundShuttingDown) return;
+    trackBackgroundTask(sweepAbandonedImportTransferSpools(db, importTransferSpoolRoot)
       .then((result) => {
         if (result.swept > 0) {
           logger.info(result, "swept abandoned company import transfer spools");
@@ -1235,11 +1244,13 @@ export async function createApp(
           { err },
           "abandoned company import transfer spool sweep failed",
         );
-      });
+      }));
   };
-  const browserUseTimer = setInterval(() => { void browserUse.sweep().catch(() => logger.warn("Browser Use reconciliation failed; retrying.")); }, 3000);
+  const browserUseTimer = setInterval(() => {
+    if (!backgroundShuttingDown) trackBackgroundTask(browserUse.sweep().catch(() => logger.warn("Browser Use reconciliation failed; retrying.")));
+  }, 3000);
   browserUseTimer.unref?.();
-  void browserUse.sweep().catch(() => logger.warn("Browser Use startup reconciliation failed; retrying."));
+  trackBackgroundTask(browserUse.sweep().catch(() => logger.warn("Browser Use startup reconciliation failed; retrying.")));
   let importTransferSweepTimer: ReturnType<typeof setInterval> | null =
     setInterval(
       sweepImportTransferSpools,
@@ -1251,7 +1262,7 @@ export async function createApp(
   // still "applying" now was interrupted by the previous shutdown and would
   // otherwise 409 every retry forever. Fail those stranded runs — their
   // spooled parts stay reusable — then run the normal sweep once.
-  void companyTransferRunService
+  trackBackgroundTask(companyTransferRunService
     .recoverStrandedApplyingRuns(db)
     .then((recovered) => {
       if (recovered.length > 0) {
@@ -1266,10 +1277,10 @@ export async function createApp(
     })
     .finally(() => {
       sweepImportTransferSpools();
-    });
-  void toolDispatcher.initialize().catch((err) => {
+    }));
+  trackBackgroundTask(toolDispatcher.initialize().catch((err) => {
     logger.error({ err }, "Failed to initialize plugin tool dispatcher");
-  });
+  }));
   const devWatcher = createPluginDevWatcher(
     lifecycle,
     async (pluginId) =>
@@ -1336,6 +1347,7 @@ export async function createApp(
   const shutdownAppServices = (): Promise<void> => {
     if (appServicesShutdown) return appServicesShutdown;
     appServicesShutdown = (async () => {
+      backgroundShuttingDown = true;
       // The scheduler tick queries the database. Stop it here, inside the
       // awaited teardown, so no tick runs after the caller ends the pool.
       scheduler.stop();
@@ -1347,15 +1359,19 @@ export async function createApp(
         clearInterval(chatPublicationTimer);
         chatPublicationTimer = null;
       }
-      await chatReconciliation.drain();
       clearInterval(browserUseTimer);
       if (importTransferSweepTimer) {
         clearInterval(importTransferSweepTimer);
         importTransferSweepTimer = null;
       }
-      devWatcher?.close();
+      await devWatcher?.close();
+      await bundledPluginsStartup;
+      await jobCoordinator.drain();
+      await scheduler.drain();
+      await chatReconciliation.drain();
+      while (backgroundTasks.size) await Promise.allSettled([...backgroundTasks]);
       viteHtmlRenderer?.dispose();
-      void viteDevServer?.close().catch(() => undefined);
+      await viteDevServer?.close();
       viteHmrServer?.close();
       hostServiceCleanup.disposeAll();
       hostServiceCleanup.teardown();

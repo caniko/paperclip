@@ -29,8 +29,8 @@ export interface PluginDevWatcher {
   watch(pluginId: string, packagePath: string): void;
   /** Stop watching a specific plugin. */
   unwatch(pluginId: string): void;
-  /** Stop all watchers and clean up. */
-  close(): void;
+  /** Stop ingress, then await started lookups/restarts and watcher closure. */
+  close(): Promise<void>;
 }
 
 export type ResolvePluginPackagePath = (
@@ -163,6 +163,17 @@ export function createPluginDevWatcher(
 ): PluginDevWatcher {
   const watchers = new Map<string, FSWatcher>();
   const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const pendingTasks = new Set<Promise<unknown>>();
+  let closed = false;
+  let closing: Promise<void> | null = null;
+  let shutdownFailed = false;
+  function trackTask(task: Promise<unknown>, closesWatcher = false) {
+    pendingTasks.add(task);
+    void task.then(() => pendingTasks.delete(task), () => {
+      pendingTasks.delete(task);
+      if (closed || closesWatcher) shutdownFailed = true;
+    });
+  }
   const fileExists = fsDeps?.existsSync ?? existsSync;
   log.info(
     { resolvesInstalledPlugins: Boolean(resolvePluginPackagePath) },
@@ -170,6 +181,7 @@ export function createPluginDevWatcher(
   );
 
   function watchPlugin(pluginId: string, packagePath: string): void {
+    if (closed) return;
     // Don't double-watch
     if (watchers.has(pluginId)) return;
 
@@ -208,6 +220,7 @@ export function createPluginDevWatcher(
       );
 
       watcher.on("all", (_eventName, changedPath) => {
+        if (closed) return;
         const relativePath = path.relative(absPath, changedPath);
         if (shouldIgnorePath(relativePath)) return;
 
@@ -218,12 +231,15 @@ export function createPluginDevWatcher(
           pluginId,
           setTimeout(() => {
             debounceTimers.delete(pluginId);
+            if (closed) return;
             log.info(
               { pluginId, changedFile: relativePath || path.basename(changedPath) },
               "plugin-dev-watcher: file change detected, restarting worker",
             );
 
-            lifecycle.restartWorker(pluginId).catch((err) => {
+            const restart = lifecycle.restartWorker(pluginId);
+            trackTask(restart);
+            void restart.catch((err) => {
               log.warn(
                 {
                   pluginId,
@@ -275,7 +291,7 @@ export function createPluginDevWatcher(
   function unwatchPlugin(pluginId: string): void {
     const pluginWatcher = watchers.get(pluginId);
     if (pluginWatcher) {
-      void pluginWatcher.close();
+      trackTask(pluginWatcher.close(), true);
       watchers.delete(pluginId);
     }
     const timer = debounceTimers.get(pluginId);
@@ -285,7 +301,9 @@ export function createPluginDevWatcher(
     }
   }
 
-  function close(): void {
+  function close(): Promise<void> {
+    if (closing) return closing;
+    closed = true;
     lifecycle.off("plugin.loaded", handlePluginLoaded);
     lifecycle.off("plugin.enabled", handlePluginEnabled);
     lifecycle.off("plugin.disabled", handlePluginDisabled);
@@ -294,9 +312,18 @@ export function createPluginDevWatcher(
     for (const [pluginId] of watchers) {
       unwatchPlugin(pluginId);
     }
+    // A debounce can survive an earlier error/unwatch path with no watcher.
+    for (const timer of debounceTimers.values()) clearTimeout(timer);
+    debounceTimers.clear();
+    closing = (async () => {
+      while (pendingTasks.size) await Promise.allSettled([...pendingTasks]);
+      if (shutdownFailed) throw new Error("Plugin development watcher did not establish shutdown settlement");
+    })();
+    return closing;
   }
 
   async function watchLocalPluginById(pluginId: string): Promise<void> {
+    if (closed) return;
     if (!resolvePluginPackagePath) {
       log.debug(
         { pluginId },
@@ -327,11 +354,11 @@ export function createPluginDevWatcher(
   }
 
   function handlePluginLoaded(payload: { pluginId: string }): void {
-    void watchLocalPluginById(payload.pluginId);
+    trackTask(watchLocalPluginById(payload.pluginId));
   }
 
   function handlePluginEnabled(payload: { pluginId: string }): void {
-    void watchLocalPluginById(payload.pluginId);
+    trackTask(watchLocalPluginById(payload.pluginId));
   }
 
   function handlePluginDisabled(payload: { pluginId: string }): void {

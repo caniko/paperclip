@@ -140,27 +140,23 @@ function cleanupEmbeddedPostgresTestDirs(dataDir: string) {
   fs.rmSync(dataDir, { recursive: true, force: true });
 }
 
-// Upper bound (ms) on how long we wait for the embedded Postgres cluster to
-// stop gracefully before abandoning the wait and returning from the hook.
-const EMBEDDED_POSTGRES_STOP_TIMEOUT_MS = 5000;
+// Allow loaded-runner checkpoint headroom within the server's 30s hook budget.
+// A deadline is a failed settlement, never a successful fixture teardown.
+const EMBEDDED_POSTGRES_STOP_TIMEOUT_MS = 20_000;
 
 // `embedded-postgres@18.1.0-beta.16` exposes only `stop(): Promise<void>` — no
 // shutdown-mode argument. Internally it SIGINTs the postgres process (already
 // PostgreSQL "fast shutdown") and resolves *only* on the child's `exit` event,
 // with no time bound of its own. Under the loaded serial server shard a slow
 // shutdown checkpoint can push that past vitest's hookTimeout and hang the
-// afterAll hook. So we bound the graceful stop: if it overruns, we stop waiting
-// and return so the hook completes. The SIGINT has already been delivered, so
-// the abandoned process still exits on its own (and again when the runner exits).
-// Errors are swallowed, matching prior behavior.
+// afterAll hook. Bound the graceful stop and report an explicit failure if its
+// exit is not established. Retain the data directory on a stop error.
 //
-// `cleanupFn` (data-dir reclaim) is chained on the raw `stop()` promise, not on
-// the timeout race, so the disposable data dir is removed *only after* `stop()`
-// actually settles — i.e. once the child Postgres process has exited. Removing
+// `cleanupFn` (data-dir reclaim) follows successful `stop()`, not the timeout
+// race, so the disposable data dir is removed *only after* the child exits. Removing
 // it on the timeout path would pull the data files out from under a still-running
-// cluster and provoke checkpoint / WAL I/O errors. In the fast path `cleanupFn`
-// has run by the time this resolves; in the timeout path it runs asynchronously
-// once the abandoned process finally exits.
+// cluster and provoke checkpoint / WAL I/O errors. A late successful exit can
+// reclaim the directory, but cannot turn the failed deadline into a pass.
 async function stopEmbeddedPostgresBounded(
   instance: EmbeddedPostgresInstance | null,
   cleanupFn?: () => void,
@@ -170,23 +166,13 @@ async function stopEmbeddedPostgresBounded(
     return;
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const stopped = instance
-    .stop()
-    .catch(() => {
-      // Swallow shutdown errors — the data dir is reclaimed regardless.
-    })
-    .finally(() => {
-      try {
-        cleanupFn?.();
-      } catch {
-        // Best-effort reclaim; ignore removal errors.
-      }
-    });
+  const stopped = instance.stop().then(() => cleanupFn?.());
   try {
     await Promise.race([
       stopped,
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, EMBEDDED_POSTGRES_STOP_TIMEOUT_MS);
+      new Promise<void>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("Embedded PostgreSQL did not settle before the shutdown deadline; retain fixture recovery data")),
+          EMBEDDED_POSTGRES_STOP_TIMEOUT_MS);
         timer.unref?.();
       }),
     ]);
@@ -242,6 +228,7 @@ async function startEmbeddedPostgresWithRetry(tempDirPrefix: string): Promise<{
 // so it does not need a real Postgres connection.
 export const __startEmbeddedPostgresWithRetryForTests = startEmbeddedPostgresWithRetry;
 export const __embeddedPostgresStartMaxAttemptsForTests = EMBEDDED_POSTGRES_START_MAX_ATTEMPTS;
+export const __stopEmbeddedPostgresForTests = stopEmbeddedPostgresBounded;
 
 async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSupport> {
   let started: { dataDir: string; instance: EmbeddedPostgresInstance } | null = null;

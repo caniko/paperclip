@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
@@ -15,6 +15,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { resetCompanyFixtures } from "./helpers/company-fixtures.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -78,23 +79,10 @@ describeEmbeddedPostgres("heartbeat local environment lifecycle", () => {
     // A run reaches its terminal status before finalizeRun finishes writing
     // its trailing lifecycle events and side effects (see the comment on
     // drainActiveRunExecutions in heartbeat.ts). Drain those in-flight writes
-    // before the TRUNCATE below, or a write that lands after the company row
+    // before fixture deletion, or a write that lands after the company row
     // is gone violates heartbeat_run_events' foreign key.
     await heartbeat.drainActiveRunExecutions();
-    await db.execute(sql.raw(`
-      TRUNCATE TABLE
-        "environment_leases",
-        "environments",
-        "activity_log",
-        "heartbeat_run_events",
-        "heartbeat_runs",
-        "agent_wakeup_requests",
-        "agent_runtime_state",
-        "company_skills",
-        "agents",
-        "companies"
-      RESTART IDENTITY CASCADE
-    `));
+    await resetCompanyFixtures(db);
   });
 
   afterAll(async () => {

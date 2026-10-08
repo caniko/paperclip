@@ -40,6 +40,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "../../__tests__/helpers/embedded-postgres.js";
+import { resetCompanyFixtures } from "../../__tests__/helpers/company-fixtures.js";
 import { reconcileSafeNativeReplacements } from "./native-safe-replacement.js";
 import { reconcileAbandonedExecutionControl } from "../execution-control-reconciliation.js";
 const externalDatabaseUrl = process.env.PAPERCLIP_TEST_DATABASE_URL;
@@ -65,7 +66,8 @@ const support = externalDatabaseUrl
     afterEach(async () => {
       // Each sweep scans all companies. Keep earlier tests' unresolved runs out
       // of later tests so every case exercises only its own recovery fixtures.
-      await db.execute(sql`TRUNCATE companies CASCADE`);
+      await heartbeatService(db).drainActiveRunExecutions();
+      await resetCompanyFixtures(db);
     });
     afterAll(async () => {
       if (externalDatabaseUrl) await db?.$client.end();

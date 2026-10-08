@@ -35,6 +35,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { resetCompanyFixtures } from "./helpers/company-fixtures.js";
 
 const steerNativeSessionMock = vi.hoisted(() => vi.fn());
 vi.mock("../services/native-runtime/native-session-executor.js", async (importOriginal) => {
@@ -66,16 +67,25 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
 
   afterEach(async () => {
     for (const [id, child] of testProcesses) {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("Queued-comment fixture child did not settle")), 5000);
+          child.once("exit", () => { clearTimeout(timer); resolve(); });
+        });
+        child.kill();
+        await exited;
+      }
       runningProcesses.delete(id);
-      child.kill();
     }
+    await heartbeatService(db).drainActiveRunExecutions();
     testProcesses.clear();
     // Each case owns the entire disposable database. Clear the full company
     // graph, including attribution rows and constraints added by migrations.
-    await db.execute(sql`TRUNCATE TABLE companies CASCADE`);
+    await resetCompanyFixtures(db);
   });
 
   afterAll(async () => {
+    await heartbeatService(db).drainActiveRunExecutions();
     await tempDb?.cleanup();
   });
 

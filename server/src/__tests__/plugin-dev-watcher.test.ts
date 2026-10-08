@@ -64,7 +64,7 @@ function createLifecycle() {
 function installMockFsWatcher() {
   const handlers: Record<string, (...args: unknown[]) => void> = {};
   const fakeWatcher = {
-    close: vi.fn(),
+    close: vi.fn(async () => {}),
     on: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
       handlers[event] = listener;
       return fakeWatcher;
@@ -108,6 +108,74 @@ describe("resolvePluginWatchTargets", () => {
 });
 
 describe("createPluginDevWatcher", () => {
+  it("retains a failed watcher-close result from before application shutdown", async () => {
+    const pluginDir = makeTempPluginDir();
+    writePluginPackage(pluginDir);
+    const { fakeWatcher } = installMockFsWatcher();
+    const lifecycle = createLifecycle();
+    fakeWatcher.close.mockRejectedValue(new Error("Watcher close refused"));
+    const watcher = createPluginDevWatcher(lifecycle as never);
+    watcher.watch("plugin-1", pluginDir);
+    watcher.unwatch("plugin-1");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await expect(watcher.close()).rejects.toThrow("did not establish shutdown settlement");
+    await expect(watcher.close()).rejects.toThrow("did not establish shutdown settlement");
+  });
+
+  it("waits for a pending package lookup and cannot install a watcher after close", async () => {
+    const pluginDir = makeTempPluginDir();
+    writePluginPackage(pluginDir);
+    installMockFsWatcher();
+    const lifecycle = createLifecycle();
+    let release!: () => void;
+    const lookup = new Promise<void>(resolve => { release = resolve; });
+    const resolver = vi.fn(async () => { await lookup; return pluginDir; });
+    const watcher = createPluginDevWatcher(lifecycle as never, resolver);
+    lifecycle.emit("plugin.loaded", { pluginId: "plugin-1" });
+    expect(resolver).toHaveBeenCalledTimes(1);
+    let settled = false;
+    const closing = Promise.resolve(watcher.close()).then(() => { settled = true; });
+    try {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(settled).toBe(false);
+    } finally { release(); await closing; }
+    lifecycle.emit("plugin.enabled", { pluginId: "plugin-1" });
+    watcher.watch("plugin-2", pluginDir);
+    expect(resolver).toHaveBeenCalledTimes(1);
+    expect(chokidarMock.watch).not.toHaveBeenCalled();
+  });
+
+  it("waits for a started restart and watcher close, and cancels a queued debounce", async () => {
+    vi.useFakeTimers();
+    const pluginDir = makeTempPluginDir();
+    writePluginPackage(pluginDir);
+    const { fakeWatcher, handlers } = installMockFsWatcher();
+    const lifecycle = createLifecycle();
+    let releaseRestart!: () => void, releaseClose!: () => void;
+    const restart = new Promise<void>(resolve => { releaseRestart = resolve; });
+    const close = new Promise<void>(resolve => { releaseClose = resolve; });
+    lifecycle.restartWorker.mockImplementation(async () => { await restart; });
+    fakeWatcher.close.mockImplementation(async () => { await close; });
+    const watcher = createPluginDevWatcher(lifecycle as never);
+    watcher.watch("plugin-1", pluginDir);
+    handlers.all?.("change", path.join(pluginDir, "dist", "worker.js"));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(lifecycle.restartWorker).toHaveBeenCalledTimes(1);
+    handlers.all?.("change", path.join(pluginDir, "dist", "worker.js"));
+    let settled = false;
+    const closing = Promise.resolve(watcher.close()).then(() => { settled = true; });
+    try {
+      await vi.advanceTimersByTimeAsync(500);
+      expect(lifecycle.restartWorker).toHaveBeenCalledTimes(1);
+      expect(settled).toBe(false);
+      releaseRestart();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+    } finally { releaseRestart(); releaseClose(); await closing; }
+    expect(fakeWatcher.close).toHaveBeenCalledTimes(1);
+    expect(settled).toBe(true);
+  });
+
   it("starts watching local plugins announced by lifecycle events", async () => {
     const pluginDir = makeTempPluginDir();
     writePluginPackage(pluginDir);
@@ -125,7 +193,7 @@ describe("createPluginDevWatcher", () => {
     const [watchedPaths] = chokidarMock.watch.mock.calls[0] ?? [];
     expect(watchedPaths).toContain(path.join(pluginDir, "dist", "worker.js"));
 
-    devWatcher.close();
+    await devWatcher.close();
   });
 
   it("debounces watched file changes and restarts the plugin worker", async () => {
@@ -143,6 +211,6 @@ describe("createPluginDevWatcher", () => {
 
     expect(lifecycle.restartWorker).toHaveBeenCalledWith("plugin-1");
 
-    devWatcher.close();
+    await devWatcher.close();
   });
 });

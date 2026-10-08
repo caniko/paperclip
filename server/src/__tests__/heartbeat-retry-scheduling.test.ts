@@ -25,7 +25,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
+import { cancelFixtureHeartbeatRuns } from "./helpers/drain-heartbeat-runs.js";
 import { registerServerAdapter, unregisterServerAdapter } from "../adapters/index.ts";
 import { createPostgresRunDispatchAdapter } from "../modules/run-dispatch/adapters/postgres.js";
 
@@ -133,7 +133,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     // wakeup, so a run or wakeup can still write heartbeat_runs and issues rows
     // when teardown starts. The cleanup deletes issues before heartbeat_runs, so
     // a late write races the deletes and can deadlock or break a foreign key.
-    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    await cancelFixtureHeartbeatRuns(db, heartbeat, (await db.select({ id: companies.id }).from(companies)).map(row => row.id));
     await cleanupRetryFixture();
     vi.clearAllMocks();
   });
