@@ -59,6 +59,27 @@ describe("Codex security configuration", () => {
     expect(args).toContain('"/private-provider-home"="none"');
   });
 
+  it.each([undefined, "/agent-files/current"])("retains only approved persisted thread environment keys (registered root: %s)", (root) => {
+    const persisted = {
+      PATH: "/persisted/bin", PATHEXT: ".EXE", SystemRoot: "C:\\Windows", WINDIR: "C:\\Windows",
+      LANG: "C.UTF-8", LC_ALL: "C.UTF-8", HOME: "/persisted/home",
+      ZDOTDIR: "/persisted/profile", BASH_ENV: "/persisted/profile/.bashrc",
+      AGENT_HOME: "/agent-files/previous", OPENAI_API_KEY: "persisted-secret",
+      GH_TOKEN: "stale-credential", PAPERCLIP_API_KEY: "persisted-secret",
+    };
+    const source = { AGENT_HOME: "/agent-files/current", OPENAI_API_KEY: "ambient-secret" };
+    const args = createIsolatedCodexAppServerArgs(source, [], root, "thread", persisted);
+    const allowlist = JSON.parse(args.find((arg) => arg.startsWith("shell_environment_policy.include_only="))!.split("=", 2)[1]!);
+    expect(allowlist).toEqual([
+      ...(root ? ["AGENT_HOME"] : []), "BASH_ENV", "HOME", "LANG", "LC_ALL", "PATH", "PATHEXT", "SystemRoot", "WINDIR", "ZDOTDIR",
+    ]);
+    expect(args.some((arg) => arg.startsWith("shell_environment_policy.set="))).toBe(false);
+    expect(args.join("\n")).not.toContain("secret");
+    expect(args.join("\n")).not.toContain("stale-credential");
+    expect(createIsolatedCodexAppServerArgs(source, [], root, "argv", persisted))
+      .toEqual(createIsolatedCodexAppServerArgs(source, [], root, "argv"));
+  });
+
   it("preserves target DNS symlink resources without opening all of /run", () => {
     const source = { PAPERCLIP_RUNNER_NETWORK_ACCESS: "enabled", PAPERCLIP_RUNNER_NETWORK_ROOTS: '["/run/systemd/resolve/stub-resolv.conf","/etc/ssl/certs"]' };
     const args = createIsolatedCodexAppServerArgs(source).join("\n");

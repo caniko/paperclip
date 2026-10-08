@@ -1956,6 +1956,17 @@ it("keeps long native command environment values out of bounded launch arguments
   expect(args).toContain('shell_environment_policy.include_only=["LANG","PATH"]');
 });
 
+it("retains persisted command keys when rebuilding native launch arguments", () => {
+  const args = createRunnerdCodexAppServerArgs({
+    environment: {}, codexHome: "/isolated/codex",
+    persistedCommandEnvironment: { PATH: "/persisted/tools", LANG: "C.UTF-8", AGENT_HOME: "/previous/run", OPENAI_API_KEY: "secret" },
+  });
+  expect(args).toContain('shell_environment_policy.include_only=["LANG","PATH"]');
+  expect(args.join("\n")).not.toContain("/persisted/tools");
+  expect(args.join("\n")).not.toContain("AGENT_HOME");
+  expect(args.join("\n")).not.toContain("secret");
+});
+
 it("retains explicit argv values for legacy native session profiles", () => {
   const args = createRunnerdCodexAppServerArgs({
     environment: { PATH: "/tools/bin", LANG: "C.UTF-8" },
@@ -6674,7 +6685,7 @@ it.each([false, true])("retains the versioned command-environment profile across
   const options = {
     stateDirectory: directory, codexCommand,
     runnerBinary: defaultCapabilityRunnerdBinary(),
-    prpIdentity: identity, environment: { PATH: "/explicit/tools" },
+    prpIdentity: identity, environment: { PATH: "/explicit/tools", LANG: "C.UTF-8" },
     lifecyclePolicy: { mode: "per_turn" as const, idleTimeoutMs: null },
   };
   const first = createCapabilityRunnerdCodexTransport(options);
@@ -6685,12 +6696,15 @@ it.each([false, true])("retains the versioned command-environment profile across
     expect(provider.config.driver).toBe("codex_app_server_command_environment_v2");
     expect(provider.config.commandEnvironment.PATH).toBe("/explicit/tools");
     const nextIdentity = rotated ? { ...identity, runId: "run-env-second", turnId: "turn-env-second", itemId: "item-env-second" } : identity;
-    const compatible = createCapabilityRunnerdCodexTransport({ ...options, prpIdentity: nextIdentity });
+    const compatible = createCapabilityRunnerdCodexTransport({
+      ...options, prpIdentity: nextIdentity, environment: rotated ? {} : options.environment,
+    });
     try {
       await expect(compatible.transport.request("thread/read", {})).resolves.toHaveProperty("thread.id", provider.threadId);
       const resumed = JSON.parse(await readFile(join(directory, "runner", "codex-provider-state.json"), "utf8"));
       expect(resumed.config.driver).toBe("codex_app_server_command_environment_v2");
       expect(resumed.config.commandEnvironment).toEqual(provider.config.commandEnvironment);
+      expect(resumed.config.args).toContain('shell_environment_policy.include_only=["LANG","PATH"]');
     } finally {
       await compatible.transport.close();
     }
