@@ -1430,7 +1430,9 @@ jobs:
           test "$(git -C .trusted-composer-stop rev-parse HEAD)" = "$COMPOSER_STOP_TRUSTED_REVISION"
           (
             cd .trusted-composer-stop
-            git ls-files -z | xargs -0 sha256sum
+            git ls-files -z -- tests/e2e scripts/qualify-composer-stop.mjs \
+              packages/paperclip-runner package.json pnpm-lock.yaml \
+              pnpm-workspace.yaml .npmrc .cargo patches | xargs -0 sha256sum
           ) > "$RUNNER_TEMP/composer-stop-harness-manifest.sha256"
           COMPOSER_STOP_HARNESS_SHA256="$(sha256sum "$RUNNER_TEMP/composer-stop-harness-manifest.sha256" | cut -d' ' -f1)"
           COMPOSER_STOP_VERIFIER_SHA256="$(sha256sum .trusted-composer-stop/scripts/qualify-composer-stop.mjs | cut -d' ' -f1)"

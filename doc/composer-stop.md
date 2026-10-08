@@ -199,7 +199,7 @@ The proposed source-separated lane uses an immutable owned checkout for its
 Playwright configuration/spec, imported fixtures, browser tooling, deterministic
 provider and dependency-free verifier. It explicitly supplies the candidate's
 absolute `PAPERCLIP_E2E_SOURCE_ROOT` as the application working directory; mandatory
-native mode refuses a missing source root. A full tracked-source SHA-256 manifest
+native mode refuses a missing source root. A harness tracked-source SHA-256 manifest
 is checked before acceptance and qualification, and retained with the trusted
 revision, manifest digest and verifier digest in the receipt. The active reusable
 workflow caller must be promoted only after this source is reviewed and passes
