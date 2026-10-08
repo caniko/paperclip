@@ -88,6 +88,10 @@ let
     };
   personal = (home { }).config;
   integrated = (machine { }).config;
+  composed =
+    (machine {
+      home-manager.users.operator.programs.paperclip.deployments.work.companies.extra.fields.name = "Other";
+    }).config;
   extended =
     (machine {
       services.paperclip.instances.work.manifest.companies.extra.fields.name = "Other";
@@ -161,6 +165,10 @@ let
         }).config;
     integratedHome = assertionsPass integrated;
     exactSelection = integrated.services.paperclip.instances.work.manifest == manifest;
+    composedSelection =
+      assertionsPass composed
+      && composed.services.paperclip.instances.work.manifest
+      == (manifest // { companies = manifest.companies // { extra.fields.name = "Other"; }; });
     controllerRemainsDisabled = !integrated.services.paperclip.instances.work.enable;
     extensionRejected = !(assertionsPass extended);
     overrideRejected = !(assertionsPass overridden);
