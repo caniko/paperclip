@@ -1424,6 +1424,11 @@ jobs:
           path: .trusted-composer-stop
           persist-credentials: false
 
+      - name: Install candidate dependency sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+
       - name: Bind independent harness and verifier source
         run: |
           set -euo pipefail
@@ -1474,10 +1479,20 @@ jobs:
 
       - name: Install dependencies
         run: |
-          if ! pnpm install --frozen-lockfile; then
+          set -euo pipefail
+          candidate() {
+            bwrap --die-with-parent --new-session --unshare-user --unshare-pid --unshare-ipc --unshare-uts \
+              --ro-bind / / --tmpfs /tmp --proc /proc --dev /dev \
+              --bind "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE" \
+              --ro-bind "$GITHUB_WORKSPACE/.trusted-composer-stop" "$GITHUB_WORKSPACE/.trusted-composer-stop" \
+              --ro-bind "$RUNNER_TEMP" "$RUNNER_TEMP" \
+              --chdir "$GITHUB_WORKSPACE" \
+              env -i PATH="$PATH" HOME=/tmp CI=true "$@"
+          }
+          if ! candidate pnpm install --frozen-lockfile; then
             echo '::notice title=Lockfile::checked-in lockfile is stale; resolving it inline'
-            pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
-            pnpm install --frozen-lockfile
+            candidate pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
+            candidate pnpm install --frozen-lockfile
           fi
 
       - name: Select the pinned Runner Rust toolchain

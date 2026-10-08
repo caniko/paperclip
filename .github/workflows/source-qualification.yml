@@ -27,8 +27,12 @@ jobs:
           node-version: 24
           package-manager-cache: false
       - name: Prove trusted Stop source and receipt binding
+        # The hostile lifecycle fixture exercises the same namespace boundary.
+        # Package setup happens only on the disposable hosted runner.
         run: |
           set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
           node --test scripts/__tests__/qualify-composer-stop.test.mjs 2>&1 | tee "$RUNNER_TEMP/trusted-stop-identity.log"
       - name: Retain trusted harness identity assertions
         if: always()
@@ -88,7 +92,7 @@ jobs:
             regression)
               python3 -m unittest discover -s .github/scripts -p 'test_qualification_evidence.py' 2>&1 | tee "$EVIDENCE/receipt-tests.log"
               pnpm check:token-gates 2>&1 | tee "$EVIDENCE/token-gates.log"
-              pnpm exec vitest run packages/adapters/hermes/src/gateway/server/executor-selection.test.ts packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts packages/adapters/hermes/src/gateway/server/recovery-lineage.test.ts packages/adapters/hermes/src/gateway/server/run-lifetime.test.ts server/src/__tests__/adapter-execution-settlement-postgres.test.ts server/src/__tests__/runtime-mcp-admission.test.ts server/src/__tests__/vitest-chat-shards.test.ts server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts server/src/__tests__/skill-sources.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter=junit --outputFile.junit="$EVIDENCE/regression.xml" 2>&1 | tee "$EVIDENCE/regression.log"
+              pnpm exec vitest run packages/adapters/hermes/src/gateway/server/executor-selection.test.ts packages/adapters/hermes/src/gateway/server/executor-admission.test.ts packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts packages/adapters/hermes/src/gateway/server/recovery-lineage.test.ts packages/adapters/hermes/src/gateway/server/run-lifetime.test.ts server/src/__tests__/adapter-execution-settlement-postgres.test.ts server/src/__tests__/runtime-mcp-admission.test.ts server/src/__tests__/vitest-chat-shards.test.ts server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts server/src/__tests__/skill-sources.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter=junit --outputFile.junit="$EVIDENCE/regression.xml" 2>&1 | tee "$EVIDENCE/regression.log"
               ;;
           esac
       - name: Seal raw source and result evidence
