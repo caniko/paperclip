@@ -1361,6 +1361,7 @@ function buildRemoteShellCommand(commandLines: string[]): string {
   // Every SSH path needs the target's login PATH, including tar and Git
   // streams. Keep profile I/O separate from command/archive I/O: a profile
   // can print a banner or read stdin, but must not alter the transferred bytes.
+  // Shell-specific profiles must run in the matching login shell, never sh.
   // .bash_profile commonly sources .bashrc; use the latter only as a fallback.
   // Do not source nvm.sh directly; a host profile may still opt into it.
   // `command .` removes the POSIX special-builtin behavior of `.`: under dash,
@@ -1369,11 +1370,21 @@ function buildRemoteShellCommand(commandLines: string[]): string {
   const profiles = [
     'if [ -f /etc/profile ]; then command . /etc/profile || true; fi',
     'if [ -f "$HOME/.profile" ]; then command . "$HOME/.profile" || true; fi',
-    'if [ -f "$HOME/.bash_profile" ]; then command . "$HOME/.bash_profile" || true; elif [ -f "$HOME/.bashrc" ]; then command . "$HOME/.bashrc" || true; fi',
-    'if [ -f "$HOME/.zprofile" ]; then command . "$HOME/.zprofile" || true; fi',
+    'case "${0##*/}" in bash) if [ -f "$HOME/.bash_profile" ]; then command . "$HOME/.bash_profile" || true; elif [ -f "$HOME/.bashrc" ]; then command . "$HOME/.bashrc" || true; fi ;; zsh) if [ -f "$HOME/.zprofile" ]; then command . "$HOME/.zprofile" || true; fi ;; esac',
   ].join(" && ");
-  const script = [`{ ${profiles}; } </dev/null >/dev/null 2>&1`, ...commandLines].join(" && ");
-  return `sh -c ${shellQuote(script)}`;
+  const script = [
+    `{ ${profiles}; } </dev/null >/dev/null 2>&1`,
+    "exec 0<&3 1>&4 2>&5 3<&- 4>&- 5>&-",
+    ...commandLines,
+  ].join(" && ");
+  // Protect streams during automatic startup too (BASH_ENV / .zshenv), then
+  // restore and close the saved descriptors before starting the command.
+  const launcher = [
+    "shell=sh",
+    'case "${SHELL##*/}" in bash|zsh) shell="$SHELL" ;; esac',
+    `exec "$shell" -c ${shellQuote(script)} 3<&0 4>&1 5>&2 </dev/null >/dev/null 2>&1`,
+  ].join("; ");
+  return `sh -c ${shellQuote(launcher)}`;
 }
 
 export async function runSshCommand(

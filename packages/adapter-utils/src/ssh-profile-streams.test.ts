@@ -77,6 +77,7 @@ beforeEach(async (context) => {
   ].join("\n"), { mode: 0o700 });
   vi.stubEnv("PATH", `${localBin}${path.delimiter}${process.env.PATH ?? ""}`);
   vi.stubEnv("HOME", home);
+  vi.stubEnv("SHELL", tools.get("sh")!);
   vi.stubEnv("GIT_CONFIG_GLOBAL", path.join(home, ".gitconfig"));
   vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
   spec = {
@@ -94,7 +95,34 @@ afterEach(async () => {
 });
 
 describe("SSH login profiles and transfer streams", () => {
-  it("round-trips binary tar data with profile-only tools", async () => {
+  it.for(["sh", "bash", "zsh"])("round-trips binary tar data with only matching %s profiles", async (shell, context) => {
+    const executable = await execFileAsync("sh", ["-c", 'command -v "$1"', "ssh-profile-test", shell])
+      .then(({ stdout }) => stdout.trim(), () => "");
+    if (!executable) context.skip(`Missing required shell: ${shell}`);
+    vi.stubEnv("SHELL", executable);
+    const home = path.join(root!, "home");
+    const profileBin = path.join(root!, "profile-bin");
+    await writeFile(path.join(home, ".bash_profile"), [
+      `bin_dirs=(${quote(profileBin)})`,
+      'export PATH="${bin_dirs[0]}"',
+      "export PROFILE_KIND=bash",
+      "",
+    ].join("\n"));
+    await writeFile(path.join(home, ".zprofile"), [
+      `bin_dirs=(${quote(profileBin)})`,
+      'export PATH="${(j.:.)bin_dirs}"',
+      "export PROFILE_KIND=zsh",
+      "",
+    ].join("\n"));
+    const startup = path.join(home, ".startup");
+    await writeFile(startup, [
+      "printf 'shell startup stdout must not enter archive\\n'",
+      "printf 'shell startup stderr must not enter archive\\n' >&2",
+      `if IFS= read -r line; then printf consumed > ${quote(path.join(root!, "consumed"))}; fi`,
+      "",
+    ].join("\n"));
+    vi.stubEnv("BASH_ENV", startup);
+    await writeFile(path.join(home, ".zshenv"), `. ${quote(startup)}\n`);
     const localDir = path.join(root!, "local");
     const restoredDir = path.join(root!, "restored");
     const remoteDir = path.join(spec.remoteCwd, "space ' quoted");
@@ -105,6 +133,8 @@ describe("SSH login profiles and transfer streams", () => {
     await syncDirectoryFromSsh({ spec, localDir: restoredDir, remoteDir });
     expect(await readFile(path.join(restoredDir, "binary.dat"))).toEqual(bytes);
     await expect(readFile(path.join(root!, "consumed"))).rejects.toMatchObject({ code: "ENOENT" });
+    const result = await runSshCommand(spec, 'printf "%s" "${PROFILE_KIND-posix}"');
+    expect(result).toEqual({ stdout: shell === "sh" ? "posix" : shell, stderr: "" });
   });
 
   it("round-trips Git history with profile-only tools", async () => {
