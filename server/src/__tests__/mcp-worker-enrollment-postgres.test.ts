@@ -34,6 +34,42 @@ describe("operator-pinned MCP worker enrollment", () => {
     return { companyId, pins, prepared, subject };
   }
 
+  it.each(["prove", "revoke"] as const)("takes the company barrier before %s locks, then observes a competing revocation", async operation => {
+    const f = await fixture();
+    let held!: () => void, release!: () => void, writerPid = 0;
+    const locked = new Promise<void>(resolve => { held = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+    const writer = db.transaction(async tx => {
+      writerPid = (await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`))[0].pid;
+      await tx.select().from(companies).where(eq(companies.id, f.companyId)).for("update");
+      held();
+      await gate;
+      // A proof waiting at the company barrier must not own its child yet.
+      // NOWAIT detects the old inversion regardless of deadlock victim choice.
+      await tx.execute(sql`select id from mcp_worker_enrollments where id = ${f.subject.enrollmentId} for update nowait`);
+      await tx.update(mcpWorkerEnrollments).set({ state: "revoked", revision: randomUUID(), revokedAt: sql`clock_timestamp()` })
+        .where(eq(mcpWorkerEnrollments.id, f.subject.enrollmentId));
+    });
+    await locked;
+    const request = operation === "prove" ? service().prove(f.subject) : service().revoke(f.companyId, f.subject.enrollmentId, actor);
+    // Attach both outcomes immediately so injected deadlock failures are handled.
+    const outcome = request.then(value => ({ value, error: null }), error => ({ value: null, error }));
+    try {
+      for (let attempts = 0; ; attempts++) {
+        const [waiting] = await db.execute<{ count: string }>(sql`select count(*)::text as count from pg_stat_activity
+          where datname = current_database() and wait_event_type = 'Lock' and ${writerPid} = any(pg_blocking_pids(pid))`);
+        if (Number(waiting.count) > 0) break;
+        if (attempts >= 50) throw new Error("Enrollment never reached the company barrier");
+        await db.execute(sql`select pg_sleep(0.02)`);
+      }
+    } finally { release(); await writer; }
+    const result = await outcome;
+    if (operation === "prove") expect(result.error).toBeInstanceOf(Error);
+    else expect(result.value?.state).toBe("revoked");
+    const audits = await db.select().from(activityLog).where(eq(activityLog.entityId, f.subject.enrollmentId));
+    expect(audits.some(event => event.action === "mcp_worker.enrolled")).toBe(false);
+    expect(audits.filter(event => event.action === "mcp_worker.revoked")).toHaveLength(0);
+  });
+
   function ingress(worker = service()) {
     const app = express();
     app.use(mcpWorkerEnrollmentProofRoutes(worker, privateHostnameGuard({ enabled: true, allowedHostnames: [], bindHost: "127.0.0.1" })));

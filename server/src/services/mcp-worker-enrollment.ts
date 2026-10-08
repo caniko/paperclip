@@ -1,11 +1,12 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { activityLog, companies, mcpWorkerEnrollments, type Db } from "@paperclipai/db";
+import { activityLog, mcpWorkerEnrollments, type Db } from "@paperclipai/db";
 import type { McpWorkerEnrollment, McpWorkerEnrollmentChallenge, McpWorkerEnrollmentPreparation } from "@paperclipai/shared";
 import { isMcpAdmissionIdentifier } from "@paperclipai/adapter-utils/mcp-admission";
 import { McpLaunchBlockedError } from "./mcp-prepared-launch-contract.js";
 import { mcpWorkerEnrollmentProofBytes, parseMcpWorkerEnrollmentPins } from "./mcp-worker-enrollment-contract.js";
 import { verifyMcpWorkerSignature } from "./mcp-worker-key.js";
+import { lockMcpCompanyScope } from "./mcp-company-scope.js";
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type Row = typeof mcpWorkerEnrollments.$inferSelect;
@@ -46,6 +47,7 @@ async function audit(tx: Tx, row: Row, action: string, actor: { actorType: "user
 export async function readEnrolledMcpWorker(tx: Tx, input: {
   companyId: string; enrollmentId: string; controllerInstanceId: string; launchExpiresAt: number;
 }): Promise<McpWorkerEnrollment | null> {
+  if (!await lockMcpCompanyScope(tx, input.companyId)) return null;
   const [row] = await tx.select().from(mcpWorkerEnrollments).where(and(eq(mcpWorkerEnrollments.id, input.enrollmentId),
     eq(mcpWorkerEnrollments.companyId, input.companyId))).for("share");
   if (!row || row.state !== "enrolled" || row.controllerInstanceId !== input.controllerInstanceId ||
@@ -90,8 +92,7 @@ export function mcpWorkerEnrollmentService(db: Db, policy: { controllerInstanceI
       requireOperator(actor);
       const pins = parseMcpWorkerEnrollmentPins(input);
       return transaction(async tx => {
-        const [company] = await tx.select({ id: companies.id }).from(companies).where(eq(companies.id, companyId)).for("key share");
-        if (!company) return blocked();
+        if (!await lockMcpCompanyScope(tx, companyId)) return blocked();
         const now = await clock(tx);
         if (pins.expiresAt <= now || pins.expiresAt > now + 30 * 24 * 60 * 60_000) return blocked();
         const bearerToken = `pcmwe_${randomBytes(32).toString("base64url")}`;
@@ -107,8 +108,13 @@ export function mcpWorkerEnrollmentService(db: Db, policy: { controllerInstanceI
     async prove(input: { enrollmentId: string; bearerToken: string; signature: string }) {
       if (!/^pcmwe_[A-Za-z0-9_-]{43}$/.test(input.bearerToken) || typeof input.signature !== "string" || input.signature.length !== 86) return blocked();
       return transaction(async tx => {
+        // An unlocked identifier lookup discovers scope only. Authenticate again
+        // after the parent barrier and the enrollment lock, never from this read.
+        const [observed] = await tx.select({ companyId: mcpWorkerEnrollments.companyId }).from(mcpWorkerEnrollments)
+          .where(eq(mcpWorkerEnrollments.id, input.enrollmentId)).limit(1);
+        if (!observed || !await lockMcpCompanyScope(tx, observed.companyId)) return blocked();
         const [row] = await tx.select().from(mcpWorkerEnrollments).where(and(eq(mcpWorkerEnrollments.id, input.enrollmentId),
-          eq(mcpWorkerEnrollments.bootstrapTokenHash, hash(input.bearerToken)))).for("update");
+          eq(mcpWorkerEnrollments.companyId, observed.companyId), eq(mcpWorkerEnrollments.bootstrapTokenHash, hash(input.bearerToken)))).for("update");
         if (!row || row.controllerInstanceId !== controllerInstanceId || row.state === "revoked" ||
             row.challengeExpiresAt.getTime() <= await clock(tx) ||
             !verifyMcpWorkerSignature(mcpWorkerEnrollmentProofBytes(challenge(row)), input.signature, row.publicKey)) return blocked();
@@ -134,6 +140,7 @@ export function mcpWorkerEnrollmentService(db: Db, policy: { controllerInstanceI
     async revoke(companyId: string, enrollmentId: string, actor: Operator) {
       requireOperator(actor);
       return transaction(async tx => {
+        if (!await lockMcpCompanyScope(tx, companyId)) return blocked();
         const [row] = await tx.select().from(mcpWorkerEnrollments).where(and(eq(mcpWorkerEnrollments.companyId, companyId),
           eq(mcpWorkerEnrollments.id, enrollmentId))).for("update");
         if (!row || row.controllerInstanceId !== controllerInstanceId) return blocked();

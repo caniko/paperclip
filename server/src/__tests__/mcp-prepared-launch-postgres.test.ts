@@ -1,12 +1,14 @@
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { activityLog, agents, companies, createDb, environmentLeases, heartbeatRuns, issues, mcpPreparedLaunches, projects } from "@paperclipai/db";
+import { activityLog, agents, companies, createDb, environmentLeases, environments, heartbeatRuns, issues, mcpPreparedLaunches, projects, workspaceOperations } from "@paperclipai/db";
 import type { McpPreparedLaunchSnapshot } from "@paperclipai/shared";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { mcpPreparedLaunchService } from "../services/mcp-prepared-launch.js";
 import { mcpLaunchProofBytes } from "../services/mcp-prepared-launch-contract.js";
-import { prepareAdapterExecution, readPendingAdapterExecutionCheckpoint } from "../services/adapter-execution-ownership.js";
+import { prepareAdapterExecution, prepareWorkspaceOwnershipCheckpoint, readPendingAdapterExecutionCheckpoint, reconcileAdapterExecution, settleAdapterExecution, withProtectedWorkspaceFinalizationWrite } from "../services/adapter-execution-ownership.js";
+import * as registry from "../adapters/registry.js";
+import { environmentService } from "../services/environments.js";
 import { legacyControllerBootId } from "../services/legacy-controller-lease.js";
 import { getSecretProvider } from "../secrets/provider-registry.js";
 import { reconcileExecution, validateManagedMcpExecutionCheckpoint } from "../../../packages/adapters/hermes/src/gateway/server/recovery.js";
@@ -319,13 +321,23 @@ describe("prepared MCP launch PostgreSQL admission", () => {
     const prepared = await f.service().prepare(f.snapshot);
     const subject = { companyId: f.snapshot.companyId, runId: f.snapshot.runId, ...prepared };
     await expect(f.service().retireForDeletion(subject)).rejects.toThrow();
+    const [lease] = await db.insert(environmentLeases).values({ companyId: subject.companyId, heartbeatRunId: subject.runId }).returning();
+    const identity = { companyId: subject.companyId, runId: subject.runId, leaseId: lease.id };
+    await prepareAdapterExecution(db, { ...identity, adapterType: "hermes_gateway", checkpoint: { fixture: "adapter" } });
+    await prepareWorkspaceOwnershipCheckpoint(db, { ...identity, adapterType: "hermes_gateway", checkpoint: { fixture: "filesystem" } });
+    await expect(f.service().retireForDeletion(subject)).rejects.toThrow();
+    await settleAdapterExecution(db, identity);
+    const adapter = registry.findServerAdapter("hermes_gateway")!;
+    const spy = vi.spyOn(registry, "findServerAdapter").mockReturnValue({ ...adapter, reconcileWorkspaceOwnership: async () => "settled" as const });
+    try {
+      expect(await reconcileAdapterExecution(db, { ...identity, finalizeWorkspace: async () => {
+        await db.insert(workspaceOperations).values({ companyId: identity.companyId, heartbeatRunId: identity.runId,
+          phase: "workspace_finalize", status: "succeeded", finishedAt: new Date() });
+      } })).toBe("settled");
+    } finally { spy.mockRestore(); }
     await db.update(heartbeatRuns).set({ status }).where(eq(heartbeatRuns.id, subject.runId));
-    const [lease] = await db.insert(environmentLeases).values({ companyId: subject.companyId, heartbeatRunId: subject.runId,
-      metadata: { workspaceOwnership: { version: 1, state: "pending", adapterType: "hermes_gateway" } } }).returning();
     await expect(f.service().retireForDeletion(subject)).rejects.toThrow();
     await db.update(environmentLeases).set({ releasedAt: new Date(), status: "released" }).where(eq(environmentLeases.id, lease.id));
-    await expect(f.service().retireForDeletion(subject)).rejects.toThrow();
-    await db.update(environmentLeases).set({ metadata: { workspaceOwnership: { version: 1, state: "settled", adapterType: "hermes_gateway" } } }).where(eq(environmentLeases.id, lease.id));
     expect(await f.service().retireForDeletion(subject)).toBe(true);
     expect(await f.service().retireForDeletion(subject)).toBe(false);
     expect(await db.select().from(mcpPreparedLaunches).where(eq(mcpPreparedLaunches.id, subject.launchId))).toEqual([]);
@@ -334,6 +346,145 @@ describe("prepared MCP launch PostgreSQL admission", () => {
     expect(audits.filter(e => e.action === "mcp_launch.retired")).toHaveLength(1);
     expect(audit.entityId).toBe(subject.launchId);
     expect(JSON.stringify(audit)).not.toContain("private-worker-token");
+  });
+
+  it.each<(Partial<typeof environmentLeases.$inferInsert> & { name: string; orphan?: boolean })>([
+    { name: "orphan pending cleanup with a release timestamp", status: "pending_cleanup", cleanupStatus: "failed", orphan: true },
+    { name: "cleanup in flight", metadata: { pendingCleanupInFlight: true } },
+    { name: "malformed cleanup-in-flight flag", metadata: { pendingCleanupInFlight: "false" } },
+    { name: "cleanup failure", cleanupStatus: "failed" },
+    { name: "pending cleanup", cleanupStatus: "pending" },
+    { name: "retained resource", status: "retained" },
+    { name: "active resource with a release timestamp", status: "active" },
+    { name: "released reusable provider resource", leasePolicy: "reuse_by_environment", provider: "fixture-remote", providerLeaseId: "private-provider-lease", cleanupStatus: "success" },
+    { name: "released workspace-reusable resource", leasePolicy: "reuse_by_execution_workspace", provider: "fixture-remote", providerLeaseId: "private-provider-lease", cleanupStatus: "success" },
+    { name: "remote release without cleanup completion", provider: "fixture-remote", providerLeaseId: "private-provider-lease" },
+    { name: "remote stop still retaining its resource", provider: "fixture-remote", providerLeaseId: "private-provider-lease", cleanupStatus: "success", metadata: { remoteExecutionTermination: { state: "stopped" } } },
+    { name: "pending stop-only teardown", metadata: { sandboxStopAndRetain: null } },
+    { name: "pending native filesystem export", metadata: { nativeWorkspaceExportResume: null } },
+    { name: "malformed settled adapter checkpoint", metadata: { adapterExecution: { state: "settled" } } },
+    { name: "malformed settled filesystem checkpoint", metadata: { workspaceOwnership: { state: "settled", version: 7, adapterType: "hermes_gateway" } } },
+    { name: "missing settled fingerprint", metadata: { adapterExecution: { state: "settled", version: 1, adapterType: "hermes_gateway" } } },
+    { name: "malformed settled fingerprint", metadata: { adapterExecution: { state: "settled", version: 1, adapterType: "hermes_gateway", fingerprint: [] } } },
+    { name: "pending settled filesystem finalization", metadata: { workspaceOwnership: { state: "settled", version: 1, adapterType: "hermes_gateway", fingerprint: "a".repeat(64), finalization: { state: "pending" } } } },
+    { name: "missing durable filesystem finalization", metadata: { workspaceOwnership: { state: "settled", version: 1, adapterType: "hermes_gateway", fingerprint: "a".repeat(64), finalization: { operationId: randomUUID(), completedAt: new Date().toISOString() } } } },
+    { name: "contradictory adapter finalization", metadata: { adapterExecution: { state: "settled", version: 1, adapterType: "hermes_gateway", fingerprint: "a".repeat(64), finalization: { state: "pending" } } } },
+  ])("refuses retirement for $name without deleting recovery or audit evidence", async change => {
+    const f = await fixture();
+    const prepared = await f.service().prepare(f.snapshot), subject = { companyId: f.snapshot.companyId, runId: f.snapshot.runId, ...prepared };
+    await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, subject.runId));
+    const { name: _name, orphan, ...values } = change;
+    await db.insert(environmentLeases).values({ companyId: subject.companyId, heartbeatRunId: orphan ? null : subject.runId,
+      releasedAt: new Date(), status: "released", ...values });
+    await expect(f.service().retireForDeletion(subject)).rejects.toThrow("Managed MCP launch authorization is blocked");
+    expect(await db.select().from(mcpPreparedLaunches).where(eq(mcpPreparedLaunches.id, subject.launchId))).toHaveLength(1);
+    const audits = await db.select().from(activityLog).where(eq(activityLog.entityId, subject.launchId));
+    expect(audits.some(event => event.action === "mcp_launch.retired")).toBe(false);
+  });
+
+  it("lets a reusable handoff commit ahead of retirement and observes the successor without a lock inversion", async () => {
+    const f = await fixture(), prepared = await f.service().prepare(f.snapshot);
+    const subject = { companyId: f.snapshot.companyId, runId: f.snapshot.runId, ...prepared };
+    const [environment] = await db.insert(environments).values({ name: `handoff-${randomUUID()}`, driver: "sandbox", config: {} }).returning();
+    const [lease] = await db.insert(environmentLeases).values({ companyId: subject.companyId, environmentId: environment.id,
+      heartbeatRunId: subject.runId, issueId: f.snapshot.issueId, leasePolicy: "reuse_by_environment", provider: "fixture-remote",
+      providerLeaseId: "fixture-allocation", status: "released", releasedAt: new Date(), cleanupStatus: "success",
+      metadata: { agentId: f.snapshot.agentId } }).returning();
+    await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, subject.runId));
+    let held!: () => void, release!: () => void, writerPid = 0;
+    const locked = new Promise<void>(resolve => { held = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+    const writer = db.transaction(async tx => {
+      writerPid = (await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`))[0].pid;
+      await tx.select({ id: environmentLeases.id }).from(environmentLeases).where(eq(environmentLeases.id, lease.id)).for("update");
+      held(); await gate;
+    });
+    await locked;
+    const handoff = environmentService(db).acquireLease({ companyId: subject.companyId, environmentId: environment.id,
+      heartbeatRunId: subject.runId, issueId: f.snapshot.issueId, provider: "fixture-remote", providerLeaseId: lease.providerLeaseId,
+      leasePolicy: "reuse_by_environment", replacesReusableLeaseId: lease.id, metadata: { agentId: f.snapshot.agentId } });
+    const handoffOutcome = handoff.then(value => ({ value, error: null }), error => ({ value: null, error }));
+    let retirement: Promise<unknown> | undefined;
+    try {
+      for (let attempts = 0; ; attempts++) {
+        const [waiting] = await db.execute<{ count: string }>(sql`select count(*)::text as count from pg_stat_activity
+          where datname = current_database() and wait_event_type = 'Lock' and ${writerPid} = any(pg_blocking_pids(pid))`);
+        if (Number(waiting.count) > 0) break;
+        if (attempts >= 50) throw new Error("Handoff never reached the predecessor");
+        await db.execute(sql`select pg_sleep(0.02)`);
+      }
+      retirement = expect(f.service().retireForDeletion(subject)).rejects.toThrow();
+    } finally { release(); await writer; }
+    const acquired = await handoffOutcome;
+    expect(acquired.error).toBeNull();
+    expect(acquired.value).toMatchObject({ status: "active", providerLeaseId: lease.providerLeaseId });
+    await retirement;
+    expect(await db.select().from(mcpPreparedLaunches).where(eq(mcpPreparedLaunches.id, subject.launchId))).toHaveLength(1);
+  });
+
+  it("takes the company barrier before task/run/launch locks and never begins the resolver while company deletion holds it", async () => {
+    const f = await fixture(), prepared = await f.service().prepare(f.snapshot);
+    const subject = { companyId: f.snapshot.companyId, runId: f.snapshot.runId, ...prepared };
+    let held!: () => void, release!: () => void, writerPid = 0;
+    const locked = new Promise<void>(resolve => { held = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+    const writer = db.transaction(async tx => {
+      writerPid = (await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`))[0].pid;
+      await tx.select().from(companies).where(eq(companies.id, subject.companyId)).for("update");
+      held();
+      await gate;
+      await tx.update(heartbeatRuns).set({ controllerBootId: randomUUID() }).where(eq(heartbeatRuns.id, subject.runId));
+    });
+    await locked;
+    const resolver = vi.fn(async () => f.snapshot), service = mcpPreparedLaunchService(db, { resolveCurrent: resolver });
+    const request = service.challenge(subject), rejection = expect(request).rejects.toThrow();
+    try {
+      for (let attempts = 0; ; attempts++) {
+        const [waiting] = await db.execute<{ count: string }>(sql`select count(*)::text as count from pg_stat_activity
+          where datname = current_database() and wait_event_type = 'Lock' and ${writerPid} = any(pg_blocking_pids(pid))`);
+        if (Number(waiting.count) > 0) break;
+        if (attempts >= 50) throw new Error("Launch never reached the company barrier");
+        await db.execute(sql`select pg_sleep(0.02)`);
+      }
+      expect(resolver).not.toHaveBeenCalled();
+    } finally { release(); await writer; }
+    await rejection;
+    expect(resolver).not.toHaveBeenCalled();
+  });
+
+  it("lets protected finalization commit before retirement without holding child locks ahead of its company FK", async () => {
+    const f = await fixture(), prepared = await f.service().prepare(f.snapshot);
+    const subject = { companyId: f.snapshot.companyId, runId: f.snapshot.runId, ...prepared };
+    const [lease] = await db.insert(environmentLeases).values({ companyId: subject.companyId, heartbeatRunId: subject.runId }).returning();
+    await prepareWorkspaceOwnershipCheckpoint(db, { companyId: subject.companyId, runId: subject.runId, leaseId: lease.id,
+      adapterType: "hermes_gateway", checkpoint: { fixture: "protected workspace" } });
+    let held!: () => void, release!: () => void, failed!: (error: unknown) => void, writerPid = 0;
+    const locked = new Promise<void>((resolve, reject) => { held = resolve; failed = reject; }), gate = new Promise<void>(resolve => { release = resolve; });
+    const writer = withProtectedWorkspaceFinalizationWrite(db, { companyId: subject.companyId, runId: subject.runId,
+      leaseId: lease.id, controllerBootId: legacyControllerBootId }, async tx => {
+      writerPid = (await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`))[0].pid;
+      held(); await gate;
+      await tx.insert(workspaceOperations).values({ companyId: subject.companyId, heartbeatRunId: subject.runId,
+        phase: "workspace_finalize", status: "succeeded", finishedAt: new Date() });
+      return true;
+    });
+    void writer.catch(failed);
+    const outcome = writer.then(value => ({ value, error: null }), error => ({ value: null, error }));
+    await locked;
+    const retirement = expect(f.service().retireForDeletion(subject)).rejects.toThrow();
+    try {
+      for (let attempts = 0; ; attempts++) {
+        const [waiting] = await db.execute<{ query: string }>(sql`select query from pg_stat_activity
+          where datname = current_database() and wait_event_type = 'Lock' and ${writerPid} = any(pg_blocking_pids(pid)) limit 1`);
+        if (waiting) {
+          expect(waiting.query).toContain('"companies"');
+          break;
+        }
+        if (attempts >= 50) throw new Error("Retirement never reached the finalizer's parent barrier");
+        await db.execute(sql`select pg_sleep(0.02)`);
+      }
+    } finally { release(); await outcome; await retirement; }
+    expect(await outcome).toEqual({ value: true, error: null });
+    expect(await db.select().from(workspaceOperations).where(eq(workspaceOperations.heartbeatRunId, subject.runId))).toHaveLength(1);
+    expect(await db.select().from(mcpPreparedLaunches).where(eq(mcpPreparedLaunches.id, subject.launchId))).toHaveLength(1);
   });
 
   it("preserves an oversized legacy checkpoint through the shared reader and original producer recovery", async () => {

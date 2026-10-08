@@ -3362,12 +3362,18 @@ function createSandboxEnvironmentDriver(
               config: metadataConfig as unknown as Record<string, unknown>,
             })
           : await resolveEnvironmentDriverConfigForRuntime(db, input.lease.companyId, input.environment);
-        if (parsed.driver !== "sandbox") {
+        if (parsed.driver !== "sandbox" || parsed.config.provider !== input.lease.provider || !input.lease.providerLeaseId) {
           cleanupStatus = "failed";
         } else {
           await destroySandboxProviderLease({
             config: parsed.config,
             providerLeaseId: input.lease.providerLeaseId,
+          });
+          // Built-in destruction is a host-owned awaited operation returning
+          // void. Bind its successful completion to the original exact lease;
+          // failed calls and changed provider pins never mint this evidence.
+          termination = remoteTerminationReceipt(input.lease, {
+            providerLeaseId: input.lease.providerLeaseId, state: "destroyed",
           });
         }
       }

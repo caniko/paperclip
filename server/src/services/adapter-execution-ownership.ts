@@ -3,6 +3,7 @@ import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { environmentLeases, heartbeatRuns, workspaceOperations, type Db } from "@paperclipai/db";
 import { getSecretProvider } from "../secrets/provider-registry.js";
 import { legacyControllerBootId } from "./legacy-controller-lease.js";
+import { lockMcpCompanyScope } from "./mcp-company-scope.js";
 
 interface OwnershipIdentity {
   companyId: string;
@@ -95,6 +96,7 @@ export async function withProtectedWorkspaceFinalizationWrite<T>(db: Db, input: 
   controllerBootId: string | null;
 }, write: (tx: Parameters<Parameters<Db["transaction"]>[0]>[0]) => Promise<T>): Promise<T> {
   return db.transaction(async (tx) => {
+    if (!await lockMcpCompanyScope(tx, input.companyId)) throw new Error("Protected workspace finalization company is unavailable.");
     await lockRunForAdapterSettlement(tx, input.runId);
     const [run] = input.controllerBootId ? await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId),

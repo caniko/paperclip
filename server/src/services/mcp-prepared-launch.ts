@@ -4,9 +4,11 @@ import { activityLog, environmentLeases, heartbeatRuns, issues, mcpPreparedLaunc
 import type { McpLaunchAuthorizationReceipt, McpLaunchChallenge, McpPreparedLaunchSnapshot } from "@paperclipai/shared";
 import { getSecretProvider } from "../secrets/provider-registry.js";
 import { legacyControllerBootId } from "./legacy-controller-lease.js";
-import { hasPendingAdapterExecution, readPendingAdapterExecutionCheckpoint } from "./adapter-execution-ownership.js";
+import { readPendingAdapterExecutionCheckpoint } from "./adapter-execution-ownership.js";
 import { validateManagedMcpExecutionCheckpoint } from "@paperclipai/hermes-paperclip-adapter/gateway/server";
 import { McpLaunchBlockedError, MCP_LAUNCH_ENVELOPE_MAX_BYTES, parseMcpLaunchSnapshot, prepareMcpLaunchEnvelope, readMcpLaunchEnvelope, verifyMcpLaunchProof } from "./mcp-prepared-launch-contract.js";
+import { lockMcpCompanyScope } from "./mcp-company-scope.js";
+import { requireSettledMcpCompanyLeases } from "./mcp-retirement-ownership.js";
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type Row = typeof mcpPreparedLaunches.$inferSelect;
@@ -36,6 +38,7 @@ async function clock(tx: Tx): Promise<number> {
 }
 
 async function lockScope(tx: Tx, scope: Scope): Promise<boolean> {
+  if (!await lockMcpCompanyScope(tx, scope.companyId)) return false;
   // Same task-before-run ordering as identity initialization and settlement.
   let taskMatches = true;
   if (scope.issueId) {
@@ -76,11 +79,44 @@ function receiptOf(row: Row, s: McpPreparedLaunchSnapshot): McpLaunchAuthorizati
     authorizedAt: row.authorizedAt.getTime(), expiresAt: row.expiresAt.getTime() };
 }
 
-async function audit(tx: Tx, row: Row, action: string) {
+async function audit(tx: Tx, row: Pick<Row, "companyId" | "controllerBootId" | "agentId" | "runId" | "id" | "generation">, action: string) {
   // No endpoints, prompt/config bytes, key material, nonce or credentials.
   await tx.insert(activityLog).values({ companyId: row.companyId, actorType: "system", actorId: row.controllerBootId,
     agentId: row.agentId, runId: row.runId, entityType: "mcp_prepared_launch", entityId: row.id,
     action: `mcp_launch.${action}`, details: { version: 1, generation: row.generation } });
+}
+
+/** Company UPDATE is held by the caller. Task-before-run ordering is retained;
+ * sealed material is not read, decrypted, or handed to deletion orchestration. */
+export async function retireMcpCompanyPreparedLaunchesInTx(tx: Tx, companyId: string,
+  recordScopes: (launches: Array<Scope & { id: string }>) => Promise<void>): Promise<void> {
+  const scopedIssues = tx.select({ id: mcpPreparedLaunches.issueId }).from(mcpPreparedLaunches)
+    .where(eq(mcpPreparedLaunches.companyId, companyId));
+  await tx.select({ id: issues.id }).from(issues).where(and(eq(issues.companyId, companyId),
+    sql`${issues.id} in (${scopedIssues})`)).orderBy(issues.id).limit(1025).for("no key update");
+  const runs = await tx.select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, status: heartbeatRuns.status })
+    .from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), sql`${heartbeatRuns.id} in (
+      select run_id from mcp_prepared_launches where company_id = ${companyId})`))
+    .orderBy(heartbeatRuns.id).limit(1025).for("no key update");
+  const launches = await tx.select({ id: mcpPreparedLaunches.id, companyId: mcpPreparedLaunches.companyId,
+    agentId: mcpPreparedLaunches.agentId, runId: mcpPreparedLaunches.runId, issueId: mcpPreparedLaunches.issueId,
+    projectId: mcpPreparedLaunches.projectId, controllerBootId: mcpPreparedLaunches.controllerBootId,
+    generation: mcpPreparedLaunches.generation }).from(mcpPreparedLaunches).where(eq(mcpPreparedLaunches.companyId, companyId))
+    .orderBy(mcpPreparedLaunches.id).limit(1025).for("update");
+  const byRun = new Map(runs.map(run => [run.id, run]));
+  if (launches.length > 1024 || runs.length > 1024 || launches.some(launch => {
+    const run = byRun.get(launch.runId);
+    return !run || run.agentId !== launch.agentId || !["succeeded", "interrupted", "failed", "cancelled", "timed_out"].includes(run.status);
+  })) return blocked();
+  await requireSettledMcpCompanyLeases(tx, companyId);
+  // The immutable receipt must be committed BEFORE recovery references vanish.
+  await recordScopes(launches);
+  if (launches.length) {
+    await tx.insert(activityLog).values(launches.map(row => ({ companyId, actorType: "system", actorId: row.controllerBootId,
+      agentId: row.agentId, runId: row.runId, entityType: "mcp_prepared_launch", entityId: row.id,
+      action: "mcp_launch.retired", details: { version: 1, generation: row.generation } })));
+    await tx.delete(mcpPreparedLaunches).where(eq(mcpPreparedLaunches.companyId, companyId));
+  }
 }
 
 /** Controller-only foundation. No producer route or capability enablement. */
@@ -145,6 +181,9 @@ export function mcpPreparedLaunchService(db: Db, authority: McpLaunchAuthorityRe
      * recovery ownership or removes the immutable retry barrier. */
     retireForDeletion(subject: Subject) {
       return transaction(async tx => {
+        // An UPDATE barrier also fences new company-scoped ownership inserts.
+        // Acquire it before all task/run/launch/lease locks.
+        if (!await lockMcpCompanyScope(tx, subject.companyId, "update")) return false;
         const where = and(eq(mcpPreparedLaunches.id, subject.launchId), eq(mcpPreparedLaunches.companyId, subject.companyId),
           eq(mcpPreparedLaunches.runId, subject.runId), eq(mcpPreparedLaunches.launchDigest, subject.launchDigest));
         const [observed] = await tx.select().from(mcpPreparedLaunches).where(where).limit(1);
@@ -155,9 +194,9 @@ export function mcpPreparedLaunchService(db: Db, authority: McpLaunchAuthorityRe
         const [run] = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, subject.runId),
           eq(heartbeatRuns.companyId, subject.companyId), eq(heartbeatRuns.agentId, row.agentId))).for("no key update");
         if (!run || !["succeeded", "interrupted", "failed", "cancelled", "timed_out"].includes(run.status)) return blocked();
-        const leases = await tx.select().from(environmentLeases).where(and(eq(environmentLeases.companyId, row.companyId),
-          eq(environmentLeases.heartbeatRunId, row.runId))).for("update");
-        if (leases.some(lease => !lease.releasedAt || hasPendingAdapterExecution(lease.metadata))) return blocked();
+        // Include orphan teardown rows with null run pointers. Never purge the
+        // only recovery reference because an associated launch expired.
+        await requireSettledMcpCompanyLeases(tx, row.companyId);
         await audit(tx, row, "retired");
         await tx.delete(mcpPreparedLaunches).where(where);
         return true;

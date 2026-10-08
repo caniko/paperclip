@@ -33,6 +33,13 @@ import {
   routineTriggers,
   routineRevisions,
   routines,
+  decisionQueueItems,
+  decisionTriageEvents,
+  decisionQueues,
+  decisionTriage,
+  decisionRetention,
+  decisionArchiveNotificationOutbox,
+  chatEndpoints,
 } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { isCloudManagedInstance } from "./cloud-instance.js";
@@ -49,6 +56,8 @@ import { environmentService } from "./environments.js";
 import { heartbeatService } from "./heartbeat.js";
 import { logActivity } from "./activity-log.js";
 import { builtInAgentService } from "./built-in-agents.js";
+import { retireMcpCompanyInTx } from "./mcp-company-retirement.js";
+import { requireSettledCompanyRuntimeServices, requireSettledMcpCompanyLeases } from "./mcp-retirement-ownership.js";
 
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -57,6 +66,8 @@ export interface CompanyActivityActor {
   actorId: string;
   agentId?: string | null;
   runId?: string | null;
+  actorSource?: string;
+  cloudStackRole?: "owner" | "admin" | "member" | "support";
 }
 
 const SYSTEM_COMPANY_ACTOR: CompanyActivityActor = {
@@ -66,7 +77,7 @@ const SYSTEM_COMPANY_ACTOR: CompanyActivityActor = {
   runId: null,
 };
 
-export function companyService(db: Db) {
+export function companyService(db: Db, options: { mcpControllerInstanceId?: string } = {}) {
   const environmentsSvc = environmentService(db);
   const heartbeat = heartbeatService(db);
   const builtInAgents = builtInAgentService(db);
@@ -535,20 +546,30 @@ export function companyService(db: Db) {
       return result.company;
     },
 
-    remove: (id: string) =>
+    remove: (id: string, actor?: CompanyActivityActor) =>
       db.transaction(async (tx) => {
-        // Delete from child tables in dependency order
-        const companyRunIds = await tx
-          .select({ id: heartbeatRuns.id })
-          .from(heartbeatRuns)
-          .where(eq(heartbeatRuns.companyId, id));
-
-        await tx.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.companyId, id));
-        if (companyRunIds.length > 0) {
-          await tx
-            .delete(heartbeatRunEvents)
-            .where(inArray(heartbeatRunEvents.runId, companyRunIds.map((run) => run.id)));
+        await tx.execute(sql`set local lock_timeout = '5s'`);
+        await tx.execute(sql`set local statement_timeout = '15s'`);
+        const [company] = await tx.select({ id: companies.id, status: companies.status }).from(companies)
+          .where(eq(companies.id, id)).for("update");
+        if (!company) return null;
+        const retired = await retireMcpCompanyInTx(tx, company, { actor, controllerInstanceId: options.mcpControllerInstanceId });
+        if (!retired) {
+          await requireSettledCompanyRuntimeServices(tx, id);
+          await requireSettledMcpCompanyLeases(tx, id, false);
         }
+        // Delete from child tables in dependency order
+        await tx.delete(decisionTriageEvents).where(eq(decisionTriageEvents.companyId, id));
+        await tx.delete(decisionQueueItems).where(eq(decisionQueueItems.companyId, id));
+        await tx.delete(decisionQueues).where(eq(decisionQueues.companyId, id));
+        await tx.delete(decisionTriage).where(eq(decisionTriage.companyId, id));
+        await tx.delete(decisionRetention).where(eq(decisionRetention.companyId, id));
+        await tx.delete(decisionArchiveNotificationOutbox).where(eq(decisionArchiveNotificationOutbox.companyId, id));
+        await tx.delete(chatEndpoints).where(eq(chatEndpoints.companyId, id));
+        await tx.delete(financeEvents).where(eq(financeEvents.companyId, id));
+        await tx.delete(costEvents).where(eq(costEvents.companyId, id));
+        await tx.delete(heartbeatRunEvents).where(sql`${heartbeatRunEvents.companyId} = ${id} or ${heartbeatRunEvents.runId} in
+          (select id from heartbeat_runs where company_id = ${id})`);
         await tx.delete(agentTaskSessions).where(eq(agentTaskSessions.companyId, id));
         await tx.delete(activityLog).where(eq(activityLog.companyId, id));
         await tx.delete(runIdentityContexts).where(eq(runIdentityContexts.companyId, id));
@@ -557,8 +578,6 @@ export function companyService(db: Db) {
         await tx.delete(agentApiKeys).where(eq(agentApiKeys.companyId, id));
         await tx.delete(agentRuntimeState).where(eq(agentRuntimeState.companyId, id));
         await tx.delete(issueComments).where(eq(issueComments.companyId, id));
-        await tx.delete(costEvents).where(eq(costEvents.companyId, id));
-        await tx.delete(financeEvents).where(eq(financeEvents.companyId, id));
         await tx.delete(approvalComments).where(eq(approvalComments.companyId, id));
         await tx.delete(approvals).where(eq(approvals.companyId, id));
         await tx.delete(companySecrets).where(eq(companySecrets.companyId, id));
@@ -576,15 +595,15 @@ export function companyService(db: Db) {
         await tx.delete(issues).where(eq(issues.companyId, id));
         await tx.delete(companyLogos).where(eq(companyLogos.companyId, id));
         await tx.delete(assets).where(eq(assets.companyId, id));
-        await tx.delete(goals).where(eq(goals.companyId, id));
         await tx.delete(projects).where(eq(projects.companyId, id));
+        await tx.delete(goals).where(eq(goals.companyId, id));
         await tx.delete(agents).where(eq(agents.companyId, id));
         const rows = await tx
           .delete(companies)
           .where(eq(companies.id, id))
           .returning();
         return rows[0] ?? null;
-      }),
+      }, { isolationLevel: "read committed" }),
 
     stats: () =>
       Promise.all([

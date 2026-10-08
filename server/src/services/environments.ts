@@ -1470,6 +1470,12 @@ export function environmentService(db: Db) {
         input.replacesReusableLeaseId ||
         input.reusesReusableLeaseId
           ? await db.transaction(async (tx) => {
+              // Retirement takes company UPDATE before lease locks. Handoff must
+              // take the parent first, before mutating a predecessor and then
+              // inserting its company-FK successor.
+              const [company] = await tx.select({ id: companies.id }).from(companies)
+                .where(eq(companies.id, input.companyId)).for("key share");
+              if (!company) throw conflict("Environment lease company no longer exists.");
               if (input.assertCompanyBinding) {
                 // Lock the environment row first. Managed reconciliation locks the
                 // same sandbox environment rows with `for update` before it writes a

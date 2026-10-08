@@ -419,7 +419,7 @@ export function stripCloudCatalogDefaultEchoes(
   return result as Partial<InstanceExperimentalSettings>;
 }
 
-export function instanceSettingsService(db: Db, options: InstanceSettingsServiceOptions = {}) {
+export function instanceSettingsService(db: InstanceSettingsWriteDb, options: InstanceSettingsServiceOptions = {}) {
   // Fail closed: a malformed PAPERCLIP_MANAGED_CONFIG throws here (and at
   // boot in index.ts) rather than silently running without the overlay.
   const managedConfig = getManagedInstanceConfig(options.runtimeEnv ?? process.env);
@@ -524,8 +524,16 @@ export function instanceSettingsService(db: Db, options: InstanceSettingsService
       return toGeneralView(row.general);
     },
 
-    getExperimental: async (): Promise<InstanceExperimentalSettingsWithManaged> => {
-      const row = await getOrCreateRow();
+    getExperimental: async (
+      readOptions?: { lock?: "share" },
+    ): Promise<InstanceExperimentalSettingsWithManaged> => {
+      let row = await getOrCreateRow();
+      if (readOptions?.lock) {
+        const [locked] = await db.select().from(instanceSettings)
+          .where(eq(instanceSettings.id, row.id)).for(readOptions.lock);
+        if (!locked) throw new Error("Instance settings changed during locked resolution");
+        row = locked;
+      }
       return toExperimentalView(row.experimental);
     },
 

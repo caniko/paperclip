@@ -29,6 +29,7 @@ import { getConversationConfirmationContext, type ConversationConfirmationContex
 import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
 import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
+import { lockMcpCompanyScope } from "./mcp-company-scope.js";
 import { adapterExecutionOwnershipNotHeldCondition, lockRunForAdapterSettlement, prepareAdapterExecution, reconcileAdapterExecution, settleAdapterExecution } from "./adapter-execution-ownership.js";
 import { assertOwnedWorkspacePreparation, filesystemOwnershipPolicy, filesystemOwnershipStateColumn, readFilesystemOwnershipState, prepareRunWorkspaceOwnership } from "./workspace-ownership.js";
 import { bindRuntimeMcpServersToRun } from "./runtime-mcp-admission.js";
@@ -9664,6 +9665,7 @@ export function heartbeatService(
         await revokeHeartbeatRunGatewayTokens({ db, companyId: run.companyId, runId: run.id });
         await instructionCopies.release(run.companyId, run.id);
         await db.transaction(async (tx) => {
+          if (!await lockMcpCompanyScope(tx, run.companyId)) throw new Error("Protected workspace recovery company is unavailable.");
           await lockRunForAdapterSettlement(tx, run.id);
           const [current] = await tx.select().from(heartbeatRuns).where(and(
             eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
@@ -19098,10 +19100,14 @@ export function heartbeatService(
         }
       }
       // Persist the cooldown independently of process memory. A crash before
-      // this write leaves the bounded in-flight lease for a later sweep.
+      // this write leaves the bounded in-flight lease for a later sweep. Clear
+      // this attempt's deadline too: it no longer owns provider work. Renewals
+      // require the same attempt AND an in-flight flag, so late writes cannot
+      // recreate ownership after this attempt-fenced completion.
       await db.update(environmentLeases).set({
         metadata: sql`${pendingCleanupMetadataObjectSql()} || ${JSON.stringify({
           pendingCleanupInFlight: false,
+          pendingCleanupLeaseExpiresAtMs: 0,
           pendingCleanupRetryAfterMs: Date.now() + (attempts + 1 >= PENDING_CLEANUP_SWEEP_ATTEMPT_CAP
             ? 30 * 60_000 : Math.min(30 * 60_000, Math.max(30_000, backoffMs))),
         })}::jsonb`,

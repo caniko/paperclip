@@ -17,7 +17,7 @@ const nativeHash = "ac20d3f6626b23aaf07e7bc7f6502bbcd728a2808d4b4adb56b2116bb30e
 // Authentic entry and SQL from 843bb5b, whose upstream prefix through 0288 is unchanged.
 const oldEntry: JournalEntry = { idx: 289, version: "7", when: 1790713813737, tag: "0289_messy_vivisector", breakpoints: true };
 const oldSqlUrl = new URL("./__tests__/fixtures/deployment-history/0289_messy_vivisector.sql", import.meta.url);
-const pendingFiles = [
+const upstreamGapFiles = [
   "0289_drop_user_keyboard_shortcuts.sql", "0290_browser_use_cloud.sql",
   "0291_conscious_secret_warriors.sql", "0292_powerful_devos.sql",
   "0293_broad_rattler.sql", "0294_chilly_marvel_apes.sql",
@@ -27,6 +27,11 @@ const guardedTables = ["agent_api_keys", "agents", "companies", "company_secret_
 const sha256 = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
 const migrationUrl = (file: string) => new URL(`./migrations/${file}`, import.meta.url);
 const journal = JSON.parse(await readFile(new URL("./migrations/meta/_journal.json", import.meta.url), "utf8")) as Journal;
+// The authentic fork already applied 0295's bytes. Its upstream gap and every
+// later migration must still run; adding a migration must not stale this upgrade
+// assertion or rewrite the old journal's native hash.
+const nativeEntry = journal.entries.find(entry => `${entry.tag}.sql` === nativeFile)!;
+const pendingFiles = [...upstreamGapFiles, ...journal.entries.filter(entry => entry.idx > nativeEntry.idx).map(entry => `${entry.tag}.sql`)];
 const support = await getEmbeddedPostgresTestSupport();
 const describePostgres = support.supported ? describe : describe.skip;
 if (!support.supported) console.warn(`Skipping deployment migration upgrade tests: ${support.reason ?? "unsupported environment"}`);

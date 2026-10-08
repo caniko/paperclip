@@ -1,12 +1,13 @@
 import { sql } from "drizzle-orm";
 import { check, index, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
-import { companies } from "./companies.js";
 
 /** Operator-pinned key possession, never self-asserted physical-host attestation.
  * Immutable pins and non-deletable revocation tombstones are guarded in SQL. */
 export const mcpWorkerEnrollments = pgTable("mcp_worker_enrollments", {
   id: uuid("id").primaryKey().defaultRandom(),
-  companyId: uuid("company_id").notNull().references(() => companies.id),
+  // The insert trigger locks/validates a live company. SQL retirement guards
+  // replace the company FK atomically so immutable key tombstones survive it.
+  companyId: uuid("company_id").notNull(),
   controllerInstanceId: text("controller_instance_id").notNull(),
   workerId: text("worker_id").notNull(),
   keyId: text("key_id").notNull(),

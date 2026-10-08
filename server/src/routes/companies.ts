@@ -272,13 +272,15 @@ function wantsAsyncImport(req: Request) {
 export interface CompanyRoutesOptions {
   /** Overridable in tests; defaults to `<instance root>/import-transfers`. */
   importTransferSpoolRoot?: string;
+  /** Captured server identity; never supplied by a deletion request. */
+  mcpControllerInstanceId?: string;
 }
 
 export function companyRoutes(db: Db, storage?: StorageService, options?: CompanyRoutesOptions) {
   const router = Router();
   const importTransferSpoolRoot =
     options?.importTransferSpoolRoot ?? resolveDefaultImportTransferSpoolRoot();
-  const svc = companyService(db);
+  const svc = companyService(db, { mcpControllerInstanceId: options?.mcpControllerInstanceId });
   const agents = agentService(db);
   const portability = companyPortabilityService(db, storage);
   const access = accessService(db);
@@ -1357,7 +1359,7 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     assertBoard(req);
-    const company = await svc.remove(companyId);
+    const company = await svc.remove(companyId, { ...getActorInfo(req), cloudStackRole: req.actor.cloudStackRole });
     if (!company) {
       res.status(404).json({ error: "Company not found" });
       return;

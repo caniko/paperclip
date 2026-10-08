@@ -56,6 +56,7 @@ import { traceparentFromContextToken } from "../instrumentation.ts";
 import { ROOT_CONTEXT, trace } from "@opentelemetry/api";
 import { buildNativeHarnessBackupManifest } from "../services/native-runtime/native-session-executor.ts";
 import { createNativeHarnessBackupStamp } from "../services/native-runtime/native-harness-backup-stamp.ts";
+import { requireSettledMcpCompanyLeases } from "../services/mcp-retirement-ownership.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -606,6 +607,56 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
     },
   );
 
+  it("settles real Stop, scoped handoff and successor destruction without erasing the historical Stop receipt", async () => {
+    const seeded = await seedReusablePluginSandboxLease();
+    const allocation = seeded.reusableLease.providerLeaseId;
+    const call = vi.fn(async (_pluginId: string, method: string) => {
+      if (method === "environmentStopLease") return { providerLeaseId: allocation, state: "stopped" };
+      if (method === "environmentResumeLease") return { providerLeaseId: allocation, metadata: { remoteCwd: "/workspace" } };
+      if (method === "environmentDestroyLease") return { providerLeaseId: allocation, state: "destroyed" };
+      throw new Error(`Unexpected retirement fixture method: ${method}`);
+    });
+    const runtime = environmentRuntimeService(db, { pluginWorkerManager: {
+      isRunning: () => true, call,
+      getWorker: () => ({ supportedMethods: ["environmentStopLease", "environmentResumeLease", "environmentReleaseLease", "environmentDestroyLease"] }),
+    } as unknown as PluginWorkerManager });
+    const settled = () => db.transaction(async tx => {
+      await tx.select({ id: companies.id }).from(companies).where(eq(companies.id, seeded.companyId)).for("update");
+      return requireSettledMcpCompanyLeases(tx, seeded.companyId);
+    });
+    // Upgrade the fixture's legacy fingerprint through the real same-run resume
+    // producer before crossing Stop; historical fingerprints cannot resume a
+    // different run, which is an intentional runtime confinement boundary.
+    await runtime.acquireRunLease({ companyId: seeded.companyId, environment: seeded.environment,
+      issueId: null, agentId: seeded.agentId, heartbeatRunId: seeded.runId,
+      persistedExecutionWorkspace: { id: seeded.executionWorkspaceId, mode: "shared_workspace" as const } });
+    await runtime.releaseRunLeases(seeded.runId, "released", undefined, "stop_and_retain");
+    await expect(settled()).rejects.toThrow();
+    const nextRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: nextRunId, companyId: seeded.companyId, agentId: seeded.agentId, status: "running" });
+    const next = await runtime.acquireRunLease({ companyId: seeded.companyId, environment: seeded.environment,
+      issueId: null, agentId: seeded.agentId, heartbeatRunId: nextRunId,
+      persistedExecutionWorkspace: { id: seeded.executionWorkspaceId, mode: "shared_workspace" as const } });
+    expect(next.lease.providerLeaseId).toBe(allocation);
+    expect(call.mock.calls.some(entry => entry[1] === "environmentResumeLease")).toBe(true);
+    expect(await environmentService(db).getLeaseById(seeded.reusableLease.id)).toMatchObject({ status: "expired", cleanupStatus: "success",
+      metadata: { remoteExecutionTermination: { state: "stopped" } } });
+    await expect(settled()).rejects.toThrow(); // The real successor is still active.
+    await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, nextRunId));
+    await runtime.destroyReusableSandboxLeases({ companyId: seeded.companyId, executionWorkspaceId: seeded.executionWorkspaceId });
+    await expect(settled()).resolves.toBeUndefined();
+    const successor = await environmentService(db).getLeaseById(next.lease.id);
+    expect(successor).toMatchObject({ status: "expired", cleanupStatus: "success", metadata: { remoteExecutionTermination: { state: "destroyed" } } });
+    expect(await environmentService(db).getLeaseById(seeded.reusableLease.id)).toMatchObject({ metadata: { remoteExecutionTermination: { state: "stopped" } } });
+    // The same provider allocation label in a different filesystem/task scope
+    // cannot settle this historical owner.
+    await db.update(environmentLeases).set({ executionWorkspaceId: null, issueId: null }).where(eq(environmentLeases.id, next.lease.id));
+    await expect(settled()).rejects.toThrow();
+    await db.update(environmentLeases).set({ executionWorkspaceId: seeded.executionWorkspaceId, status: "pending_cleanup", cleanupStatus: "failed" })
+      .where(eq(environmentLeases.id, next.lease.id));
+    await expect(settled()).rejects.toThrow();
+  });
+
   it("reports an unwired manager separately from a stopped sandbox worker", async () => {
     const { companyId, environment, runId } = await seedReusablePluginSandboxLease();
     const input = {
@@ -627,6 +678,66 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
     await expect(runtimeWithStoppedWorker.acquireRunLease(input))
       .rejects.toThrow("its worker is not running");
     expect(offlineManager.call).not.toHaveBeenCalled();
+  });
+
+  it.each(["success", "failure", "foreign provider"] as const)("settles built-in Stop and handoff only after exact successful destruction: %s", async outcome => {
+    // The built-in fake deliberately defaults to ephemeral. This disposable
+    // provider fixture declares reuse to exercise the supported built-in branch.
+    const provider = sandboxProviderRuntime.getSandboxProvider("fake")!;
+    const descriptor = Object.getOwnPropertyDescriptor(provider, "supportsReusableLeases")!;
+    Object.defineProperty(provider, "supportsReusableLeases", { ...descriptor, value: true });
+    try {
+      const seeded = await seedEnvironment({ driver: "sandbox", config: { provider: "fake", image: "retirement:fixture", reuseLease: true } });
+      const issueId = randomUUID();
+      await db.insert(issues).values({ id: issueId, companyId: seeded.companyId, title: "Built-in retirement", status: "in_progress", assigneeAgentId: seeded.agentId });
+      const runtime = environmentRuntimeService(db);
+      const settled = () => db.transaction(async tx => {
+        await tx.select({ id: companies.id }).from(companies).where(eq(companies.id, seeded.companyId)).for("update");
+        return requireSettledMcpCompanyLeases(tx, seeded.companyId);
+      });
+      const first = await runtime.acquireRunLease({ companyId: seeded.companyId, environment: seeded.environment, issueId,
+        agentId: seeded.agentId, heartbeatRunId: seeded.runId, persistedExecutionWorkspace: null });
+      await runtime.releaseRunLeases(seeded.runId, "released", undefined, "stop_and_retain");
+      expect(await environmentService(db).getLeaseById(first.lease.id)).toMatchObject({ metadata: { remoteExecutionTermination: { state: "stopped" } } });
+      const nextRunId = randomUUID();
+      await db.insert(heartbeatRuns).values({ id: nextRunId, companyId: seeded.companyId, agentId: seeded.agentId, status: "running" });
+      const next = await runtime.acquireRunLease({ companyId: seeded.companyId, environment: seeded.environment, issueId,
+        agentId: seeded.agentId, heartbeatRunId: nextRunId, persistedExecutionWorkspace: null });
+      expect(next.lease.providerLeaseId).toBe(first.lease.providerLeaseId);
+      await expect(settled()).rejects.toThrow();
+      await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, nextRunId));
+      if (outcome === "foreign provider") await db.update(environmentLeases).set({ provider: "different-recorded-provider" }).where(eq(environmentLeases.id, next.lease.id));
+      const spy = outcome === "success" ? null : vi.spyOn(sandboxProviderRuntime, "destroySandboxProviderLease");
+      if (outcome === "failure") spy!.mockRejectedValue(new Error("fixture destruction failed"));
+      try {
+        await runtime.destroyReusableSandboxLeases({ companyId: seeded.companyId, issueId });
+        if (outcome === "foreign provider") expect(spy).not.toHaveBeenCalled();
+      } finally { spy?.mockRestore(); }
+      const successor = await environmentService(db).getLeaseById(next.lease.id);
+      if (outcome !== "success") {
+        expect(successor).toMatchObject({ status: "pending_cleanup", cleanupStatus: "failed" });
+        expect(successor?.metadata).not.toHaveProperty("remoteExecutionTermination");
+        await expect(settled()).rejects.toThrow();
+        if (outcome === "failure") {
+          expect(await heartbeatService(db, { environmentRuntime: runtime }).sweepPendingCleanupLeases({ backoffMs: 0 }))
+            .toMatchObject({ destroyed: 1 });
+          const swept = await environmentService(db).getLeaseById(next.lease.id);
+          expect(swept).toMatchObject({ status: "expired", cleanupStatus: "success", metadata: {
+            pendingCleanupInFlight: false, pendingCleanupLeaseExpiresAtMs: 0,
+            remoteExecutionTermination: { state: "destroyed", leaseId: next.lease.id, providerLeaseId: next.lease.providerLeaseId },
+          } });
+          await expect(settled()).resolves.toBeUndefined();
+        }
+      } else {
+        expect(successor).toMatchObject({ status: "expired", cleanupStatus: "success", metadata: { remoteExecutionTermination: {
+          schema: "paperclip.remote-termination.v1", companyId: seeded.companyId, runId: nextRunId, leaseId: next.lease.id,
+          provider: "fake", providerLeaseId: next.lease.providerLeaseId, state: "destroyed",
+        } } });
+        await expect(settled()).resolves.toBeUndefined();
+        await db.update(environmentLeases).set({ issueId: null }).where(eq(environmentLeases.id, next.lease.id));
+        await expect(settled()).rejects.toThrow();
+      }
+    } finally { Object.defineProperty(provider, "supportsReusableLeases", descriptor); }
   });
 
   it("retains a successful reusable sandbox lease without stopping the provider resource", async () => {
