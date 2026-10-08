@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { expect, it, vi } from "vitest";
@@ -7,14 +7,16 @@ import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { execute } from "./execute.js";
 import { reconcileExecution } from "./recovery.js";
 
-it.each(["normal", "lost-admission", "managed-mcp-lost-admission", "failed-logging", "child-completion", "pre-admission-cancel", "rejected-admission"])("retains cancellation ownership through %s and unknown stop status", async (failure) => {
+it.each(["normal", "lost-admission", "ordinary-lost-admission", "ordinary-stalled-admission", "managed-mcp-lost-admission", "failed-logging", "child-completion", "pre-admission-cancel", "rejected-admission"])("retains cancellation ownership through %s and unknown stop status", async (failure) => {
   const managed = failure === "managed-mcp-lost-admission";
-  const loseAdmission = failure === "lost-admission" || managed;
+  const ordinary = failure.startsWith("ordinary-");
+  const loseAdmission = failure === "lost-admission" || failure === "ordinary-lost-admission" || managed;
   const cancel = new AbortController();
   let admitted = 0;
   let stops = 0;
   let polls = 0;
   let allowSettlement = false;
+  let pendingAdmission: ServerResponse | undefined;
   const requests: { key: string | undefined; body: string }[] = [];
   const server = createServer(async (req, res) => {
     if (req.url === "/v1/capabilities") {
@@ -39,6 +41,10 @@ it.each(["normal", "lost-admission", "managed-mcp-lost-admission", "failed-loggi
       }
       admitted++;
       cancel.abort();
+      if (failure === "ordinary-stalled-admission") {
+        pendingAdmission = res;
+        return; // admission succeeded, but its acknowledgement never arrives
+      }
       if (failure === "rejected-admission") { res.writeHead(409).end(); return; }
       if (loseAdmission && admitted === 1) { res.destroy(); return; }
       res.writeHead(202).end(JSON.stringify({ run_id: "owned", status: "started" }));
@@ -82,9 +88,9 @@ it.each(["normal", "lost-admission", "managed-mcp-lost-admission", "failed-loggi
       pollIntervalMs: 250, eventReconnectMs: 250 },
     runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
     context: { paperclipWorkspace: { cwd: "/srv/data" } },
-    executionTarget: { kind: "local", environmentId: "worker", workspaceRealization: {
+    ...(ordinary ? {} : { executionTarget: { kind: "local" as const, environmentId: "worker", workspaceRealization: {
       mode: "in_place" as const, authoritativeRoot: "/srv/data", pathAliases: [], outboundRestorePaths: [],
-    } },
+    } } }),
     ...(managed ? { runtimeMcp: { getServers: () => [{ name: "reader", connectionId: "reader", token: "run-reader-secret",
       url: "http://127.0.0.1:9000/mcp", runBinding: { runId: "paperclip-owned", executionHostId: "worker", serverHostId: "worker",
         gatewayUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/` } }] } } : {}),
@@ -97,10 +103,12 @@ it.each(["normal", "lost-admission", "managed-mcp-lost-admission", "failed-loggi
   try {
     await vi.waitFor(() => expect(stops).toBeGreaterThan(0), { timeout: 5000 });
     expect(ready).toHaveBeenCalledOnce();
+    // This successor durably owns ordinary admissions too, without a workspace binding.
     expect(checkpoint).toBeDefined();
     expect(returned).toBe(false);
     expect(collected).not.toHaveBeenCalled();
-    expect(JSON.parse(requests[0].body).execution_context.lifetime).toBe("wait_for_jobs");
+    if (ordinary) expect(JSON.parse(requests[0].body).execution_context).toBeUndefined();
+    else expect(JSON.parse(requests[0].body).execution_context.lifetime).toBe("wait_for_jobs");
     // A fresh controller only has the durable checkpoint. Its stop response is
     // still not permission to release while the target remains nonterminal.
     expect(await reconcileExecution(checkpoint!)).toBe("pending");
@@ -121,6 +129,7 @@ it.each(["normal", "lost-admission", "managed-mcp-lost-admission", "failed-loggi
     expect(admitted).toBe(failure === "pre-admission-cancel" ? 0 : 1);
   } finally {
     allowSettlement = true;
+    pendingAdmission?.end(JSON.stringify({ run_id: "owned", status: "started" }));
     await execution;
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
