@@ -318,6 +318,25 @@ describe.skipIf(!support.supported)('skill source persistence', () => {
     expect(await service.detail(companyId, created.source.id)).toMatchObject({ enabled: true, revision: excluded.source.revision });
   });
 
+  it('rolls back sibling versions and source entries when a later installed write is denied', async () => {
+    const service = skillSourceService(db), skills = companySkillService(db);
+    files = { 'allowed/SKILL.md': md('allowed'), 'protected/SKILL.md': md('protected') }; commit = sha;
+    const created = await service.create(companyId, { repositoryUrl: 'https://github.com/acme/skills', trackingRef: 'transaction-policy', commitSha: sha, selectedPaths: Object.keys(files) }, context);
+    const allowed = created.imported.find(skill => skill.metadata?.skillSourcePath === 'allowed/SKILL.md')!;
+    const protectedSkill = created.imported.find(skill => skill.id !== allowed.id)!;
+    const before = (await skills.getById(companyId, allowed.id))!;
+    files['allowed/SKILL.md'] = md('allowed updated');
+    files['protected/SKILL.md'] = md('protected updated'); commit = 'f'.repeat(40);
+    const authorize = vi.fn<SkillSourceContext['authorize']>(async (action, resource) => {
+      if (action === 'skills.update' && resource.skillId === protectedSkill.id) throw new Error('protected installed write');
+    });
+    await expect(service.refresh(companyId, created.source.id, { ...context, authorize })).rejects.toThrow('protected installed write');
+    expect(authorize.mock.calls.filter(([action, resource]) => action === 'skills.update' && resource.skillId).map(([, resource]) => resource.skillId)).toEqual([allowed.id, protectedSkill.id]);
+    expect(await skills.getById(companyId, allowed.id)).toMatchObject({ currentVersionId: before.currentVersionId, metadata: before.metadata, updatedAt: before.updatedAt });
+    expect(await skills.listVersions(companyId, allowed.id)).toHaveLength(1);
+    expect(await service.detail(companyId, created.source.id)).toMatchObject({ revision: created.source.revision, lastScanCommit: sha, entries: created.source.entries });
+  });
+
   it('authorizes previews before any provider read and uses the current caller connection', async () => {
     const service = skillSourceService(db);
     const input = { repositoryUrl: 'https://github.com/acme/skills', connectionId: randomUUID(), commitSha: sha, skillPath: 'SKILL.md', filePath: 'SKILL.md' };

@@ -48,23 +48,6 @@ export function skillSourceService(db: Db) {
     await context.authorize('skills.import', { sourceType: 'git', sourceLocator: input.repositoryUrl });
     return previewGitHubSkillFile(input, context.read(input.connectionId ?? null));
   }
-  async function authorizeScan(source: SourceRow, scan: ScannedSkillSource, selectedPaths: string[], context: SkillSourceContext) {
-    const previous = await db.select().from(entries).where(and(eq(entries.companyId, source.companyId), eq(entries.sourceId, source.id)));
-    // publish() also changes installed metadata for invalid, absent and excluded
-    // paths. Per-skill policy applies to those mutations, not just new versions.
-    for (const entry of previous) {
-      const skill = entry.skillId ? await skills.getById(source.companyId, entry.skillId) : null;
-      if (skill) await context.authorize('skills.update', { sourceType: 'git', sourceLocator: source.repositoryUrl, skillId: skill.id, skillKey: skill.key });
-    }
-    for (const candidate of scan.skills.filter(candidate => selectedPaths.includes(candidate.path) && !candidate.error)) {
-      const old = previous.find(entry => entry.path === candidate.path);
-      const skill = old?.skillId ? await skills.getById(source.companyId, old.skillId) : null;
-      if (skill) continue;
-      await context.authorize('skills.import', {
-        sourceType: 'git', sourceLocator: source.repositoryUrl, skillKey: newSkillKey(scan, candidate.path, candidate.name, source.id),
-      });
-    }
-  }
   async function authorizeSelection(source: SourceRow, selectedPaths: string[], context: SkillSourceContext) {
     for (const entry of (await detail(source.companyId, source.id)).entries) {
       if (!entry.skillId || (entry.selection === 'selected') === selectedPaths.includes(entry.path)) continue;
@@ -107,8 +90,13 @@ export function skillSourceService(db: Db) {
           trustLevel: candidate.files.some(file => file.kind === 'script' || file.executable) ? 'scripts_executables' : candidate.files.some(file => file.kind === 'asset' || file.kind === 'other') ? 'assets' : 'markdown_only',
           metadata, updatedAt: new Date() };
         const changed = !current?.currentVersionId || current.metadata?.snapshotHash !== hash;
+        // Authorize the installed write in this transaction, not untouched siblings.
+        if (current && (changed || current.metadata?.skillSourceState !== 'synced')) {
+          await context.authorize('skills.update', { sourceType: 'git', sourceLocator: source.repositoryUrl, skillId: current.id, skillKey: current.key });
+        }
         if (current && changed) await tx.update(companySkills).set(values).where(and(eq(companySkills.companyId, source.companyId), eq(companySkills.id, current.id)));
         else if (!current) {
+          await context.authorize('skills.import', { sourceType: 'git', sourceLocator: scan.repositoryUrl, skillKey: key });
           const [created] = await tx.insert(companySkills).values({ ...values, companyId: source.companyId, key, slug, installCount: 1 }).returning({ id: companySkills.id });
           skillId = created!.id;
         }
@@ -124,6 +112,7 @@ export function skillSourceService(db: Db) {
           (current ? updated : imported).push(installed);
         } else unchanged++;
       } else if (current) {
+        await context.authorize('skills.update', { sourceType: 'git', sourceLocator: source.repositoryUrl, skillId: current.id, skillKey: current.key });
         await tx.update(companySkills).set({ metadata: { ...current.metadata, skillSourceId: source.id, skillSourcePath: candidate.path,
           skillSourceState: selection !== 'selected' ? 'not_syncing' : 'update_failed' } }).where(and(eq(companySkills.companyId, source.companyId), eq(companySkills.id, current.id)));
       }
@@ -136,7 +125,10 @@ export function skillSourceService(db: Db) {
       await tx.update(entries).set({ present: false, selection: selected.has(old.path) ? 'selected' : 'excluded', error: null }).where(eq(entries.id, old.id));
       if (old.skillId) {
         const current = await skills.getById(source.companyId, old.skillId, tx);
-        if (current) await tx.update(companySkills).set({ metadata: { ...current.metadata, skillSourceId: source.id, skillSourcePath: old.path, skillSourceState: 'removed' } }).where(and(eq(companySkills.companyId, source.companyId), eq(companySkills.id, old.skillId)));
+        if (current) {
+          await context.authorize('skills.update', { sourceType: 'git', sourceLocator: source.repositoryUrl, skillId: current.id, skillKey: current.key });
+          await tx.update(companySkills).set({ metadata: { ...current.metadata, skillSourceId: source.id, skillSourcePath: old.path, skillSourceState: 'removed' } }).where(and(eq(companySkills.companyId, source.companyId), eq(companySkills.id, old.skillId)));
+        }
       }
     }
     // Two old imports can represent distinct installed skills under HEAD and an
@@ -159,11 +151,6 @@ export function skillSourceService(db: Db) {
       throw conflict('This repository is already in Sources. Manage its skills there.');
     }
     const id = randomUUID();
-    // New imports are authorized per generated skill identity too, before publishing.
-    for (const candidate of scan.skills.filter(candidate => input.selectedPaths.includes(candidate.path) && !candidate.error)) {
-      await context.authorize('skills.import', { sourceType: 'git', sourceLocator: scan.repositoryUrl,
-        skillKey: newSkillKey(scan, candidate.path, candidate.name, id) });
-    }
     return db.transaction(async tx => {
       const [source] = await tx.insert(sources).values({ id, companyId, repositoryId: scan.repositoryId, repositoryUrl: scan.repositoryUrl, fullName: scan.fullName,
         trackingRef: scan.trackingRef, connectionId: scan.connectionId ?? input.connectionId ?? null, lastAttemptAt: new Date() }).onConflictDoNothing().returning();
@@ -189,7 +176,6 @@ export function skillSourceService(db: Db) {
       if (source.repositoryId && source.repositoryId !== scan.repositoryId) throw conflict('The repository at this URL has changed identity. Add it as a new source.');
       const current = await detail(companyId, id);
       const selectedPaths = selection?.selectedPaths ?? current.entries.filter(entry => entry.selection === 'selected').map(entry => entry.path);
-      await authorizeScan(source, scan, selectedPaths, context);
       return await db.transaction(async tx => {
         const [locked] = await tx.select().from(sources).where(scope(companyId, id)).for('update');
         if (!locked || locked.leaseToken !== token || locked.revision !== source.revision || locked.leaseExpiresAt! < new Date()) throw conflict('Source refresh expired or changed. Try again.');
@@ -207,14 +193,16 @@ export function skillSourceService(db: Db) {
   async function disconnect(companyId: string, id: string, context: SkillSourceContext) {
     const source = await row(companyId, id);
     await context.authorize('skills.edit', { sourceType: 'git', sourceLocator: source.repositoryUrl });
-    await authorizeSelection(source, [], context);
     return db.transaction(async tx => {
       await tx.select().from(sources).where(scope(companyId, id)).for('update');
       await tx.update(sources).set({ enabled: false, revision: sql`${sources.revision} + 1`, leaseToken: null, leaseExpiresAt: null }).where(scope(companyId, id));
       for (const entry of (await detail(companyId, id, tx)).entries) {
         if (!entry.skillId) continue;
         const skill = await skills.getById(companyId, entry.skillId, tx);
-        if (skill) await tx.update(companySkills).set({ metadata: { ...skill.metadata, skillSourceId: id, skillSourceState: 'not_syncing' } }).where(and(eq(companySkills.companyId, companyId), eq(companySkills.id, skill.id)));
+        if (skill) {
+          await context.authorize('skills.edit', { sourceType: 'git', sourceLocator: source.repositoryUrl, skillId: skill.id, skillKey: skill.key });
+          await tx.update(companySkills).set({ metadata: { ...skill.metadata, skillSourceId: id, skillSourceState: 'not_syncing' } }).where(and(eq(companySkills.companyId, companyId), eq(companySkills.id, skill.id)));
+        }
       }
       await context.audit(tx, id, 'company.skill_source_disconnected', {});
       return detail(companyId, id, tx);
