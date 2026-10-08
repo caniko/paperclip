@@ -12,6 +12,7 @@ const provenance = {
   runnerSha256: "c".repeat(64), providerSha256: "d".repeat(64),
   junitSha256: "e".repeat(64),
   sourceLockSha256: "f".repeat(64), effectiveLockSha256: "f".repeat(64),
+  trustedRevision: "1".repeat(40), harnessSha256: "2".repeat(64), verifierSha256: "3".repeat(64),
   nodeVersion: "24.20.0", pnpmVersion: "9.15.4",
 };
 function cancellationEvidence() {
@@ -58,6 +59,9 @@ test("qualification binds both mandatory cases and the exact report and binaries
   assert.equal(receipt.effectiveLockSha256, provenance.effectiveLockSha256);
   assert.equal(receipt.nodeVersion, provenance.nodeVersion);
   assert.equal(receipt.pnpmVersion, provenance.pnpmVersion);
+  assert.equal(receipt.trustedRevision, provenance.trustedRevision);
+  assert.equal(receipt.harnessSha256, provenance.harnessSha256);
+  assert.equal(receipt.verifierSha256, provenance.verifierSha256);
   assert.equal(receipt.lockfileRegenerated, false);
   assert.equal(receipt.cases.length, 2);
   assert.equal(receipt.evidence.length, 5);
@@ -158,4 +162,21 @@ test("the hosted JUnit gate refuses missing, failed, errored and skipped cases",
     const result = spawnSync("python3", ["-c", python, reportPath], { encoding: "utf8" });
     assert.equal(result.status === 0, fault === "none", `${fault}: ${result.stderr}`);
   }
+});
+
+test("the mandatory lane executes an immutable harness and verifier outside the candidate source", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/pr-trusted.yml", import.meta.url), "utf8");
+  const lane = workflow.split("  native_composer_stop:")[1].split("\n  e2e:")[0];
+  const checkout = lane.split("      - name: Checkout immutable Stop harness")[1]?.split("      - name:")[0];
+  assert.ok(checkout, "candidate-controlled acceptance files are not a trusted harness");
+  assert.match(checkout, /repository: caniko\/paperclip/);
+  assert.match(checkout, /ref: [0-9a-f]{40}(?:\s|$)/);
+  assert.match(checkout, /path: \.trusted-composer-stop/);
+  assert.match(lane, /PAPERCLIP_E2E_SOURCE_ROOT: \$\{\{ github\.workspace \}\}/);
+  assert.match(lane, /--config \.trusted-composer-stop\/tests\/e2e\/playwright-composer-stop\.config\.ts/);
+  assert.match(lane, /node \.trusted-composer-stop\/scripts\/qualify-composer-stop\.mjs/);
+  assert.doesNotMatch(lane, /node scripts\/qualify-composer-stop\.mjs/);
+  assert.match(lane, /COMPOSER_STOP_TRUSTED_REVISION/);
+  assert.match(lane, /COMPOSER_STOP_HARNESS_SHA256/);
+  assert.match(lane, /COMPOSER_STOP_VERIFIER_SHA256/);
 });

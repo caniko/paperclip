@@ -11,18 +11,30 @@ output="$1"
 gateway_file="$2"
 
 read_token() {
-  local file="$1" token
-  if [ ! -s "$file" ]; then
-    echo 'hermes worker environment: missing or empty credential' >&2
+  local file="$1" token resolved credential opened mode size
+  if ! resolved="$(readlink -e -- "$file")" || [ ! -f "$resolved" ] ||
+    ! { exec {credential}<"$resolved"; } 2>/dev/null; then
+    echo 'hermes worker environment: invalid credential source' >&2
+    return 1
+  fi
+  # Bind validation and all byte reads to the same opened inode. Runtime
+  # symlink rotation must not substitute an unchecked source between reads.
+  opened="/proc/$BASHPID/fd/$credential"
+  resolved="$(readlink -e -- "$opened")" || return 1
+  read -r mode size <<< "$(stat -Lc '%a %s' -- "$opened")"
+  if [ ! -f "$opened" ] || [[ "$resolved" == /nix/store || "$resolved" == /nix/store/* ]] ||
+    (( (8#$mode & 7) != 0 || size == 0 || size > 1048576 )); then
+    echo 'hermes worker environment: invalid credential source' >&2
     return 1
   fi
 
   # Bash drops NULs and trailing LF bytes during command substitution. Compare
   # the original file to the accepted form before using the converted string.
-  token="$(cat "$file")" || return 1
+  token="$(head -c 1048577 -- "$opened")" || return 1
   if [[ ! "$token" =~ ^[A-Za-z0-9._~:/?@%+=,-]+$ ]] ||
-    { ! cmp -s "$file" <(printf '%s' "$token") &&
-      ! cmp -s "$file" <(printf '%s\n' "$token"); }; then
+    (( ${#token} > 1048576 )) ||
+    { ! cmp -s "$opened" <(printf '%s' "$token") &&
+      ! cmp -s "$opened" <(printf '%s\n' "$token"); }; then
     echo 'hermes worker environment: invalid credential bytes' >&2
     return 1
   fi

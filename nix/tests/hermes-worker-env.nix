@@ -40,6 +40,6 @@ pkgs.runCommand "paperclip-hermes-worker-env-check" { nativeBuildInputs = [ pkgs
   # Keep the test PATH aligned with the declared service path. A broader build
   # environment must not hide a missing renderer dependency.
   export PATH=${lib.makeBinPath ([ pkgs.bash ] ++ workerPath)}
-  bash ${./hermes-worker-env.sh} "$render"
+  bash ${./hermes-worker-env.sh} "$render" ${pkgs.writeText "hermes-worker-store-credential-fixture" "tvly-valid"}
   touch "$out"
 ''

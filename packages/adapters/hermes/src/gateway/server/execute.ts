@@ -579,6 +579,9 @@ async function handleEvent(
     if (seen.get(sequence) !== digest) throw protocolError("Conflicting Hermes event replay");
     return;
   }
+  if (sequenced && sequence !== (state.cursors.get(runId) ?? 0) + 1) {
+    throw protocolError("Noncontiguous Hermes event sequence");
+  }
   state.lastEventName = eventName;
   const sanitized = asRecord(redactForLog(parsed, [], 0, redactText)) ?? {};
   if (sequenced && ctx.onEvent) {
@@ -1029,6 +1032,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const checkpoint = executionCheckpoint(baseUrl, runHeaders, requestBody);
   let checkpointPrepared = false;
   try {
+    if (cancellable && !ctx.onExecutionCheckpoint) {
+      throw Object.assign(new Error("Cancellable Hermes admission requires host-owned durable execution checkpoints"), {
+        code: "hermes_gateway_checkpoint_required",
+      });
+    }
     if (cancellable) await ctx.onCancellationReady?.();
     if (binding || managedMcp || ownedAdmission) {
       const capabilities = await fetchJson(apiUrl(baseUrl, "/v1/capabilities"), {
@@ -1058,9 +1066,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // request can block so continuation gates may release their issue lock.
     ctx.onDispatch?.();
     const create = async (url = createRunUrl) => {
+      // Abort the uncertain admission, never the separate request that fences it.
+      const timeout = AbortSignal.timeout(30_000);
       const receipt = await fetchJson(url, {
         method: "POST", headers: runHeaders, body: requestBody,
-        ...(ownedAdmission || managedMcp ? { signal: AbortSignal.timeout(30_000), redirect: "error" } : {}),
+        ...(ownedAdmission || managedMcp ? {
+          signal: url === createRunUrl && ctx.signal ? AbortSignal.any([ctx.signal, timeout]) : timeout,
+          redirect: "error",
+        } : {}),
       });
       if (ownedAdmission && !extractRunId(receipt)) throw new Error("Hermes admission acknowledgement has no run_id; retaining ownership.");
       return receipt;

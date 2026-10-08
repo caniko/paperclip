@@ -11,7 +11,9 @@ export function isPublicExecutorToolSelector(value: string): boolean {
   return PUBLIC_EXECUTOR_TOOL_SELECTORS.has(value);
 }
 
-const SECRET_NAME_PATTERN = String.raw`[A-Za-z0-9_-]*(?:api[-_]?key|(?:access[-_]?|auth[-_]?)?token|token|authorization(?:[-_]?code)?|bearer|secrets?|passwd|passwords?|credentials?|jwt|private[-_]?key|cookie|connectionstring)(?:[-_]?(?:value|header|prod(?:uction)?|dev(?:elopment)?|test|staging|primary|secondary))*`;
+// Exclude only known metadata names; credential names may carry arbitrary
+// identifier suffixes (rotations, versions, tenant names, etc.).
+const SECRET_NAME_PATTERN = String.raw`(?!-*(?:token[-_]?(?:budget|policy)|secret[-_]?storage|credentials?[-_]?handling|authorization[-_]?required)(?![A-Za-z0-9_-]))[A-Za-z0-9_-]*(?:api[-_]?key|(?:access[-_]?|auth[-_]?)?token|token|authorization(?:[-_]?code)?|bearer|secrets?|passwd|passwords?|credentials?|jwt|private[-_]?key|cookie|connectionstring)[A-Za-z0-9_-]*`;
 
 const COMMAND_CLI_SECRET_OPTION_RE = new RegExp(
   String.raw`(\B-{1,2}${SECRET_NAME_PATTERN}(?:\s+|=)(["']?))[^\s"'` +

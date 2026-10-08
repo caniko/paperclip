@@ -1003,6 +1003,13 @@ An operator Stop waits for provider termination. Remote sandbox providers may re
 
 Graceful controller shutdown also joins the registered Stop control for live legacy adapters without a local child, including Hermes gateway runs. The run keeps its task and environment ownership until the target confirms settlement. A stop request alone cannot release that ownership. This shutdown cancellation does not launch a successor. Native runner reattachment and local-process shutdown keep their existing restart paths.
 
+Cancellable Hermes callers must supply host-owned durable admission checkpoints,
+including ordinary runs without a workspace binding. Missing checkpoint storage
+fails before cancellation readiness or remote dispatch. Stop aborts a stalled
+admission acknowledgement, then fences that uncertain admission with the original
+idempotency key and request body. The fencing request has its own bounded signal;
+the cancelled execution signal must not prevent settlement.
+
 Cancelled runs and runs with a recorded pending stop lose run-scoped API write authority, while reads remain available for diagnostics. This applies to ordinary tasks as well as conversations. Task and interaction mutations recheck that authority in the write transaction, so a cancelled run cannot overwrite a recovery disposition with a late Done or resolve an interaction after revocation. A task handoff that intentionally stops its own run can commit only with a server receipt tied to that exact request. Direct sandbox CLI adapters such as Grok register cancellation before preparation and keep ownership until host-owned termination is verified, including a sandbox acquired before adapter registration. A failed stop does not acknowledge cancellation or abandon an outstanding remote command. Interrupted workspace restore failures remain recorded for recovery; a stop receipt proves termination, not successful file restoration.
 
 For native conversations, an authenticated user message sent after the previous run finishes can retire its execution recovery holds and start a fresh turn. Hold retirement and the new run are atomic. The previous transcript, tool outcomes, and recovery history remain intact. This starts a new conversation; it does not replay tool calls with unknown outcomes.

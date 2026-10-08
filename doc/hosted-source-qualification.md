@@ -2,8 +2,8 @@
 
 The `Exact-head source qualification` PR workflow checks the actual PR head.
 It runs workspace typechecks, the full test command, the build, token gates,
-and mandatory Hermes lineage, PostgreSQL settlement, MCP admission and real
-chat-shard regressions. It installs
+and mandatory Hermes lineage and run-lifetime, PostgreSQL settlement, MCP
+admission, real chat-shard, wake-lock and skill-refresh regressions. It installs
 only declared dependencies and uses disposable hosted fixture state.
 
 Each lane runs once. The test wrapper writes separate JUnit reports when
@@ -27,6 +27,9 @@ the actual GitHub artifact metadata and requires at least 2,592,000 seconds
 between creation and expiry. Every required artifact uses `retention-days: 31`.
 The repository and organization must permit at least 31 days before execution.
 Changing a workflow setting alone does not prove artifact retention.
+The trusted Stop harness identity job also gates acceptance. Its assertion log
+has its own provider-retention readback, retained with the five source-proof
+artifact readbacks in the source-retention artifact.
 
 The live PR head and base must both match the triggering event. A moved base
 rejects the run before application execution, even when its head is unchanged.
