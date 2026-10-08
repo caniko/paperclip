@@ -266,6 +266,44 @@ describe.skipIf(!support.supported)('skill source persistence', () => {
     expect(again.imported[0]!.id).toBe(result.imported[0]!.id);
     expect(await companySkillService(db).listVersions(isolatedCompany, result.imported[0]!.id)).toHaveLength(1);
   });
+  it.each(['%ZZ', '%', '%C3%28'])('rejects malformed legacy URL escapes as 422 before provider access (%s)', async escape => {
+    const read = vi.fn(context.read);
+    await expect(skillSourceService(db).importFromUrl(companyId, `https://github.com/acme/skills/tree/${escape}`, { ...context, read })).rejects.toMatchObject({ status: 422 });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('authorizes create, refresh and disconnect without borrowing a reserved one-connection pool', async () => {
+    const single = createDb(testDb.connectionString, { maxConnections: 1 });
+    const service = skillSourceService(single);
+    files = { 'pool/SKILL.md': md('pool policy') }; commit = sha;
+    const guarded: SkillSourceContext = {
+      ...context,
+      authorize: async (_action, _resource, connection = single) => {
+        // Route-supplied access/policy evaluation also needs a database read.
+        // A transaction must supply its connection instead of the reserved root.
+        expect(await connection.select({ id: companies.id }).from(companies).where(eq(companies.id, companyId))).toHaveLength(1);
+      },
+    };
+    const operation = (async () => {
+      const created = await service.create(companyId, { repositoryUrl: 'https://github.com/acme/skills', trackingRef: 'pool-policy', commitSha: sha, selectedPaths: ['pool/SKILL.md'] }, guarded);
+      files['pool/SKILL.md'] = md('pool policy updated'); commit = 'e'.repeat(40);
+      const refreshed = await service.refresh(companyId, created.source.id, guarded);
+      expect(refreshed.updated).toHaveLength(1);
+      expect(await service.disconnect(companyId, created.source.id, guarded)).toMatchObject({ enabled: false });
+    })();
+    // Close the deliberately blocked RED client and observe its rejection too.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([operation, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('skill authorization borrowed the reserved root pool')), 5000);
+      })]);
+    } finally {
+      clearTimeout(timer);
+      await single.$client.end({ timeout: 1 });
+      await operation.catch(() => {});
+    }
+  }, 15000);
+
   it('checks per-skill policies for additions and deselection before publishing', async () => {
     const service = skillSourceService(db);
     files = { 'protected/SKILL.md': md('protected') }; commit = sha;

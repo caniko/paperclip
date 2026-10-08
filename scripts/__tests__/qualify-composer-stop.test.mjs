@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { qualifyComposerStop } from "../qualify-composer-stop.mjs";
@@ -190,4 +190,41 @@ test("the mandatory lane executes an immutable harness and verifier outside the 
   assert.match(base, /cwd: process\.env\.PAPERCLIP_E2E_SOURCE_ROOT \?\?/);
   const config = readFileSync(new URL("../../tests/e2e/playwright-composer-stop.config.ts", import.meta.url), "utf8");
   assert.match(config, /Mandatory native composer Stop requires an absolute candidate source root/);
+});
+
+test("candidate dependency execution cannot rewrite trusted verifier, tools or provenance", (t) => {
+  const workflow = readFileSync(new URL("../../.github/workflows/pr-trusted.yml", import.meta.url), "utf8");
+  const lane = workflow.split("  native_composer_stop:")[1].split("\n  e2e:")[0];
+  const install = lane.split("      - name: Install dependencies\n")[1]?.split("      - name:")[0];
+  assert.ok(install, "retain a candidate installation boundary that can be exercised");
+  const command = install.match(/        run: \|\n([\s\S]*)/)[1]
+    .split("\n").map(line => line.replace(/^ {10}/, "")).join("\n");
+  const directory = mkdtempSync(join(tmpdir(), "composer-stop-candidate-isolation-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const tools = join(directory, "fixture-tools");
+  const runtime = join(directory, "trusted-runtime");
+  const trusted = join(directory, ".trusted-composer-stop");
+  for (const path of [tools, runtime, join(trusted, "scripts"), join(trusted, "node_modules")]) mkdirSync(path, { recursive: true });
+  const targets = [join(trusted, "scripts", "qualify-composer-stop.mjs"), join(trusted, "node_modules", "browser-tool.mjs"),
+    join(runtime, "composer-stop-harness-manifest.sha256"), join(runtime, "trusted-github-env")];
+  for (const path of targets) writeFileSync(path, "independently trusted bytes\n");
+  const attack = `import { writeFileSync } from "node:fs";
+    for (const target of ${JSON.stringify(targets)}) {
+      try { writeFileSync(target, "candidate-controlled forged acceptance\\n"); } catch {}
+    }`;
+  // No dependencies or real provider are required. Both the host shim and a
+  // future isolated pnpm invocation execute the same hostile lifecycle fixture.
+  for (const source of [directory, join(directory, ".candidate")]) {
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, "attack.mjs"), attack);
+    writeFileSync(join(source, "package.json"), JSON.stringify({ name: "candidate-isolation-fixture", version: "1.0.0", scripts: { postinstall: "node attack.mjs" } }));
+  }
+  writeFileSync(join(tools, "pnpm"), `#!/bin/sh\nexec node ${JSON.stringify(join(directory, "attack.mjs"))}\n`, { mode: 0o755 });
+  const result = spawnSync("bash", ["-c", command.replaceAll("${{ github.workspace }}", directory)], {
+    cwd: directory, encoding: "utf8", timeout: 20000,
+    env: { ...process.env, PATH: `${tools}:${process.env.PATH}`, GITHUB_WORKSPACE: directory,
+      RUNNER_TEMP: runtime, GITHUB_ENV: targets[3] },
+  });
+  assert.equal(result.status, 0, `candidate fixture must actually execute: ${result.stderr}`);
+  for (const path of targets) assert.equal(readFileSync(path, "utf8"), "independently trusted bytes\n", `candidate changed trusted state: ${path}`);
 });
