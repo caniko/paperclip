@@ -144,7 +144,19 @@ DATABASE_URL=postgres://postgres.[PROJECT-REF]:[PASSWORD]@...5432/postgres \
 
 See [Supabase pricing](https://supabase.com/pricing) for current details.
 
-## Connection loss during a transaction
+## Connection loss and retries
+
+The database client does not replay arbitrary statements after a disconnect.
+PostgreSQL may have committed a statement before the connection loses its
+response. The postgres.js message `write CONNECTION_CLOSED` does not prove
+that the statement was never sent: the driver also uses it when an in-flight
+query loses its connection. SQL text cannot establish replay safety either;
+a `SELECT` can call a function with side effects.
+
+The affected operation fails and a new operation can reconnect through the
+pool. Callers may retry only when the complete operation is idempotent or has
+a durable receipt that prevents duplicate effects. Some transient statement
+failures therefore reach the caller instead of being retried automatically.
 
 When a database connection closes, its transaction fails. Paperclip does not
 replay that transaction. New requests can use a fresh connection from the pool.
@@ -164,6 +176,13 @@ including `CONNECT_TIMEOUT`, at most twice. This retry applies only to the
 idempotent actor synchronization operations, not arbitrary transactions. A
 persistent outage still fails the request after the bounded retries; each
 connection attempt remains subject to the configured database connect timeout.
+
+The dashboard's company lookup, task counts, pending approval count, and
+monthly spend each retry these connection errors at most twice. Each callback
+is read-only and rebuilds its query for each attempt. A failed read
+does not replay completed reads or the budget workflow. Missing companies,
+authentication errors, and other database errors propagate without retry.
+This does not enable general SQL replay.
 
 ## Execution identity row locks
 
@@ -442,17 +461,18 @@ ownership. Release is idempotent and does not report expected shutdown as loss.
 Before managed migrations, `assertDeploymentSchemaCompatible` checks every
 stored migration hash against the installed SQL files. Unknown hashes refuse
 startup without changing the journal. Use the matching application or a verified
-compatible backup; renumbering a fork's applied migrations is not an upgrade.
+compatible backup; rewriting a fork's applied migration journal is not an upgrade.
 
-Migration `0289_messy_vivisector.sql` adds the `deployment_resources` ownership
+Migration `0295_nostalgic_rhodey.sql` adds the `deployment_resources` ownership
 ledger and guards owned resource fields and secret versions. Resource identities
 use owner, kind, and key; no cascading foreign key can silently erase ownership.
 Operational pauses and spending remain mutable. The reconciler uses a
 transaction-local setting for its own writes. This guard controls application
 writes, not arbitrary SQL access by the database owner.
 
-This migration is generated from the upstream `0288` schema for fresh staging
-and upstream-history databases. A database with the older fork-only
+The migration follows upstream `0294`. Its SQL hash matches the earlier fork's
+`0289_messy_vivisector.sql`; that applied hash remains in the database journal
+while the upstream `0289`–`0294` gap is filled. A database with the older fork-only
 `0284_bizarre_mastermind` / `0285_deployment_workspaces` history needs a separate
 verified migration/restore procedure. The compatibility check refuses that
 unknown history.

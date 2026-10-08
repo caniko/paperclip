@@ -153,16 +153,20 @@ local encrypted material without recording secret-access timestamps. Preserve
 that key, runtime credentials, storage, and the migration journal in backups.
 Application generation rollback is not database rollback.
 
-Migration `0289_messy_vivisector` follows the selected upstream history. Older
-fork-only `0284_bizarre_mastermind` / `0285_deployment_workspaces` databases are
-not upgrade-qualified; unknown hashes fail closed. Use a separate verified
-migration or restore procedure. Fresh disposable staging does not prove
-retained-data production recovery.
+Migration `0295_nostalgic_rhodey` follows upstream `0294`. It retains
+the earlier fork's `0289_messy_vivisector` SQL hash, so the applied journal
+entry and guards survive while the upstream `0289`–`0294` gap is filled. The
+embedded PostgreSQL upgrade fixture checks retained ciphertext, ownership,
+and history. Older fork-only `0284_bizarre_mastermind` /
+`0285_deployment_workspaces` databases are not upgrade-qualified; unknown
+hashes fail closed. Use a separate verified migration or restore procedure.
+Fresh disposable staging does not prove retained-data production recovery.
 
 ## Verification
 
 Focused tests live in `server/src/deployment/`,
-`packages/db/src/deployment-ownership.test.ts`, and
+`packages/db/src/deployment-ownership.test.ts`,
+`packages/db/src/deployment-migration-upgrade.test.ts`, and
 `packages/shared/src/deployment-manifest.test.ts`. They exercise actual
 PostgreSQL, the real launcher, authenticated API calls, a fake HTTP gateway,
 ownership/adoption, no-op reapply, failure rollback, lease loss, and logical
