@@ -25,6 +25,8 @@ declare global {
           status?: string;
         }>;
         isInstanceAdmin?: boolean;
+        /** Authenticated Cloud stack role; request bodies never supply this. */
+        cloudStackRole?: "owner" | "admin" | "member" | "support";
         keyId?: string;
         keyScope?: AgentApiKeyScope;
         runId?: string;

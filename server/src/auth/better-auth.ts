@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Request, RequestHandler } from "express";
 import type { IncomingHttpHeaders } from "node:http";
 import { betterAuth, type Auth } from "better-auth";
@@ -243,7 +244,7 @@ export function createBetterAuthInstance(
   db: Db,
   config: Config,
   trustedOrigins: string[],
-  options: { autoSignIn?: boolean } = {},
+  options: { autoSignIn?: boolean; bootstrapUserId?: string } = {},
 ): BetterAuthInstance {
   const baseUrl = config.authBaseUrlMode === "explicit" ? config.authPublicBaseUrl : undefined;
   const publicUrl = process.env.PAPERCLIP_PUBLIC_URL?.trim() || baseUrl;
@@ -287,7 +288,11 @@ export function createBetterAuthInstance(
       deploymentExposure: config.deploymentExposure,
       override: process.env.PAPERCLIP_AUTH_RATE_LIMIT_ENABLED,
     }),
-    advanced: buildBetterAuthAdvancedOptions({ disableSecureCookies }),
+    advanced: {
+      ...buildBetterAuthAdvancedOptions({ disableSecureCookies }),
+      ...(options.bootstrapUserId ? { database: { generateId: ({ model }: { model: string }) =>
+        model === "user" ? options.bootstrapUserId! : randomUUID() } } : {}),
+    },
     // Registered only for a managed workspace instance: the plugin is what makes
     // `Open workspace` password-independent, and a control-plane instance that
     // was never handed a workspace key must not expose the exchange at all.
@@ -329,7 +334,10 @@ export function createBetterAuthInstance(
   // only managed HTTP-loopback requests through a cookie-compatible instance.
   const loopbackAuth = betterAuth({
     ...authConfig,
-    advanced: buildBetterAuthAdvancedOptions({ disableSecureCookies: true }),
+    advanced: {
+      ...authConfig.advanced,
+      ...buildBetterAuthAdvancedOptions({ disableSecureCookies: true }),
+    },
   });
   const cookieSecurityInput = {
     deploymentMode: config.deploymentMode,

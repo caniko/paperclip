@@ -35,7 +35,7 @@ function createFakeDb(options: {
       : options.settingsRow;
   const insertedTables: unknown[] = [];
   const deletedTables: unknown[] = [];
-  const selectWheres: Array<{ table: unknown; condition: unknown }> = [];
+  const selectWheres: Array<{ table: unknown; condition: unknown; lockMode?: string }> = [];
   const chain: Record<string, unknown> = {};
   chain.values = () => chain;
   chain.onConflictDoUpdate = () => chain;
@@ -43,7 +43,34 @@ function createFakeDb(options: {
   chain.where = () => chain;
   chain.returning = async () => [membershipRow];
   chain.then = (resolve: (v: unknown) => unknown) => Promise.resolve(undefined).then(resolve);
+  const selectChain = (allowFailure: boolean) => {
+    if (allowFailure && options.selectThrows) throw new Error("select unavailable");
+    return {
+      from: (table: unknown) => ({
+        where: (condition: unknown) => {
+          const read: (typeof selectWheres)[number] = { table, condition };
+          selectWheres.push(read);
+          const rows = table === instanceSettings && settingsRow ? [settingsRow]
+            : table === companyMemberships ? (options.membershipQueryRows ?? []) : [];
+          return {
+            then: (resolve: (v: unknown) => unknown) => Promise.resolve(rows).then(resolve),
+            for: async (lockMode: string) => {
+              read.lockMode = lockMode;
+              return table === companies ? [{ id: membershipRow.companyId }]
+                : table === companyMemberships ? [membershipRow] : rows;
+            },
+          };
+        },
+      }),
+    };
+  };
   const db = {
+    execute: async () => [{ isolation: "read committed" }],
+    transaction: async (callback: (tx: Db) => Promise<unknown>) => callback({ ...db,
+      // selectThrows models the auxiliary authorization/scope read failure;
+      // the newly fenced membership-write transaction remains operational.
+      select: () => selectChain(false),
+    } as unknown as Db),
     insert: (table: unknown) => {
       insertedTables.push(table);
       return chain;
@@ -52,25 +79,7 @@ function createFakeDb(options: {
       deletedTables.push(table);
       return chain;
     },
-    select: () => {
-      if (options.selectThrows) throw new Error("select unavailable");
-      return {
-        from: (table: unknown) => ({
-          where: (condition: unknown) => {
-            selectWheres.push({ table, condition });
-            const rows =
-              table === instanceSettings && settingsRow
-                ? [settingsRow]
-                : table === companyMemberships
-                  ? (options.membershipQueryRows ?? [])
-                  : [];
-            return {
-              then: (resolve: (v: unknown) => unknown) => Promise.resolve(rows).then(resolve),
-            };
-          },
-        }),
-      };
-    },
+    select: () => selectChain(true),
   } as unknown as Db;
   return { db, insertedTables, deletedTables, selectWheres };
 }
@@ -236,7 +245,7 @@ describe("resolveCloudTenantActor (shared-pool hardening)", () => {
     it("loads memberships with the session path's exact own-user active-status filter", async () => {
       const { db, selectWheres } = createFakeDb();
       await resolveCloudTenantActor(db, fakeReq(VALID_HEADERS));
-      const membershipSelects = selectWheres.filter((entry) => entry.table === companyMemberships);
+      const membershipSelects = selectWheres.filter((entry) => entry.table === companyMemberships && !entry.lockMode);
       expect(membershipSelects).toHaveLength(1);
       // Rows for other users and rows in any non-active status are excluded
       // by the query itself: the filter binds exactly this user id and the
@@ -267,6 +276,7 @@ describe("resolveCloudTenantActor (shared-pool hardening)", () => {
       const actor = await resolveCloudTenantActor(db, fakeReq(VALID_HEADERS));
       expect(actor!.isInstanceAdmin).toBe(true);
       expect(actor!.source).toBe("cloud_tenant");
+      expect(actor!.cloudStackRole).toBe("owner");
       // Elevation is computed, never persisted: no instance_user_roles insert,
       // and the stale-row purge still runs on every authentication.
       expect(insertedTables).not.toContain(instanceUserRoles);
@@ -294,6 +304,7 @@ describe("resolveCloudTenantActor (shared-pool hardening)", () => {
         );
         expect(actor).not.toBeNull();
         expect(actor!.isInstanceAdmin).toBe(false);
+        expect(actor!.cloudStackRole).toBe(stackRole);
       },
     );
 

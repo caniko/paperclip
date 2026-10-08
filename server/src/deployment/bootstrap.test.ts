@@ -1,6 +1,7 @@
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { authAccounts, authSessions, authUsers, instanceUserRoles, createDb, startEmbeddedPostgresTestDatabase } from "@paperclipai/db";
@@ -30,6 +31,29 @@ describe("pre-listen operator bootstrap", () => {
   });
   const snapshot = async () => ({ users: await db.select().from(authUsers), accounts: await db.select().from(authAccounts),
     roles: await db.select().from(instanceUserRoles), sessions: await db.select().from(authSessions) });
+
+  it("keeps the reserved fresh actor ID through managed HTTP-loopback bootstrap", async () => {
+    const isolated = await startEmbeddedPostgresTestDatabase("paperclip-bootstrap-managed-loopback-");
+    const isolatedDb = createDb(isolated.connectionString);
+    const previousPublicUrl = process.env.PAPERCLIP_PUBLIC_URL;
+    const previousManagedUrl = process.env.PAPERCLIP_MANAGED_RUNTIME_PUBLIC_URL;
+    process.env.PAPERCLIP_PUBLIC_URL = "https://fixture-paperclip.example.test";
+    process.env.PAPERCLIP_MANAGED_RUNTIME_PUBLIC_URL = "https://fixture-runtime.example.test";
+    try {
+      const reservedId = randomUUID();
+      const loopbackConfig = { ...config, authBaseUrlMode: "auto" as const, authPublicBaseUrl: undefined };
+      expect(await bootstrapOperator(isolatedDb, loopbackConfig, input, true, reservedId)).toBe(reservedId);
+      expect((await isolatedDb.select().from(authUsers)).map(user => user.id)).toEqual([reservedId]);
+      expect(await isolatedDb.select().from(instanceUserRoles)).toMatchObject([{ userId: reservedId, role: "instance_admin" }]);
+      expect(await isolatedDb.select().from(authSessions)).toEqual([]);
+    } finally {
+      if (previousPublicUrl === undefined) delete process.env.PAPERCLIP_PUBLIC_URL;
+      else process.env.PAPERCLIP_PUBLIC_URL = previousPublicUrl;
+      if (previousManagedUrl === undefined) delete process.env.PAPERCLIP_MANAGED_RUNTIME_PUBLIC_URL;
+      else process.env.PAPERCLIP_MANAGED_RUNTIME_PUBLIC_URL = previousManagedUrl;
+      await isolated.cleanup();
+    }
+  }, 30_000);
 
   it("rolls back account creation if the administrator claim fails", async () => {
     await db.execute(sql`create function fail_bootstrap_claim() returns trigger language plpgsql as $$ begin raise exception 'injected claim failure'; end; $$`);

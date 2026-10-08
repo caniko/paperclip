@@ -1,4 +1,5 @@
 import { subscribeAllCompanyLiveEvents } from "./services/live-events.js";
+import { ensureLocalBoardCompanyMembership } from "./services/user-company-access-lock.js";
 import { chatCompletionDeliveryService } from "./services/chat-completion-delivery.js";
 /// <reference path="./types/express.d.ts" />
 // Kicks off the OTel bootstrap as early as possible (no-op unless
@@ -391,25 +392,7 @@ async function startServerWithDatabaseTeardown(
   
     const companyRows = await db.select({ id: companies.id }).from(companies);
     for (const company of companyRows) {
-      const membership = await db
-        .select({ id: companyMemberships.id })
-        .from(companyMemberships)
-        .where(
-          and(
-            eq(companyMemberships.companyId, company.id),
-            eq(companyMemberships.principalType, "user"),
-            eq(companyMemberships.principalId, LOCAL_BOARD_USER_ID),
-          ),
-        )
-        .then((rows: Array<{ id: string }>) => rows[0] ?? null);
-      if (membership) continue;
-      await db.insert(companyMemberships).values({
-        companyId: company.id,
-        principalType: "user",
-        principalId: LOCAL_BOARD_USER_ID,
-        status: "active",
-        membershipRole: "owner",
-      });
+      await ensureLocalBoardCompanyMembership(db, company.id, LOCAL_BOARD_USER_ID);
     }
   }
   

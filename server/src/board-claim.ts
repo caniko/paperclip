@@ -4,6 +4,7 @@ import type { Db } from "@paperclipai/db";
 import { companies, companyMemberships, instanceUserRoles } from "@paperclipai/db";
 import type { DeploymentMode } from "@paperclipai/shared";
 import { ensureHumanRoleDefaultGrants } from "./services/principal-access-compatibility.js";
+import { lockUserCompanyAccess } from "./services/user-company-access-lock.js";
 
 const LOCAL_BOARD_USER_ID = "local-board";
 const CLAIM_TTL_MS = 1000 * 60 * 60 * 24;
@@ -90,8 +91,9 @@ export async function claimBoardOwnership(
   const status = getChallengeStatus(opts.token, opts.code);
   if (status !== "available") return { status };
 
-  const claimedCompanyIds: string[] = [];
   await db.transaction(async (tx) => {
+    await lockUserCompanyAccess(tx, opts.userId);
+    const allCompanies = await tx.select({ id: companies.id }).from(companies).orderBy(companies.id).for("key share");
     const existingTargetAdmin = await tx
       .select({ id: instanceUserRoles.id })
       .from(instanceUserRoles)
@@ -108,9 +110,7 @@ export async function claimBoardOwnership(
       .delete(instanceUserRoles)
       .where(and(eq(instanceUserRoles.userId, LOCAL_BOARD_USER_ID), eq(instanceUserRoles.role, "instance_admin")));
 
-    const allCompanies = await tx.select({ id: companies.id }).from(companies);
     for (const company of allCompanies) {
-      claimedCompanyIds.push(company.id);
       const existing = await tx
         .select({ id: companyMemberships.id, status: companyMemberships.status })
         .from(companyMemberships)
@@ -131,26 +131,17 @@ export async function claimBoardOwnership(
           status: "active",
           membershipRole: "owner",
         });
-        continue;
-      }
-
-      if (existing.status !== "active") {
+      } else if (existing.status !== "active") {
         await tx
           .update(companyMemberships)
           .set({ status: "active", membershipRole: "owner", updatedAt: new Date() })
           .where(eq(companyMemberships.id, existing.id));
       }
+      await ensureHumanRoleDefaultGrants(tx as unknown as Db, {
+        companyId: company.id, principalId: opts.userId, membershipRole: "owner", grantedByUserId: opts.userId,
+      });
     }
-  });
-
-  for (const companyId of claimedCompanyIds) {
-    await ensureHumanRoleDefaultGrants(db, {
-      companyId,
-      principalId: opts.userId,
-      membershipRole: "owner",
-      grantedByUserId: opts.userId,
-    });
-  }
+  }, { isolationLevel: "read committed" });
 
   if (activeChallenge && activeChallenge.token === opts.token) {
     activeChallenge.claimedAt = new Date();

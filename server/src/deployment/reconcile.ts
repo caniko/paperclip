@@ -22,6 +22,7 @@ import { readCredential, type DeploymentDescriptor } from "./runtime.js";
 import type { Config } from "../config.js";
 import { verifyLocalEncryptedMaterials } from "../secrets/local-encrypted-provider.js";
 import { mergeProjectWorkspaceRuntimeConfig } from "../services/project-workspace-runtime-config.js";
+import { lockUserCompanyAccess, lockCompanyAccessScope } from "../services/user-company-access-lock.js";
 
 const tables = { company: companies, project: projects, workspace: projectWorkspaces, agent: agents, routine: routines, schedule: routineTriggers, secret: companySecrets, taskBridge: agentApiKeys };
 type Kind = keyof typeof tables;
@@ -93,11 +94,9 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       throw new Error("Deployment owner changed; an explicit ownership handoff is required");
     }
     const owned = ledger.filter((b) => b.owner === m.owner);
-    if (options.apply && (Object.keys(m.projectWorkspaces).length || owned.some((b) => b.kind === "workspace"))) {
-      // Native primary selection updates sibling rows. Prevent a UI/API writer
-      // from inserting or changing a sibling between ownership validation and apply.
-      await tx.execute(sql`lock table project_workspaces in share row exclusive mode`);
-    }
+    const actorId = await bootstrapOperator(tx, options.config, options.descriptor.bootstrap, false);
+    const reservedActorId = options.descriptor.bootstrap ? actorId ?? randomUUID() : null;
+    if (options.apply && reservedActorId) await lockUserCompanyAccess(transaction, reservedActorId);
     const bindings = new Map(owned.map((b) => [`${b.kind}/${b.key}`, b]));
     const ids = new Map<string, string>();
     const getId = (kind: Kind, key: string, adopt?: string) => {
@@ -109,7 +108,6 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     for (const [key, p] of Object.entries(m.projects)) getId("project", key, p.adopt);
     for (const [key, w] of Object.entries(m.projectWorkspaces)) getId("workspace", key, w.adopt);
     for (const [key, a] of Object.entries(m.agents)) getId("agent", key, a.adopt);
-    const actorId = await bootstrapOperator(tx, options.config, options.descriptor.bootstrap, false);
     if (Object.keys(m.routines).length && !actorId && !options.descriptor.bootstrap) throw new Error("Declared routines require an operator bootstrap identity");
     stage = "resource-preflight";
     const actor = { userId: actorId };
@@ -200,6 +198,18 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         update: async () => { throw new Error("Task bridge rotation requires a new declaration key and removal of the old key"); } });
     }
     const differences: DeploymentDifference[] = [];
+    if (options.apply) {
+      // Cover all existing declared and removed scopes before any child/table
+      // locks. Missing generated company IDs are protected by insertion itself.
+      const scopes = [...new Set([...specs.map(spec => spec.companyId ?? spec.id),
+        ...owned.map(binding => binding.companyId ?? binding.resourceId)])].sort();
+      for (const companyId of scopes) await lockCompanyAccessScope(transaction, companyId);
+      if (Object.keys(m.projectWorkspaces).length || owned.some(binding => binding.kind === "workspace")) {
+        // Native primary selection updates siblings; retain its table barrier
+        // after the user and company barriers, before ownership validation.
+        await tx.execute(sql`lock table project_workspaces in share row exclusive mode`);
+      }
+    }
     if (!identity) differences.push({ kind: "instance", key: options.descriptor.instance, action: "create", fields: ["instance"] });
     else if (options.singleOwner && !identity.general.owner) {
       differences.push({ kind: "instance", key: options.descriptor.instance, action: "update", fields: ["owner"] });
@@ -297,7 +307,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         await tx.update(instanceSettings).set({ general: { ...identity.general, owner: m.owner } })
           .where(eq(instanceSettings.id, identity.id));
       }
-      actor.userId = await bootstrapOperator(tx, options.config, options.descriptor.bootstrap, true);
+      actor.userId = await bootstrapOperator(tx, options.config, options.descriptor.bootstrap, true, reservedActorId ?? undefined);
       stage = "resource-apply";
       for (const spec of specs) {
         if (!actions.has(spec)) continue;

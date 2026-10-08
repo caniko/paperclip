@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { lockCompanyAccessScope, lockUserCompanyAccess } from "../services/user-company-access-lock.js";
 import type { Request, RequestHandler } from "express";
 import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -62,7 +63,7 @@ function pruneCloudTenantWriteDebounce(
 }
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
-import { forbidden, unauthorized, unprocessable } from "../errors.js";
+import { conflict, forbidden, unauthorized, unprocessable } from "../errors.js";
 
 export { isCloudManagedInstance } from "../services/cloud-instance.js";
 import { cloudTenantPrimaryCompanyId } from "../services/cloud-instance.js";
@@ -648,44 +649,38 @@ async function resolveCloudTenantActorOnce(
     await repairCloudTenantCompanyProvisionDefaults(db, { companyId, stackId, now });
   }
 
-  effectiveMembership = shouldSync ? await db
-    .insert(companyMemberships)
-    .values({
-      companyId,
-      principalType: "user",
-      principalId: userId,
-      status: "active",
-      membershipRole,
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: [
-        companyMemberships.companyId,
-        companyMemberships.principalType,
-        companyMemberships.principalId,
-      ],
-      set: {
-        status: "active",
-        membershipRole,
-        updatedAt: now,
-      },
-    })
-    .returning()
-    .then((rows) => rows[0] ?? {
-      companyId,
-      membershipRole,
-      status: "active",
-    }) : { companyId, membershipRole, status: "active" as const };
+  if (shouldSync) {
+    effectiveMembership = await db.transaction(async (tx) => {
+      await lockUserCompanyAccess(tx, userId);
+      if (!(await lockCompanyAccessScope(tx, companyId))) throw conflict("Company access changed; refresh and retry");
+      const membership = await tx
+        .insert(companyMemberships)
+        .values({
+          companyId,
+          principalType: "user",
+          principalId: userId,
+          status: "active",
+          membershipRole,
+          updatedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: [companyMemberships.companyId, companyMemberships.principalType, companyMemberships.principalId],
+          set: { status: "active", membershipRole, updatedAt: now },
+        })
+        .returning()
+        .then((rows) => rows[0] ?? { companyId, membershipRole, status: "active" });
 
-  // Without instance-admin elevation, cloud tenant users are authorized purely
-  // through company-scoped permission grants — seed the same role defaults the
-  // regular membership flows create.
-  if (shouldSync) await ensureHumanRoleDefaultGrants(db, {
-    companyId,
-    principalId: userId,
-    membershipRole: effectiveMembership.membershipRole ?? membershipRole,
-    grantedByUserId: null,
-  });
+      // Publish role defaults in the membership transaction, before releasing
+      // the fence to a concurrent exact-set removal.
+      await ensureHumanRoleDefaultGrants(tx as unknown as Db, {
+        companyId,
+        principalId: userId,
+        membershipRole: membership.membershipRole ?? membershipRole,
+        grantedByUserId: null,
+      });
+      return membership;
+    }, { isolationLevel: "read committed" });
+  }
   if (shouldSync) {
     cloudTenantWriteDebounce.delete(userId);
     cloudTenantWriteDebounce.set(userId, { fingerprint: syncFingerprint, syncedAt: Date.now() });
@@ -734,6 +729,7 @@ async function resolveCloudTenantActorOnce(
     // company-scoped. Turning the flag off de-elevates on the next request —
     // there is no role row to clean up.
     isInstanceAdmin: await resolveOwnerInstanceAdmin(db, stackRole),
+    cloudStackRole: stackRole,
     source: "cloud_tenant",
   };
 }

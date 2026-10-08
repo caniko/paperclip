@@ -2,6 +2,7 @@ import { and, eq, inArray, ne, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   companyMemberships,
+  companies,
   companySecretBindings,
   companySecrets,
   connectionGrantDelegations,
@@ -19,6 +20,7 @@ import { conflict } from "../errors.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
 import { authorizationService, type AuthorizationActor, type AuthorizationResource } from "./authorization.js";
 import { ensureHumanRoleDefaultGrants } from "./principal-access-compatibility.js";
+import { lockCompanyAccessScope, lockUserCompanyAccess } from "./user-company-access-lock.js";
 
 type MembershipRow = typeof companyMemberships.$inferSelect;
 type GrantInput = {
@@ -35,6 +37,13 @@ type MemberArchiveInput = {
 
 export function accessService(db: Db) {
   const authorization = authorizationService(db);
+
+  function assertMembershipIdentity(identity: MembershipRow, current: MembershipRow) {
+    if (identity.companyId !== current.companyId || identity.principalType !== current.principalType
+      || identity.principalId !== current.principalId) {
+      throw conflict("Company access changed; refresh and retry");
+    }
+  }
 
   async function sweepMemberConnectionAccess(
     tx: Parameters<Parameters<Db["transaction"]>[0]>[0],
@@ -452,6 +461,12 @@ export function accessService(db: Db) {
     if (!member) return null;
 
     await db.transaction(async (tx) => {
+      if (member.principalType === "user") await lockUserCompanyAccess(tx, member.principalId);
+      if (!(await lockCompanyAccessScope(tx, companyId))) throw conflict("Company no longer exists");
+      const [current] = await tx.select().from(companyMemberships).where(eq(companyMemberships.id, memberId)).for("update");
+      if (!current) throw conflict("Company access changed; refresh and retry");
+      assertMembershipIdentity(member, current);
+      if (current.status === "archived") throw conflict("Company access changed; refresh and retry");
       await tx
         .delete(principalPermissionGrants)
         .where(
@@ -490,7 +505,11 @@ export function accessService(db: Db) {
     },
     grantedByUserId: string | null,
   ) {
+    const identity = await getMemberById(companyId, memberId);
+    if (!identity) return null;
     return db.transaction(async (tx) => {
+      if (identity.principalType === "user") await lockUserCompanyAccess(tx, identity.principalId);
+      if (!(await lockCompanyAccessScope(tx, companyId))) return null;
       await tx.execute(sql`
         select ${companyMemberships.id}
         from ${companyMemberships}
@@ -508,6 +527,8 @@ export function accessService(db: Db) {
         .for("update")
         .then((rows) => rows[0] ?? null);
       if (!existing) return null;
+
+      assertMembershipIdentity(identity, existing);
 
       const nextMembershipRole =
         data.membershipRole !== undefined ? data.membershipRole : existing.membershipRole;
@@ -643,7 +664,11 @@ export function accessService(db: Db) {
   }
 
   async function archiveMember(companyId: string, memberId: string, input: MemberArchiveInput = {}) {
+    const identity = await getMemberById(companyId, memberId);
+    if (!identity) return null;
     return db.transaction(async (tx) => {
+      if (identity.principalType === "user") await lockUserCompanyAccess(tx, identity.principalId);
+      if (!(await lockCompanyAccessScope(tx, companyId))) return null;
       await tx.execute(sql`
         select ${companyMemberships.id}
         from ${companyMemberships}
@@ -661,6 +686,7 @@ export function accessService(db: Db) {
         .for("update")
         .then((rows) => rows[0] ?? null);
       if (!existing) return null;
+      assertMembershipIdentity(identity, existing);
       if (existing.principalType !== "user") {
         throw conflict("Only human company members can be archived");
       }
@@ -778,13 +804,29 @@ export function accessService(db: Db) {
     const target = new Set(companyIds);
 
     await db.transaction(async (tx) => {
+      await lockUserCompanyAccess(tx, userId);
+      const scope = await tx.select({ companyId: companyMemberships.companyId }).from(companyMemberships)
+        .where(and(eq(companyMemberships.principalType, "user"), eq(companyMemberships.principalId, userId)));
+      const companyScope = [...new Set([...target, ...scope.map(row => row.companyId)])].sort();
+      for (const companyId of companyScope) {
+        if (!(await lockCompanyAccessScope(tx, companyId))) throw conflict("Company access changed; refresh and retry");
+      }
+      // Other trusted producers can add a membership while discovery is waiting
+      // on a parent. Reread the complete set without locking unknown children;
+      // expanded authority requires fresh parent-first discovery, never omission.
+      const currentScope = await tx.select({ companyId: companyMemberships.companyId }).from(companyMemberships)
+        .where(and(eq(companyMemberships.principalType, "user"), eq(companyMemberships.principalId, userId)));
+      if (currentScope.some(row => !companyScope.includes(row.companyId))) {
+        throw conflict("Company access changed; refresh and retry");
+      }
       // Serialize every company-access removal/reactivation with personal OAuth
       // completion, which locks the same membership row before writing secrets.
-      const existing = await tx
+      const existing = companyScope.length ? await tx
         .select()
         .from(companyMemberships)
-        .where(and(eq(companyMemberships.principalType, "user"), eq(companyMemberships.principalId, userId)))
-        .for("update");
+        .where(and(eq(companyMemberships.principalType, "user"), eq(companyMemberships.principalId, userId),
+          inArray(companyMemberships.companyId, companyScope)))
+        .for("update") : [];
       const existingByCompany = new Map(existing.map((row) => [row.companyId, row]));
       const toArchive = existing.filter((row) => !target.has(row.companyId) && row.status !== "archived");
       if (toArchive.length > 0 && options.actorUserId && options.actorUserId === userId) {
@@ -863,7 +905,7 @@ export function accessService(db: Db) {
           membershipRole: "operator",
         });
       }
-    });
+    }, { isolationLevel: "read committed" });
 
     return listUserCompanyAccess(userId);
   }
@@ -875,10 +917,14 @@ export function accessService(db: Db) {
     membershipRole: string | null = "member",
     status: "pending" | "active" | "suspended" = "active",
   ) {
-    const existing = await getMembership(companyId, principalType, principalId);
-    if (existing) {
-      if (existing.status !== status || existing.membershipRole !== membershipRole) {
-        const updated = await db
+    return db.transaction(async tx => {
+      if (principalType === "user") await lockUserCompanyAccess(tx, principalId);
+      if (!(await lockCompanyAccessScope(tx, companyId))) throw conflict("Company access changed; refresh and retry");
+      const [existing] = await tx.select().from(companyMemberships).where(and(eq(companyMemberships.companyId, companyId),
+        eq(companyMemberships.principalType, principalType), eq(companyMemberships.principalId, principalId))).for("update");
+      if (existing) {
+        if (existing.status === status && existing.membershipRole === membershipRole) return existing;
+        const updated = await tx
           .update(companyMemberships)
           .set({ status, membershipRole, updatedAt: new Date() })
           .where(eq(companyMemberships.id, existing.id))
@@ -886,20 +932,10 @@ export function accessService(db: Db) {
           .then((rows) => rows[0] ?? null);
         return updated ?? existing;
       }
-      return existing;
-    }
 
-    return db
-      .insert(companyMemberships)
-      .values({
-        companyId,
-        principalType,
-        principalId,
-        status,
-        membershipRole,
-      })
-      .returning()
-      .then((rows) => rows[0]);
+      return tx.insert(companyMemberships).values({ companyId, principalType, principalId, status, membershipRole })
+        .returning().then(rows => rows[0]);
+    });
   }
 
   async function setPrincipalGrants(
@@ -910,6 +946,15 @@ export function accessService(db: Db) {
     grantedByUserId: string | null,
   ) {
     await db.transaction(async (tx) => {
+      if (principalType === "user") await lockUserCompanyAccess(tx, principalId);
+      if (!(await lockCompanyAccessScope(tx, companyId))) throw conflict("Company no longer exists");
+      if (principalType === "user") {
+        const [membership] = await tx.select().from(companyMemberships).where(and(
+          eq(companyMemberships.companyId, companyId), eq(companyMemberships.principalType, "user"),
+          eq(companyMemberships.principalId, principalId),
+        )).for("update");
+        if (!membership || membership.status === "archived") throw conflict("Company access changed; refresh and retry");
+      }
       await tx
         .delete(principalPermissionGrants)
         .where(
@@ -938,18 +983,21 @@ export function accessService(db: Db) {
   async function copyActiveUserMemberships(sourceCompanyId: string, targetCompanyId: string) {
     const sourceMemberships = await listActiveUserMemberships(sourceCompanyId);
     for (const membership of sourceMemberships) {
-      await ensureMembership(
-        targetCompanyId,
-        "user",
-        membership.principalId,
-        membership.membershipRole,
-        "active",
-      );
-      await ensureHumanRoleDefaultGrants(db, {
-        companyId: targetCompanyId,
-        principalId: membership.principalId,
-        membershipRole: membership.membershipRole,
-        grantedByUserId: null,
+      await db.transaction(async tx => {
+        await lockUserCompanyAccess(tx, membership.principalId);
+        for (const companyId of [...new Set([sourceCompanyId, targetCompanyId])].sort()) {
+          if (!(await lockCompanyAccessScope(tx, companyId))) throw conflict("Company access changed; refresh and retry");
+        }
+        const [current] = await tx.select().from(companyMemberships).where(eq(companyMemberships.id, membership.id)).for("share");
+        if (!current) return;
+        assertMembershipIdentity(membership, current);
+        if (current.status !== "active") return;
+        await accessService(tx as unknown as Db).ensureMembership(targetCompanyId, "user", current.principalId,
+          current.membershipRole, "active");
+        await ensureHumanRoleDefaultGrants(tx as unknown as Db, {
+          companyId: targetCompanyId, principalId: current.principalId,
+          membershipRole: current.membershipRole, grantedByUserId: null,
+        });
       });
     }
     return sourceMemberships;
@@ -996,56 +1044,44 @@ export function accessService(db: Db) {
     grantedByUserId: string | null,
     scope: Record<string, unknown> | null = null,
   ) {
-    if (!enabled) {
-      await db
-        .delete(principalPermissionGrants)
-        .where(
-          and(
+    await db.transaction(async (tx) => {
+      if (principalType === "user") await lockUserCompanyAccess(tx, principalId);
+      if (!(await lockCompanyAccessScope(tx, companyId))) throw conflict("Company no longer exists");
+      if (!enabled) {
+        await tx
+          .delete(principalPermissionGrants)
+          .where(and(
             eq(principalPermissionGrants.companyId, companyId),
             eq(principalPermissionGrants.principalType, principalType),
             eq(principalPermissionGrants.principalId, principalId),
             eq(principalPermissionGrants.permissionKey, permissionKey),
-          ),
-        );
-      return;
-    }
+          ));
+        return;
+      }
 
-    await ensureMembership(companyId, principalType, principalId, "member", "active");
-
-    const existing = await db
-      .select()
-      .from(principalPermissionGrants)
-      .where(
-        and(
+      await accessService(tx as unknown as Db).ensureMembership(companyId, principalType, principalId, "member", "active");
+      const existing = await tx
+        .select()
+        .from(principalPermissionGrants)
+        .where(and(
           eq(principalPermissionGrants.companyId, companyId),
           eq(principalPermissionGrants.principalType, principalType),
           eq(principalPermissionGrants.principalId, principalId),
           eq(principalPermissionGrants.permissionKey, permissionKey),
-        ),
-      )
-      .then((rows) => rows[0] ?? null);
+        ))
+        .then((rows) => rows[0] ?? null);
 
-    if (existing) {
-      await db
-        .update(principalPermissionGrants)
-        .set({
-          scope,
-          grantedByUserId,
-          updatedAt: new Date(),
-        })
-        .where(eq(principalPermissionGrants.id, existing.id));
-      return;
-    }
-
-    await db.insert(principalPermissionGrants).values({
-      companyId,
-      principalType,
-      principalId,
-      permissionKey,
-      scope,
-      grantedByUserId,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      if (existing) {
+        await tx
+          .update(principalPermissionGrants)
+          .set({ scope, grantedByUserId, updatedAt: new Date() })
+          .where(eq(principalPermissionGrants.id, existing.id));
+        return;
+      }
+      await tx.insert(principalPermissionGrants).values({
+        companyId, principalType, principalId, permissionKey, scope, grantedByUserId,
+        createdAt: new Date(), updatedAt: new Date(),
+      });
     });
   }
 
@@ -1057,7 +1093,11 @@ export function accessService(db: Db) {
       status?: "pending" | "active" | "suspended";
     },
   ) {
+    const identity = await getMemberById(companyId, memberId);
+    if (!identity) return null;
     return db.transaction(async (tx) => {
+      if (identity.principalType === "user") await lockUserCompanyAccess(tx, identity.principalId);
+      if (!(await lockCompanyAccessScope(tx, companyId))) return null;
       await tx.execute(sql`
         select ${companyMemberships.id}
         from ${companyMemberships}
@@ -1075,6 +1115,7 @@ export function accessService(db: Db) {
         .for("update")
         .then((rows) => rows[0] ?? null);
       if (!existing) return null;
+      assertMembershipIdentity(identity, existing);
 
       const nextMembershipRole =
         data.membershipRole !== undefined ? data.membershipRole : existing.membershipRole;

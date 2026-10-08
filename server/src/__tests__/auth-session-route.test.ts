@@ -31,6 +31,28 @@ function createDb() {
   } as any;
 }
 
+// These route tests model header/session projection. Real lock contention is
+// covered by user-company-access-writers.test.ts; expose the transaction and
+// locked-row query shapes without changing the ordinary membership/name reads.
+function addCloudWriteTransaction(db: any, membership: () => {
+  companyId: string;
+  membershipRole: string;
+  status: string;
+}) {
+  db.execute = vi.fn(async () => [{ isolation: "read committed" }]);
+  db.transaction = vi.fn(async (run: (tx: typeof db) => Promise<unknown>) => run({
+    ...db,
+    select: (...args: unknown[]) => ({
+      from: (table: unknown) => ({
+        where: (condition: unknown) => Object.assign(db.select(...args).from(table).where(condition), {
+          for: async () => table === companies ? [{ id: membership().companyId }]
+            : table === companyMemberships ? [membership()] : [],
+        }),
+      }),
+    }),
+  }));
+}
+
 describe("actorMiddleware authenticated session profile", () => {
   const originalCloudTenantToken = process.env.PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN;
 
@@ -102,6 +124,11 @@ describe("actorMiddleware authenticated session profile", () => {
       delete: vi.fn(() => ({ where: () => Promise.resolve(undefined) })),
       select: vi.fn(() => createSelectChain([])),
     } as any;
+    addCloudWriteTransaction(db, () => ({
+      companyId: inserts[1]?.values.id as string,
+      membershipRole: "owner",
+      status: "active",
+    }));
     const app = express();
     app.use(
       actorMiddleware(db, {
@@ -186,6 +213,7 @@ describe("actorMiddleware authenticated session profile", () => {
       insert: vi.fn(() => insertChain),
       delete: vi.fn(() => ({ where: () => Promise.resolve(undefined) })),
     } as any;
+    addCloudWriteTransaction(db, () => ({ companyId: "company-1", membershipRole: "member", status: "active" }));
     const app = express();
     app.use(
       actorMiddleware(db, {
@@ -280,7 +308,7 @@ describe("actorMiddleware authenticated session profile", () => {
       })),
       delete: vi.fn(() => ({ where: () => Promise.resolve(undefined) })),
     } as any;
-    db.transaction = vi.fn(async (run: (tx: typeof db) => Promise<void>) => run(db));
+    addCloudWriteTransaction(db, () => ({ companyId: "company-1", membershipRole: "owner", status: "active" }));
     const app = express();
     app.use(
       actorMiddleware(db, {
@@ -362,6 +390,7 @@ describe("actorMiddleware authenticated session profile", () => {
         },
       })),
     } as any;
+    addCloudWriteTransaction(db, () => ({ companyId: "company-1", membershipRole: "owner", status: "active" }));
     const app = express();
     app.use(
       actorMiddleware(db, {

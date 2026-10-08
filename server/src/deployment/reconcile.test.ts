@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
-import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
+import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, authAccounts, authUsers, instanceUserRoles, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
 import { reconcileDeployment } from "./reconcile.js";
 import { loadConfig } from "../config.js";
 import { secretService } from "../services/secrets.js";
@@ -134,6 +134,93 @@ it("preserves existing and later operator membership decisions for adopted compa
   } } })).bindings).toEqual(first.bindings);
   expect(await memberships()).toEqual([]);
 });
+
+it("fences the reconciliation actor before company and workspace ownership", async () => {
+  const [account] = await db.select().from(authAccounts);
+  const [company] = await db.insert(companies).values({ name: "Reconciliation access fence", issuePrefix: "RCAF" }).returning();
+  let ready!: (pid: number) => void, release!: () => void;
+  const held = new Promise<number>(resolve => { ready = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const blocker = db.transaction(async tx => {
+    const [backend] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${'paperclip.user-company-access:' + account.userId}, 0))`);
+    ready(backend.pid);
+    await gate;
+  });
+  const pid = await held;
+  const apply = reconcile({ version: 1, owner: "reconciliation-access-fence", companies: {
+    existing: { adopt: company.id, fields: { name: company.name } },
+  } });
+  void apply.catch(() => undefined);
+  try {
+    let waiting = false;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const [waiter] = await db.execute(sql`select pid from pg_stat_activity where ${pid} = any(pg_blocking_pids(pid)) limit 1`);
+      if (waiter) { waiting = true; break; }
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    expect(waiting).toBe(true);
+    await db.transaction(async tx => {
+      await tx.select().from(companies).where(eq(companies.id, company.id)).for("update", { noWait: true });
+      await tx.execute(sql`lock table project_workspaces in share row exclusive mode nowait`);
+      await tx.execute(sql`lock table instance_user_roles in share row exclusive mode nowait`);
+    });
+    expect(await db.select().from(companyMemberships).where(eq(companyMemberships.companyId, company.id))).toEqual([]);
+    release();
+    await blocker;
+    await apply;
+    expect(await db.select().from(companyMemberships).where(eq(companyMemberships.companyId, company.id)))
+      .toMatchObject([{ principalId: account.userId, membershipRole: "owner", status: "active" }]);
+  } finally {
+    release();
+    await Promise.allSettled([blocker, apply]);
+  }
+}, 15_000);
+
+it("rejects a bootstrap account appearing after reconciliation preflight instead of switching user fences", async () => {
+  const isolated = await startEmbeddedPostgresTestDatabase("paperclip-reconcile-bootstrap-race-");
+  const isolatedDb = createDb(isolated.connectionString);
+  let ready!: (pid: number) => void, release!: () => void;
+  const held = new Promise<number>(resolve => { ready = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const blocker = isolatedDb.transaction(async tx => {
+    const [backend] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+    await tx.execute(sql`lock table project_workspaces in share row exclusive mode`);
+    ready(backend.pid);
+    await gate;
+  });
+  const pid = await held;
+  const racedUserId = "raced-reconciliation-operator";
+  const raw = { version: 1, owner: "bootstrap-race", companies: { example: { fields: { name: "Race company" } } },
+    projects: { main: { company: "example", fields: { name: "Race project" } } },
+    projectWorkspaces: { primary: { project: "main", fields: { name: "Primary", cwd: root, isPrimary: true } } } };
+  const apply = reconcileDeployment(isolatedDb, raw, { descriptor, config, apply: true, singleOwner: false });
+  void apply.catch(() => undefined);
+  try {
+    let waiting = false;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const [waiter] = await isolatedDb.execute(sql`select pid from pg_stat_activity where ${pid} = any(pg_blocking_pids(pid)) limit 1`);
+      if (waiter) { waiting = true; break; }
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    expect(waiting).toBe(true);
+    // This connection commits the account after the earlier preflight returned
+    // no actor. Apply must keep its reserved fresh identity and fail closed.
+    await isolatedDb.insert(authUsers).values({ id: racedUserId, email: descriptor.bootstrap!.email, name: "Raced operator",
+      emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
+    await isolatedDb.insert(instanceUserRoles).values({ userId: racedUserId, role: "instance_admin" });
+    release();
+    await blocker;
+    await expect(apply).rejects.toThrow("Bootstrap identity changed; retry preflight");
+    expect(await isolatedDb.select().from(companyMemberships)).toEqual([]);
+    expect(await isolatedDb.select().from(companies)).toEqual([]);
+    expect((await isolatedDb.select().from(authUsers)).map(user => user.id)).toEqual([racedUserId]);
+  } finally {
+    release();
+    await Promise.allSettled([blocker, apply]);
+    await isolated.cleanup();
+  }
+}, 30_000);
 
 it("rejects invalid references and ownership conflicts without partial writes", async () => {
   const before = await db.select().from(deploymentResources);

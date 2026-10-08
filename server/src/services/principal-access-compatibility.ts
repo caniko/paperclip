@@ -3,6 +3,7 @@ import type { Db } from "@paperclipai/db";
 import { agents, companyMemberships, principalPermissionGrants } from "@paperclipai/db";
 import type { PermissionKey, PrincipalType } from "@paperclipai/shared";
 import { grantsForHumanRole, normalizeHumanRole } from "./company-member-roles.js";
+import { lockCompanyAccessScope, lockUserCompanyAccess } from "./user-company-access-lock.js";
 
 type GrantInput = {
   permissionKey: PermissionKey;
@@ -63,13 +64,21 @@ export async function ensureHumanRoleDefaultGrants(
     grantedByUserId: string | null;
   },
 ): Promise<number> {
-  const role = normalizeHumanRole(input.membershipRole, "operator");
-  return insertMissingPrincipalGrants(db, {
-    companyId: input.companyId,
-    principalType: "user",
-    principalId: input.principalId,
-    grants: grantsForHumanRole(role),
-    grantedByUserId: input.grantedByUserId,
+  return db.transaction(async tx => {
+    await lockUserCompanyAccess(tx, input.principalId);
+    if (!(await lockCompanyAccessScope(tx, input.companyId))) return 0;
+    const [membership] = await tx.select().from(companyMemberships).where(and(
+      eq(companyMemberships.companyId, input.companyId), eq(companyMemberships.principalType, "user"),
+      eq(companyMemberships.principalId, input.principalId),
+    )).for("share");
+    // A delayed seed must neither recreate grants removed by an exact-set
+    // operation nor restore a role observed before the preceding writer.
+    if (!membership || membership.status !== "active") return 0;
+    const role = normalizeHumanRole(membership.membershipRole, "operator");
+    return insertMissingPrincipalGrants(tx as unknown as Db, {
+      companyId: input.companyId, principalType: "user", principalId: input.principalId,
+      grants: grantsForHumanRole(role), grantedByUserId: input.grantedByUserId,
+    });
   });
 }
 

@@ -88,6 +88,196 @@ describeEmbeddedPostgres("access service", () => {
     await tempDb?.cleanup();
   });
 
+  async function holdCompany(companyId: string) {
+    let ready!: (pid: number) => void, failed!: (error: unknown) => void, release!: () => void;
+    const held = new Promise<number>((resolve, reject) => { ready = resolve; failed = reject; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const done = db.transaction(async tx => {
+      const [backend] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+      await tx.select().from(companies).where(eq(companies.id, companyId)).for("update");
+      ready(backend.pid);
+      await gate;
+    });
+    void done.catch(failed);
+    return { pid: await held, release, done };
+  }
+
+  async function waitForAccessBlocker(pid: number) {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const [row] = await db.execute<{ pid: number }>(sql`select pid from pg_stat_activity
+        where datname = current_database() and wait_event_type = 'Lock' and ${pid} = any(pg_blocking_pids(pid)) limit 1`);
+      if (row) return row.pid;
+      await db.execute(sql`select pg_sleep(0.01)`);
+    }
+    throw new Error("Access operation never reached the company barrier");
+  }
+
+  async function holdUserAccess(userId: string) {
+    let ready!: (pid: number) => void, failed!: (error: unknown) => void, release!: () => void;
+    const held = new Promise<number>((resolve, reject) => { ready = resolve; failed = reject; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const done = db.transaction(async tx => {
+      const [backend] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${'paperclip.user-company-access:' + userId}, 0))`);
+      ready(backend.pid);
+      await gate;
+    });
+    void done.catch(failed);
+    return { pid: await held, release, done };
+  }
+
+  it.each(["ensure", "status", "status and grants", "archive"] as const)(
+    "fences the %s membership writer before acquiring its company parent", async operation => {
+      const { company } = await createCompanyWithOwner(db);
+      const userId = `writer-fence-${randomUUID()}`;
+      const [member] = await db.insert(companyMemberships).values({ companyId: company.id, principalType: "user",
+        principalId: userId, status: "active", membershipRole: "member" }).returning();
+      const access = accessService(db);
+      const blocker = await holdUserAccess(userId);
+      const write = operation === "ensure" ? access.ensureMembership(company.id, "user", userId, "member", "suspended")
+        : operation === "status" ? access.updateMember(company.id, member.id, { status: "suspended" })
+        : operation === "status and grants" ? access.updateMemberAndPermissions(company.id, member.id, { status: "suspended", grants: [] }, null)
+        : access.archiveMember(company.id, member.id);
+      void write.catch(() => undefined);
+      try {
+        await waitForAccessBlocker(blocker.pid);
+        // A waiting writer must hold no parent/child ownership ahead of the user
+        // fence. This independent connection can still take the deletion barrier.
+        await db.transaction(async tx => {
+          await tx.select().from(companies).where(eq(companies.id, company.id)).for("update", { noWait: true });
+        });
+        expect((await db.select().from(companyMemberships).where(eq(companyMemberships.id, member.id)))[0]).toEqual(member);
+        blocker.release();
+        await blocker.done;
+        await write;
+        expect((await db.select().from(companyMemberships).where(eq(companyMemberships.id, member.id)))[0].status)
+          .toBe(operation === "archive" ? "archived" : "suspended");
+      } finally {
+        blocker.release();
+        await Promise.allSettled([blocker.done, write]);
+      }
+    }, 10_000,
+  );
+
+  it.each(["repeatable read", "serializable"] as const)("rejects nested exact-set writes at %s isolation", async isolationLevel => {
+    const { company } = await createCompanyWithOwner(db);
+    const userId = `snapshot-fence-${randomUUID()}`;
+    await db.transaction(async tx => {
+      await expect(accessService(tx as unknown as ReturnType<typeof createDb>).setUserCompanyAccess(userId, [company.id]))
+        .rejects.toThrow("Company access requires READ COMMITTED isolation");
+    }, { isolationLevel });
+    expect(await db.select().from(companyMemberships).where(eq(companyMemberships.principalId, userId))).toEqual([]);
+  });
+
+  it("does not seed delayed human grants after an exact-set removal", async () => {
+    const { company } = await createCompanyWithOwner(db);
+    const userId = `delayed-seed-${randomUUID()}`;
+    const access = accessService(db);
+    await access.ensureMembership(company.id, "user", userId, "member");
+    await access.setUserCompanyAccess(userId, []);
+    await access.ensureRoleDefaultGrants(company.id, userId, "member", null);
+    expect(await db.select().from(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, userId))).toEqual([]);
+    await expect(access.setPrincipalGrants(company.id, "user", userId, [{ permissionKey: "agents:create" }], null))
+      .rejects.toThrow("Company access changed; refresh and retry");
+  });
+
+  it("keeps permission activation and grant publication inside the exact-set fence", async () => {
+    const { company } = await createCompanyWithOwner(db);
+    const userId = `permission-fence-${randomUUID()}`;
+    const gateUserId = `grant-gate-${randomUUID()}`;
+    // Pause an actual grant insertion after membership activation, on an
+    // independent PostgreSQL connection, to expose a post-commit seed window.
+    await db.execute(sql.raw(`create function paperclip_test_grant_gate() returns trigger language plpgsql as $$
+      begin
+        if NEW.principal_id = '${userId}' then
+          perform pg_advisory_xact_lock(hashtextextended('paperclip.user-company-access:${gateUserId}', 0));
+        end if;
+        return NEW;
+      end $$;
+      create trigger paperclip_test_grant_gate before insert on principal_permission_grants
+        for each row execute function paperclip_test_grant_gate();`));
+    const blocker = await holdUserAccess(gateUserId);
+    const access = accessService(db);
+    const publish = access.setPrincipalPermission(company.id, "user", userId, "agents:create", true, null, null);
+    void publish.catch(() => undefined);
+    let remove: Promise<unknown> | undefined;
+    try {
+      await waitForAccessBlocker(blocker.pid);
+      const [publisher] = await db.execute<{ pid: number }>(sql`select pid from pg_stat_activity where ${blocker.pid} = any(pg_blocking_pids(pid)) limit 1`);
+      remove = access.setUserCompanyAccess(userId, []);
+      void remove.catch(() => undefined);
+      await waitForAccessBlocker(publisher.pid);
+      blocker.release();
+      await blocker.done;
+      await publish;
+      await remove;
+      expect((await access.listUserCompanyAccess(userId))[0].status).toBe("archived");
+      expect(await db.select().from(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, userId))).toEqual([]);
+    } finally {
+      blocker.release();
+      await Promise.allSettled([blocker.done, publish, ...(remove ? [remove] : [])]);
+      await db.execute(sql`drop trigger paperclip_test_grant_gate on principal_permission_grants`);
+      await db.execute(sql`drop function paperclip_test_grant_gate()`);
+    }
+  }, 15_000);
+
+  it("serializes disjoint exact-set requests for the same user's company access", async () => {
+    const a = await createCompanyWithOwner(db), b = await createCompanyWithOwner(db), userId = `exact-set-${randomUUID()}`;
+    const hold = await holdCompany(a.company.id);
+    const access = accessService(db);
+    const first = access.setUserCompanyAccess(userId, [a.company.id]);
+    const firstOutcome = first.then(value => ({ value }), error => ({ error }));
+    let secondOutcome: Promise<unknown> | undefined;
+    try {
+      const firstPid = await waitForAccessBlocker(hold.pid);
+      let secondFinished = false;
+      secondOutcome = access.setUserCompanyAccess(userId, [b.company.id])
+        .then(value => { secondFinished = true; return { value }; }, error => { secondFinished = true; return { error }; });
+      // Before the fix the second request commits B while A is still paused.
+      // With serialization it blocks on A's per-user fence. Observe either
+      // outcome rather than assuming a sleep has placed the contender.
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const [waiting] = await db.execute(sql`select pid from pg_stat_activity where datname = current_database()
+          and wait_event_type = 'Lock' and ${firstPid} = any(pg_blocking_pids(pid)) limit 1`);
+        if (waiting || secondFinished) break;
+        if (attempt === 99) throw new Error("Second exact-set request neither blocked nor settled");
+        await db.execute(sql`select pg_sleep(0.01)`);
+      }
+    } finally {
+      hold.release();
+      await hold.done;
+      await firstOutcome;
+      await secondOutcome;
+    }
+    expect(await firstOutcome).toHaveProperty("value");
+    expect(await secondOutcome).toHaveProperty("value");
+    const active = (await access.listUserCompanyAccess(userId)).filter(row => row.status === "active");
+    expect(active).toHaveLength(1);
+    expect([a.company.id, b.company.id]).toContain(active[0].companyId);
+  });
+
+  it("denies expanded company scope discovered while an exact-set request waits", async () => {
+    const a = await createCompanyWithOwner(db), b = await createCompanyWithOwner(db), userId = `expanded-scope-${randomUUID()}`;
+    const hold = await holdCompany(a.company.id);
+    const access = accessService(db);
+    const outcome = access.setUserCompanyAccess(userId, [a.company.id]).then(value => ({ value }), error => ({ error }));
+    try {
+      await waitForAccessBlocker(hold.pid);
+      // An unfenced external producer expands the discovery set. Production
+      // writers share the user fence; the reread must still fail closed here.
+      await db.insert(companyMemberships).values({ companyId: b.company.id, principalType: "user", principalId: userId,
+        status: "active", membershipRole: "operator" });
+    } finally {
+      hold.release();
+      await hold.done;
+      await outcome;
+    }
+    expect(await outcome).toHaveProperty("error", expect.objectContaining({ message: expect.stringContaining("Company access changed") }));
+    const rows = await access.listUserCompanyAccess(userId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ companyId: b.company.id, status: "active" });
+  });
+
   it("rejects combined access updates that would demote the last active owner", async () => {
     const { company, owner } = await createCompanyWithOwner(db);
     const access = accessService(db);
