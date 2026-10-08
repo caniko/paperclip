@@ -37,7 +37,9 @@ def identity():
     require(os.environ["GITHUB_EVENT_NAME"] == "pull_request", "Qualification requires a PR event")
     pr = event["pull_request"]
     head = pr["head"]["sha"]
-    require(api(f"pulls/{pr['number']}")["head"]["sha"] == head, "PR head advanced; evidence is historical")
+    live = api(f"pulls/{pr['number']}")
+    require(live["head"]["sha"] == head, "PR head advanced; evidence is historical")
+    require(live["base"]["sha"] == pr["base"]["sha"], "PR base advanced; evidence is historical")
     require(int(os.environ["GITHUB_RUN_ATTEMPT"]) == 1, "Retries cannot qualify; publish a source successor")
     return {"repository": os.environ["GITHUB_REPOSITORY"], "pr": pr["number"], "head": head,
             "base": pr["base"]["sha"], "workflow_ref": os.environ["GITHUB_WORKFLOW_REF"],

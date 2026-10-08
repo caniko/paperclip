@@ -22,14 +22,14 @@ jobs:
       max-parallel: 2
       matrix:
         lane: [typecheck, tests, build, regression]
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - name: Check exact head and retention readiness
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           EVIDENCE="$RUNNER_TEMP/qualification"
           mkdir -p "$EVIDENCE"
@@ -118,14 +118,14 @@ jobs:
     name: Regression evidence / original F645 RED
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - name: Bind successor test source before baseline execution
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           EVIDENCE="$RUNNER_TEMP/qualification"
           mkdir -p "$EVIDENCE"
