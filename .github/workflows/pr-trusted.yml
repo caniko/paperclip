@@ -1317,8 +1317,6 @@ jobs:
       PAPERCLIP_E2E_SKIP_LLM: "true"
       PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"
       PAPERCLIP_STOP_REQUIRE_NATIVE: "true"
-      PAPERCLIP_STOP_FAKE_CODEX: ${{ github.workspace }}/packages/paperclip-runner/runner/target/debug/fake-codex-app-server
-      PAPERCLIP_RUNNER_BINARY: ${{ github.workspace }}/packages/paperclip-runner/runner/target/debug/paperclip-runnerd
       COMPOSER_STOP_HEAD_REVISION: ${{ github.event.pull_request.head.sha }}
     steps:
       - name: Checkout exact PR head
@@ -1386,7 +1384,16 @@ jobs:
 
       - name: Build real runner and deterministic provider
         working-directory: packages/paperclip-runner
-        run: cargo build --manifest-path runner/Cargo.toml --locked --bin paperclip-runnerd --bin fake-codex-app-server
+        run: |
+          cargo build --manifest-path runner/Cargo.toml --locked --bin paperclip-runnerd --bin fake-codex-app-server
+          node --input-type=module <<'JS'
+          import { appendFileSync } from "node:fs";
+          import { resolveCargoBinary, resolveCargoTargetDirectory } from "./scripts/cargo-artifacts.mjs";
+          const targetDirectory = resolveCargoTargetDirectory();
+          for (const [name, binary] of [["PAPERCLIP_RUNNER_BINARY", "paperclip-runnerd"], ["PAPERCLIP_STOP_FAKE_CODEX", "fake-codex-app-server"]]) {
+            appendFileSync(process.env.GITHUB_ENV, `${name}=${resolveCargoBinary({ binary, targetDirectory })}\n`);
+          }
+          JS
 
       - name: Verify runner Chrome
         run: google-chrome --version
