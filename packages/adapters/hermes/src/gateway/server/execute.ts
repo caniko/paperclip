@@ -1126,6 +1126,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     state.stopping = true;
     protocolStop.abort();
   };
+  // Persist the admitted root even when the first frame is rejected. Recovery
+  // must retain its empty cursor rather than depend on a later valid event.
+  try { await persistProgress(observer, state); }
+  catch (err) { onProtocolError(err instanceof Error ? err : new Error(String(err))); }
   const events = consumeEvents({
     ctx: observer,
     baseUrl,
