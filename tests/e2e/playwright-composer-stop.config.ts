@@ -8,6 +8,9 @@ import base from "./playwright.config";
 // protocol fixture. Never let this suite fall through to a logged-in real Codex.
 const fixture = process.env.PAPERCLIP_STOP_FAKE_CODEX;
 if (process.env.PAPERCLIP_STOP_REQUIRE_NATIVE === "true") {
+  const sourceRoot = process.env.PAPERCLIP_E2E_SOURCE_ROOT;
+  if (!sourceRoot || !path.isAbsolute(sourceRoot) || !fs.statSync(sourceRoot).isDirectory())
+    throw new Error("Mandatory native composer Stop requires an absolute candidate source root");
   for (const binary of [fixture, process.env.PAPERCLIP_RUNNER_BINARY]) {
     if (!binary || !path.isAbsolute(binary) || !fs.statSync(binary).isFile())
       throw new Error("Mandatory native composer Stop requires both absolute binary paths");
