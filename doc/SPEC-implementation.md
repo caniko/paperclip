@@ -1993,6 +1993,21 @@ finalization and tool/instruction teardown. Waiting is durable and states that n
 agent work has started. See [Existing filesystem workspaces](filesystem-workspaces.md)
 for supported preparation paths and remaining host/isolation qualification gates.
 
+### Ordered Hermes execution workers (2026-10-09)
+
+An optional `executorEndpoints` inventory selects the first authenticated Hermes
+worker that advertises live admission eligibility, available capacity and
+admission-bound durable recovery. Selection precedes the immutable admission
+checkpoint. All create replays, events and recovery stay on that endpoint with
+the original idempotency key and wire body. Issue and agent sessions persist
+endpoint affinity. An unavailable pinned session waits for its worker or an
+explicit session reset; it is not moved automatically. Run/none session strategies
+select fresh for each new run. Protected execution targets remain on the primary;
+the inventory grants no filesystem, collector or activation authority.
+
+See [Hermes executor routing](hermes-executor-routing.md) for configuration and
+worker draining requirements.
+
 ## GitHub-synced skill sources
 
 - Discovery supports opt-in `Accept: application/x-ndjson` on the existing discovery

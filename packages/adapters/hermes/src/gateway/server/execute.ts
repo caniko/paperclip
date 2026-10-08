@@ -31,6 +31,9 @@ import { bindSessionKey, requireWorkspaceCapability, resolveWorkspaceBinding, ty
 import { admitOwnedRun, waitForOwnedRun } from "./run-lifetime.js";
 import { executionCheckpoint, lineageStopSettled, settleOwnedAdmission } from "./recovery.js";
 import { requireManagedMcpCapability, resolveManagedMcp, type ManagedMcpManifest } from "./managed-mcp.js";
+import { selectExecutor } from "./executor-selection.js";
+import { buildHeaders, normalizeBaseUrl, parseHeaders } from "./http-config.js";
+export { buildHeaders, normalizeBaseUrl, parseHeaders } from "./http-config.js";
 
 type SessionKeyStrategy = "issue" | "agent" | "run" | "none";
 
@@ -74,14 +77,6 @@ type ExecutionState = {
 
 type TextRedactor = (value: string) => string;
 
-const CRITICAL_HEADERS = new Set([
-  "authorization",
-  "content-type",
-  "accept",
-  "idempotency-key",
-  "x-hermes-session-key",
-]);
-
 const SENSITIVE_KEY_PATTERN =
   /(^|[_-])(auth|authorization|token|secret|password|api[_-]?key|private[_-]?key)([_-]|$)/i;
 const BEARER_TOKEN_PATTERN = /Bearer\s+\S+/gi;
@@ -101,8 +96,6 @@ const TERMINAL_STATUSES = new Set([
 
 const FAILURE_STATUSES = new Set(["failed", "error"]);
 const CANCELLED_STATUSES = new Set(["cancelled", "canceled", "stopped", "interrupted"]);
-const DEFAULT_HERMES_DASHBOARD_PORT = "9119";
-const HERMES_DASHBOARD_API_PATHS = new Set(["", "/", "/chat"]);
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -131,27 +124,6 @@ function normalizeSessionKeyStrategy(value: unknown): SessionKeyStrategy {
   const raw = asString(value, "issue").trim().toLowerCase();
   if (raw === "agent" || raw === "run" || raw === "none") return raw;
   return "issue";
-}
-
-export function normalizeBaseUrl(value: string): URL | null {
-  try {
-    const url = new URL(value);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    const normalizedPath = url.pathname.replace(/\/+$/, "") || "/";
-    if (
-      url.port === DEFAULT_HERMES_DASHBOARD_PORT &&
-      HERMES_DASHBOARD_API_PATHS.has(normalizedPath)
-    ) {
-      url.pathname = "/api";
-    } else {
-      url.pathname = url.pathname.replace(/\/+$/, "");
-    }
-    url.search = "";
-    url.hash = "";
-    return url;
-  } catch {
-    return null;
-  }
 }
 
 function apiUrl(baseUrl: URL, path: string): string {
@@ -237,45 +209,6 @@ function redactForLog(value: unknown, keyPath: string[] = [], depth = 0, redactT
     return out;
   }
   return redactText(String(value));
-}
-
-export function parseHeaders(value: unknown): Record<string, string> {
-  const source =
-    typeof value === "string" && value.trim().length > 0
-      ? (() => {
-          try {
-            return JSON.parse(value);
-          } catch {
-            return {};
-          }
-        })()
-      : value;
-  const parsed = parseObject(source);
-  const headers: Record<string, string> = {};
-  for (const [key, entry] of Object.entries(parsed)) {
-    const normalized = key.trim();
-    if (!normalized || CRITICAL_HEADERS.has(normalized.toLowerCase())) continue;
-    if (typeof entry === "string") headers[normalized] = entry;
-  }
-  return headers;
-}
-
-export function buildHeaders(input: {
-  apiKey: string;
-  sessionKey: string | null;
-  runId: string;
-  extraHeaders: Record<string, string>;
-  accept: string;
-  contentType?: string;
-}): Record<string, string> {
-  return {
-    ...input.extraHeaders,
-    Authorization: `Bearer ${input.apiKey}`,
-    Accept: input.accept,
-    ...(input.contentType ? { "Content-Type": input.contentType } : {}),
-    "Idempotency-Key": input.runId,
-    ...(input.sessionKey ? { "X-Hermes-Session-Key": input.sessionKey } : {}),
-  };
 }
 
 function buildInput(ctx: AdapterExecutionContext, paperclipApiUrl: string | null): string {
@@ -934,6 +867,15 @@ function errorResult(err: unknown, baseUrl: URL, redactText: TextRedactor = sani
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  let selectedExecutor: string | null;
+  try {
+    selectedExecutor = await selectExecutor(ctx);
+  } catch (error) {
+    return { exitCode: 1, signal: null, timedOut: false,
+      errorCode: asString(parseObject(error).code, "hermes_gateway_executor_unavailable"),
+      errorMessage: error instanceof Error ? error.message : "Executor selection failed." };
+  }
+  if (selectedExecutor) ctx = { ...ctx, config: { ...ctx.config, apiBaseUrl: selectedExecutor } };
   const apiBaseUrlValue = asString(ctx.config.apiBaseUrl ?? ctx.config.url, "").trim();
   if (!apiBaseUrlValue) {
     return {
@@ -1051,7 +993,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   let runId: string | null = null;
   const supervised = binding?.context.lifetime === "wait_for_jobs";
-  const ownedAdmission = supervised || Boolean(ctx.onExecutionCheckpoint);
+  const ownedAdmission = supervised || Boolean(ctx.onExecutionCheckpoint) || Boolean(selectedExecutor);
   const cancellable = ownedAdmission || Boolean(ctx.signal);
   const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : null;
   const deadlineExpired = () => deadline !== null && Date.now() >= deadline;
@@ -1208,10 +1150,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ctx.signal?.removeEventListener("abort", requestedStop);
     await Promise.all([events, polling]);
     await ctx.onProviderStopped?.();
-    if (state.protocolError) return errorResult(state.protocolError, baseUrl, redactText);
+    if (state.protocolError) {
+      const result = errorResult(state.protocolError, baseUrl, redactText);
+      if (selectedExecutor) result.sessionParams = { hermesRunId: runId, strategy, executorBaseUrl: selectedExecutor };
+      return result;
+    }
     const result = mapFinalResultForTest({ terminal: owned.terminal, outputChunks: state.outputChunks,
       sessionKey, strategy, redactText });
     if (binding) result.sessionParams = { ...result.sessionParams, executionContextFingerprint: binding.fingerprint };
+    if (selectedExecutor) result.sessionParams = { ...result.sessionParams, executorBaseUrl: selectedExecutor };
     if (ctx.signal?.aborted) {
       result.resultJson = { ...result.resultJson,
         executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString() } };
@@ -1266,6 +1213,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         hermesRunId: runId,
         strategy,
         ...(binding ? { executionContextFingerprint: binding.fingerprint } : {}),
+        ...(selectedExecutor ? { executorBaseUrl: selectedExecutor } : {}),
       },
       sessionDisplayId: sessionKey ? redactText(sessionKey) : null,
     };
@@ -1279,5 +1227,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     redactText,
   });
   if (binding) result.sessionParams = { ...result.sessionParams, executionContextFingerprint: binding.fingerprint };
+  if (selectedExecutor) result.sessionParams = { ...result.sessionParams, executorBaseUrl: selectedExecutor };
   return result;
 }

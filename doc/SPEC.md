@@ -259,6 +259,13 @@ silently launching a different engine. A default local engine must support
 normal task work and control-plane coordination; explicit operator restrictions
 remain authoritative.
 
+Hermes gateway adapters can select from an optional ordered worker inventory
+before a new session's admission. Worker eligibility and capacity come from
+authenticated live observations. Conversations and admitted runs retain their
+chosen endpoint; target ownership and durable recovery remain authoritative.
+See [Hermes executor routing](hermes-executor-routing.md) and the V1 implementation
+contract for supported affinity and draining behavior.
+
 ### Adapter Interface
 
 Every adapter implements three methods:

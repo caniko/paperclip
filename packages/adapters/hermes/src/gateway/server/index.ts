@@ -19,6 +19,7 @@ export const sessionCodec: AdapterSessionCodec = {
     const hermesRunId = readString(record.hermesRunId);
     const strategy = readString(record.strategy);
     const executionContextFingerprint = readString(record.executionContextFingerprint);
+    const executorBaseUrl = readString(record.executorBaseUrl);
     if (!hermesSessionId && !sessionKey && !hermesRunId) return null;
     return {
       ...(hermesRunId ? { hermesRunId } : {}),
@@ -26,6 +27,7 @@ export const sessionCodec: AdapterSessionCodec = {
       ...(sessionKey ? { sessionKey } : {}),
       ...(strategy ? { strategy } : {}),
       ...(executionContextFingerprint ? { executionContextFingerprint } : {}),
+      ...(executorBaseUrl ? { executorBaseUrl } : {}),
     };
   },
   serialize(params) {
@@ -35,6 +37,7 @@ export const sessionCodec: AdapterSessionCodec = {
     const hermesRunId = readString(params.hermesRunId);
     const strategy = readString(params.strategy);
     const executionContextFingerprint = readString(params.executionContextFingerprint);
+    const executorBaseUrl = readString(params.executorBaseUrl);
     if (!hermesSessionId && !sessionKey && !hermesRunId) return null;
     return {
       ...(hermesRunId ? { hermesRunId } : {}),
@@ -42,6 +45,7 @@ export const sessionCodec: AdapterSessionCodec = {
       ...(sessionKey ? { sessionKey } : {}),
       ...(strategy ? { strategy } : {}),
       ...(executionContextFingerprint ? { executionContextFingerprint } : {}),
+      ...(executorBaseUrl ? { executorBaseUrl } : {}),
     };
   },
   getDisplayId(params) {
