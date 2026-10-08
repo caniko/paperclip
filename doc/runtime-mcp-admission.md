@@ -174,10 +174,27 @@ checkpoints independently of fresh producer admission.
 Expiry or revocation retains the ledger and all recovery ownership. Restrictive
 company/run/task/project references deliberately prevent deleting referenced
 entities before reconciliation. `retireForDeletion` is an explicit controller
-operation: it requires a terminal run, released leases and settled adapter **and
-filesystem** checkpoints; it atomically records retirement and removes the sealed
-ledger. Entity-deletion integration must use this operation before deleting a
+operation: it requires a terminal run and settled company leases, including orphan
+teardown rows with no run pointer. Release timestamps are insufficient: pending
+cleanup, failures/in-flight cleanup, retained or still-reusable resources, and
+pending/malformed adapter **or filesystem** evidence block retirement. Settled
+checkpoints retain a valid producer fingerprint; filesystem evidence must reference
+its terminal, same-company/run workspace-finalization operation. The bounded SQL
+scan admits at most 1,024 leases and returns only IDs and validity flags, not
+encrypted checkpoints or provider metadata. A historical Stop receipt survives
+handoff: it is discharged only by later, scoped destruction of the same allocation
+under the same company/environment/provider/plugin and workspace or task-agent
+scope. An active, pending-cleanup or foreign-scope successor never discharges it.
+Retirement atomically records retirement and removes the sealed ledger.
+Entity-deletion integration must use this operation before deleting a
 populated ledger's owners. It is not an expiry-driven cleanup or authority transfer.
+
+MCP enrollment and launch writers acquire company `KEY SHARE` before their child
+locks; retirement starts with the company `UPDATE` deletion barrier. Proof's
+unlocked identifier lookup only discovers company scope, which is reread under
+the parent lock before authenticating the locked enrollment. Transactional lease
+handoff/reacquisition takes the same parent barrier before its predecessor mutation
+and successor insertion. Task-before-run ordering remains in place.
 
 The focused suites cover real PostgreSQL concurrent retries, changed task rows,
 challenge renewal/replay, usable producer recovery, actual lock contention,
@@ -258,8 +275,133 @@ must still recheck the current enrollment and grants.
 
 Provision/inspection/revocation endpoints must enforce instance-admin **and**
 company authorization before they are exposed. Browser sessions and implicit
-local-board access cannot replace bootstrap proof. Company
-deletion is currently restricted by the enrollment references; audited company
-retirement preserving key-label tombstones must be qualified before production
-provisioning is exposed. The grant resolver, runtime ingress/dispatch, protected
-worker-side key handling and combined transport acceptance remain required.
+local-board access cannot replace bootstrap proof. Audited company retirement
+preserving key-label tombstones must be qualified before production provisioning
+is exposed. The grant resolver, runtime ingress/dispatch, protected worker-side
+key handling and combined transport acceptance remain required.
+
+### Permanent company retirement (qualification pending)
+
+Migration `0298_high_vulture.sql` atomically replaces the enrollment/company FK
+with live-company insertion guards and permanent retirement records. Original
+enrollment pins, labels and final revisions survive company and activity-log
+deletion. Immutable typed receipt entries preserve each launch's company,
+agent, task, run, project, controller boot and generation; they retain no sealed
+launch material. Deferred SQL checks require the complete receipt and company
+deletion to commit together. Direct deletion, rekeying, truncation and reuse of
+a retired company UUID are guarded.
+
+Launch insertion takes the company barrier and is fenced after the retirement
+header exists. Launch identity and scope are immutable. After that header exists,
+launch deletion requires its exact matching receipt, including nullable issue and
+project IDs, controller boot and generation. Pre-header launch disposal retains
+its settlement checks. Launch-table TRUNCATE is blocked.
+
+Company UUID insertion and deletion require PostgreSQL READ COMMITTED isolation.
+The AFTER INSERT guard runs after uniqueness contention; stronger snapshot
+isolation is rejected rather than trusting a snapshot taken before retirement.
+The company removal service selects READ COMMITTED explicitly. Retired UUIDs
+are permanent identity barriers, not reusable company labels.
+
+`mcp-company-retirement.ts` runs inside the existing company removal transaction,
+before purge, with the company UPDATE barrier already held. A company with MCP
+state must be archived and have current instance-admin and company authority.
+Local sessions/API keys recheck locked role and active-membership rows. Cloud
+actors use the authentication-owned stack-owner role and the canonical managed
+owner-elevation setting under a row lock; persisted instance roles cannot elevate
+a Cloud actor. Trusted implicit local-board authority retains its existing
+operator semantics. Companies without MCP state retain ordinary board deletion.
+Their environment leases must still satisfy the company-wide settlement
+predicate, including orphan `pending_cleanup` leases. This check does not impose
+the MCP archive, controller identity, instance-admin, or PostgreSQL-17 requirements.
+Both deletion paths retain every runtime row while runtime settlement is
+unqualified.
+
+Access mutations acquire the company barrier before membership/grant locks.
+Exact-set access updates and production human-membership writers share a per-user
+transaction advisory lock, before company barriers and child locks. This includes
+member status/archive operations, Cloud synchronization, board claims, startup
+local-board seeding and deployment reconciliation. Multi-company operations lock
+parents in sorted ID order. Membership-ID writers revalidate the company and
+principal identity after locking. A complete scope reread rejects newly discovered
+companies with a refresh-and-retry conflict.
+
+The user fence requires actual READ COMMITTED isolation, including nested
+transactions: a repeatable-read snapshot acquired before a wait could hide the
+preceding producer from both discovery and reread. Default grant seeds use the
+current locked active membership and role; delayed seeds cannot restore grants
+after access removal. Permission activation and publication, copied membership
+defaults, Cloud defaults and board-claim defaults retain the same transaction
+fence through publication. Explicit replacement rejects archived memberships.
+
+Deployment bootstrap fences its exact existing or reserved fresh actor ID before
+blocking role ownership. Reconciliation retains that identity through apply and
+rejects an account appearing under a different ID after preflight. Both public
+and managed-loopback authentication instances preserve the reserved ID generator.
+
+Retirement admits at most 1,024 enrollments, launches and leases per collection,
+with a 1 MiB serialized receipt ceiling. Lease inspection returns IDs and SQL
+validity flags rather than encrypted checkpoints or provider payloads. PostgreSQL
+17 or later is required: retirement disarms any inherited transaction timer and
+rearms a 30-second budget less all elapsed work since BEGIN. Lock waits remain
+limited to five seconds and statements to fifteen seconds. PostgreSQL disables
+the transaction timer before durable commit/WAL completion; the budget does not
+claim to bound that final durable-commit interval.
+
+**Native-backed company retirement remains blocked.** Native cleanup currently
+publishes SQL `settled` before completing runtime-owner release and filesystem
+activation-marker removal. A committed coordinator, expired lease or historical
+settlement therefore cannot authorize deleting recovery references. The native
+owner needs durable final-settlement evidence, company-first claim fencing and
+qualified dependent-record purge before this gate can be widened. Retirement
+performs no native cleanup or ownership transfer.
+
+**Runtime-backed company deletion also remains blocked.** A `stopped` status,
+`stoppedAt`, removed exposure, or missing in-memory registry entry does not prove
+that a backend or provisioning continuation has settled. Every
+`workspace_runtime_services` row therefore preserves its company recovery scope,
+including legacy and adapter-managed rows.
+
+Runtime entry points commit a starting recovery row under company-first parent
+locks before provisioning, adoption, broker reservation, or process spawn.
+Starting intent does not reserve a configured port; the allocator publishes the
+port it actually selects. Manual starts and retries perform resource work after
+those short transactions commit. Returned private broker handles are persisted
+before hostname resolution or backend binding, and failure bookkeeping updates
+status/timestamps without replaying stale ownership fields. Healthy shared reuse
+validates its declared owning scope and retains its original workspace pins; an
+unhealthy runtime leased by another run keeps a distinct owner and replacement ID.
+Registry IDs are adoption hints, not replacement IDs. Rejected adoption preserves
+the original recovery row and gives provisioning, reservation and replacement
+spawn their own committed intents. Actual adoption revalidates the returned ID
+and its owning pins before health checks, termination or publication; legacy
+missing-row restoration retains the original resource identity. These barriers
+protect empty-runtime-set deletion. They do not supply
+generation fencing, cancellation drainage, verified termination of unregistered
+backends, or process/provision/exposure settlement receipts; those are required
+before accepting or purging runtime recovery rows.
+
+### Disposable qualification fixtures
+
+Company fixtures use scoped, transactional child-first deletion in
+`server/src/__tests__/helpers/company-fixtures.ts`. Company-wide TRUNCATE reaches
+the permanent retirement/key guards even when their tables are empty. The fixture
+helper retains those guards and refuses to reset a selected company with MCP
+state; ledger/retirement tests must instead own a fresh disposable database.
+Paired runner attempts retain deterministic company/user IDs and a stable
+controller instance identity while removing the previous attempt's company data.
+
+Before resetting or disposing a fixture, stop new scheduling and await existing
+HTTP, heartbeat, plugin, export, browser and transfer work. Orderly application
+shutdown drains started startup/sweep callbacks, plugin lifecycle handlers,
+watcher lookups/restarts/closure, and scheduled/manual jobs after stopping new
+work. A heartbeat quiescence deadline
+or an embedded PostgreSQL shutdown deadline is an explicit test failure. Database
+files are reclaimed only after successful PostgreSQL exit; a stop rejection retains
+them. Tests that insert synthetic run rows without starting executors close only
+those known synthetic rows before checking real dispatched work for quiescence.
+Retry and authorization fixtures explicitly pause dispatch for their disposable
+companies and use the owning heartbeat cancellation workflow before teardown.
+Cancellation refusal retains the database; the passive quiescence helper does
+not cancel work or accept exhausted polling as settlement.
+Synthetic closure is fixture isolation, not runtime/native ownership settlement.

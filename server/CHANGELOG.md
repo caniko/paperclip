@@ -5,6 +5,10 @@
 ### Patch Changes
 
 - Bound full-tree workspace Git scans with process-wide concurrency, queue, timeout, cancellation, coalescing, and short-lived changed-file caching. Saturated or timed-out changed-file requests now return a retryable degraded response, and hidden file-browser panels no longer initiate scans.
+- Fence membership and permission publication with current locked company access, preserve exact bootstrap actor identity, and recheck authenticated Cloud-owner authority during MCP company retirement.
+- Record bounded, immutable MCP retirement receipts before company deletion. Retain orphan cleanup, native ownership, and runtime recovery records until their owning workflows establish settlement; production managed MCP admission remains disabled.
+- Persist runtime recovery intent before provisioning, adoption, broker reservation, or process spawn, and revalidate adopted resource identities before publication.
+- Drain started application, plugin, and fixture work before disposal. Treat HTTP aborts, heartbeat drain exhaustion, and PostgreSQL shutdown failures as explicit settlement failures that retain recovery data.
 
 ## 0.3.1
 
