@@ -26,7 +26,7 @@ const binaries = {
   fakeHarnessBinaryPath: resolveCargoBinary({ binary: "fake-harness", targetDirectory }),
 };
 
-describe.sequential("Local runner and fake harness", () => {
+describe("Local runner and fake harness", { concurrent: false }, () => {
   it("runs the CLI with relative binary overrides from another cwd without Cargo", async () => {
     const directory = await mkdtemp(join(tmpdir(), "local-runner-caller-"));
     try {
