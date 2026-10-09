@@ -1393,7 +1393,7 @@ jobs:
           path: |
             tests/e2e/playwright-report/
             tests/e2e/test-results/
-          retention-days: 14
+          retention-days: 32
 
   native_composer_stop:
     name: Native composer Stop
@@ -1631,7 +1631,7 @@ jobs:
           name: native-composer-stop-${{ github.event.pull_request.head.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           # Leave headroom for GitHub's independently rounded artifact timestamps.
           # Independent qualification still requires at least 30 full days.
-          retention-days: 31
+          retention-days: 32
           if-no-files-found: error
           path: |
             ${{ runner.temp }}/composer-stop-report.json
