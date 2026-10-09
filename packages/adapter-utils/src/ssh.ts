@@ -1367,10 +1367,15 @@ function buildRemoteShellCommand(commandLines: string[]): string {
   // `command .` removes the POSIX special-builtin behavior of `.`: under dash,
   // a bash-only profile line such as `export -a` otherwise exits the whole
   // shell before `|| true` runs. Keep exports made before that failing line.
+  // Native zsh's `command` searches only external commands. Select its `.`
+  // builtin explicitly without enabling POSIX_BUILTINS for the host's profile.
+  // https://zsh.sourceforge.io/Doc/Release/Shell-Grammar.html#Precommand-Modifiers
+  const sourceProfile = (file: string) =>
+    `case "\${0##*/}" in zsh) builtin . ${file} || true ;; *) command . ${file} || true ;; esac`;
   const profiles = [
-    'if [ -f /etc/profile ]; then command . /etc/profile || true; fi',
-    'if [ -f "$HOME/.profile" ]; then command . "$HOME/.profile" || true; fi',
-    'case "${0##*/}" in bash) if [ -f "$HOME/.bash_profile" ]; then command . "$HOME/.bash_profile" || true; elif [ -f "$HOME/.bashrc" ]; then command . "$HOME/.bashrc" || true; fi ;; zsh) if [ -f "$HOME/.zprofile" ]; then command . "$HOME/.zprofile" || true; fi ;; esac',
+    `if [ -f /etc/profile ]; then ${sourceProfile("/etc/profile")}; fi`,
+    `if [ -f "$HOME/.profile" ]; then ${sourceProfile('"$HOME/.profile"')}; fi`,
+    'case "${0##*/}" in bash) if [ -f "$HOME/.bash_profile" ]; then command . "$HOME/.bash_profile" || true; elif [ -f "$HOME/.bashrc" ]; then command . "$HOME/.bashrc" || true; fi ;; zsh) if [ -f "$HOME/.zprofile" ]; then builtin . "$HOME/.zprofile" || true; fi ;; esac',
   ].join(" && ");
   const script = [
     `{ ${profiles}; } </dev/null >/dev/null 2>&1`,

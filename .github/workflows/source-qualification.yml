@@ -134,6 +134,11 @@ jobs:
           pnpm install --frozen-lockfile 2>&1 | tee "$EVIDENCE/install.log"
           pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
           pnpm run preflight:workspace-links
+      - name: Provision native backup clients and zsh for workspace cases
+        if: matrix.lane == 'tests-workspaces-b'
+        run: |
+          set -euo pipefail
+          node .github/scripts/prepare-source-native-tools.mjs "$EVIDENCE" 2>&1 | tee "$EVIDENCE/native-tools.log"
       - name: Run mandatory application lane once
         env:
           LANE: ${{ matrix.lane }}

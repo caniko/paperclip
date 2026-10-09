@@ -56,6 +56,30 @@ direnv exec . pnpm install --resolution-only --ignore-scripts --no-frozen-lockfi
 Keep this local generated lock separate from implementation commits, as required
 by the dependency lockfile policy below.
 
+The Linux development shell also supplies PostgreSQL 18 clients, zsh and dash for
+the native Unix-socket backup, login-profile stream and POSIX profile-error cases.
+The hosted source
+`tests-workspaces-b` lane checks the actual embedded server version, selects
+matching `pg_dump`/`psql` clients and provisions zsh before executing the same
+fixtures. When Ubuntu 24.04 lacks matching clients, it uses the official signed
+PostgreSQL Apt repository with the repository key bound by SHA-256 in the helper.
+It retains `native-tools.json` with source/lock bindings and executable
+versions and SHA-256 hashes. Missing or incompatible tools fail preparation;
+they do not make required skipped cases acceptable. Package installation is
+restricted to hosted attempt 1. For a local inventory without installation:
+
+```sh
+node .github/scripts/prepare-source-native-tools.mjs --verify-only /path/to/fresh-evidence
+```
+
+Local verification grants no hosted qualification credit. The original source
+attempts, assertions, deadlines and strict zero-skip gate remain intact.
+
+SSH profile loading uses native zsh's `.` builtin, since zsh's `command` modifier
+only searches external commands by default. POSIX shells retain `command .` for
+nonfatal profile errors. Startup/profile output and stdin remain isolated from
+the transferred command, tar or Git stream.
+
 ## Dependency Lockfile Policy
 
 GitHub Actions owns `pnpm-lock.yaml`.

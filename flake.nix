@@ -34,7 +34,7 @@
         inherit pkgs pnpm packageJson;
         extraPackages =
           [pkgs.git pkgs.openssh pkgs.lsof]
-          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.procps];
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.procps pkgs.postgresql_18 pkgs.zsh pkgs.dash];
       };
     });
   };
