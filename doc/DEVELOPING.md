@@ -560,6 +560,26 @@ verifying Vite/HMR behavior.
 
 For normal issue work, start with the smallest targeted check that proves the change. Reserve repo-wide typecheck/build/test runs for PR-ready handoff or changes broad enough that narrow checks do not cover the risk.
 
+### Exact-head hosted test evidence
+
+`PAPERCLIP_TEST_REPORT_DIR` enables per-invocation JUnit evidence in
+`scripts/run-vitest-stable.mjs`, with retries disabled and `.only` rejected.
+The qualification reporter retains each original display title and appends
+Vitest's stable task ID. Separate parameterized cases can share a display title;
+re-emitting the same framework task keeps the same ID and remains detectable as
+a duplicate by the strict receipt verifier. Actual retries or repeated test
+executions fail reporting after the original result file is retained.
+
+The hosted regression lane exercises that contract against real Vitest, including
+explicit negative fixtures for failed/skipped results, retries and duplicate task
+emission. Their raw reports are retained as labeled negative-fixture text files
+alongside the contract log, separate from mandatory application XML.
+
+The stable runner stops on its first failing invocation. A server JUnit report
+therefore does not by itself establish that later workspace and serialized
+invocations completed. Acceptance still requires the entire command, unchanged
+strict reports, and verified exact-source artifact digests and provider retention.
+
 ### Task search evaluation
 
 The task search relevance rubric and regression corpus are documented in
