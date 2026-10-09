@@ -1,4 +1,6 @@
-import { JUnitReporter } from "vitest/reporters";
+// Vitest 5 exports built-in reporters from its public Node entry point.
+// https://github.com/vitest-dev/vitest/blob/v5.0.3/packages/vitest/src/public/node.ts
+import { JUnitReporter } from "vitest/node";
 
 // Vitest 5.0.3 exposes writeTasks and stable task IDs. Display titles alone can
 // collide for parameterized cases, including when Vitest truncates parameters.
