@@ -105,3 +105,34 @@ test("re-emitting the same framework task keeps its colliding identity", async (
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("Node JUnit keeps equal titles source-bound and preserves raw failures, skips and same-source collisions", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "qualification-node-reporter-"));
+  const file = path.join(root, "report.xml");
+  try {
+    writeFileSync(path.join(root, "one.test.mjs"), `import { test } from "node:test";
+      test("same title", () => {});
+      test("same title", () => {});
+      test.skip("skipped title", () => {});`);
+    writeFileSync(path.join(root, "two.test.mjs"), `import { test } from "node:test";
+      test("same title", () => { throw new Error("preserved Node assertion"); });`);
+    const result = spawnSync(process.execPath, ["--test",
+      `--test-reporter=${path.join(repoRoot, "scripts/qualification-node-junit-reporter.mjs")}`,
+      `--test-reporter-destination=${file}`, "one.test.mjs", "two.test.mjs"],
+    // This is an independent Node test process, not a nested run() invocation.
+    { cwd: root, env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== "NODE_TEST_CONTEXT")),
+      encoding: "utf8", timeout: 60_000 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1, result.stderr);
+    const cases = readReport(file);
+    assert.equal(cases.length, 4);
+    assert.equal(cases.filter(row => row.failure).length, 1);
+    assert.equal(cases.filter(row => row.skipped).length, 1);
+    assert.deepEqual(cases.filter(row => row.name === "same title").map(row => row.classname).sort(),
+      ["one.test.mjs", "one.test.mjs", "two.test.mjs"]);
+    assert.match(readFileSync(file, "utf8"), /preserved Node assertion/);
+    retain("node-source-identities", file, result.stdout + result.stderr);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
