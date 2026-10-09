@@ -7,6 +7,28 @@ const jobs = [...workflow.matchAll(/^  ([a-z_][a-z_0-9]*):\n([\s\S]*?)(?=^  [a-z
 const installers = jobs.filter(([, , body]) => /\bpnpm install [^\r\n]*--frozen-lockfile\b/.test(body));
 const cachedInstallers = installers.filter(([, job]) => job !== "native_composer_stop");
 
+test("generated Nix concurrency isolates forks but coalesces the same source branch", () => {
+  const nix = readFileSync(new URL("../../workflows/nix-builds.yaml", import.meta.url), "utf8");
+  const group = nix.match(/^  group: (.+)$/m)?.[1];
+  assert.ok(group);
+  assert.match(nix, /^  cancel-in-progress: true$/m);
+  const key = (repository, ref, pullRequest = false) => group.replace(/\$\{\{ (.*?) \}\}/g, (_, expression) => {
+    const context = {
+      "github.workflow": "Nix installable builds",
+      "github.repository": repository,
+      "github.ref_name": pullRequest ? "4/merge" : ref,
+      "github.event.pull_request.head.repo.full_name": pullRequest ? repository : "",
+      "github.event.pull_request.head.ref": pullRequest ? ref : "",
+    };
+    const operands = expression.split(" || ");
+    for (const operand of operands) assert.ok(Object.hasOwn(context, operand), operand);
+    return operands.map((operand) => context[operand]).find(Boolean);
+  });
+  assert.notEqual(key("alice/paperclip", "fix", true), key("bob/paperclip", "fix", true));
+  assert.notEqual(key("alice/paperclip", "fix", true), key("alice/paperclip", "other", true));
+  assert.equal(key("alice/paperclip", "fix", true), key("alice/paperclip", "fix"));
+});
+
 test("PR workflows restore dependency stores without creating branch copies", () => {
   assert.equal(installers.length, 8);
   assert.equal(cachedInstallers.length, 7);

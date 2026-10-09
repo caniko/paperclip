@@ -14,7 +14,7 @@ cores = 2
 capture_results = true
 artifact_retention_days = 31
 extra_setup = [
-  "nix run github:caniko/simit/be445e3b4493690aff1da7a00a6b52caf18676ee -- init ci --platform github --ci-provider actions --runtime nix --check --diff",
+  "nix run github:caniko/simit/41d38cc198b54e771aff717010a3788b337b7fd0 -- init ci --platform github --ci-provider actions --runtime nix --check --diff",
 ]
 
 [release.artifacts]
