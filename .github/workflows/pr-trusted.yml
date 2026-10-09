@@ -1425,9 +1425,7 @@ jobs:
           persist-credentials: false
 
       - name: Install candidate dependency sandbox
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap
+        run: bash .github/scripts/prepare-candidate-sandbox.sh
 
       - name: Bind independent harness and verifier source
         run: |

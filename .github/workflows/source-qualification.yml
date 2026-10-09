@@ -31,8 +31,7 @@ jobs:
         # Package setup happens only on the disposable hosted runner.
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap
+          bash .github/scripts/prepare-candidate-sandbox.sh
           node --test scripts/__tests__/qualify-composer-stop.test.mjs 2>&1 | tee "$RUNNER_TEMP/trusted-stop-identity.log"
       - name: Retain trusted harness identity assertions
         if: always()
