@@ -327,6 +327,14 @@ jobs:
       - name: Test e2e shard partition
         run: node --test ./scripts/__tests__/e2e-shard.test.mjs
 
+      - name: Prepare mandatory sandbox contract dependencies
+        run: |
+          set -euo pipefail
+          if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ]; then
+            bash .github/scripts/prepare-candidate-sandbox.sh
+          fi
+          bwrap --version
+
       - name: Test mandatory native composer Stop qualification
         run: node --test ./scripts/__tests__/qualify-composer-stop.test.mjs
 

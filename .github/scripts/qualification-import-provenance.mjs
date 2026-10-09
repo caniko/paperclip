@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
-import ts from "typescript";
+import { createScanner, SyntaxKind, TokenFlags } from "typescript/unstable/ast";
 import { collectRows, sha256 } from "./qualification-roster.mjs";
 
 function relativeSource(file, root) {
@@ -9,6 +9,34 @@ function relativeSource(file, root) {
   const relative = path.relative(realpathSync(root), resolved).split(path.sep).join("/");
   assert.ok(relative && !relative.startsWith("../") && !path.isAbsolute(relative), "Imported declaration source escapes the checkout");
   return relative;
+}
+
+// TypeScript 7's root export contains version metadata, not the legacy parser.
+// Its published scanner handles comments and decoded string literals. Accept
+// only this complete grammar; every other file retains ordinary parser errors.
+function sideEffectTestImports(text) {
+  const scanner = createScanner(true, undefined, text);
+  const imports = [];
+  let token = scanner.scan();
+  while (token === SyntaxKind.ImportKeyword && !scanner.hasUnicodeEscape()) {
+    if (scanner.scan() !== SyntaxKind.StringLiteral || scanner.isUnterminated()
+      || (scanner.getTokenFlags() & TokenFlags.ContainsInvalidEscape)) return null;
+    const imported = scanner.getTokenValue();
+    if (!/^\.{1,2}\/.+\.test\.(?:js|ts)$/.test(imported)) return null;
+    imports.push(imported);
+    token = scanner.scan();
+    if (token === SyntaxKind.SemicolonToken) token = scanner.scan();
+    else if (token !== SyntaxKind.EndOfFile && !scanner.hasPrecedingLineBreak()) return null;
+  }
+  if (token !== SyntaxKind.EndOfFile || scanner.isUnterminated() || !imports.length) return null;
+  // skipTrivia's EOF token does not retain an unterminated trailing comment's
+  // flags. Inspect the literal/trivia tokens too before accepting the grammar.
+  const lexical = createScanner(false, undefined, text);
+  do {
+    token = lexical.scan();
+    if (lexical.isUnterminated() || (lexical.getTokenFlags() & TokenFlags.ContainsInvalidEscape)) return null;
+  } while (token !== SyntaxKind.EndOfFile);
+  return imports;
 }
 
 // Only side-effect imports of real test sources can establish this provenance.
@@ -19,14 +47,9 @@ export function importEntries(specifications, root) {
   for (const specification of specifications) {
     const file = relativeSource(specification.moduleId, root);
     const text = readFileSync(path.join(root, file), "utf8");
-    const ast = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
-    assert.equal(ast.parseDiagnostics.length, 0, `Invalid declaration source: ${file}`);
-    if (!ast.statements.length || !ast.statements.every(statement =>
-      ts.isImportDeclaration(statement) && !statement.importClause
-      && ts.isStringLiteral(statement.moduleSpecifier)
-      && /^\.{1,2}\/.+\.test\.(?:js|ts)$/.test(statement.moduleSpecifier.text))) continue;
-    const sources = ast.statements.map(statement => {
-      const imported = statement.moduleSpecifier.text;
+    const imports = sideEffectTestImports(text);
+    if (!imports) continue;
+    const sources = imports.map(imported => {
       const target = path.resolve(root, path.dirname(file), imported.replace(/\.js$/, ".ts"));
       const source = relativeSource(target, root);
       return { file: source, sha256: sha256(readFileSync(path.join(root, source))), import: imported };

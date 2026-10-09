@@ -190,9 +190,18 @@ test("only literal side-effect test imports establish declaration edges", () => 
   try {
     writeFileSync(path.join(root, "source.test.ts"), 'import { it } from "vitest"; it("case", () => {});');
     for (const text of ['import { caseFactory } from "./source.test.js";', 'import "./setup.js";',
-      'import "./source.test.js"; const changesRegistration = true;', 'export * from "./source.test.js";']) {
+      'import "./source.test.js"; const changesRegistration = true;', 'export * from "./source.test.js";',
+      'import("./source.test.js");', 'const misleading = \'import "./source.test.js";\';',
+      'import "./source.test.js"; /* unterminated', 'import "./source.test.js',
+      'import "./source.test.js" with { type: "json" };',
+      'import "./sou\\uZZZZrce.test.js";', 'imp\\u006frt "./source.test.js";']) {
       writeFileSync(spec.moduleId, text);
       assert.deepEqual(importEntries([spec], root), []);
+    }
+    for (const text of ['/* import "./outside.test.ts"; */ import "./source.test.js";',
+      '// only a comment\nimport "./source.test.js"', 'import "./sou\\u0072ce.test.js";']) {
+      writeFileSync(spec.moduleId, text);
+      assert.equal(importEntries([spec], root)[0].sources[0].file, "source.test.ts");
     }
     writeFileSync(spec.moduleId, 'import "./source.test.js"; import "./source.test.js";');
     assert.throws(() => importEntries([spec], root), /Duplicate declaration import/);

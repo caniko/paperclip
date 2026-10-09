@@ -82,6 +82,22 @@ When changing the workflow path or branch, authorize the new reference before
 updating the caller. Retain older authorized SHA references while queued runs or
 supported reruns still use them.
 
+The owned fork qualifies the prepared native composer Stop job independently
+in `.github/workflows/qualification-native-stop.yml` before advancing its
+immutable PR caller. Generate that lane with
+`node scripts/generate-composer-stop-qualification.mjs`; `--check` verifies
+parity. Every prepared environment value, step, command, assertion deadline,
+immutable harness/provider pin and 32-day artifact policy is retained. Only the
+job's gate dependency and runner selection change: the independent lane always
+runs on an actual Ubuntu 24.04 GitHub-hosted runner. A local browser pass gives
+diagnostic evidence only. Caller promotion still needs exact-source attempt-1
+runtime proof, all retained attachment hashes and provider retention readback.
+The prepared policy job installs the same Bubblewrap namespace prerequisites
+before exercising its mandatory hostile-lifecycle contract. Hosted image
+defaults do not guarantee `bwrap`; self-hosted policy runners must already
+provide it. The contract still executes the hostile fixture and rejects writes
+to the immutable verifier, browser tools and provenance.
+
 ## Start Dev
 
 From repo root:
@@ -620,6 +636,13 @@ before the parser gap is recorded as resolved. Duplicate imports, non-test setup
 source escapes, missing static declarations and collection errors remain blockers.
 The raw errors, source hashes, supplemental rosters and bijective case bindings
 remain inspectable. This provenance gives no assertion execution credit.
+
+Import-only recognition uses the declared TypeScript 7 scanner entry point.
+It accepts only complete literal side-effect test imports, comments and their
+statement separators. Other syntax keeps the ordinary parser's errors. The
+TypeScript root export supplies version metadata and cannot supply the removed
+legacy `createSourceFile` compiler API. The roster contract covers decoded
+strings, comments, malformed literals and executable setup rejection.
 
 Reconcile the union of actual environment collections before claiming complete
 coverage. Static parsing does not fully expand dynamic parameters or recognize

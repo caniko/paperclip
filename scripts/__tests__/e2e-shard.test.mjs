@@ -8,6 +8,7 @@ import test from "node:test";
 
 import { defaultSuiteWeight, loadShardDurations } from "../general-server-shard.mjs";
 import { IGNORED_SPECS, listE2eSpecs, selectE2eShard } from "../e2e-shard.mjs";
+import { renderStopQualification } from "../generate-composer-stop-qualification.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const script = path.join(repoRoot, "scripts", "e2e-shard.mjs");
@@ -296,6 +297,19 @@ test("the prepared Stop workflow selects the absolute candidate root and retains
   const jobs = readWorkflowJobs(readFileSync(trustedPrWorkflow, "utf8"));
   assert.match(jobs.get("native_composer_stop"), /PAPERCLIP_E2E_SOURCE_ROOT: \$\{\{ github\.workspace \}\}/);
   assert.match(jobs.get("e2e_shards"), /retention-days: 32/);
+});
+
+test("the independent hosted Stop lane uses every prepared command before caller promotion", () => {
+  const prepared = readFileSync(trustedPrWorkflow, "utf8");
+  const qualification = readFileSync(path.join(repoRoot, ".github/workflows/qualification-native-stop.yml"), "utf8");
+  assert.equal(qualification, renderStopQualification(prepared));
+  const original = readWorkflowJobs(prepared).get("native_composer_stop");
+  const independent = readWorkflowJobs(qualification).get("native_composer_stop");
+  assert.equal(independent.slice(independent.indexOf("    env:\n")).trimEnd(), original.slice(original.indexOf("    env:\n")).trimEnd());
+  assert.match(independent, /runs-on: ubuntu-24\.04/);
+  assert.match(independent, /timeout-minutes: 20/);
+  assert.doesNotMatch(independent, /needs\.gate/);
+  assert.match(readFileSync(prCallerWorkflow, "utf8"), /pr-trusted\.yml@28e815c12bb5daa074d5d12e3abcc8c9339d07cf/);
 });
 
 test("the stacked PR scope selector runs full CI only where intended", () => {

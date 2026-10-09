@@ -166,6 +166,11 @@ test("the hosted JUnit gate refuses missing, failed, errored and skipped cases",
 
 test("the mandatory lane executes an immutable harness and verifier outside the candidate source", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/pr-trusted.yml", import.meta.url), "utf8");
+  const policy = workflow.split("  policy:")[1].split("\n  typecheck_release_registry:")[0];
+  const preparation = policy.indexOf("      - name: Prepare mandatory sandbox contract dependencies");
+  assert.ok(preparation >= 0 && preparation < policy.indexOf("      - name: Test mandatory native composer Stop qualification"));
+  assert.match(policy.slice(preparation), /bash \.github\/scripts\/prepare-candidate-sandbox\.sh/);
+  assert.match(policy.slice(preparation), /bwrap --version/);
   const lane = workflow.split("  native_composer_stop:")[1].split("\n  e2e:")[0];
   const checkout = lane.split("      - name: Checkout immutable Stop harness")[1]?.split("      - name:")[0];
   assert.ok(checkout, "candidate-controlled acceptance files are not a trusted harness");
