@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
@@ -31,7 +32,7 @@ describe("Local runner and fake harness", { concurrent: false }, () => {
     const directory = await mkdtemp(join(tmpdir(), "local-runner-caller-"));
     try {
       const { stdout } = await promisify(execFile)(process.execPath, [
-        "--import", import.meta.resolve("tsx"),
+        "--import", createRequire(import.meta.url).resolve("tsx"),
         fileURLToPath(new URL("../cli/local-runner.ts", import.meta.url)),
         "--runner-binary", relative(directory, binaries.runnerBinaryPath),
         "--fake-harness-binary", relative(directory, binaries.fakeHarnessBinaryPath),
