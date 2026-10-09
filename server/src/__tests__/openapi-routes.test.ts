@@ -21,8 +21,10 @@ const apiPrefixes: Record<string, string> = {
   "agents.ts": "/api",
   "agent-commentary.ts": "/api",
   "agent-avatars.ts": "/api",
+  "agent-profile-avatar.ts": "/api",
   "announcements.ts": "/api",
   "ai-connections.ts": "/api",
+  "decision-models.ts": "/api",
   "attention.ts": "/api",
   "approvals.ts": "/api",
   "assets.ts": "/api",
@@ -41,6 +43,7 @@ const apiPrefixes: Record<string, string> = {
   "connection-intents.ts": "/api",
   "costs.ts": "/api",
   "dashboard.ts": "/api",
+  "dot-runner.ts": "/api",
   "decision-queues.ts": "/api",
   "decisions.ts": "/api",
   "decision-training.ts": "/api",
@@ -109,6 +112,12 @@ const explicitOpenApiOperationCoverageExclusions = new Set([
   "GET /mcp/oauth/authorize",
   "POST /mcp/oauth/token",
   "POST /mcp/oauth/revoke",
+  "GET /.well-known/oauth-authorization-server/mcp/runner/oauth",
+  "POST /mcp/runner/oauth/register",
+  "POST /mcp/runner/oauth/device_authorization",
+  "GET /mcp/runner/oauth/authorize",
+  "POST /mcp/runner/oauth/token",
+  "POST /mcp/runner/oauth/revoke",
   // This endpoint is authenticated by the provider signature rather than by a
   // Paperclip board/agent credential. It intentionally stays out of the public
   // board API document, while this exact exclusion keeps route coverage honest.
@@ -203,6 +212,31 @@ function loadActualRoutes() {
         excludedRoutes.add(operation);
       } else {
         routes.add(operation);
+      }
+    }
+
+    if (file === "public-mcp.ts") {
+      // The shared gateway mounts these protocol paths for each OAuth resource.
+      if (source.includes("router.get(metadataPath,")) {
+        excludedRoutes.add("GET /.well-known/oauth-authorization-server");
+        excludedRoutes.add("GET /.well-known/oauth-authorization-server/mcp/runner/oauth");
+      }
+      for (const match of source.matchAll(/router\.(get|post)\(oauthPath \+ "([^"]+)"/g)) {
+        for (const oauthPath of ["/mcp/oauth", "/mcp/runner/oauth"]) {
+          const operation = `${match[1].toUpperCase()} ${oauthPath}${match[2]}`;
+          if (explicitOpenApiOperationCoverageExclusions.has(operation)) excludedRoutes.add(operation);
+          else routes.add(operation);
+        }
+      }
+    }
+    if (file === "dot-runner.ts") {
+      for (const name of ["path", "invitePath"]) {
+        const basePath = new RegExp(`const ${name} = "([^"]+)"`).exec(source)?.[1];
+        if (!basePath) throw new Error(`Dot ${name} route prefix is missing`);
+        const methods = new RegExp(`router\\.(get|post|delete)\\(${name}(?: \\+ "([^"]+)")?`, "g");
+        for (const match of source.matchAll(methods)) {
+          routes.add(`${match[1].toUpperCase()} ${normalizeExpressPath(prefix + basePath + (match[2] ?? ""))}`);
+        }
       }
     }
 
@@ -586,7 +620,7 @@ describe("openapi routes", () => {
         setup: { type: "object", additionalProperties: false },
       },
     });
-    expect(JSON.stringify(endpointResponse)).not.toContain("credentials");
+    expect(JSON.stringify(endpointResponse)).not.toContain('"credentials":');
     expect(JSON.stringify(endpointResponse)).not.toContain("privateKey");
     expect(JSON.stringify(endpointResponse)).not.toContain("signingSecret");
     expect(
@@ -826,6 +860,19 @@ describe("openapi routes", () => {
       properties: { primaryAgentId: { type: "string", format: "uuid" } },
     });
     expect(path.put.responses["422"]).toBeDefined();
+  });
+
+  it("documents operator Dot invitations and current pairing and event-test fields", () => {
+    const { spec } = loadSpecRoutes();
+    const invitations = spec.paths["/api/companies/{companyId}/dot-invitations"];
+    for (const operation of [invitations.get, invitations.post]) {
+      expect(operation["x-paperclip-authorization"]).toEqual({ actor: "board" });
+      expect(operation.responses["200"]).toBeDefined();
+    }
+    expect(invitations.post.requestBody.content["application/json"].schema.additionalProperties).toBe(false);
+    const base = "/api/companies/{companyId}/agents/{agentId}/dot-binding";
+    expect(spec.paths[base].post.requestBody.content["application/json"].schema.properties.replaceBindingId).toMatchObject({ type: "string", format: "uuid" });
+    expect(spec.paths[base + "/event-test"].post.requestBody.content["application/json"].schema.properties.bindingId).toMatchObject({ type: "string", format: "uuid" });
   });
 
   it("documents board-only repository discovery and selection", () => {

@@ -1115,6 +1115,7 @@ Core authorization follows these rules:
 - A user may set inbox-agent policy to `disabled` or `allowlist`. Policy restrictions override the default-open path, and low-trust agents are denied.
 - An agent targeting any user other than its resolved responsible user requires either a materialized target-user policy that permits that agent (`open` or matching `allowlist`) or an explicit `inbox:manage` grant. The implicit default-open policy for a missing row remains responsible-user-only, so it never becomes a blanket cross-user grant. Grants may be unscoped or constrained by `scope.userIds` and act as administrative overrides, including over a disabled target-user policy.
 - Archive and unarchive operations are company-scoped, reversible, and activity logged with actor, agent, run, target user, target-resolution source, and policy mode.
+- Concurrent archives keep the newest archive time and its actor attribution. An earlier request must not undo an archive written by human completion while it waited. Unarchive removes that state so a later archive starts fresh.
 - New qualifying issue activity may invalidate an archive so the item resurfaces; archival is not a substitute for resolving or closing work.
 - Viewing an issue may update its per-user read receipt, but read receipts alone do not enroll the issue in Mine. Mine participation begins with a user-authored comment, issue creation/assignment, or another audited user mutation; explicit product actions such as manually running a routine may record an audited inbox touch.
 
@@ -2053,6 +2054,13 @@ configuration, plugin packages and outstanding hosted release gates. The
 [delivery plan](plans/2026-09-30-paperclip-public-mcp-and-plugins.md) separates
 external agent participation and granted third-party tools into later releases.
 
+The experimental OpenAI Dot Runner provider uses a separate `/mcp/runner`
+agent OAuth resource. It reuses the public gateway's browser/device consent,
+client metadata verification and signed event delivery, but requires one-use
+agent pairing and normal run admission. Personal grants cannot authorize
+Runner operations. See [OpenAI Dot Runner](openai-dot-runner.md) for the
+self-hosted release boundary and remaining account qualification.
+
 ### Experimental AI connection routing
 
 Opt-in plugin routers may represent a pool as an AI runtime binding. Core keeps
@@ -2073,6 +2081,16 @@ remove stale instructions after edits or access revocation. See
 [Connection instructions](connections/CONNECTION-INSTRUCTIONS.md) for contracts,
 UI conventions, custom adapter integration, and initial memory templates.
 
+### Remote Codex model compatibility
+
+Fresh remote Codex Runner preparation can replace a model whose verified CLI
+minimum exceeds the supported image CLI version. It selects a compatible older
+model in the same class, then the stable Runner default, and saves that effective
+model before checkpoint selection. A visible task warning and local run-log event
+record the substitution. This does not change agent settings, rewrite admitted
+executions, or bypass artifact, ownership, permission, and budget gates. See
+[remote Codex compatibility](execution-semantics.md#remote-codex-model-compatibility).
+
 ### Native provider capacity retry
 
 Committed, run-bound Codex `serverOverloaded` terminal failures display the model
@@ -2091,3 +2109,9 @@ as free-form text in the instance database. Legacy agents use the default
 in standard, ask, and planning modes. Submission never changes task disposition
 or routes feedback externally. See [Agent commentary](agent-commentary.md) for
 authentication, replay, document-sized limits, inspection, and deletion semantics.
+
+## Company decision-model service
+
+Company Settings → General can configure one shared API-key connection for optional internal decisions. V1 supports OpenAI Decisions and Jev through OpenRouter. Companies start unconfigured; background sponsorship defaults on when configured, while an explicit off setting persists. Human and agent calls retain current responsible-user, connection audience, resource, and agent installation checks. Only explicitly registered internal background features can use company sponsorship.
+
+The internal service provides local-only availability and bounded, reauthorized execution. It records metadata-only invocation history and independent fractional service charges in the existing cost ledger, applying company and applicable agent/project budgets under the accounting lock. Unknown dispatch charges retain reservations until audited resolution. Settings/testing require connection management permission; history uses existing cost visibility. See [decision-models.md](decision-models.md) for the contract, supported models, accounting, privacy, and endpoints.

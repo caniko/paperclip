@@ -440,8 +440,63 @@ This requires a failed `configuration_incomplete` run in the preparing stage,
 a setup-phase report, explicit proof that provider work did not start, and a
 nonempty list of recognized missing or inactive secret bindings. Process exit
 evidence, unknown binding reasons, secret-provider failures, ambiguous missing
-secret-definition lookups, and workspace failures remain reportable. This filter
-does not change task recovery, credentials, or execution policy.
+secret-definition lookups remain reportable. This filter does not change task
+recovery, credentials, or execution policy.
+
+AI account selection also stays local when the selection service proves a
+missing responsible user, personal default, or selected connection; an
+incompatible selection; or an account that needs reconnection. The service marks
+the original error, and setup preserves its closed `selectionFailure` reason.
+The same failed/preparing/setup/bootstrap checks apply, and resumed native runs
+with persisted provider input remain reportable. The generic
+`ai_connection_unavailable` wrapper alone is insufficient: database, credential
+provider, controller, and unclassified errors still report. Failed runs, blocked
+tasks, and account-repair actions remain unchanged.
+
+A workspace policy conflict also stays local when the resolver proves that an
+explicit `local_path` or `non_git_path` project workspace has no repository URL,
+Git confirms the selected directory is not a repository, and the task requests
+a Git worktree. The run must fail during setup before provider work starts.
+Its existing validation error, blocked task and board recovery action remain.
+Local Git command failures, permissions, corrupt repositories, fallback paths,
+and generic missing or unrestorable workspaces remain reportable. The error text
+or `workspace_validation_failed` code alone never suppresses them.
+
+Recognized external connection failures also stay in the local run result instead
+of producing application-error events in Sentry. Their producer records a closed
+`connectionFailure` descriptor: schema version, provider, operation, and reason.
+It contains no URL, host, path, credential, or remote response. This classification
+does not change the run's failed state, task recovery action, retry policy, or
+whether remote work may have been accepted.
+
+- Managed remote Git clones classify known authentication, repository access,
+  invalid URL, DNS (including machine-specific SSH aliases), connection, TLS,
+  rate-limit, and upstream failures from the actual clone subprocess. Setup must
+  fail before provider work starts. Every failed workspace candidate must have
+  proven connection evidence; a mixed or unknown failure remains reportable.
+  Local/file clones, credential-provider exceptions, local checkout or copy
+  failures, process signals, and repository corruption remain reportable. Remote
+  fetch failures already return workspace warnings; their classification is not
+  transferred to a later failure resolving a local base ref.
+- Hermes gateway configuration validation and the initial create-run request use
+  exact config, HTTP, or structured transport evidence. Missing configuration,
+  rejected credentials, unavailable endpoints, rate limits, and upstream outages
+  remain visible to the run owner. Unknown protocol/parser errors, missing run
+  identifiers, untyped terminal failures, and timeouts after accepted work remain
+  reportable. Stream/poll errors retain their existing retry and logging behavior.
+
+Expected pre-provider waits for a shared project workspace, a credential rotation
+lock, or an exhausted AI connection pool carry a server-owned expected
+cancellation receipt. They retain existing retry and lock behavior without a
+Sentry cancellation event. A later failed retry still reports its actual error;
+the wait code alone is not sufficient to suppress an event.
+
+MCP tool discovery records recognized outbound HTTP/transport failures through
+server-only provenance. These failures preserve the response status, stored
+connection health, audit record, local context, and first-party telemetry while
+skipping only Sentry. A proven missing OAuth scope returns an actionable 422
+response with its reconnect guidance. Unknown responses, parsing errors, local
+callbacks, database errors, and unproven network-looking messages still report.
 
 The `run_failure` context also includes the recorded process `exitCode` and
 `signal`, so a generic adapter error can still distinguish a nonzero exit from
@@ -562,6 +617,29 @@ includes `workspaceRestoreFailure` with one of the shared, path-free codes:
 or `restore_failed`. Unknown values are omitted. Workspace paths and arbitrary
 pre-restore result data are not included. A later successful run does not, by
 itself, establish that an earlier failed restore recovered the workspace files.
+
+For `workspace_validation_failed` with `git_worktree_not_reusable`, `run_execution`
+includes `workspaceValidationReason` and an allowlisted `workspaceValidationReasonCode`:
+`missing_worktree`, `not_a_git_checkout`, `not_registered`, `wrong_repository_root`,
+`branch_mismatch`, or `git_inspection_failed`. The last code distinguishes an
+unsuccessful or truncated Git registration inspection from confirmed absence in
+a complete list. Its optional `workspaceValidationInspection*` fields identify
+the fixed command `worktree_list`, failure (`spawn_failed`, `nonzero_exit`, or
+`output_truncated`), an allowlisted OS error code (or `unknown`), and an exit code
+from 1 through 255. No paths, repository or branch names, IDs, command output, or
+arbitrary messages enter these fields. Validation still blocks reuse; it does
+not repair Git metadata, change the selected repository, or retry the task.
+
+For explicit reuse of a retained Git workspace, `persisted_workspace_source_conflict`
+uses the same two fields with the fixed reason codes `source_scope_mismatch`,
+`explicit_project_workspace_conflict`, `source_path_unproven`,
+`source_registration_unproven`, `source_repository_mismatch`, or
+`source_repository_unavailable`. These distinguish an unverified original source
+from a missing Git registration. Paths, repository URLs, and workspace IDs stay
+out of the diagnostic fields. The task remains blocked until its original source
+is available or the owner intentionally selects a different workspace. A failed
+Git registration probe retains `git_inspection_failed` and the same bounded
+inspection fields, including when it occurs during original-source selection.
 
 When available, the saved `workspaceRestoreDiagnostic` adds the bounded fields
 `workspaceRestorePhase`, `workspaceRestoreStep`, `workspaceRestoreErrorCode`,

@@ -7,6 +7,7 @@ import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  assets,
   toolConnectionInstalls,
   agentConfigRevisions,
   agentApiKeys,
@@ -15,6 +16,7 @@ import {
   agentWakeupRequests,
   activityLog,
   costEvents,
+  budgetReservations,
   heartbeatRunEvents,
   heartbeatRuns,
   issueExecutionDecisions,
@@ -754,6 +756,15 @@ export function agentService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       assertBuiltInAgentMetadataMutationAllowed(existing.metadata, data.metadata, options);
     }
 
+    if (data.appearance?.customAvatarAssetId) {
+      const [asset] = await db.select().from(assets).where(and(
+        eq(assets.id, data.appearance.customAvatarAssetId), eq(assets.companyId, existing.companyId),
+        eq(assets.createdByAgentId, id),
+      ));
+      if (!asset || asset.contentType !== "image/png" || !asset.objectKey.startsWith(`${existing.companyId}/agent-avatars/${id}/`)) {
+        throw unprocessable("Use the avatar upload endpoint to set this agent's image");
+      }
+    }
     const normalizedPatch = { ...data } as Partial<typeof agents.$inferInsert>;
     if (data.permissions !== undefined) {
       normalizedPatch.permissions = normalizeAgentPermissions(data.permissions);
@@ -912,6 +923,7 @@ export function agentService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
     getById,
 
     create: async (companyId: string, data: Omit<typeof agents.$inferInsert, "companyId">, options?: CreateAgentOptions) => {
+      if (data.appearance?.customAvatarAssetId) throw unprocessable("Create the agent before uploading its avatar");
       assertBuiltInAgentMetadataMutationAllowed(null, data.metadata, options);
       if (data.reportsTo) {
         await ensureManager(companyId, data.reportsTo);
@@ -1098,6 +1110,13 @@ export function agentService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       }
 
       return withAccountingTransaction(db, existing.companyId, async (tx) => {
+        const [decisionHold] = await tx.select({ id: budgetReservations.id }).from(budgetReservations).where(and(
+          eq(budgetReservations.companyId, existing.companyId), eq(budgetReservations.agentId, id),
+          eq(budgetReservations.state, "held"), sql`${budgetReservations.decisionInvocationId} is not null`,
+        )).limit(1);
+        if (decisionHold) throw conflict("Wait for active decisions or resolve their unknown charges in Costs before deleting this agent", {
+          code: "agent_decision_accounting_pending",
+        });
         await tx
           .select({ id: agents.id })
           .from(agents)
