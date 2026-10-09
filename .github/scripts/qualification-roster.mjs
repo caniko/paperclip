@@ -4,6 +4,27 @@ import path from "node:path";
 
 export const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
 
+// Vitest concurrently appends discovered projects and does not promise ordering.
+// Compare every identity, including pool, without discarding duplicates.
+// https://github.com/vitest-dev/vitest/blob/v5.0.3/packages/vitest/src/node/specifications.ts
+export function specificationRows(specifications, root) {
+  const identities = new Set();
+  return specifications.map(specification => {
+    const file = path.relative(root, specification.moduleId).split(path.sep).join("/");
+    assert.ok(file && !file.startsWith("../") && !path.isAbsolute(file), "Specification source must be inside the checkout");
+    const row = { file, project: specification.project.name, pool: specification.pool };
+    assert.ok(typeof row.project === "string" && typeof row.pool === "string", "Specification identity is incomplete");
+    const key = JSON.stringify([row.project, row.file, row.pool]);
+    assert.ok(!identities.has(key), "Duplicate configured specification");
+    identities.add(key);
+    return row;
+  }).sort((a, b) => {
+    const left = JSON.stringify([a.project, a.file, a.pool]);
+    const right = JSON.stringify([b.project, b.file, b.pool]);
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+}
+
 // Consume Vitest's task tree directly. The v5.0.3 `list --json` formatter
 // discards skipped cases, which would remove required coverage from this map.
 // https://github.com/vitest-dev/vitest/blob/v5.0.3/packages/vitest/src/node/cli/cli-api.ts

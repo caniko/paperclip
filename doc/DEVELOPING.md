@@ -598,6 +598,10 @@ benchmark, Cloud, runner and live-provider prerequisites. A missing generated
 managed-runner parameter remains an explicit required expansion. Source drift,
 unmapped cases and uncollected files remain blockers.
 
+Vitest discovers projects concurrently. The collector retains both raw discovery
+lists and compares sorted file/project/pool identities. Reordering cannot hide
+a changed or missing entry, and duplicate specifications fail collection.
+
 Reconcile the union of actual environment collections before claiming complete
 coverage. Static parsing does not fully expand dynamic parameters or recognize
 every test factory. Framework IDs depend on test order, so parameter changes

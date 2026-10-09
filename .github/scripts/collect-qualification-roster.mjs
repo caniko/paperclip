@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createVitest } from "vitest/node";
-import { collectRows, mapEnvironments, sha256 } from "./qualification-roster.mjs";
+import { collectRows, mapEnvironments, sha256, specificationRows } from "./qualification-roster.mjs";
 
 const root = process.cwd();
 const destination = path.resolve(process.argv[2]);
@@ -22,7 +22,9 @@ const options = { root, watch: false, reporters: [], includeTaskLocation: true,
 let ctx = await createVitest(options);
 try {
   const specs = await ctx.globTestSpecifications();
-  const specifications = specs.map(spec => ({ file: path.relative(root, spec.moduleId).split(path.sep).join("/"), project: spec.project.name }));
+  const discoveryRows = specifications => specifications.map(spec => ({ file: path.relative(root, spec.moduleId).split(path.sep).join("/"), project: spec.project.name, pool: spec.pool }));
+  write("static-discovery.json", discoveryRows(specs));
+  const specifications = specificationRows(specs, root);
   write("specifications.json", specifications);
   assert.ok(specs.length, "No configured test specifications");
   const sources = Object.fromEntries([...new Set(specifications.map(spec => spec.file))]
@@ -39,7 +41,8 @@ try {
   await ctx.close();
   ctx = await createVitest(options);
   const runtimeSpecs = await ctx.globTestSpecifications();
-  assert.deepEqual(runtimeSpecs.map(spec => ({ file: path.relative(root, spec.moduleId).split(path.sep).join("/"), project: spec.project.name })),
+  write("runtime-discovery.json", discoveryRows(runtimeSpecs));
+  assert.deepEqual(specificationRows(runtimeSpecs, root),
     specifications, "Configured specifications changed between static and runtime collection");
   const { testModules, unhandledErrors } = await ctx.collectTests(runtimeSpecs);
   const rows = collectRows(testModules, root);

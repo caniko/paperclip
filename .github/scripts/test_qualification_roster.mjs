@@ -5,11 +5,26 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createVitest } from "vitest/node";
-import { collectRows, mapEnvironments, sha256 } from "./qualification-roster.mjs";
+import { collectRows, mapEnvironments, sha256, specificationRows } from "./qualification-roster.mjs";
 
 const module = tasks => ({ task: { filepath: "/checkout/fixture.test.ts", projectName: "fixture", mode: "run", tasks } });
 const task = (id, mode = "run") => ({ id, type: "test", name: "same display title", mode, location: { line: 10, column: 3 } });
 const policy = { all_declared_cases_required: true, rules: [], environments: { "default-hosted": {} } };
+
+test("concurrent discovery order cannot hide a missing, changed or duplicate file/project/pool identity", () => {
+  const spec = (file, project, pool = "forks") => ({ moduleId: `/checkout/${file}`, project: { name: project }, pool });
+  const first = spec("a.test.ts", "first");
+  const second = spec("b.test.ts", "second");
+  const expected = specificationRows([first, second], "/checkout");
+  assert.deepEqual(specificationRows([second, first], "/checkout"), expected);
+  for (const changed of [[first], [first, spec("c.test.ts", "second")],
+    [first, spec("b.test.ts", "other")], [first, spec("b.test.ts", "second", "typescript")]]) {
+    assert.throws(() => assert.deepEqual(specificationRows(changed, "/checkout"), expected));
+  }
+  assert.throws(() => specificationRows([first, first], "/checkout"), /Duplicate configured specification/);
+  assert.throws(() => specificationRows([{ ...first, pool: undefined }], "/checkout"), /identity is incomplete/);
+  assert.throws(() => specificationRows([first], "/other-checkout"), /inside the checkout/);
+});
 
 test("keeps distinct parameter identities, inherited skips and todo cases required and unexecuted", () => {
   const rows = collectRows([module([task("a"), task("b"), { type: "suite", name: "unavailable", mode: "skip", tasks: [task("c")] }, task("d", "todo")])], "/checkout");
