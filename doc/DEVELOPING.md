@@ -575,6 +575,14 @@ explicit negative fixtures for failed/skipped results, retries and duplicate tas
 emission. Their raw reports are retained as labeled negative-fixture text files
 alongside the contract log, separate from mandatory application XML.
 
+The exact-head regression lane also retains mandatory XML and raw logs for the
+PR policy scripts, authentic deployment migration upgrade, draft-assets migration,
+CLI authentication routes, semantic action catalog and local Runner lifecycle.
+The Runner package's own lane wrapper builds its real Rust fixtures before the
+focused tests. Each XML report uses the strict verifier; Vitest reports use the
+stable-task reporter. These focused results supplement the original admission,
+lineage, skill authorization and PostgreSQL deployment regressions.
+
 The stable runner stops on its first failing invocation. A server JUnit report
 therefore does not by itself establish that later workspace and serialized
 invocations completed. Acceptance still requires the entire command, unchanged
@@ -622,8 +630,9 @@ failures, errors, skips and retries. SDK-present and SDK-absent contracts need
 separate real environments. The live Tailscale exercise and Claude Code login
 characterization sources prohibit CI execution; their coverage and the hosted-only
 requirement remain documented conflicts until reconciled. The collection artifact
-requests 32-day retention and verifies actual provider expiry and SHA-256. A successful collection or custody
-receipt does not qualify the producer or authorize deployment.
+requests 32-day retention and verifies actual provider expiry and SHA-256. A
+successful collection or custody receipt does not qualify the producer or
+authorize deployment.
 
 ### Task search evaluation
 
