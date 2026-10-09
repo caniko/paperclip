@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createVitest } from "vitest/node";
 import { collectRows, mapEnvironments, sha256, specificationRows } from "./qualification-roster.mjs";
+import { importEntries, reconcileImportEntry, supplementalSpecifications } from "./qualification-import-provenance.mjs";
 
 const module = tasks => ({ task: { filepath: "/checkout/fixture.test.ts", projectName: "fixture", mode: "run", tasks } });
 const task = (id, mode = "run") => ({ id, type: "test", name: "same display title", mode, location: { line: 10, column: 3 } });
@@ -111,3 +112,98 @@ test("real Vitest collection preserves skipped cases and static-only declaration
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("real Vitest reconciles an import-only entry to independently collected source locations without executing cases", { timeout: 60_000 }, async () => {
+  const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+  const root = mkdtempSync(path.join(os.tmpdir(), "qualification-imports-"));
+  let ctx;
+  try {
+    symlinkSync(path.join(repoRoot, "node_modules"), path.join(root, "node_modules"), "junction");
+    writeFileSync(path.join(root, "entry.test.ts"), 'import "./source.test.js";');
+    writeFileSync(path.join(root, "source.test.ts"), `import { beforeAll, describe, it } from "vitest";
+      beforeAll(() => { throw new Error("collection must not execute hooks"); });
+      describe("imported suite", () => {
+        it.each([1, 2])("same title", () => { throw new Error("collection must not execute assertions"); });
+        it.skip("required unavailable case", () => {});
+      });`);
+    const configFile = path.join(root, "vitest.config.mjs");
+    writeFileSync(configFile, `export default { test: { name: "import-contract", root: ${JSON.stringify(root)}, include: ["entry.test.ts"] } };`);
+    const options = { root, config: configFile, watch: false, reporters: [], includeTaskLocation: true,
+      allowOnly: false, retry: 0, maxWorkers: 1, fileParallelism: false };
+    ctx = await createVitest(options);
+    const specs = await ctx.globTestSpecifications();
+    const entries = importEntries(specs, root);
+    assert.equal(entries.length, 1);
+    const extra = supplementalSpecifications(specs, entries, root);
+    assert.equal(extra.length, 1);
+    const parsed = await ctx.parseSpecifications(specs);
+    const originalErrors = parsed.flatMap(module => module.errors());
+    assert.equal(originalErrors.length, 1);
+    assert.match(originalErrors[0].message, /No test suite found/);
+    const sourceParsed = await ctx.parseSpecifications(extra);
+    assert.ok(sourceParsed.every(module => !module.errors().length));
+    const declarations = collectRows(sourceParsed, root);
+    await ctx.close();
+    ctx = await createVitest(options);
+    const runtimeSpecs = await ctx.globTestSpecifications();
+    const primary = await ctx.collectTests(runtimeSpecs);
+    const primaryModules = primary.testModules;
+    assert.deepEqual(primary.unhandledErrors, []);
+    await ctx.close();
+    ctx = await createVitest(options);
+    const supplemental = await ctx.collectTests(supplementalSpecifications(await ctx.globTestSpecifications(), entries, root));
+    assert.deepEqual(supplemental.unhandledErrors, []);
+    const modules = [...primaryModules, ...supplemental.testModules];
+    const result = reconcileImportEntry(entries[0], modules, declarations, root);
+    assert.equal(result.complete, true);
+    assert.equal(result.bindings.length, 3);
+    assert.equal(new Set(result.bindings.map(binding => binding.wrapper_id)).size, 3);
+    assert.ok(result.bindings.every(binding => binding.source_file === "source.test.ts" && binding.source_location.line > 0));
+    assert.equal(result.collection_is_execution_evidence, false);
+    assert.equal(collectRows(primaryModules, root).filter(row => row.skipped_in_environment).length, 1);
+    assert.equal(reconcileImportEntry(entries[0], modules, [], root).complete, false);
+    assert.equal(reconcileImportEntry(entries[0], primaryModules, declarations, root).complete, false);
+    const sourceRows = collectRows(supplemental.testModules, root);
+    const sourceTasks = sourceRows.map(row => ({ type: "test", id: row.id, name: row.name,
+      mode: row.declared_mode, dynamic: row.dynamic_declaration, location: row.location }));
+    const modified = { task: { ...supplemental.testModules[0].task,
+      tasks: sourceTasks.map((task, index) => index === 0 ? { ...task, name: "different source" } : task) } };
+    assert.equal(reconcileImportEntry(entries[0], [...primaryModules, modified], declarations, root).complete, false);
+    const unlocated = { task: { ...supplemental.testModules[0].task,
+      tasks: sourceTasks.map(task => ({ ...task, location: null })) } };
+    assert.equal(reconcileImportEntry(entries[0], [...primaryModules, unlocated], declarations, root).complete, false);
+    if (process.env.EVIDENCE) {
+      const directory = path.join(process.env.EVIDENCE, "import-contract");
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(path.join(directory, "provenance.json"), JSON.stringify({ originalErrors, declarations,
+        primary: collectRows(primaryModules, root), supplemental: collectRows(supplemental.testModules, root), result }, null, 2) + "\n");
+    }
+  } finally {
+    await ctx?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("only literal side-effect test imports establish declaration edges", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "qualification-import-grammar-"));
+  const spec = { moduleId: path.join(root, "entry.test.ts"), project: { name: "grammar" }, pool: "forks" };
+  try {
+    writeFileSync(path.join(root, "source.test.ts"), 'import { it } from "vitest"; it("case", () => {});');
+    for (const text of ['import { caseFactory } from "./source.test.js";', 'import "./setup.js";',
+      'import "./source.test.js"; const changesRegistration = true;', 'export * from "./source.test.js";']) {
+      writeFileSync(spec.moduleId, text);
+      assert.deepEqual(importEntries([spec], root), []);
+    }
+    writeFileSync(spec.moduleId, 'import "./source.test.js"; import "./source.test.js";');
+    assert.throws(() => importEntries([spec], root), /Duplicate declaration import/);
+    symlinkSync(repoRootForEscape(), path.join(root, "outside.test.ts"));
+    writeFileSync(spec.moduleId, 'import "./outside.test.ts";');
+    assert.throws(() => importEntries([spec], root), /escapes the checkout/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function repoRootForEscape() {
+  return fileURLToPath(new URL("../../server/src/__tests__/heartbeat-native-runner-selection.test.ts", import.meta.url));
+}

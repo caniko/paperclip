@@ -610,6 +610,17 @@ Vitest discovers projects concurrently. The collector retains both raw discovery
 lists and compares sorted file/project/pool identities. Reordering cannot hide
 a changed or missing entry, and duplicate specifications fail collection.
 
+Import-only acceptance entry points retain their original parser errors and all
+configured runtime identities. A source-backed supplement recognizes only
+literal side-effect imports of real test files inside the checkout. It uses
+Vitest's public specification API and the importing project's actual environment
+to collect otherwise undiscovered sources separately. Registration order, full
+case shape, cardinality and independently collected source locations must agree
+before the parser gap is recorded as resolved. Duplicate imports, non-test setup,
+source escapes, missing static declarations and collection errors remain blockers.
+The raw errors, source hashes, supplemental rosters and bijective case bindings
+remain inspectable. This provenance gives no assertion execution credit.
+
 Reconcile the union of actual environment collections before claiming complete
 coverage. Static parsing does not fully expand dynamic parameters or recognize
 every test factory. Framework IDs depend on test order, so parameter changes
