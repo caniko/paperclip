@@ -109,6 +109,10 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
   expect(allowed.status, await allowed.text()).toBe(201);
   expect((await createIssue(bindings["company/example"], bindings["project/outside"])).status).toBe(403);
   expect((await createIssue(bindings["company/other"], bindings["project/main"])).status).toBe(403);
+  // Task ingress remains scoped; creating work does not grant project API access.
+  expect((await fetch(`http://localhost:${port}/api/projects/${bindings["project/main"]}`, {
+    headers: { authorization: "Bearer entry-test-bridge-token-at-least-32-characters" },
+  })).status).toBe(404);
   const plan = await command("plan");
   expect(plan.code, plan.stderr).toBe(0);
   expect(JSON.parse(plan.stdout).differences).toEqual([]);

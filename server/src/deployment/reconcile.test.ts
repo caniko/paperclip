@@ -146,6 +146,25 @@ it.each(["manual", "budget"])("reenables declarations without resuming %s pauses
   expect((await db.select().from(routines).where(eq(routines.id, routineId)))[0].status).toBe("active");
 });
 
+it("allocates colliding company prefixes within one atomic deployment transaction", async () => {
+  const declaration = { version: 1, owner: "prefix-collision",
+    companies: {
+      first: { fields: { name: "Colliding transaction first" } },
+      second: { fields: { name: "Colliding transaction second" } },
+    },
+    projects: { main: { company: "second", fields: { name: "Collision project" } } },
+  };
+  const first = await reconcile(declaration);
+  const [one] = await db.select().from(companies).where(eq(companies.id, first.bindings["company/first"]));
+  const [two] = await db.select().from(companies).where(eq(companies.id, first.bindings["company/second"]));
+  expect(one.issuePrefix).toMatch(/^COLA*$/);
+  expect(two.issuePrefix).toMatch(/^COLA*$/);
+  expect(two.issuePrefix).not.toBe(one.issuePrefix);
+  expect((await db.select().from(projects).where(eq(projects.id, first.bindings["project/main"])))[0].companyId).toBe(two.id);
+  expect((await reconcile(declaration)).bindings).toEqual(first.bindings);
+  expect((await reconcile(declaration, false)).differences).toEqual([]);
+});
+
 it("preserves existing and later operator membership decisions for adopted companies", async () => {
   await reconcile({ version: 1, owner: "adopt-membership", companies: {} });
   const [account] = await db.select().from(authAccounts);
