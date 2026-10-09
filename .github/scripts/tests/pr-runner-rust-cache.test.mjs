@@ -26,7 +26,7 @@ const SELECT_STEP = "      - name: Select the pinned Runner Rust toolchain";
 // entry. Each one has to agree with the writer on every key input, or that
 // one lane misses and silently recompiles every third-party crate while the
 // others hit.
-const READER_JOBS = ["typecheck_release_registry", "verify_paperclip_runner", "build", "canary_dry_run"];
+const READER_JOBS = ["typecheck_release_registry", "verify_paperclip_runner", "build", "canary_dry_run", "native_composer_stop"];
 const readers = READER_JOBS.map((name) => [name, job(prWorkflow, name)]);
 const release = job(releaseWorkflow, "verify_paperclip_runner");
 
