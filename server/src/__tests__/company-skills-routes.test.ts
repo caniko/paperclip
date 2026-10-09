@@ -195,7 +195,7 @@ function registerModuleMocks() {
   });
 
   vi.doMock("../services/index.js", () => ({
-    accessService: () => mockAccessService,
+    accessService: mockAccessServiceFactory,
     agentService: () => mockAgentService,
     companySkillService: () => mockCompanySkillService,
     issueService: () => mockIssueService,
@@ -229,6 +229,8 @@ describe("company skill mutation permissions", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAccessServiceFactory.mockReset().mockReturnValue(mockAccessService);
+    mockSkillPolicyServiceFactory.mockReset().mockReturnValue(mockCompanySkillPolicyService);
     mockSkillSourceService.sourceForSkill.mockResolvedValue(null);
     mockSkillSourceService.importFromUrl.mockImplementation((companyId, source) => mockCompanySkillService.importFromSource(companyId, source));
     mockGetTelemetryClient.mockReturnValue({ track: vi.fn() });
