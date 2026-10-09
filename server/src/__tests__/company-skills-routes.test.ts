@@ -1395,6 +1395,32 @@ describe("company skill mutation permissions", () => {
     expect(mockCompanySkillPolicyService.evaluate).not.toHaveBeenCalled();
   });
 
+  it("binds the source authorizer factory to the reserved transaction", async () => {
+    const tx = {} as NonNullable<Parameters<SkillSourceContext["authorize"]>[2]>;
+    const decide = vi.fn().mockResolvedValue(allowSkillChangeDecision());
+    const resolveAgentPrincipal = vi.fn().mockResolvedValue({ type: "agent", id: "agent-1", role: "engineer" });
+    const evaluate = vi.fn().mockResolvedValue({ allowed: true });
+    mockAccessServiceFactory.mockReturnValueOnce(mockAccessService).mockReturnValueOnce({ ...mockAccessService, decide });
+    mockSkillPolicyServiceFactory.mockReturnValueOnce(mockCompanySkillPolicyService).mockReturnValueOnce({ resolveAgentPrincipal, evaluate });
+    mockSkillSourceService.discover.mockImplementation(async (_input, context: SkillSourceContext) => {
+      const authorize = context.authorizeForTransaction!(tx);
+      await authorize("skills.import", { sourceType: "git", sourceLocator: "https://github.com/acme/skills" });
+      return { candidates: [] };
+    });
+    await request(createApp({ type: "agent", agentId: "agent-1", companyId: "company-1", source: "agent_key" }))
+      .post("/api/companies/company-1/skill-sources/discover")
+      .send({ repositoryUrl: "https://github.com/acme/skills" })
+      .expect(200);
+    expect(mockAccessServiceFactory).toHaveBeenCalledTimes(2);
+    expect(mockAccessServiceFactory).toHaveBeenLastCalledWith(tx);
+    expect(mockSkillPolicyServiceFactory).toHaveBeenCalledTimes(2);
+    expect(mockSkillPolicyServiceFactory).toHaveBeenLastCalledWith(tx);
+    expect(resolveAgentPrincipal).toHaveBeenCalledWith("company-1", "agent-1");
+    expect(evaluate).toHaveBeenCalledWith(expect.objectContaining({ companyId: "company-1", action: "skills.import" }));
+    expect(mockAccessService.decide).not.toHaveBeenCalled();
+    expect(mockCompanySkillPolicyService.evaluate).not.toHaveBeenCalled();
+  });
+
   it('streams discovery updates and a final result while retaining JSON compatibility', async () => {
     const result = { candidates: [], commitSha: 'a'.repeat(40) };
     mockSkillSourceService.discover.mockImplementation(async (_input, _context, options) => {

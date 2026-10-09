@@ -283,6 +283,7 @@ describe.skipIf(!support.supported)('skill source persistence', () => {
         // A transaction must supply its connection instead of the reserved root.
         expect(await connection.select({ id: companies.id }).from(companies).where(eq(companies.id, companyId))).toHaveLength(1);
       },
+      authorizeForTransaction: tx => (action, resource) => guarded.authorize(action, resource, tx),
     };
     const operation = (async () => {
       const created = await service.create(companyId, { repositoryUrl: 'https://github.com/acme/skills', trackingRef: 'pool-policy', commitSha: sha, selectedPaths: ['pool/SKILL.md'] }, guarded);
