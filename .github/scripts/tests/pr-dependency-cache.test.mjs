@@ -15,7 +15,7 @@ test("generated Nix concurrency isolates forks but coalesces the same source bra
   const key = (repository, ref, pullRequest = false) => group.replace(/\$\{\{ (.*?) \}\}/g, (_, expression) => {
     const context = {
       "github.workflow": "Nix installable builds",
-      "github.repository": repository,
+      "github.repository": pullRequest ? "caniko/paperclip" : repository,
       "github.ref_name": pullRequest ? "4/merge" : ref,
       "github.event.pull_request.head.repo.full_name": pullRequest ? repository : "",
       "github.event.pull_request.head.ref": pullRequest ? ref : "",
