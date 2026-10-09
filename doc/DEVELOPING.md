@@ -610,12 +610,19 @@ Playwright, Node, Python, Rust and native-package evidence retains its existing
 separate workflow requirements; this workspace roster supplies no credit for
 those lanes.
 
+The first workspace-wide runtime collection at `d3799675`
+([attempt 1](https://github.com/caniko/paperclip/actions/runs/37910691371))
+retained 33,380 cases and 81 skips from 2,119 configured specifications.
+Its source-bound map also covers the opt-in
+Claude Code login characterization, process-sandbox execution and live Daytona
+duplex cases. Each case remains required; collection grants no execution credit.
+
 Each required case still needs exact-source, attempt-1 evidence with zero
 failures, errors, skips and retries. SDK-present and SDK-absent contracts need
-separate real environments. The live Tailscale exercise explicitly prohibits
-CI execution; its coverage and the hosted-only requirement remain a documented
-conflict until reconciled. The collection artifact requests 32-day retention and
-verifies actual provider expiry and SHA-256. A successful collection or custody
+separate real environments. The live Tailscale exercise and Claude Code login
+characterization sources prohibit CI execution; their coverage and the hosted-only
+requirement remain documented conflicts until reconciled. The collection artifact
+requests 32-day retention and verifies actual provider expiry and SHA-256. A successful collection or custody
 receipt does not qualify the producer or authorize deployment.
 
 ### Task search evaluation
