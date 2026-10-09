@@ -15,6 +15,7 @@ import { findServerAdapter } from "../adapters/registry.js";
 import { projectWorkspaces } from "@paperclipai/db";
 import { projectService } from "../services/projects.js";
 import { budgetPolicies } from "@paperclipai/db";
+import { budgetService } from "../services/budgets.js";
 
 let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
 let db: ReturnType<typeof createDb>;
@@ -171,6 +172,12 @@ it.each(["company", "agent"])("preserves %s budget pause and policy on an unrela
   declaration.companies.example.fields.name = `Budget fields ${kind}`;
   const first = await reconcile(declaration);
   const id = first.bindings[`${kind}/${kind === "company" ? "example" : "worker"}`];
+  const target = kind === "company" ? declaration.companies.example : declaration.agents.worker;
+  // Native creation stores the legacy limit. Install a real policy before
+  // testing that an unrelated declaration edit preserves its existing state.
+  await budgetService(db).upsertPolicy(first.bindings["company/example"], {
+    scopeType: kind, scopeId: id, amount: target.fields.budgetMonthlyCents, windowKind: "calendar_month_utc",
+  }, null);
   const pausedAt = new Date("2020-01-01T00:00:00Z");
   if (kind === "company") {
     await db.update(companies).set({ status: "paused", pauseReason: "budget", pausedAt }).where(eq(companies.id, id));
@@ -186,7 +193,6 @@ it.each(["company", "agent"])("preserves %s budget pause and policy on an unrela
   )))[0];
   const policy = await readPolicy();
   expect(policy).toBeDefined();
-  const target = kind === "company" ? declaration.companies.example : declaration.agents.worker;
   target.fields.name = `Renamed budget fields ${kind}`;
   expect((await reconcile(declaration)).bindings).toEqual(first.bindings);
   expect(await readScope()).toMatchObject({ name: target.fields.name, status: "paused", pauseReason: "budget", pausedAt });
