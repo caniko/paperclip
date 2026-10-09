@@ -98,7 +98,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: review-app-verification-${{ github.run_id }}-${{ github.run_attempt }}
-          retention-days: 30
+          # Provider timestamp rounding can put 30 declared days below the
+          # required 2,592,000 actual seconds. Keep the readback floor unchanged.
+          retention-days: 32
           if-no-files-found: warn
           path: |
             ${{ runner.temp }}/review-app-authentication.json
