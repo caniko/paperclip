@@ -98,6 +98,17 @@ defaults do not guarantee `bwrap`; self-hosted policy runners must already
 provide it. The contract still executes the hostile fixture and rejects writes
 to the immutable verifier, browser tools and provenance.
 
+The owned caller now pins `4fbe02dbc1ebf59f95bee0eb84cb3edd623f7210` after
+[independent hosted attempt 1](https://github.com/caniko/paperclip/actions/runs/37967935165)
+passed both mandatory Stop cases with zero failures, errors, skips, retries or
+flaky outcomes. Custody verified the archive digest, all five attachment hashes,
+the 1,001-file immutable harness manifest, verifier source and lockfile bindings.
+An offline invocation of that immutable verifier reproduced the hosted receipt.
+The provider archive SHA-256 is
+`10bafdc47cd25f48b6d830f6f8cdc25a5795e936e576f44b0b4af7d611aa05c5`;
+actual retention is `2764798` seconds. This qualifies the prepared Stop lane.
+Each new application head still requires its own attempt-1 runtime evidence.
+
 ## Start Dev
 
 From repo root:

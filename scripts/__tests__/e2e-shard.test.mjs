@@ -299,7 +299,7 @@ test("the prepared Stop workflow selects the absolute candidate root and retains
   assert.match(jobs.get("e2e_shards"), /retention-days: 32/);
 });
 
-test("the independent hosted Stop lane uses every prepared command before caller promotion", () => {
+test("the independent hosted Stop lane keeps the qualified prepared commands", () => {
   const prepared = readFileSync(trustedPrWorkflow, "utf8");
   const qualification = readFileSync(path.join(repoRoot, ".github/workflows/qualification-native-stop.yml"), "utf8");
   assert.equal(qualification, renderStopQualification(prepared));
@@ -309,7 +309,7 @@ test("the independent hosted Stop lane uses every prepared command before caller
   assert.match(independent, /runs-on: ubuntu-24\.04/);
   assert.match(independent, /timeout-minutes: 20/);
   assert.doesNotMatch(independent, /needs\.gate/);
-  assert.match(readFileSync(prCallerWorkflow, "utf8"), /pr-trusted\.yml@28e815c12bb5daa074d5d12e3abcc8c9339d07cf/);
+  assert.match(readFileSync(prCallerWorkflow, "utf8"), /pr-trusted\.yml@4fbe02dbc1ebf59f95bee0eb84cb3edd623f7210/);
 });
 
 test("the stacked PR scope selector runs full CI only where intended", () => {
