@@ -305,7 +305,17 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         const binding = bindings.get(`${spec.kind}/${spec.key}`);
         if (!binding && !spec.adopt) {
           spec.id = await spec.create(fields); ids.set(`${spec.kind}/${spec.key}`, spec.id);
-        } else await spec.update(fields);
+        } else {
+          const updateFields = { ...fields };
+          // Native budget setters reconcile pause state even for an unchanged
+          // limit. An enablement or unrelated edit must not reapply that limit.
+          // Keep the full declaration in the ledger so ownership is preserved.
+          if (binding && (spec.kind === "agent" || spec.kind === "company")
+            && !actions.get(spec)!.fields.includes("budgetMonthlyCents")) {
+            delete updateFields.budgetMonthlyCents;
+          }
+          await spec.update(updateFields);
+        }
         if (!spec.enabled) await disableResource(tx, spec.kind, spec.id);
         const next = { owner: m.owner, kind: spec.kind, key: spec.key, resourceId: spec.id, companyId: spec.companyId, fields: spec.fields(), enabled: spec.enabled };
         await tx.insert(deploymentResources).values(next).onConflictDoUpdate({ target: [deploymentResources.owner, deploymentResources.kind, deploymentResources.key], set: next });

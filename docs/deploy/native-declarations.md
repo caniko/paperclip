@@ -183,7 +183,10 @@ runtime configuration. Declare metadata to preserve it during adoption.
 
 Database guards reject ordinary edits to owned fields and credentials.
 Operational pauses, spending, and run history remain mutable. Reapply does not
-resume paused work. Removing declarations retains history: agents, companies,
+resume paused work. Enablement changes and unrelated field edits do not reapply
+an unchanged company or agent budget. The declaration still owns that budget;
+an explicit limit change uses the native budget policy.
+Removing declarations retains history: agents, companies,
 and routines pause; schedules and secrets disable; task-bridge keys revoke.
 Workspace removal is rejected until an explicit ownership handoff exists.
 Task-bridge rotation requires a new declaration key and token. Existing active
