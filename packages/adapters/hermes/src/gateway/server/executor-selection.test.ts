@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { selectExecutor } from "./executor-selection.js";
-import { sessionCodec } from "./index.js";
+import { executionAffinityScope, sessionCodec } from "./index.js";
 
 const primary = "https://workers.example/atlas";
 const secondary = "https://workers.example/nomad";
@@ -14,6 +14,30 @@ const ready = (accepting = true, availableSlots = 1) => new Response(JSON.string
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Hermes executor selection before admission", () => {
+  it("uses the actual issue conversation key and treats an unscoped timer as fresh", () => {
+    expect(executionAffinityScope(config, { taskKey: "__heartbeat__", wakeSource: "timer" })).toBeNull();
+    expect(executionAffinityScope(config, { taskKey: "cache-alias", issueId: "issue-one" })).toEqual({
+      scope: "issue", taskKey: "issue-one", primaryEndpoint: primary,
+    });
+    expect(executionAffinityScope({ ...config, sessionKeyStrategy: " AGENT " }, { issueId: "issue-two" })).toEqual({
+      scope: "agent", taskKey: null, primaryEndpoint: primary,
+    });
+    expect(executionAffinityScope({ ...config, apiBaseUrl: "https://user:private@example.test", sessionKeyStrategy: "agent" }, {})).toBeNull();
+  });
+
+  it("an explicit reset tombstone overrides a stale issue-local worker result", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => url.startsWith(primary) ? ready(false) : ready()));
+    expect(await selectExecutor({ config, executionAffinity: { endpoint: null }, runtime: {
+      sessionParams: { executorBaseUrl: primary, sessionKey: "stale-before-reset" },
+    } })).toBe(secondary);
+  });
+
+  it("selects fresh for an unscoped issue-strategy timer despite a cached provider result", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => url.startsWith(primary) ? ready(false) : ready()));
+    expect(await selectExecutor({ config, context: { wakeSource: "timer" }, runtime: {
+      sessionId: "previous-issue", sessionParams: { executorBaseUrl: primary },
+    } })).toBe(secondary);
+  });
   it("uses the primary when ready and sends authentication without redirects", async () => {
     const fetch = vi.fn(async () => ready());
     vi.stubGlobal("fetch", fetch);

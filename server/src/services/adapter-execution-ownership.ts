@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
-import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
-import { environmentLeases, heartbeatRuns, workspaceOperations, type Db } from "@paperclipai/db";
+import { and, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { adapterSessionAffinities, environmentLeases, heartbeatRuns, workspaceOperations, type Db } from "@paperclipai/db";
+import type { ExecutionAffinityBinding } from "./adapter-session-affinity.js";
 import { getSecretProvider } from "../secrets/provider-registry.js";
 import { legacyControllerBootId } from "./legacy-controller-lease.js";
 
@@ -111,13 +112,14 @@ export function adapterExecutionOwnershipNotHeldCondition() {
 async function prepareCheckpoint(db: Db, input: OwnershipIdentity & {
   adapterType: string;
   checkpoint: Record<string, unknown>;
+  affinity?: ExecutionAffinityBinding & { selectedEndpoint: string };
 }, key: typeof KEYS[number]): Promise<void> {
-  const { checkpoint, ...identity } = input;
+  const { checkpoint, affinity, ...identity } = input;
   const prepared = await getSecretProvider("local_encrypted").createSecret({
     value: JSON.stringify({ schema: key === KEY ? SCHEMA : `${SCHEMA}.workspace`, ...identity, checkpoint }),
   });
   await db.transaction(async (tx) => {
-    const [run] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+    const [run] = await tx.select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId),
       eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
       eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
@@ -130,6 +132,17 @@ async function prepareCheckpoint(db: Db, input: OwnershipIdentity & {
       eq(environmentLeases.heartbeatRunId, input.runId), eq(environmentLeases.status, "active"),
     )).for("update");
     if (!lease) throw new Error("Adapter admission no longer owns the environment lease");
+    if (affinity) {
+      if (key !== KEY || affinity.companyId !== input.companyId || affinity.agentId !== run.agentId
+        || affinity.adapterType !== input.adapterType) throw new Error("Executor affinity ownership mismatch");
+      const [saved] = await tx.update(adapterSessionAffinities).set({ endpoint: affinity.selectedEndpoint, updatedAt: new Date() }).where(and(
+        eq(adapterSessionAffinities.companyId, affinity.companyId), eq(adapterSessionAffinities.agentId, affinity.agentId),
+        eq(adapterSessionAffinities.adapterType, affinity.adapterType), eq(adapterSessionAffinities.scopeKey, affinity.scopeKey),
+        eq(adapterSessionAffinities.generation, affinity.generation),
+        or(isNull(adapterSessionAffinities.endpoint), eq(adapterSessionAffinities.endpoint, affinity.selectedEndpoint)),
+      )).returning({ id: adapterSessionAffinities.id });
+      if (!saved) throw new Error("Executor conversation was reset or pinned to another worker before admission");
+    }
     const previous = record(lease.metadata?.[key]);
     if (lease.metadata && key in lease.metadata) {
       if (previous.state === "pending" && previous.fingerprint === prepared.valueSha256) return;
@@ -142,7 +155,7 @@ async function prepareCheckpoint(db: Db, input: OwnershipIdentity & {
   });
 }
 
-export function prepareAdapterExecution(db: Db, input: OwnershipIdentity & { adapterType: string; checkpoint: Record<string, unknown> }) {
+export function prepareAdapterExecution(db: Db, input: OwnershipIdentity & { adapterType: string; checkpoint: Record<string, unknown>; affinity?: ExecutionAffinityBinding & { selectedEndpoint: string } }) {
   return prepareCheckpoint(db, input, KEY);
 }
 

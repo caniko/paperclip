@@ -1,6 +1,6 @@
 import type { AdapterSessionManagement, ServerAdapterModule } from "@paperclipai/adapter-utils";
 import { ADAPTER_LABEL, ADAPTER_TYPE } from "./shared/constants.js";
-import { execute, getConfigSchema, prepareWorkspaceOwnership, reconcileExecution, reconcileWorkspaceOwnership, sessionCodec, testEnvironment } from "./server/index.js";
+import { execute, executionAffinityScope, getConfigSchema, prepareWorkspaceOwnership, reconcileExecution, reconcileWorkspaceOwnership, sessionCodec, testEnvironment } from "./server/index.js";
 
 export const type = ADAPTER_TYPE;
 export const label = ADAPTER_LABEL;
@@ -66,6 +66,7 @@ export function createServerAdapter(): ServerAdapterModule {
     reconcileWorkspaceOwnership,
     testEnvironment,
     sessionCodec,
+    executionAffinityScope,
     sessionManagement,
     models,
     supportsLocalAgentJwt: false,

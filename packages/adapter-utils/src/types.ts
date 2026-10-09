@@ -259,7 +259,9 @@ export interface AdapterExecutionContext {
   /** Persist an immutable recovery checkpoint before provider admission. May contain
    * credentials: the host must encrypt it and must not publish it in events/logs.
    * Rejection means no provider work may start. */
-  onExecutionCheckpoint?: (checkpoint: Record<string, unknown>) => Promise<void>;
+  onExecutionCheckpoint?: (checkpoint: Record<string, unknown>, affinityEndpoint?: string) => Promise<void>;
+  /** Host-owned conversation binding, independent of issue-local provider session state. */
+  executionAffinity?: { endpoint: string | null };
   /** Mutable observation state, kept separately from the immutable admission. */
   onExecutionProgress?: (progress: Record<string, unknown>) => Promise<void>;
   /** Host-owned stop of this run's sandbox during setup or direct CLI execution. Resolves only after
@@ -538,6 +540,12 @@ export interface WorkspaceOwnershipContext extends Pick<AdapterExecutionContext,
 export interface ServerAdapterModule {
   type: string;
   execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult>;
+  /** Stable conversation scope for executor selection; run/none return null. */
+  executionAffinityScope?: (config: Record<string, unknown>, context: Record<string, unknown>) => {
+    scope: "agent" | "issue";
+    taskKey: string | null;
+    primaryEndpoint: string;
+  } | null;
   /** One bounded stop/reconcile attempt using the exact persisted admission.
    * A missing/failed control channel is pending, never proof of settlement. */
   reconcileExecution?: (checkpoint: Record<string, unknown>, progress?: Record<string, unknown>) => Promise<"pending" | "settled">;

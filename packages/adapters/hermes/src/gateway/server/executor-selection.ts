@@ -39,13 +39,21 @@ export function executorInventory(config: Record<string, unknown>): string[] | n
 export async function selectExecutor(input: {
   config: Record<string, unknown>;
   runtime: { sessionId?: string | null; sessionParams?: Record<string, unknown> | null };
+  context?: Record<string, unknown>;
+  executionAffinity?: AdapterExecutionContext["executionAffinity"];
   executionTarget?: AdapterExecutionContext["executionTarget"];
   workspaceOwnership?: AdapterExecutionContext["workspaceOwnership"];
   signal?: AbortSignal;
 }): Promise<string | null> {
   const endpoints = executorInventory(input.config);
-  const continuousSession = !["run", "none"].includes(String(input.config.sessionKeyStrategy ?? "issue"));
-  const affinity = continuousSession ? input.runtime.sessionParams?.executorBaseUrl : undefined;
+  const strategy = String(input.config.sessionKeyStrategy ?? "issue").trim().toLowerCase();
+  const hasIssue = [input.context?.taskId, input.context?.issueId].some(value => typeof value === "string" && value.trim().length > 0);
+  const continuousSession = !["run", "none"].includes(strategy)
+    && (strategy === "agent" || !input.context || hasIssue);
+  const storedAffinity = input.executionAffinity
+    ? input.executionAffinity.endpoint ?? undefined
+    : input.runtime.sessionParams?.executorBaseUrl;
+  const affinity = continuousSession ? storedAffinity : undefined;
   if (!endpoints) {
     const primary = normalizeBaseUrl(String(input.config.apiBaseUrl ?? input.config.url ?? ""))?.toString().replace(/\/+$/, "");
     if (affinity !== undefined && affinity !== primary) {
@@ -62,7 +70,7 @@ export async function selectExecutor(input: {
   if (targetBound && affinity && affinity !== endpoints[0]) {
     throw failure("hermes_gateway_executor_affinity_invalid", "A protected execution target cannot adopt a secondary-worker session.");
   }
-  const candidates = affinity ? [affinity] : targetBound || (continuousSession && (input.runtime.sessionId || input.runtime.sessionParams))
+  const candidates = affinity ? [affinity] : targetBound || (continuousSession && !input.executionAffinity && (input.runtime.sessionId || input.runtime.sessionParams))
     ? [endpoints[0]!] : endpoints;
   const apiKey = String(input.config.apiKey ?? input.config.token ?? "").trim();
   if (!apiKey) throw failure("hermes_gateway_api_key_missing", "Executor selection requires an authenticated Hermes gateway.");

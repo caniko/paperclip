@@ -1026,7 +1026,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     if (ownedAdmission) {
       if (!ctx.onExecutionCheckpoint) throw new Error("wait_for_jobs requires host-owned durable execution checkpoints");
-      await ctx.onExecutionCheckpoint(checkpoint);
+      await ctx.onExecutionCheckpoint(checkpoint,
+        (strategy === "agent" || (strategy === "issue" && issueIdFromContext(ctx))) && !managedMcp
+          ? baseUrl.toString().replace(/\/+$/, "") : undefined);
       checkpointPrepared = true;
     }
     // This adapter has no local child process, so crossing into the first
