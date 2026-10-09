@@ -1,5 +1,7 @@
+import type { AgentPublicIdentity } from "@paperclipai/shared";
 import type {
   Agent,
+  ConnectionIntentInteraction,
   AgentDesiredSkillEntry,
   AgentSkillAssignmentMode,
   AgentPermissions,
@@ -108,6 +110,13 @@ function agentPath(id: string, companyId?: string, suffix = "") {
 }
 
 export const agentsApi = {
+  setAvatar: (companyId: string, agentId: string, imageBase64: string | null) =>
+    api.put<{ agentId: string; appearance: import("@paperclipai/shared").AgentAppearance; avatarUrl: string }>(`/companies/${companyId}/agents/${agentId}/avatar`, { imageBase64 }),
+  getIdentity: (id: string, companyId?: string) =>
+    api.get<AgentPublicIdentity | null>(agentPath(id, companyId, "/identity")),
+  adoptAiConnection: (agentId: string, interactionId: string, connectionId: string, companyId: string) =>
+    api.post<ConnectionIntentInteraction>(withCompanyScope(`/agents/${agentId}/connection-intents/${interactionId}/adopt`, companyId), { connectionId }),
+
   list: (companyId: string) => api.get<Agent[]>(`/companies/${companyId}/agents`),
   org: (companyId: string) => api.get<OrgNode[]>(`/companies/${companyId}/org`),
   listConfigurations: (companyId: string) =>
@@ -222,11 +231,12 @@ export const agentsApi = {
   adapterModels: (
     companyId: string,
     type: string,
-    options?: { refresh?: boolean; environmentId?: string | null; provider?: string },
+    options?: { refresh?: boolean; environmentId?: string | null; provider?: string; poolId?: string },
   ) => {
     const params = new URLSearchParams();
     if (options?.refresh) params.set("refresh", "1");
     if (options?.provider) params.set("provider", options.provider);
+    if (options?.poolId) params.set("poolId", options.poolId);
     if (options?.environmentId) params.set("environmentId", options.environmentId);
     const query = params.size > 0 ? `?${params.toString()}` : "";
     return api.get<AdapterModel[]>(
@@ -242,7 +252,7 @@ export const agentsApi = {
     type: string,
     data: {
       adapterConfig: Record<string, unknown>;
-      aiConnection?: import("@paperclipai/shared").AiConnectionBinding;
+      aiConnection?: import("@paperclipai/shared").AiRuntimeConnectionBinding;
       agentId?: string;
       testCredentials?: Record<string, string>;
       environmentId?: string | null;
