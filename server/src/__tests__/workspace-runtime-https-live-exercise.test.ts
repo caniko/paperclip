@@ -9,7 +9,8 @@
  * URL rather than only in a mock's return value.
  *
  * It is skipped unless BOTH hold, because it mutates host-level Tailscale serve
- * state and must never run in CI:
+ * state. CI is allowed only in an explicitly authorized isolated-hosted profile
+ * with a disposable node and a dedicated real broker; never a persistent host:
  *
  *   - `PAPERCLIP_LIVE_BROKER_EXERCISE=1`
  *   - the broker socket exists (`PAPERCLIP_TAILSCALE_BROKER_SOCKET` or the default)
@@ -60,6 +61,12 @@ async function brokerSocketPresent() {
 }
 
 const optedIn = process.env.PAPERCLIP_LIVE_BROKER_EXERCISE === "1";
+if (optedIn && process.env.CI && (
+  process.env.RUNNER_ENVIRONMENT !== "github-hosted"
+  || process.env.PAPERCLIP_LIVE_PROFILE !== "isolated-hosted"
+)) {
+  throw new Error("Live HTTPS exercise requires the isolated hosted profile in CI");
+}
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const live = optedIn && embeddedPostgresSupport.supported && (await brokerSocketPresent());
 

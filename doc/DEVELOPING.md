@@ -627,9 +627,18 @@ duplex cases. Each case remains required; collection grants no execution credit.
 
 Each required case still needs exact-source, attempt-1 evidence with zero
 failures, errors, skips and retries. SDK-present and SDK-absent contracts need
-separate real environments. The live Tailscale exercise and Claude Code login
-characterization sources prohibit CI execution; their coverage and the hosted-only
-requirement remain documented conflicts until reconciled. The collection artifact
+separate real environments. The user authorized isolated hosted profiles for the
+live Tailscale and Claude Code cases on 2026-10-09. Other CI execution of those
+opt-in suites fails closed. The Claude workflow uses a fresh HOME, a source-pinned
+native CLI, real pseudo-terminal and network, and no provider credential. It
+submits no browser code and retains no authorization URL bytes. Its original
+case, assertions and 60-second deadline remain intact. Provider archive and
+binary hashes, strict stable-ID JUnit and non-secret output receive source-bound
+receipts and 32-day custody. The Tailscale profile still requires a disposable
+owned node, HTTPS/MagicDNS and a dedicated real broker with service credentials;
+production host state cannot supply this profile. Neither profile receives
+execution credit until its exact-source result and actual retention pass.
+The collection artifact
 requests 32-day retention and verifies actual provider expiry and SHA-256. A
 successful collection or custody receipt does not qualify the producer or
 authorize deployment.

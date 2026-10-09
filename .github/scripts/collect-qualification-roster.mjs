@@ -71,7 +71,7 @@ try {
     blockers: ["Every required case still needs source-bound, attempt-1 execution evidence with zero failures, skips and retries.",
       "The union of real OS, SDK, runner and live environment collections must reconcile conditional declarations and parameter expansions.",
       "Unresolved mappings, collection errors, missing specifications and source drift remain blockers.",
-       "Live Tailscale and Claude Code characterization sources prohibit CI execution; retain those conflicts until authorized live proof and the hosted-only qualification requirement are reconciled."] };
+       "Authorized live profiles require disposable hosted environments: the pinned Claude prompt lane is pending; Tailscale requires real service credentials and a dedicated broker-provisioned node."] };
   write("coverage-map.json", roster);
   assert.equal(errors.length, 0, "Collection errors remain in the retained coverage map");
   assert.equal(missing.length, 0, "Configured specifications were not collected");
