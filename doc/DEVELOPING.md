@@ -580,6 +580,40 @@ therefore does not by itself establish that later workspace and serialized
 invocations completed. Acceptance still requires the entire command, unchanged
 strict reports, and verified exact-source artifact digests and provider retention.
 
+### Complete required coverage map
+
+`.github/workflows/qualification-coverage.yml` collects the complete configured
+workspace Vitest roster from the exact PR head on a disposable hosted runner.
+Every declared case remains required, including skipped and todo cases. The
+workflow records static declarations as well as runtime-collected parameter
+cases. Vitest's `list --json` output is unsuitable for this map because its
+formatter omits skipped cases.
+
+The artifact includes `coverage-map.json`, the two raw rosters, configured test
+specifications, source-file SHA-256 values, collection errors and a custody
+receipt. Collection does not run assertion bodies and grants no execution
+credit. The source-bound environment rules in
+`.github/qualification/coverage-environments.json` identify real OS, SDK,
+benchmark, Cloud, runner and live-provider prerequisites. A missing generated
+managed-runner parameter remains an explicit required expansion. Source drift,
+unmapped cases and uncollected files remain blockers.
+
+Reconcile the union of actual environment collections before claiming complete
+coverage. Static parsing does not fully expand dynamic parameters or recognize
+every test factory. Framework IDs depend on test order, so parameter changes
+between environments need source-location and parameter review as well as IDs.
+Playwright, Node, Python, Rust and native-package evidence retains its existing
+separate workflow requirements; this workspace roster supplies no credit for
+those lanes.
+
+Each required case still needs exact-source, attempt-1 evidence with zero
+failures, errors, skips and retries. SDK-present and SDK-absent contracts need
+separate real environments. The live Tailscale exercise explicitly prohibits
+CI execution; its coverage and the hosted-only requirement remain a documented
+conflict until reconciled. The collection artifact requests 32-day retention and
+verifies actual provider expiry and SHA-256. A successful collection or custody
+receipt does not qualify the producer or authorize deployment.
+
 ### Task search evaluation
 
 The task search relevance rubric and regression corpus are documented in

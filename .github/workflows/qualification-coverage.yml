@@ -1,0 +1,75 @@
+name: Complete required coverage map
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+concurrency:
+  group: coverage-map-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    name: Exact head / complete declaration roster
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Bind source and retention readiness
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/coverage-map"
+          mkdir -p "$EVIDENCE"
+          mkdir -p "$RUNNER_TEMP/coverage-instance" "$RUNNER_TEMP/coverage-tmp"
+          printf '%s\n' "EVIDENCE=$EVIDENCE" "NODE_ENV=test" "PAPERCLIP_HOME=$RUNNER_TEMP/coverage-instance" "PAPERCLIP_CONFIG=$RUNNER_TEMP/coverage-instance/config.json" "PAPERCLIP_INSTANCE_ID=coverage-${GITHUB_RUN_ID}" "TMPDIR=$RUNNER_TEMP/coverage-tmp" >> "$GITHUB_ENV"
+          python3 .github/scripts/qualification-evidence.py initialize "$EVIDENCE"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          version: 9.15.4
+          run_install: false
+      - name: Install declared collection dependencies
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee "$EVIDENCE/install.log"
+          pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+          pnpm run preflight:workspace-links
+      - name: Preserve every configured declaration and runtime-collected case
+        run: |
+          set -euo pipefail
+          node --test .github/scripts/test_qualification_roster.mjs 2>&1 | tee "$EVIDENCE/roster-contract.log"
+          node .github/scripts/collect-qualification-roster.mjs "$EVIDENCE" 2>&1 | tee "$EVIDENCE/collection.log"
+      - name: Seal collection custody only
+        if: always()
+        run: python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" '${{ job.status }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: complete-coverage-map-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          retention-days: 32
+          if-no-files-found: error
+          path: ${{ runner.temp }}/coverage-map/
+      - name: Verify actual provider retention
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/qualification-evidence.py artifacts complete-coverage-map- 1 "$RUNNER_TEMP/coverage-retention.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: coverage-retention-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          retention-days: 32
+          if-no-files-found: error
+          path: ${{ runner.temp }}/coverage-retention.json
