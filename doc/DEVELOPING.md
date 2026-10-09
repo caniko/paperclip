@@ -615,6 +615,16 @@ therefore does not by itself establish that later workspace and serialized
 invocations completed. Acceptance still requires the entire command, unchanged
 strict reports, and verified exact-source artifact digests and provider retention.
 
+The exact-head workflow partitions that same command across four complete server
+shards, two workspace-A file shards, the complete workspace-B group and four
+serialized shards. Each job retains its dry-run plan and strict JUnit reports.
+The full server group includes the chat and native-runner suites. The matrix
+contract checks complete, non-overlapping server membership and every configured
+workspace. All jobs keep the two-hour limit and attempt-1 requirement. The
+retention gate requires all fourteen application artifacts and the original RED
+artifact. Skips still fail strict acceptance; partitioning grants no coverage
+credit to a missing or unexecuted environment.
+
 ### Complete required coverage map
 
 `.github/workflows/qualification-coverage.yml` collects the complete configured

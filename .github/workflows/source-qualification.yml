@@ -50,7 +50,62 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        lane: [typecheck, tests, build, regression]
+        include:
+          - lane: typecheck
+          - lane: build
+          - lane: regression
+          # Keep the original complete groups and their assertion deadlines.
+          # The full command exceeded the two-hour job limit while still
+          # traversing serialized suites. Only split existing runner groups.
+          - lane: tests-server-1
+            mode: general
+            group: general-server
+            shard_index: 0
+            shard_count: 4
+          - lane: tests-server-2
+            mode: general
+            group: general-server
+            shard_index: 1
+            shard_count: 4
+          - lane: tests-server-3
+            mode: general
+            group: general-server
+            shard_index: 2
+            shard_count: 4
+          - lane: tests-server-4
+            mode: general
+            group: general-server
+            shard_index: 3
+            shard_count: 4
+          - lane: tests-workspaces-a-1
+            mode: general
+            group: general-workspaces-a
+            shard_index: 0
+            shard_count: 2
+          - lane: tests-workspaces-a-2
+            mode: general
+            group: general-workspaces-a
+            shard_index: 1
+            shard_count: 2
+          - lane: tests-workspaces-b
+            mode: general
+            group: general-workspaces-b
+          - lane: tests-serialized-1
+            mode: serialized
+            shard_index: 0
+            shard_count: 4
+          - lane: tests-serialized-2
+            mode: serialized
+            shard_index: 1
+            shard_count: 4
+          - lane: tests-serialized-3
+            mode: serialized
+            shard_index: 2
+            shard_count: 4
+          - lane: tests-serialized-4
+            mode: serialized
+            shard_index: 3
+            shard_count: 4
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -82,11 +137,21 @@ jobs:
       - name: Run mandatory application lane once
         env:
           LANE: ${{ matrix.lane }}
+          TEST_MODE: ${{ matrix.mode }}
+          TEST_GROUP: ${{ matrix.group }}
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          SHARD_COUNT: ${{ matrix.shard_count }}
         run: |
           set -euo pipefail
           case "$LANE" in
             typecheck) pnpm -r typecheck 2>&1 | tee "$EVIDENCE/typecheck.log" ;;
-            tests) pnpm test:run 2>&1 | tee "$EVIDENCE/tests.log" ;;
+            tests-*)
+              args=(--mode "$TEST_MODE")
+              if [ -n "$TEST_GROUP" ]; then args+=(--group "$TEST_GROUP"); fi
+              if [ -n "$SHARD_COUNT" ]; then args+=(--shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT"); fi
+              node scripts/run-vitest-stable.mjs "${args[@]}" --dry-run > "$EVIDENCE/shard-plan.json"
+              pnpm test:run -- "${args[@]}" 2>&1 | tee "$EVIDENCE/tests.log"
+              ;;
             build) pnpm build 2>&1 | tee "$EVIDENCE/build.log" ;;
             regression)
               python3 -m unittest discover -s .github/scripts -p 'test_qualification_evidence.py' 2>&1 | tee "$EVIDENCE/receipt-tests.log"
@@ -106,7 +171,7 @@ jobs:
         run: |
           set -euo pipefail
           strict=()
-          case "$LANE" in tests|regression) strict+=(--strict-reports) ;; esac
+          case "$LANE" in tests-*|regression) strict+=(--strict-reports) ;; esac
           python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" "$OUTCOME" "${strict[@]}"
       - name: Retain original evidence
         if: always()
@@ -135,7 +200,7 @@ jobs:
           persist-credentials: false
       - name: Read actual provider expiry and digest for every required artifact
         run: |
-          python3 .github/scripts/qualification-evidence.py artifacts source-proof- 5 retention.json
+          python3 .github/scripts/qualification-evidence.py artifacts source-proof- 15 retention.json
           python3 .github/scripts/qualification-evidence.py artifacts trusted-stop-identity- 1 harness-retention.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
