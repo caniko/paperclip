@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -98,6 +98,52 @@ test("a regenerated dependency lock is explicitly identified in the receipt", ()
   assert.equal(receipt.lockfileRegenerated, true);
   assert.equal(receipt.sourceLockSha256, provenance.sourceLockSha256);
   assert.equal(receipt.effectiveLockSha256, "0".repeat(64));
+});
+
+test("the proposed caller retains the staged effective lock before candidate runtime", (t) => {
+  const workflow = readFileSync(new URL("../../.github/workflows/pr-trusted.yml", import.meta.url), "utf8");
+  const lane = workflow.split("  native_composer_stop:")[1].split("\n  e2e:")[0];
+  const statement = lane.split("\n").find(line => line.includes("composer-candidate-stage.mjs effective-lock"))?.trim();
+  assert.ok(statement, "the host source lock is not the staged effective dependency lock");
+  assert.ok(lane.indexOf(statement) < lane.indexOf("      - name: Run mandatory composer Stop acceptance"));
+  assert.doesNotMatch(lane, /cp pnpm-lock\.yaml "\$COMPOSER_STOP_EFFECTIVE_LOCKFILE"/);
+  const directory = mkdtempSync(join(tmpdir(), "composer-stop-effective-lock-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const candidate = join(directory, "candidate");
+  const trusted = join(directory, ".trusted-composer-stop", "scripts");
+  mkdirSync(candidate);
+  mkdirSync(trusted, { recursive: true });
+  for (const name of ["composer-candidate-stage.mjs", "composer-candidate-sandbox.mjs", "grok-public-install-sandbox.mjs"]) {
+    copyFileSync(new URL(`../${name}`, import.meta.url), join(trusted, name));
+  }
+  const sourceLock = "unchanged source lock\n";
+  const effectiveLock = "regenerated staged dependency lock\n";
+  writeFileSync(join(directory, "pnpm-lock.yaml"), sourceLock);
+  writeFileSync(join(candidate, "pnpm-lock.yaml"), effectiveLock);
+  const output = join(directory, "composer-stop-effective-lock.yaml");
+  const result = spawnSync("bash", ["-c", statement], { cwd: directory, encoding: "utf8", timeout: 10000,
+    env: { ...process.env, COMPOSER_STOP_CANDIDATE_ROOT: candidate, RUNNER_TEMP: directory } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(output, "utf8"), effectiveLock);
+  const receipt = qualifyComposerStop(Buffer.from(JSON.stringify(report())), { ...provenance,
+    sourceLockSha256: createHash("sha256").update(sourceLock).digest("hex"),
+    effectiveLockSha256: createHash("sha256").update(readFileSync(output)).digest("hex") });
+  assert.equal(receipt.lockfileRegenerated, true);
+  assert.notEqual(receipt.sourceLockSha256, receipt.effectiveLockSha256);
+  rmSync(join(candidate, "pnpm-lock.yaml"));
+  for (const fault of ["symlink", "directory", "fifo", "oversized"]) {
+    const lock = join(candidate, "pnpm-lock.yaml");
+    if (fault === "symlink") symlinkSync(join(directory, "pnpm-lock.yaml"), lock);
+    if (fault === "directory") mkdirSync(lock);
+    if (fault === "fifo") assert.equal(spawnSync("mkfifo", [lock]).status, 0);
+    if (fault === "oversized") { writeFileSync(lock, ""); truncateSync(lock, 16 * 1024 * 1024 + 1); }
+    const refused = spawnSync("bash", ["-c", statement], { cwd: directory, encoding: "utf8", timeout: 10000,
+      env: { ...process.env, COMPOSER_STOP_CANDIDATE_ROOT: candidate, RUNNER_TEMP: directory } });
+    assert.notEqual(refused.status, 0, fault);
+    assert.equal(refused.signal, null, `${fault} must refuse rather than hang`);
+    assert.equal(readFileSync(output, "utf8"), effectiveLock, `${fault} changed trusted evidence`);
+    rmSync(lock, { recursive: true });
+  }
 });
 
 test("missing, skipped, failed, retried or incomplete native proof is refused", () => {

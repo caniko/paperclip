@@ -1476,6 +1476,10 @@ jobs:
         run: |
           node .trusted-composer-stop/scripts/composer-candidate-stage.mjs build "$COMPOSER_STOP_CANDIDATE_ROOT"
 
+      - name: Retain staged effective dependency lock before runtime
+        run: |
+          node .trusted-composer-stop/scripts/composer-candidate-stage.mjs effective-lock "$COMPOSER_STOP_CANDIDATE_ROOT" "$RUNNER_TEMP/composer-stop-effective-lock.yaml"
+
       - name: Build immutable deterministic provider
         working-directory: .trusted-composer-stop/packages/paperclip-runner
         run: |
@@ -1527,7 +1531,6 @@ jobs:
           COMPOSER_STOP_PNPM_VERSION="$(pnpm --version)"
           export COMPOSER_STOP_REVISION COMPOSER_STOP_PNPM_VERSION
           git show HEAD:pnpm-lock.yaml > "$COMPOSER_STOP_SOURCE_LOCKFILE"
-          cp pnpm-lock.yaml "$COMPOSER_STOP_EFFECTIVE_LOCKFILE"
           node .trusted-composer-stop/scripts/qualify-composer-stop.mjs "$RUNNER_TEMP/composer-stop-report.json" "$RUNNER_TEMP/composer-stop-receipt.json"
 
       - name: Retain native composer Stop evidence

@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { appendFileSync, closeSync, constants, fstatSync, mkdtempSync, mkdirSync, openSync, readSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { composerCandidateDockerArgs } from "./composer-candidate-sandbox.mjs";
 
@@ -61,12 +61,41 @@ export function runComposerCandidatePhase({ candidate, phase }) {
   }
 }
 
+function captureComposerCandidateLock(candidate, output) {
+  if (typeof candidate !== "string" || typeof output !== "string" || !isAbsolute(candidate) || !isAbsolute(output)) {
+    throw new Error("Effective lock evidence requires absolute candidate and output paths");
+  }
+  const location = relative(realpathSync(candidate), realpathSync(dirname(output)));
+  if (!location || (!location.startsWith("../") && !isAbsolute(location))) {
+    throw new Error("Effective lock evidence must be outside the candidate directory");
+  }
+  // Candidate preparation has stopped. Never follow a candidate lock symlink on
+  // the host or block on a FIFO; bind a single regular-file descriptor instead.
+  const fd = openSync(join(candidate, "pnpm-lock.yaml"), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    // ponytail: cap lock evidence at 16 MiB; increase only for reviewed larger locks.
+    if (!stat.isFile() || stat.size === 0 || stat.size > 16 * 1024 * 1024) throw new Error("Invalid staged effective lock");
+    const bytes = Buffer.alloc(stat.size + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const count = readSync(fd, bytes, length, bytes.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+    if (length !== stat.size) throw new Error("Staged effective lock changed during evidence capture");
+    writeFileSync(output, bytes.subarray(0, length), { flag: "wx", mode: 0o600 });
+  } finally { closeSync(fd); }
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [phase, candidate] = process.argv.slice(2);
+  const [phase, candidate, output] = process.argv.slice(2);
   if (phase === "stage") {
     const source = stageComposerCandidate({ source: process.env.GITHUB_WORKSPACE,
       revision: process.env.COMPOSER_STOP_HEAD_REVISION, temporaryDirectory: process.env.RUNNER_TEMP });
     appendFileSync(process.env.GITHUB_ENV, `COMPOSER_STOP_CANDIDATE_ROOT=${source}\n`);
+  } else if (phase === "effective-lock") {
+    captureComposerCandidateLock(candidate, output);
   } else {
     runComposerCandidatePhase({ candidate, phase });
   }
