@@ -12,7 +12,7 @@ import { EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, getEmbeddedPostgresTestSupport, star
 type TestSql = ReturnType<typeof connectPostgres>;
 type JournalEntry = { idx: number; version: string; when: number; tag: string; breakpoints: boolean };
 type Journal = { version: string; dialect: string; entries: JournalEntry[] };
-const nativeFile = "0295_nostalgic_rhodey.sql";
+const nativeFile = "0319_exotic_spiral.sql";
 const nativeHash = "ac20d3f6626b23aaf07e7bc7f6502bbcd728a2808d4b4adb56b2116bb30e6412";
 // Authentic entry and SQL from 843bb5b, whose upstream prefix through 0288 is unchanged.
 const oldEntry: JournalEntry = { idx: 289, version: "7", when: 1790713813737, tag: "0289_messy_vivisector", breakpoints: true };
@@ -21,6 +21,18 @@ const pendingFiles = [
   "0289_drop_user_keyboard_shortcuts.sql", "0290_browser_use_cloud.sql",
   "0291_conscious_secret_warriors.sql", "0292_powerful_devos.sql",
   "0293_broad_rattler.sql", "0294_chilly_marvel_apes.sql",
+  "0295_public_captain_cross.sql", "0296_stiff_thaddeus_ross.sql",
+  "0297_foamy_swordsman.sql", "0298_connection_agent_instructions.sql",
+  "0299_absent_ser_duncan.sql", "0300_chunky_chamber.sql",
+  "0301_lumpy_maria_hill.sql", "0302_colossal_otto_octavius.sql",
+  "0303_supreme_garia.sql", "0304_curvy_shadow_king.sql",
+  "0305_chubby_vin_gonzales.sql", "0306_familiar_titania.sql",
+  "0307_cool_naoko.sql", "0308_whole_steel_serpent.sql",
+  "0309_loving_the_hood.sql", "0310_agent_commentary.sql",
+  "0311_mcp_file_transfers.sql", "0312_easy_eternity.sql",
+  "0313_private_task_access.sql", "0314_private_task_draft_assets.sql",
+  "0315_rapid_emma_frost.sql", "0316_premium_slayback.sql",
+  "0317_messy_famine.sql", "0318_strong_blacklash.sql",
 ];
 const browserTables = ["browser_use_browsers", "browser_use_runs", "browser_use_sessions", "browser_use_settings"];
 const guardedTables = ["agent_api_keys", "agents", "companies", "company_secret_versions", "company_secrets", "project_workspaces", "projects", "routine_triggers", "routines"];
