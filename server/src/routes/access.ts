@@ -187,6 +187,27 @@ function readSkillMarkdown(skillName: string): string | null {
   return null;
 }
 
+/** Invite onboarding must use this app's bundled skills, not operator overrides. */
+function readBundledSkillMarkdown(skillName: string): string | null {
+  const normalized = skillName.trim().toLowerCase();
+  if (!isSafeSkillName(normalized)) {
+    return null;
+  }
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(moduleDir, "../../skills", normalized, "SKILL.md"), // published: dist/routes/ -> <pkg>/skills/
+    path.resolve(moduleDir, "../../../skills", normalized, "SKILL.md"), // dev: src/routes/ -> repo root/skills/
+  ];
+  for (const skillPath of candidates) {
+    try {
+      return fs.readFileSync(skillPath, "utf8");
+    } catch {
+      // Continue to next bundled candidate.
+    }
+  }
+  return null;
+}
+
 function isSafeSkillName(skillName: string): boolean {
   return /^[a-z0-9][a-z0-9._-]*$/.test(skillName);
 }
@@ -3592,7 +3613,7 @@ export function accessRoutes(
 
     const skillName = (req.params.skillName as string).trim().toLowerCase();
     if (skillName !== "paperclip") throw notFound("Skill not found");
-    const markdown = readSkillMarkdown(skillName);
+    const markdown = readBundledSkillMarkdown(skillName);
     if (!markdown) throw notFound("Skill not found");
     res.type("text/markdown").send(markdown);
   });

@@ -47,7 +47,8 @@ it("delivers a controller-produced run binding through the real Hermes adapter w
   vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
     if (String(url).endsWith("/v1/capabilities")) return Response.json({ features: { runs_managed_mcp: {
       version: 1, enabled: true, mode: "run_isolated", host_id: "controller-host",
-    }, runs_execution_context: { version: 1, mode: "precondition", backends: ["local"], lifetimes: ["wait_for_jobs"], stop_admission: true } } });
+    }, runs_execution_context: { version: 1, mode: "precondition", backends: ["local"], lifetimes: ["wait_for_jobs"], stop_admission: true },
+    runs_recovery: { version: 1, durable_lineage_stop: true, ordinary_stop_admission: true, admission_binding: 1 } } });
     if (String(url).endsWith("/v1/runs")) {
       bodies.push(JSON.parse(String(init?.body)));
       return Response.json({ run_id: `provider-${bodies.length}`, status: "started" }, { status: 202 });

@@ -73,8 +73,11 @@ for (const action of ["task_retry", "thread_retry", "inbox_retry", "message", "q
       await page.goto(action === "inbox_retry" ? `/${company.issuePrefix}/inbox/all` : taskUrl);
       if (action === "task_retry") {
         const notice = page.getByRole("status", { name: "Task recovery" });
-        await expect(notice).toHaveText("Automatic recovery of this task stopped.Retry");
-        await expect(notice.getByRole("link")).toHaveCount(0);
+        await expect(notice).toContainText("Server restarted during startup");
+        await expect(notice).toContainText("Automatic recovery stopped.");
+        await expect(notice.getByRole("link", { name: "Inspect run" }))
+          .toHaveAttribute("href", new RegExp(`/agents/${agent.id}/runs/${sourceRunId}$`));
+        await expect(notice.getByRole("button", { name: "Retry", exact: true })).toBeEnabled();
         const presentation = await notice.evaluate(element => {
           const style = getComputedStyle(element);
           return { border: style.borderTopWidth, background: style.backgroundColor };
@@ -97,7 +100,27 @@ for (const action of ["task_retry", "thread_retry", "inbox_retry", "message", "q
         await page.getByRole("button", { name: action === "thread_retry" ? "Try again" : "Retry", exact: true }).click();
         if (action === "inbox_retry") await page.goto(taskUrl);
       }
-      await expect(page.getByText("Answered the pending follow-up once.", { exact: false })).toBeVisible({ timeout: 45_000 });
+      try {
+        await expect(page.getByText("Answered the pending follow-up once.", { exact: false })).toBeVisible({ timeout: 45_000 });
+      } catch (error) {
+        // Keep persisted admission evidence before fixture cleanup, without
+        // including comments, adapter config, credentials or provider output.
+        const admission = await Promise.all([
+          db.select({ id: issues.id, status: issues.status, executionRunId: issues.executionRunId, checkoutRunId: issues.checkoutRunId })
+            .from(issues).where(eq(issues.id, issue.id)),
+          db.select({ id: heartbeatRuns.id, status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode, createdAt: heartbeatRuns.createdAt, startedAt: heartbeatRuns.startedAt, finishedAt: heartbeatRuns.finishedAt })
+            .from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agent.id)),
+          db.select({ id: agentWakeupRequests.id, status: agentWakeupRequests.status, reason: agentWakeupRequests.reason, runId: agentWakeupRequests.runId, requestedByActorType: agentWakeupRequests.requestedByActorType, requestedAt: agentWakeupRequests.requestedAt, finishedAt: agentWakeupRequests.finishedAt })
+            .from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agent.id)),
+          db.select({ id: issueRecoveryActions.id, status: issueRecoveryActions.status, kind: issueRecoveryActions.kind })
+            .from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issue.id)),
+        ]).catch(() => null);
+        await test.info().attach("legacy-recovery-admission", {
+          body: JSON.stringify({ action, issueId: issue.id, agentId: agent.id, admission }, null, 2),
+          contentType: "application/json",
+        }).catch(() => {});
+        throw error;
+      }
       await expect(page.getByRole("status", { name: "Task recovery" })).toHaveCount(0);
       const completed = await json(await request.get(`/api/issues/${issue.id}`));
       expect(completed).toMatchObject({ status: "done", executionBlocker: null });

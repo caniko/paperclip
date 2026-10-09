@@ -144,6 +144,32 @@ This mode does not start Hermes. It creates runs with `POST /v1/runs`, streams
 Hermes events with SSE, polls run status as a fallback, and stops timed-out runs
 with `POST /v1/runs/{run_id}/stop`.
 
+Controller cancellation also applies to ordinary gateway runs. After admission,
+the adapter retries Stop and keeps observing until a terminal parent-run receipt
+is verified; child completion, mismatched run IDs, and nonterminal Stop responses
+do not acknowledge cancellation. The adapter tests run in the PR workspace lane.
+
+#### Durable run recovery and Stop
+
+When the host supplies an execution checkpoint callback, ordinary gateway runs
+require `features.runs_recovery.version = 1`, `durable_lineage_stop`, and
+`ordinary_stop_admission`. The host seals the original endpoint, headers, and
+create body before admission. Observation progress (successor identities and
+per-run SSE cursors) is recorded separately and cannot replace that admission.
+
+The adapter follows `superseded` parents to their approved successors. SSE
+reconnects send `Last-Event-ID` for the current run; sequenced receipts reuse the
+server's existing run-log deduplication. A lineage Stop is acknowledged only
+after every admitted executor settles. Controller loss uses the sealed original
+admission to stop and reconcile the lineage; it does not automatically continue
+model work. Missing capabilities or unavailable workers retain pending ownership.
+
+`unrecoverable` with `intervention_reason: "tool_effect_uncertain"` produces
+`hermes_gateway_tool_effect_uncertain`, not successful completion or an automatic
+retry. Inspect the original tool effect before deciding whether to start new work.
+Rolling back requires settling pending provider admissions first, since an older
+controller or worker cannot enforce these recovery contracts.
+
 #### Maintain an existing directory
 
 The gateway adapter supports a configured worker whose terminal backend is
@@ -196,6 +222,16 @@ incompatible with this protected mode. See
 [`doc/filesystem-workspaces.md`](../../../doc/filesystem-workspaces.md) for the
 configuration, isolation, recovery and qualification contract.
 
+After controller loss, supervised runs use their original encrypted checkpoint
+to stop the original idempotent admission. Recovery does not use the agent's
+current gateway configuration or start a replacement provider. A pending provider
+or workspace receipt retains the run, task, environment lease and agent slot.
+Verified settlement permits cancellation or interrupted-run reconciliation.
+An already dispatched gateway run without a durable checkpoint remains held as
+`remote_owner_unverified`; ordinary cancellation returns `409` until its remote
+owner can be verified. Graceful shutdown joins registered Stop and suppresses
+successor dispatch while the existing owner settles.
+
 ### Run-isolated managed MCP
 
 Controller-delivered MCP credentials require an explicit instance-operator
@@ -236,6 +272,21 @@ Hermes must advertise authenticated version-1 `runs_managed_mcp` with
 conversation, even after an A/B/A agent sequence. Credential files, profiles, and
 shared session history are not used for delivery; run tokens are redacted from
 adapter logs. Qualify the actual worker connector and teardown before rollout.
+
+### Recovery receipt compatibility
+
+Owned admissions require `runs_recovery.admission_binding: 1` in addition to
+durable lineage Stop. The authenticated `/v1/runs/stop` endpoint binds the
+reserved root to SHA-256 digests of the original idempotency key and HTTP body.
+The private checkpoint retains the original request. Recovery verifies those
+digests and every known lineage member from the separately persisted progress.
+An older worker without this capability refuses owned dispatch before admission.
+
+Poll and SSE observations remain scoped to their original run endpoint across
+successor transitions and pending host callbacks. Identical sequenced replays are
+deduplicated; changed payloads and host receipt conflicts request Stop and retain
+ownership until valid lineage settlement. Complete wire-payload digests are
+persisted separately from redacted display content.
 
 ### Compatibility with the old gateway package
 

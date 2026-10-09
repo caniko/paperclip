@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { resolveBuildCommit } from "../../scripts/write-build-stamp.mjs";
+import { configureFixtureGitIdentity } from "./helpers/git-fixture.js";
 
 it("packages a full source commit without a Docker build argument", () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "paperclip-build-stamp-")));
@@ -15,7 +16,8 @@ it("packages a full source commit without a Docker build argument", () => {
     copyFileSync(new URL("../../scripts/write-build-stamp.mjs", import.meta.url), script);
     const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
     git("init", "--quiet");
-    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "--no-gpg-sign", "-m", "fixture");
+    configureFixtureGitIdentity(root);
+    git("commit", "--allow-empty", "-m", "fixture");
     const env = { ...process.env };
     delete env.PAPERCLIP_BUILD_COMMIT;
     execFileSync(process.execPath, [script], { cwd: root, env, stdio: "pipe" });

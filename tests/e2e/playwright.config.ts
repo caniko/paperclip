@@ -61,7 +61,7 @@ export default defineConfig({
   // The webServer directive bootstraps a throwaway instance and then starts it.
   // `onboard --yes --run` works in a non-interactive temp PAPERCLIP_HOME.
   webServer: {
-    cwd: path.resolve(import.meta.dirname, "../.."),
+    cwd: process.env.PAPERCLIP_E2E_SOURCE_ROOT ?? path.resolve(import.meta.dirname, "../.."),
     // Exercise the shipped UI. Source-checkout onboarding otherwise enables
     // Vite middleware: every reload traverses thousands of modules, including
     // service-worker-intercepted requests, before React can even start.

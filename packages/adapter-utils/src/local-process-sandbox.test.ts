@@ -16,6 +16,20 @@ import { runChildProcess } from "./server-utils.js";
 
 const cleanup: string[] = [];
 
+// Use the same explicit read-only grants as production filesystemExtraPaths.
+// The qualification driver supplies selected Nix software outputs, never the
+// whole store. Native tests on other systems retain their existing defaults.
+function sandboxRuntimePaths() {
+  const paths = parseLocalProcessSandboxExtraPaths(
+    JSON.parse(process.env.PAPERCLIP_TEST_SANDBOX_RUNTIME_PATHS ?? "[]"),
+  );
+  if (paths.some(({ path: candidate, access }) => access !== "ro"
+    || !/^\/nix\/store\/[0123456789abcdfghijklmnpqrsvwxyz]{32}-[^/]+$/.test(candidate))) {
+    throw new Error("Sandbox fixture runtime paths must be selected read-only Nix store outputs.");
+  }
+  return paths;
+}
+
 async function withTmpDir<T>(tmpDir: string, run: () => Promise<T>): Promise<T> {
   const previousTmpDir = process.env.TMPDIR;
   process.env.TMPDIR = tmpDir;
@@ -438,7 +452,7 @@ describe("local process sandbox", () => {
         localProcessSandbox: {
           workspaceDir: workspace,
           filesystemScope: "workspace",
-          extraPaths: [{ path: allowed, access: "ro" }],
+          extraPaths: [...sandboxRuntimePaths(), { path: allowed, access: "ro" }],
           command: process.env.PAPERCLIP_TEST_BWRAP,
         },
       });
@@ -465,6 +479,7 @@ describe("local process sandbox", () => {
           localProcessSandbox: {
             workspaceDir: workspace,
             filesystemScope: "workspace",
+            extraPaths: sandboxRuntimePaths(),
             command: process.env.PAPERCLIP_TEST_BWRAP,
           },
         },
@@ -552,6 +567,7 @@ function request(url) {
                 filesystemScope: "workspace",
                 networkScope: "allowlist",
                 networkAllowlist: [`127.0.0.1:${address.port}`],
+                extraPaths: sandboxRuntimePaths(),
                 command: process.env.PAPERCLIP_TEST_BWRAP,
               },
             },

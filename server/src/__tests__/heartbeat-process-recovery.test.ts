@@ -3,9 +3,11 @@ import { legacyDispositionFingerprint, LEGACY_DISPOSITION_REPAIR_INSTRUCTION } f
 import * as controllerLeases from "../services/legacy-controller-lease.js";
 import { prepareAdapterExecution, prepareWorkspaceOwnershipCheckpoint, recordWorkspaceOwnershipGrant, reconcileAdapterExecution, settleAdapterExecution } from "../services/adapter-execution-ownership.js";
 import { environmentService } from "../services/environments.js";
+import * as instructionWorkingCopies from "../services/agent-instruction-working-copies.js";
+import * as runEvents from "../services/heartbeat-run-events.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { workspaceOperationService } from "../services/workspace-operations.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
@@ -25,6 +27,7 @@ import {
   describe,
   expect,
   it,
+  onTestFinished,
   vi,
 } from "vitest";
 import {
@@ -1262,6 +1265,86 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     return { companyId, agentId, issueId };
   }
 
+  it.each([
+    ["legacy", "queued"], ["native", "queued"],
+    ["legacy", "claim"], ["native", "claim"],
+    ["legacy", "dispatch"], ["native", "dispatch"],
+  ] as const)("stops verified %s comment work when pause commits at %s", async (runtimeMode, boundary) => {
+    const source = await seedAssignedTodoNoRunFixture();
+    const runId = randomUUID();
+    const wakeupRequestId = randomUUID();
+    const commentId = randomUUID();
+    if (runtimeMode === "native") await db.update(agents).set({
+      adapterType: "paperclip_runner", adapterConfig: { provider: "codex", model: "gpt-5.6-luna" },
+    }).where(eq(agents.id, source.agentId));
+    await db.insert(issueComments).values({
+      id: commentId, companyId: source.companyId, issueId: source.issueId,
+      authorUserId: "responsible-user", body: "Queued before the operator paused work",
+    });
+    await db.insert(agentWakeupRequests).values({
+      id: wakeupRequestId, companyId: source.companyId, agentId: source.agentId,
+      source: "automation", reason: "issue_commented", status: "queued", runId,
+      requestedByActorType: "user", requestedByActorId: "responsible-user",
+      payload: { issueId: source.issueId, commentId },
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId, companyId: source.companyId, agentId: source.agentId,
+      // Fresh native candidates begin in legacy preparation until the atomic
+      // runtime selection writes the native binding and coordinator together.
+      invocationSource: "automation", triggerDetail: "system", status: "queued", runtimeMode: "legacy",
+      wakeupRequestId, contextSnapshot: {
+        issueId: source.issueId, wakeReason: "issue_commented", source: "issue.comment",
+        commentId, wakeCommentId: commentId, wakeCommentIds: [commentId],
+        // A saved flag from the old policy cannot grant new execution.
+        treeHoldInteraction: true,
+      },
+    });
+    let paused = false;
+    let pausedStatus: string | undefined;
+    const pause = async () => {
+      await db.insert(issueTreeHolds).values({
+        companyId: source.companyId, rootIssueId: source.issueId,
+        mode: "pause", status: "active", reason: "operator pause", createdByActorType: "user",
+        createdByUserId: "responsible-user",
+      });
+      pausedStatus = (await db.select({ status: issues.status }).from(issues)
+        .where(eq(issues.id, source.issueId)))[0]?.status;
+      paused = true;
+    };
+    if (boundary === "queued") await pause();
+    const nativeFactory = vi.fn(() => { throw new Error("Paused work reached the provider boundary"); });
+    const heartbeat = heartbeatService(db, {
+      runtimeEnv: {}, nativeSessionBackendFactory: nativeFactory,
+      beforeChatControlRecoveryCheck: async ({ stage, runId: id }) => {
+        if (!paused && id === runId && stage === boundary) await pause();
+      },
+    });
+    await heartbeat.resumeQueuedRuns();
+    await heartbeat.drainActiveRunExecutions();
+    expect(paused).toBe(true);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    expect(mockExecutePaperclipNativeSession).not.toHaveBeenCalled();
+    expect(nativeFactory).not.toHaveBeenCalled();
+    const stopped = await heartbeat.getRun(runId);
+    expect(stopped).toMatchObject({
+      status: "cancelled",
+      errorCode: "issue_paused",
+      resultJson: { stopReason: "issue_paused", cancelledByActorType: "user", cancelledByUserId: "responsible-user" },
+    });
+    if (runtimeMode === "native" && boundary === "dispatch") {
+      expect(stopped).toMatchObject({ runtimeMode: "native", resultJson: {
+        startupPreparationSettledAt: expect.any(String),
+        nativeCancellation: { dispatchState: "acknowledged", dispatched: false },
+      } });
+      expect((await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, runId)))[0])
+        .toMatchObject({ attempt: 0, controllerGeneration: 0, resultId: null, leaseOwner: null });
+    }
+    expect((await db.select().from(issues).where(eq(issues.id, source.issueId)))[0])
+      .toMatchObject({ status: pausedStatus, executionRunId: null, checkoutRunId: null });
+    expect(await db.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, source.issueId))).toEqual([]);
+  });
+
   async function seedIdleTimerAgentFixture() {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -1569,13 +1652,33 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     }
   });
 
+  async function isolateRunFailureFixtureEnvironment() {
+    // As in run-failure-report.test.ts, unknown inherited values are secrets.
+    // Build settings such as AR=ar must not rewrite this fixture's diagnostics.
+    const inheritedEnv = process.env;
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "recovery-report-"));
+    process.env = Object.fromEntries(
+      ["PATH", "HOME", "USER", "USERNAME", "LOGNAME", "USERPROFILE", "TMPDIR", "TEMP", "TMP"]
+        .flatMap((key) => inheritedEnv[key] === undefined ? [] : [[key, inheritedEnv[key]]]),
+    );
+    process.env.PAPERCLIP_HOME = home;
+    process.env.PAPERCLIP_INSTANCE_ID = `recovery-fixture-${randomUUID()}`;
+    onTestFinished(async () => {
+      process.env = inheritedEnv;
+      await fs.rm(home, { recursive: true, force: true });
+    });
+  }
+
   it.each([
     "continuation_source_context_missing",
     "continuation_user_authorization_missing",
     "continuation_task_ownership_changed",
   ])("retains untyped continuation setup failures: %s", async (message) => {
+    await isolateRunFailureFixtureEnvironment();
+    const credential = `continuation-test-credential-${randomUUID()}`;
+    process.env.PAPERCLIP_CONTINUATION_TEST_CREDENTIAL = credential;
     const { runId, wakeupRequestId } = await seedQueuedIssueRunFixture();
-    const error = new Error(message, { cause: Object.assign(new Error("upstream setup failed"), { code: "ECONNRESET" }) });
+    const error = new Error(message, { cause: Object.assign(new Error(`upstream setup failed ${credential}`), { code: "ECONNRESET" }) });
     const build = vi.spyOn(executionContinuation, "buildExecutionContinuation")
       .mockRejectedValueOnce(error);
     try {
@@ -1590,8 +1693,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       const report = await waitForValue(async () => mockCaptureRunFailure.mock.calls.find(([event]) => event.runId === runId)?.[0]);
       expect(report?.diagnostics).toMatchObject({
         execution: { failurePhase: "setup" },
-        exceptions: [{ message, stack: expect.stringContaining("heartbeat-process-recovery.test.ts") }, { code: "ECONNRESET" }],
+        exceptions: [{ message, stack: expect.stringContaining("heartbeat-process-recovery.test.ts") },
+          { code: "ECONNRESET", message: "upstream setup failed ***REDACTED***" }],
       });
+      expect(JSON.stringify(report)).not.toContain(credential);
       const [wakeup] = await db.select().from(agentWakeupRequests)
         .where(eq(agentWakeupRequests.id, wakeupRequestId));
       expect(wakeup.status).toBe("failed");
@@ -2455,6 +2560,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
   it("schedules one conversation continuation after losing the provider", async () => {
+    await isolateRunFailureFixtureEnvironment();
     const { agentId, runId, issueId } = await seedRunFixture({
       agentStatus: "idle",
       processPid: 999_999_999,
@@ -2728,6 +2834,42 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       vi.unstubAllEnvs();
       await fs.rm(fixture, { recursive: true, force: true });
     }
+  });
+
+  it("wires ordinary Hermes admission, successor progress and redacted deduplicated receipts through the heartbeat", async () => {
+    const { agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    await db.update(agents).set({ adapterType: "hermes_gateway" }).where(eq(agents.id, agentId));
+    mockAdapterExecute.mockImplementationOnce(async (input: unknown) => {
+      const ctx = input as import("@paperclipai/adapter-utils").AdapterExecutionContext;
+      await ctx.onExecutionCheckpoint!({ version: 1, baseUrl: "http://127.0.0.1:1",
+        headers: { "Idempotency-Key": runId, Authorization: "Bearer private-admission-secret" }, body: "{}" });
+      const stored = () => db.select().from(environmentLeases).where(eq(environmentLeases.heartbeatRunId, runId)).then(rows => rows[0]);
+      const sealedAdmission = (await stored()).metadata?.adapterExecution;
+      expect(sealedAdmission).toHaveProperty("material");
+      const progress = { version: 1, rootRunId: "parent", runId: "leaf", lineage: ["parent", "leaf"], cursors: { leaf: 1 } };
+      await ctx.onExecutionProgress!(progress);
+      expect((await stored()).metadata?.adapterExecution).toEqual({ ...sealedAdmission as object, progress });
+      const event = { eventType: "hermes.message.delta", stream: "stdout" as const,
+        message: "Bearer private-event-secret", payload: { api_key: "private-event-secret", delta: "visible progress" },
+        providerSource: { runId: "leaf", sequence: 1, canonicalPayload: { delta: "visible progress" } } };
+      await ctx.onEvent!(event);
+      await ctx.onEvent!(event);
+      const receipts = await db.select().from(heartbeatRunEvents).where(and(
+        eq(heartbeatRunEvents.runId, runId), eq(heartbeatRunEvents.sourceInstanceId, "hermes_gateway:leaf"),
+      ));
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]).toMatchObject({ sourceEventId: "hermes_gateway:leaf:1", sourceSeq: 1 });
+      expect(JSON.stringify(receipts)).not.toContain("private-event-secret");
+      await ctx.onProviderStopped!();
+      expect((await stored()).metadata?.adapterExecution).toMatchObject({ state: "settled" });
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Complete", provider: "test", model: "test" };
+    });
+    const heartbeat = heartbeatService(db);
+    await heartbeat.resumeQueuedRuns();
+    await waitForRunToSettle(heartbeat, runId);
+    await heartbeat.waitForRunExecutionDrain(runId);
+    expect((await heartbeat.getRun(runId))?.status).toBe("succeeded");
   });
 
   it("preserves both ownership checkpoints through metadata replacement and ordered recovery", async () => {
@@ -3029,7 +3171,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(lease.metadata).toEqual({ ordinary: true });
   });
 
-  it("recovers the sealed admission after controller loss and releases ownership only after settlement", async () => {
+  it.each(["cancel", "reap"] as const)("recovers the sealed admission after controller loss through %s only after settlement", async (recovery) => {
     const { companyId, agentId, runId, issueId } = await seedRunFixture({ adapterType: "hermes_gateway" });
     const environment = await environmentService(db).ensureLocalEnvironment();
     const [lease] = await db.insert(environmentLeases).values({ companyId, environmentId: environment.id,
@@ -3059,7 +3201,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     };
     const heartbeat = heartbeatService(db);
     try {
-      await db.update(heartbeatRuns).set(controllerLeases.legacyControllerClaim("legacy"))
+      await db.update(heartbeatRuns).set({
+        ...controllerLeases.legacyControllerClaim("legacy"),
+        executionStage: "dispatching",
+        runnerProfileJson: { adapterDispatch: { adapterType: "hermes_gateway" } },
+      })
         .where(eq(heartbeatRuns.id, runId));
       await prepareAdapterExecution(db, { ...identity, adapterType: "hermes_gateway", checkpoint });
       await prepareAdapterExecution(db, { ...identity, adapterType: "hermes_gateway", checkpoint });
@@ -3087,10 +3233,21 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].executionRunId).toBe(runId);
 
       state = "settled";
-      await heartbeat.cancelRun(runId);
-      expect((await heartbeat.getRun(runId))?.status).toBe("cancelled");
+      if (recovery === "cancel") {
+        await heartbeat.cancelRun(runId);
+        expect((await heartbeat.getRun(runId))).toMatchObject({
+          status: "cancelled", resultJson: { executionCancellation: { state: "acknowledged" } },
+        });
+      } else {
+        // Expire cleanup authority so the next controller can retry this same
+        // sealed admission without dispatching a new provider or workspace.
+        await db.update(heartbeatRuns).set({ controllerLeaseExpiresAt: new Date(0) })
+          .where(eq(heartbeatRuns.id, runId));
+        expect((await heartbeat.reapOrphanedRuns()).runIds).toContain(runId);
+        expect((await heartbeat.getRun(runId))).toMatchObject({ status: "failed", errorCode: "process_lost" });
+      }
       const releasedLease = await environmentService(db).getLeaseById(lease.id);
-      expect(releasedLease?.status).toBe("expired");
+      expect(releasedLease?.status).toBe(recovery === "cancel" ? "expired" : "failed");
       expect(releasedLease?.releasedAt).toBeInstanceOf(Date);
       expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].executionRunId).toBeNull();
       const stops = requests.filter((request) => request.path === "/v1/runs/stop");
@@ -3104,7 +3261,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         .metadata?.adapterExecution).not.toHaveProperty("material");
     } finally {
       await settleAdapterExecution(db, identity);
-      await heartbeat.cancelRun(runId);
+      await heartbeat.cancelRun(runId).catch(() => {});
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   });
@@ -3208,7 +3365,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
   it("fences native selection when cancellation wins during preparation", async () => {
     await withTempPaperclipHome(async () => {
-      const { agentId, issueId, runId } = await seedQueuedIssueRunFixture();
+      const { companyId, agentId, issueId, runId } = await seedQueuedIssueRunFixture();
       await db.update(agents).set({ adapterType: "paperclip_runner",
         adapterConfig: { provider: "codex", model: "gpt-5.6-luna" },
       }).where(eq(agents.id, agentId));
@@ -3219,6 +3376,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         beforeNativeRuntimeSelection: async id => {
           reachedSelection = true;
           await heartbeat.cancelRun(id);
+          const [preparingTask] = await db.select().from(issues).where(eq(issues.id, issueId));
+          expect(preparingTask.executionRunId).toBe(id);
+          expect((await heartbeat.getRun(id))?.resultJson?.startupPreparationSettledAt).toBeUndefined();
+          expect(await getExecutionBlocker(db, companyId, issueId)).toBeNull();
         },
       });
       await heartbeat.resumeQueuedRuns();
@@ -3234,6 +3395,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       expect(mockAdapterExecute).not.toHaveBeenCalled();
       const [task] = await db.select().from(issues).where(eq(issues.id, issueId));
       expect(task.executionRunId).toBeNull();
+      expect(task.status).not.toBe("blocked");
+      expect(await getExecutionBlocker(db, companyId, issueId)).toBeNull();
+      expect(await db.select().from(issueRecoveryActions).where(and(
+        eq(issueRecoveryActions.companyId, companyId), eq(issueRecoveryActions.sourceIssueId, issueId),
+      ))).toEqual([]);
     });
   });
 
@@ -4289,6 +4455,93 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         ownerType: "board",
       }),
     ]);
+  });
+
+  it.each([false, true])("settles the live gateway before graceful shutdown (delayed target settlement: %s)", async (delayed) => {
+    const { agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    let stopRequests = 0;
+    let targetSettled = false;
+    const stopObserved = Promise.withResolvers<void>();
+    const gateway = createServer(async (request, response) => {
+      const reply = (body: unknown) => {
+        response.setHeader("Content-Type", "application/json");
+        response.end(JSON.stringify(body));
+      };
+      if (request.url === "/v1/capabilities") {
+        reply({ features: {
+          runs_execution_context: { version: 1, mode: "precondition", backends: ["local"], lifetimes: ["wait_for_jobs"], stop_admission: true },
+          runs_recovery: { version: 1, durable_lineage_stop: true, ordinary_stop_admission: true, admission_binding: 1 },
+        } });
+      } else if (request.method === "POST" && request.url === "/v1/runs") {
+        request.resume();
+        reply({ run_id: "shutdown-fixture", status: "started" });
+      } else if (request.method === "POST" && (request.url === "/v1/runs/shutdown-fixture/stop" || request.url === "/v1/runs/stop")) {
+        let body = "";
+        for await (const chunk of request) body += chunk;
+        stopRequests += 1;
+        if (!delayed) targetSettled = true;
+        reply({ run_id: "shutdown-fixture", status: targetSettled ? "cancelled" : "stopping",
+          stop_requested: true, lineage_settled: targetSettled,
+          lineage: [{ run_id: "shutdown-fixture", status: targetSettled ? "cancelled" : "stopping" }],
+          ...(request.url === "/v1/runs/stop" ? { admission: { version: 1, root_run_id: "shutdown-fixture",
+            key_sha256: createHash("sha256").update(String(request.headers["idempotency-key"])).digest("hex"),
+            body_sha256: createHash("sha256").update(body).digest("hex"),
+          } } : {}),
+        });
+        stopObserved.resolve();
+      } else if (request.url === "/v1/runs/shutdown-fixture/events") {
+        response.writeHead(204).end();
+      } else if (request.url === "/v1/runs/shutdown-fixture") {
+        reply({ run_id: "shutdown-fixture", status: targetSettled ? "cancelled" : "running" });
+      } else {
+        response.writeHead(404).end();
+      }
+    });
+    gateway.listen(0, "127.0.0.1");
+    await once(gateway, "listening");
+    await db.update(agents).set({ adapterType: "hermes_gateway", adapterConfig: {
+      apiBaseUrl: `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`,
+      apiKey: "shutdown-fixture-key", pollIntervalMs: 250, eventReconnectMs: 250,
+    } }).where(eq(agents.id, agentId));
+    const actual = await vi.importActual<typeof import("../adapters/index.ts")>("../adapters/index.ts");
+    mockAdapterExecute.mockImplementationOnce((async (input: unknown) => actual.getServerAdapter("hermes_gateway").execute(
+      input as import("@paperclipai/adapter-utils").AdapterExecutionContext,
+    )) as typeof mockAdapterExecute);
+    const heartbeat = heartbeatService(db);
+    let drain: ReturnType<typeof heartbeat.drainRunningRunsForShutdown> | undefined;
+    try {
+      await heartbeat.resumeQueuedRuns();
+      await vi.waitFor(() => expect(adapterExecutionControls.has(runId)).toBe(true));
+      await vi.waitFor(async () => expect((await heartbeat.getRun(runId))?.executionStage).toBe("dispatching"));
+      expect(runningProcesses.has(runId)).toBe(false);
+      drain = heartbeat.drainRunningRunsForShutdown("SIGTERM", new Date(), [runId]);
+      await Promise.race([
+        stopObserved.promise,
+        drain.then(() => { throw new Error("Shutdown returned before requesting target Stop"); }),
+      ]);
+      if (delayed) {
+        expect((await heartbeat.getRun(runId))?.status).toBe("running");
+        expect((await heartbeat.getRun(runId))?.resultJson?.executionCancellation).toMatchObject({ state: "requested" });
+        expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].executionRunId).toBe(runId);
+        expect((await db.select().from(environmentLeases).where(eq(environmentLeases.heartbeatRunId, runId)))[0].releasedAt).toBeNull();
+        targetSettled = true;
+      }
+      await drain;
+      await heartbeat.waitForRunExecutionDrain(runId);
+      expect(stopRequests).toBeGreaterThan(0);
+      expect((await heartbeat.getRun(runId))).toMatchObject({ status: "cancelled",
+        resultJson: { executionCancellation: { state: "acknowledged" } } });
+      expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].executionRunId).toBeNull();
+      expect((await db.select().from(environmentLeases).where(eq(environmentLeases.heartbeatRunId, runId)))[0].releasedAt).not.toBeNull();
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId))).toEqual([]);
+    } finally {
+      targetSettled = true;
+      adapterExecutionControls.get(runId)?.controller.abort();
+      await drain?.catch(() => undefined);
+      await heartbeat.waitForRunExecutionDrain(runId);
+      gateway.closeAllConnections();
+      await new Promise<void>(resolve => gateway.close(() => resolve()));
+    }
   });
 
   it("suspends native Paperclip Runner ownership on graceful restart without cancelling or creating a retry run", async () => {
@@ -5384,7 +5637,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const report = await waitForValue(async () => mockCaptureRunFailure.mock.calls.find(([event]) => event.runId === runId)?.[0]);
     expect(report?.diagnostics).toMatchObject({
       execution: { failurePhase: "execute" },
-      exceptions: [{ stack: expect.stringContaining("heartbeat-process-recovery.test.ts") }],
+      // Secret redaction may mask substrings of the checkout path and test filename.
+      exceptions: [{ stack: expect.stringContaining('Sandbox provider "kubernetes" is not installed') }],
     });
 
     const interaction = await waitForValue(async () => {
@@ -6823,14 +7077,28 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toMatchObject({ status: "blocked", assigneeAgentId: agentId });
   });
 
-  it("converts a continuation parked for review into a dependency wait on its open sub-tasks", async () => {
-    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+  it.each([false, "receipt", "launch", "provider", "cleanup"])("converts a continuation parked for review into a dependency wait on its open sub-tasks (dispatch receipt: %s)", async dispatchReceipt => {
+    const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
       runStatus: "cancelled",
       retryReason: "issue_continuation_needed",
       runErrorCode: "issue_continuation_waiting_on_review",
       runError: "Continuation parked: issue is waiting on review/approval",
     });
+    if (dispatchReceipt) {
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+      await db.update(heartbeatRuns).set({ startedAt: null,
+        resultJson: { stopReason: "issue_continuation_waiting_on_review", timeoutSource: "stale_queued_run_gate" },
+      }).where(eq(heartbeatRuns.id, run.id));
+    }
+    if (dispatchReceipt === "launch" || dispatchReceipt === "provider") {
+      await db.insert(heartbeatRunEvents).values({ companyId, runId, agentId, seq: 1,
+        eventType: dispatchReceipt === "launch" ? "native.process_start_requested" : "provider.event",
+        stream: "system", level: "info", message: "Contradictory execution evidence" });
+    } else if (dispatchReceipt === "cleanup") {
+      await db.insert(environmentLeases).values({ companyId, heartbeatRunId: runId,
+        provider: "local", status: "pending_cleanup", cleanupStatus: "failed" });
+    }
     const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
     const openChildTodoId = randomUUID();
     const openChildInProgressId = randomUUID();
@@ -6872,6 +7140,14 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const heartbeat = heartbeatService(db);
     const result = await heartbeat.reconcileStrandedAssignedIssues();
 
+    if (dispatchReceipt && dispatchReceipt !== "receipt") {
+      expect(result.waitingOnReviewResolved).toBe(0);
+      expect(result.escalated).toBe(1);
+      expect(await getExecutionBlocker(db, companyId, issueId)).toMatchObject({
+        cause: "legacy_execution_requires_reconciliation", runId, canRetry: false,
+      });
+      return;
+    }
     expect(result.waitingOnReviewResolved).toBe(1);
     expect(result.escalated).toBe(0);
     expect(result.issueIds).toEqual([issueId]);
@@ -7751,6 +8027,72 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(repairWakeups).toHaveLength(0);
   });
 
+  it.each([
+    { providerOutcome: "succeeded", cleanupAt: "inner", warningFails: false },
+    { providerOutcome: "failed", cleanupAt: "inner", warningFails: false },
+    { providerOutcome: "throws", cleanupAt: "inner", warningFails: false },
+    { providerOutcome: "succeeded", cleanupAt: "outer", warningFails: false },
+    { providerOutcome: "succeeded", cleanupAt: "inner", warningFails: true },
+  ] as const)("preserves a $providerOutcome provider outcome when instruction cleanup times out ($cleanupAt, warning failure: $warningFails)", async ({ providerOutcome, cleanupAt, warningFails }) => {
+    const { companyId, agentId, runId, issueId } = await seedRunFixture({ runtimeMode: "legacy", agentStatus: "idle", runStatus: "queued" });
+    const interactionId = randomUUID();
+    const release = vi.fn().mockRejectedValue(Object.assign(new Error("Timed out waiting for workspace restore lock at /private/agent-files.lock"), {
+      code: "ERR_WORKSPACE_RESTORE_LOCK_TIMEOUT",
+    }));
+    if (cleanupAt === "outer") release.mockResolvedValueOnce(undefined);
+    const originalFactory = instructionWorkingCopies.agentInstructionWorkingCopyService;
+    const factory = vi.spyOn(instructionWorkingCopies, "agentInstructionWorkingCopyService").mockImplementation((...args) => ({
+      ...originalFactory(...args), release,
+    }));
+    const originalAppend = runEvents.appendHeartbeatRunEvent;
+    const append = vi.spyOn(runEvents, "appendHeartbeatRunEvent").mockImplementation((db, event) => {
+      if (warningFails && event.eventType === "instruction_cleanup") throw new Error("Fixture warning persistence failed");
+      return originalAppend(db, event);
+    });
+    mockAdapterExecute.mockImplementationOnce((async () => {
+      await db.insert(issueThreadInteractions).values({ id: interactionId, companyId, issueId, sourceRunId: runId,
+        kind: "request_confirmation", title: "Approve the saved plan", payload: { version: 1, prompt: "Accept the plan?" } });
+      await db.update(issues).set({ status: "in_review" }).where(eq(issues.id, issueId));
+      await db.insert(issueComments).values({ companyId, issueId, authorAgentId: agentId, createdByRunId: runId, body: "Plan saved; awaiting approval." });
+      if (providerOutcome === "throws") throw new Error("Original provider failure");
+      return { exitCode: providerOutcome === "succeeded" ? 0 : 1, signal: null, timedOut: false,
+        errorCode: providerOutcome === "succeeded" ? null : "provider_failed",
+        errorMessage: providerOutcome === "succeeded" ? null : "Original provider failure",
+        summary: "Plan saved; awaiting approval.", provider: "test", model: "test-model",
+        usage: { inputTokens: 100, outputTokens: 25 }, costUsd: 0.05 };
+    }) as typeof mockAdapterExecute);
+    const heartbeat = heartbeatService(db);
+    try {
+      await heartbeat.resumeQueuedRuns();
+      await heartbeat.drainActiveRunExecutions();
+      const settled = await heartbeat.getRun(runId);
+      expect(settled).toMatchObject({ status: providerOutcome === "succeeded" ? "succeeded" : "failed",
+        error: providerOutcome === "succeeded" ? null : "Original provider failure" });
+      if (providerOutcome !== "throws") {
+        expect(settled?.resultJson?.summary).toBe("Plan saved; awaiting approval.");
+        expect(settled?.usageJson).toMatchObject({ inputTokens: 100, outputTokens: 25 });
+        const costs = await db.select().from(costEvents).where(eq(costEvents.heartbeatRunId, runId));
+        expect(costs).toHaveLength(1);
+        expect(costs[0]?.costCents).toBe(5);
+      }
+      expect(release).toHaveBeenCalledTimes(cleanupAt === "outer" ? 2 : 1);
+      expect(adapterExecutionControls.has(runId)).toBe(false);
+      const warnings = await db.select().from(heartbeatRunEvents).where(and(eq(heartbeatRunEvents.runId, runId), eq(heartbeatRunEvents.eventType, "instruction_cleanup")));
+      expect(warnings).toHaveLength(warningFails ? 0 : 1);
+      if (!warningFails) expect(warnings[0]).toMatchObject({ level: "warn", payload: { state: "deferred" } });
+      expect(JSON.stringify(warnings)).not.toContain("/private/");
+      expect(await db.select().from(issueComments).where(eq(issueComments.issueId, issueId))).toEqual(expect.arrayContaining([
+        expect.objectContaining({ body: "Plan saved; awaiting approval." }),
+      ]));
+      expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, interactionId)))[0]?.status).toBe("pending");
+      expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]?.status).toBe("in_review");
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId))).toHaveLength(0);
+    } finally {
+      factory.mockRestore();
+      append.mockRestore();
+    }
+  });
+
   it("stops controller renewal and releases execution controls when teardown deadline cleanup throws", async () => {
     const { runId, issueId } = await seedRunFixture({ runtimeMode: "legacy", agentStatus: "idle", runStatus: "queued" });
     mockAdapterExecute.mockImplementationOnce(async () => {
@@ -8188,7 +8530,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
           select count(*)::int as count from pg_stat_activity
           where datname = current_database() and ${pid} = any(pg_blocking_pids(pid))
             and query ilike '%heartbeat_runs%'
-            and (query ilike '%for update%' or query ilike '%update%heartbeat_runs%')
+            and (query ilike '%for update%' or query ilike '%for no key update%' or query ilike '%update%heartbeat_runs%')
         `);
           expect(row!.count).toBeGreaterThan(0);
         });

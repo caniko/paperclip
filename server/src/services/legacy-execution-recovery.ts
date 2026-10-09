@@ -1,3 +1,4 @@
+import { isPreDispatchReviewWaitVerified } from "./pre-dispatch-review-wait.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { normalizeMaxTurnStopReason } from "./heartbeat-stop-metadata.js";
 import { claimedAdapterType, hasConversationContinuationPolicy } from "./conversation-continuation.js";
@@ -54,6 +55,12 @@ export function legacyExecutionNeedsReconciliation(
   );
 }
 
+/** Review-wait receipts are only exempt after retained execution evidence agrees.
+ * The synchronous classifier stays conservative for callers without a DB proof. */
+export async function legacyExecutionNeedsReconciliationWithEvidence(db: Db, run: Run): Promise<boolean> {
+  return legacyExecutionNeedsReconciliation(run) && !(await isPreDispatchReviewWaitVerified(db, run));
+}
+
 /** Persist the failed legacy run, owned lock release and operator decision together. */
 export async function terminalizeLegacyExecution(input: {
   db: Db;
@@ -79,7 +86,7 @@ export async function terminalizeLegacyExecution(input: {
           .where(
             and(eq(issues.companyId, run.companyId), eq(issues.id, issueId)),
           )
-          .for("update")
+          .for("no key update")
       : [];
     await lockRunForAdapterSettlement(tx, run.id);
     const [updated] = await tx

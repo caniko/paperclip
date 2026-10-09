@@ -16,7 +16,7 @@ import {
   DEFAULT_CAPABILITY_SCENARIO_POLICY,
 } from "./policy.js";
 import {
-  containsProtectedSemanticData,
+  isPaperclipSemanticValueWithinBounds,
   redactSemanticValue,
 } from "./redaction.js";
 import { discoverCapabilityDefinitions } from "./discovery.js";
@@ -121,11 +121,11 @@ export class CapabilitySemanticDispatcher {
       return result;
     }
 
-    if (containsProtectedSemanticData(call.input)) {
+    if (!isPaperclipSemanticValueWithinBounds(call.input)) {
       const decision = deniedDecision(
         invocation,
-        "protected_data_denied",
-        "Protected data is not accepted by semantic tools.",
+        "input_invalid",
+        "Tool input exceeds safe bounds.",
       );
       const result = this.#denial(call, descriptor.operationId, denialCode(decision), decision.reason);
       this.#record(policyContext, decision, call.callId, call.input, result);
@@ -331,6 +331,10 @@ export class CapabilitySemanticDispatcher {
           slug: typeof input.slug === "string" ? input.slug : undefined,
           description: requiredString(input.description), markdown: requiredString(input.markdown) };
         break;
+      case "update_skill":
+        command = { kind: "update_skill", taskId, skillId: requiredString(input.skillId),
+          expectedVersionId: requiredString(input.expectedVersionId), markdown: requiredString(input.markdown) };
+        break;
       case "write_document":
         command = {
           kind: "write_document",
@@ -419,6 +423,13 @@ export class CapabilitySemanticDispatcher {
         id: skill.id, name: skill.name, slug: skill.slug, description: skill.description,
         versionId: skill.versionId, studioPath: `/skills/studio/${skill.id}`,
       });
+    }
+    if (operationId === "update_skill" && outcome.ok) {
+      const receipt = outcome.result.skillUpdateReceipt;
+      if (receipt === undefined) {
+        throw new SemanticDispatchFailure("operation_unavailable", "Skill update receipt is missing.");
+      }
+      return readSuccess(outcome.result.stateRevision, receipt);
     }
     return commandOutcome(outcome);
   }
@@ -601,7 +612,9 @@ function optionalStringArray(value: unknown): string[] {
 }
 
 function optionalJson(value: unknown): CapabilityJsonValue {
-  return value === undefined ? {} : redactSemanticValue(value);
+  // Admission already validated JSON shape and bounds. Redaction is for
+  // audit copies, never for arguments sent to the control plane.
+  return value === undefined ? {} : value as CapabilityJsonValue;
 }
 
 function deepFreeze<T>(value: T): T {

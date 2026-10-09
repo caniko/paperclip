@@ -1,4 +1,5 @@
-import { createServer } from "node:http";
+import { createHash } from "node:crypto";
+import { createServer, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { expect, it, vi } from "vitest";
@@ -6,20 +7,44 @@ import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { execute } from "./execute.js";
 import { reconcileExecution } from "./recovery.js";
 
-it.each(["normal", "lost-admission", "managed-mcp-lost-admission", "failed-logging", "child-completion", "pre-admission-cancel", "rejected-admission"])("retains cancellation ownership through %s and unknown stop status", async (failure) => {
+it("refuses cancellation without durable admission ownership before remote dispatch", async () => {
+  const fetch = vi.spyOn(globalThis, "fetch");
+  const ready = vi.fn(async () => {});
+  const dispatch = vi.fn();
+  try {
+    const result = await execute({
+      runId: "unowned-cancellation", signal: new AbortController().signal,
+      onCancellationReady: ready, onDispatch: dispatch, onLog: async () => {},
+      agent: { id: "agent", companyId: "company", name: "Worker", adapterType: "hermes_gateway", adapterConfig: {} },
+      config: { apiBaseUrl: "http://127.0.0.1:8642", apiKey: "fixture" }, context: {},
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+    });
+    expect(result.errorCode).toBe("hermes_gateway_checkpoint_required");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(ready).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+  } finally {
+    fetch.mockRestore();
+  }
+});
+
+it.each(["normal", "lost-admission", "ordinary-lost-admission", "ordinary-stalled-admission", "managed-mcp-lost-admission", "failed-logging", "child-completion", "pre-admission-cancel", "rejected-admission"])("retains cancellation ownership through %s and unknown stop status", async (failure) => {
   const managed = failure === "managed-mcp-lost-admission";
-  const loseAdmission = failure === "lost-admission" || managed;
+  const ordinary = failure.startsWith("ordinary-");
+  const loseAdmission = failure === "lost-admission" || failure === "ordinary-lost-admission" || managed;
   const cancel = new AbortController();
   let admitted = 0;
   let stops = 0;
   let polls = 0;
   let allowSettlement = false;
+  let pendingAdmission: ServerResponse | undefined;
   const requests: { key: string | undefined; body: string }[] = [];
   const server = createServer(async (req, res) => {
     if (req.url === "/v1/capabilities") {
       res.end(JSON.stringify({ features: { runs_execution_context: {
         version: 1, mode: "precondition", backends: ["local"], lifetimes: ["wait_for_jobs"], stop_admission: true,
-      }, runs_managed_mcp: { version: 1, enabled: true, mode: "run_isolated", host_id: "worker" } } }));
+      }, runs_managed_mcp: { version: 1, enabled: true, mode: "run_isolated", host_id: "worker" },
+        runs_recovery: { version: 1, durable_lineage_stop: true, ordinary_stop_admission: true, admission_binding: 1 } } }));
     } else if (req.url === "/v1/runs" || req.url === "/v1/runs/stop") {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -27,18 +52,29 @@ it.each(["normal", "lost-admission", "managed-mcp-lost-admission", "failed-loggi
       if (managed) expect(JSON.parse(body)).toMatchObject({ runtime_mcp: { run_id: "paperclip-owned", servers: [{ token: "run-reader-secret" }] } });
       if (req.url === "/v1/runs/stop") {
         stops++;
-        res.end(JSON.stringify({ run_id: "owned", status: allowSettlement ? "cancelled" : "stopping" }));
+        res.end(JSON.stringify({ run_id: "owned", status: allowSettlement ? "cancelled" : "stopping",
+          admission: { version: 1, root_run_id: "owned",
+            key_sha256: createHash("sha256").update(String(req.headers["idempotency-key"])).digest("hex"),
+            body_sha256: createHash("sha256").update(body).digest("hex") },
+          stop_requested: true, lineage_settled: allowSettlement,
+          lineage: [{ run_id: "owned", status: allowSettlement ? "cancelled" : "stopping" }] }));
         return;
       }
       admitted++;
       cancel.abort();
+      if (failure === "ordinary-stalled-admission") {
+        pendingAdmission = res;
+        return; // admission succeeded, but its acknowledgement never arrives
+      }
       if (failure === "rejected-admission") { res.writeHead(409).end(); return; }
       if (loseAdmission && admitted === 1) { res.destroy(); return; }
       res.writeHead(202).end(JSON.stringify({ run_id: "owned", status: "started" }));
     } else if (req.url === "/v1/runs/owned/stop") {
       stops++;
       // Acknowledging the stop request is not evidence of target settlement.
-      res.end(JSON.stringify({ status: "stopping" }));
+      res.end(JSON.stringify({ run_id: "owned", status: allowSettlement ? "cancelled" : "stopping",
+        stop_requested: true, lineage_settled: allowSettlement,
+        lineage: [{ run_id: "owned", status: allowSettlement ? "cancelled" : "stopping" }] }));
     } else if (req.url === "/v1/runs/owned/events") {
       if (allowSettlement) {
         res.setHeader("Content-Type", "text/event-stream");
@@ -73,9 +109,9 @@ it.each(["normal", "lost-admission", "managed-mcp-lost-admission", "failed-loggi
       pollIntervalMs: 250, eventReconnectMs: 250 },
     runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
     context: { paperclipWorkspace: { cwd: "/srv/data" } },
-    executionTarget: { kind: "local", environmentId: "worker", workspaceRealization: {
-      mode: "in_place", authoritativeRoot: "/srv/data", pathAliases: [], outboundRestorePaths: [],
-    } },
+    ...(ordinary ? {} : { executionTarget: { kind: "local" as const, environmentId: "worker", workspaceRealization: {
+      mode: "in_place" as const, authoritativeRoot: "/srv/data", pathAliases: [], outboundRestorePaths: [],
+    } } }),
     ...(managed ? { runtimeMcp: { getServers: () => [{ name: "reader", connectionId: "reader", token: "run-reader-secret",
       url: "http://127.0.0.1:9000/mcp", runBinding: { runId: "paperclip-owned", executionHostId: "worker", serverHostId: "worker",
         gatewayUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/` } }] } } : {}),
@@ -88,10 +124,12 @@ it.each(["normal", "lost-admission", "managed-mcp-lost-admission", "failed-loggi
   try {
     await vi.waitFor(() => expect(stops).toBeGreaterThan(0), { timeout: 5000 });
     expect(ready).toHaveBeenCalledOnce();
+    // This successor durably owns ordinary admissions too, without a workspace binding.
     expect(checkpoint).toBeDefined();
     expect(returned).toBe(false);
     expect(collected).not.toHaveBeenCalled();
-    expect(JSON.parse(requests[0].body).execution_context.lifetime).toBe("wait_for_jobs");
+    if (ordinary) expect(JSON.parse(requests[0].body).execution_context).toBeUndefined();
+    else expect(JSON.parse(requests[0].body).execution_context.lifetime).toBe("wait_for_jobs");
     // A fresh controller only has the durable checkpoint. Its stop response is
     // still not permission to release while the target remains nonterminal.
     expect(await reconcileExecution(checkpoint!)).toBe("pending");
@@ -112,6 +150,7 @@ it.each(["normal", "lost-admission", "managed-mcp-lost-admission", "failed-loggi
     expect(admitted).toBe(failure === "pre-admission-cancel" ? 0 : 1);
   } finally {
     allowSettlement = true;
+    pendingAdmission?.end(JSON.stringify({ run_id: "owned", status: "started" }));
     await execution;
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -124,21 +163,23 @@ it.each([
   { name: "mismatched", receipt: { run_id: "other", status: "cancelled" }, terminal: false, blockedObservers: false },
   { name: "nonterminal", receipt: { run_id: "owned", status: "stopping" }, terminal: false, blockedObservers: false },
   { name: "terminal with blocked observers", receipt: { run_id: "owned", status: "cancelled" }, terminal: true, blockedObservers: true },
-])("settles cancellation only from a parent terminal stop receipt: $name", async ({ receipt, terminal, blockedObservers }) => {
+].flatMap(test => ["gateway", "in_place"].map(mode => ({ ...test, mode }))))("settles cancellation only from a parent terminal stop receipt: $name / $mode", async ({ receipt, terminal, blockedObservers, mode }) => {
   const cancel = new AbortController();
   const collected = vi.fn(async () => {});
+  const ready = vi.fn(async () => {});
   let stops = 0;
   let polls = 0;
   let streams = 0;
   let closedObservers = 0;
   let allowSettlement = terminal;
   let cleanup = false;
-  const finalReceipt = { run_id: "owned", status: "cancelled", output: "Owned jobs stopped", usage: { input_tokens: 3, output_tokens: 2 } };
+  const finalReceipt = { run_id: "owned", status: "cancelled", output: "Owned jobs stopped", usage: { input_tokens: 3, output_tokens: 2 },
+    stop_requested: true, lineage_settled: true, lineage: [{ run_id: "owned", status: "cancelled" }] };
   const server = createServer(async (req, res) => {
     if (req.url === "/v1/capabilities") {
       res.end(JSON.stringify({ features: { runs_execution_context: {
         version: 1, mode: "precondition", backends: ["local"], lifetimes: ["wait_for_jobs"], stop_admission: true,
-      } } }));
+      }, runs_recovery: { version: 1, durable_lineage_stop: true, ordinary_stop_admission: true, admission_binding: 1 } } }));
     } else if (req.url === "/v1/runs") {
       for await (const _chunk of req) { /* consume the admission body */ }
       res.writeHead(202).end(JSON.stringify({ run_id: "owned", status: "started" }));
@@ -165,15 +206,15 @@ it.each([
   await once(server, "listening");
   let returned = false;
   const execution = execute({
-    runId: "paperclip-stop-receipt", signal: cancel.signal, onProviderStopped: collected,
+    runId: "paperclip-stop-receipt", signal: cancel.signal, onProviderStopped: collected, onCancellationReady: ready,
     onExecutionCheckpoint: async () => {},
     agent: { id: "agent", companyId: "company", name: "Worker", adapterType: "hermes_gateway", adapterConfig: {} },
     config: { apiBaseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, apiKey: "fixture",
       pollIntervalMs: 250, eventReconnectMs: 250 },
     runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null }, context: {},
-    executionTarget: { kind: "local", workspaceRealization: {
+    ...(mode === "in_place" ? { executionTarget: { kind: "local" as const, workspaceRealization: {
       mode: "in_place", authoritativeRoot: "/srv/data", pathAliases: [], outboundRestorePaths: [],
-    } }, onLog: async () => {},
+    } } } : {}), onLog: async () => {},
   }).then(result => { returned = true; return result; });
   try {
     await vi.waitFor(() => {
@@ -191,9 +232,11 @@ it.each([
     const result = await execution;
     expect(result.errorCode).toBe("hermes_gateway_cancelled");
     expect(result.resultJson).toMatchObject({ run_id: "owned", status: "cancelled" });
+    expect(result.resultJson?.executionCancellation).toMatchObject({ state: "acknowledged" });
     expect(result.summary).toBe("Owned jobs stopped");
     expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 2 });
     expect(collected).toHaveBeenCalledOnce();
+    expect(ready).toHaveBeenCalledOnce();
     if (blockedObservers) await vi.waitFor(() => expect(closedObservers).toBe(2), { timeout: 3000 });
     const counts = { stops, polls, streams };
     await new Promise(resolve => setTimeout(resolve, 350));

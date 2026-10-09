@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { testEnvironment } from "./test.js";
+import { createFixtureSupportBin } from "./sandbox-fixture-tools.js";
 
 function buildFakeAgentScript(): string {
   return `#!/bin/sh
@@ -28,10 +29,9 @@ function buildInstallSimulationCommand(commandPath: string): string {
   ].join("\n");
 }
 
-function createSandboxRunner(options: { homeDir: string; installCommandPath: string }) {
+function createSandboxRunner(options: { homeDir: string; installCommandPath: string; supportBin: string }) {
   let counter = 0;
   const installCommands: string[] = [];
-  const systemPath = "/usr/bin:/bin";
   return {
     installCommands,
     execute: async (input: {
@@ -55,7 +55,7 @@ function createSandboxRunner(options: { homeDir: string; installCommandPath: str
         env: {
           ...(input.env ?? {}),
           HOME: input.env?.HOME ?? options.homeDir,
-          PATH: input.env?.PATH ?? systemPath,
+          PATH: input.env?.PATH ?? options.supportBin,
         },
         stdin: input.stdin,
         timeoutSec: Math.max(1, Math.ceil((input.timeoutMs ?? 30_000) / 1000)),
@@ -96,6 +96,9 @@ exit 7
 
   it("re-resolves the installed agent under ~/.cursor/bin and verifies --version before the hello probe", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-cursor-envtest-"));
+    const supportBin = await createFixtureSupportBin(root, [
+      "sh", "bash", "mkdir", "rm", "base64", "mv", "tar", "cp", "find", "wc", "dd", "cat", "chmod",
+    ]);
     const homeDir = path.join(root, "home");
     const workspace = path.join(root, "workspace");
     const remoteWorkspace = path.join(root, "remote-workspace");
@@ -106,6 +109,7 @@ exit 7
     const runner = createSandboxRunner({
       homeDir,
       installCommandPath: agentPath,
+      supportBin,
     });
 
     try {
@@ -116,7 +120,7 @@ exit 7
           command: "agent",
           cwd: workspace,
           env: {
-            PATH: "/usr/bin:/bin",
+            PATH: supportBin,
           },
         },
         executionTarget: {

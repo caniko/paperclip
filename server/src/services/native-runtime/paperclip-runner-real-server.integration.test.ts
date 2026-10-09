@@ -1,17 +1,14 @@
-import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 
 import { eq } from "drizzle-orm";
 import { agents, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import {
-  createRunnerdCodexTransport,
-  defaultCapabilityRunnerdBinary,
-} from "../../vendor/paperclip-runner/index.js";
+import { createRunnerdCodexTransport } from "../../vendor/paperclip-runner/index.js";
 import { startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import {
   registerRunnerPrpAuthority,
@@ -20,16 +17,16 @@ import {
 } from "../../realtime/runner-prp-ws.js";
 import { PaperclipRunnerToolAuthority } from "./paperclip-runner-tool-authority.js";
 
-const fakeCodexAppServer = resolve(
+const runnerWorkspace = resolve(
   import.meta.dirname,
-  "../../../../packages/paperclip-runner/runner/target/debug/fake-codex-app-server",
+  "../../../../packages/paperclip-runner/runner",
 );
-const runnerBinariesAvailable =
-  existsSync(defaultCapabilityRunnerdBinary()) && existsSync(fakeCodexAppServer);
-const runnerBinaryIt = runnerBinariesAvailable ? it : it.skip;
+const executableSuffix = process.platform === "win32" ? ".exe" : "";
 
 describe("paperclip-runner real server vertical slice", () => {
   let temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
+  let runnerBinary: string;
+  let fakeCodexAppServer: string;
   const companyId = "00000000-0000-4000-8000-000000000701";
   const agentId = "00000000-0000-4000-8000-000000000702";
   const issueId = "00000000-0000-4000-8000-000000000703";
@@ -37,15 +34,54 @@ describe("paperclip-runner real server vertical slice", () => {
   const resumedRunId = "00000000-0000-4000-8000-000000000705";
 
   beforeAll(async () => {
+    // Build even when binaries exist so the fixture exercises fresh source.
+    execFileSync("cargo", [
+      "build",
+      "--release",
+      "--locked",
+      "-p",
+      "paperclip-runner-core",
+      "--bin",
+      "paperclip-runnerd",
+      "--bin",
+      "fake-codex-app-server",
+    ], {
+      cwd: runnerWorkspace,
+      stdio: "inherit",
+      timeout: 600_000,
+    });
+
+    // Resolve the same target directory Cargo used, including toolchain
+    // environment and config overrides (see stage-runner-binary.mjs).
+    const metadata: unknown = JSON.parse(execFileSync("cargo", [
+      "metadata",
+      "--format-version=1",
+      "--no-deps",
+      "--locked",
+      "--offline",
+    ], {
+      cwd: runnerWorkspace,
+      encoding: "utf8",
+    }));
+    if (
+      !metadata || typeof metadata !== "object" ||
+      !("target_directory" in metadata) ||
+      typeof metadata.target_directory !== "string" ||
+      !isAbsolute(metadata.target_directory)
+    ) {
+      throw new Error("Cargo metadata must contain an absolute target_directory");
+    }
+    runnerBinary = resolve(metadata.target_directory, "release", `paperclip-runnerd${executableSuffix}`);
+    fakeCodexAppServer = resolve(metadata.target_directory, "release", `fake-codex-app-server${executableSuffix}`);
     temporary = await startEmbeddedPostgresTestDatabase("paperclip-runner-real-server-");
-  });
+  }, 660_000);
 
   afterAll(async () => {
     runnerPrpWebSocketInternals.resetForTests();
-    await temporary.cleanup();
+    await temporary?.cleanup();
   });
 
-  runnerBinaryIt("runs Rust runnerd through Paperclip PRP and reads the real bound task", async () => {
+  it("runs Rust runnerd through Paperclip PRP and reads the real bound task", async () => {
     const db = createDb(temporary.connectionString);
     await db.insert(companies).values({ id: companyId, name: "Real runner slice", issuePrefix: "RRS" });
     await db.insert(agents).values({
@@ -92,7 +128,7 @@ describe("paperclip-runner real server vertical slice", () => {
     await writeFile(expectedContextFile, JSON.stringify({ companyId, actorId: agentId, taskId: issueId, runId, callId: "semantic-call-1" }));
     const fakeArgs = ["--state-file", resolve(stateDirectory, "fake-provider-state.json"), "--emit-tool-call", "--durable-turn-ids", "--durable-tool-ids", "--expected-canonical-task-context-file", expectedContextFile];
     const bundle = createRunnerdCodexTransport({
-      runnerBinary: defaultCapabilityRunnerdBinary(),
+      runnerBinary,
       codexCommand: fakeCodexAppServer,
       codexArgs: fakeArgs,
       stateDirectory,
@@ -163,7 +199,7 @@ describe("paperclip-runner real server vertical slice", () => {
       });
       await writeFile(expectedContextFile, JSON.stringify({ companyId, actorId: agentId, taskId: issueId, runId: resumedRunId, callId: "semantic-call-2" }));
       const restored = createRunnerdCodexTransport({
-        runnerBinary: defaultCapabilityRunnerdBinary(),
+        runnerBinary,
         codexCommand: fakeCodexAppServer,
         codexArgs: fakeArgs,
         stateDirectory,

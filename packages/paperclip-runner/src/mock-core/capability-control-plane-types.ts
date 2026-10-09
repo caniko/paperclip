@@ -359,6 +359,7 @@ interface CapabilityBaseCommand {
 
 export type CapabilitySemanticCommand =
   | (CapabilityBaseCommand & { kind: "create_skill"; name: string; slug?: string; description: string; markdown: string })
+  | (CapabilityBaseCommand & { kind: "update_skill"; skillId: string; markdown: string; expectedVersionId: string })
   | (CapabilityBaseCommand & { kind: "report_progress"; body: string })
   | (CapabilityBaseCommand & {
       kind: "write_document";
@@ -455,6 +456,13 @@ export interface CapabilityCommandResult {
   stateRevision: number;
   entityRefs: string[];
   scheduledWakeIds: string[];
+  /** Committed update response, retained even when the skill is edited again. */
+  skillUpdateReceipt?: {
+    skillId: string;
+    path: "SKILL.md";
+    versionId: string;
+    studioPath: string;
+  };
 }
 
 export interface CapabilityCommandErrorResult {
@@ -479,6 +487,7 @@ export type CapabilityCommandOutcome =
  */
 export const CAPABILITY_COMMAND_REQUIRED_CLAIMS = {
   create_skill: [],
+  update_skill: [],
   report_progress: [],
   write_document: [],
   request_human_input: [],

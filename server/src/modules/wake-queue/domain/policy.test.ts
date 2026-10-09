@@ -258,9 +258,9 @@ describe("decideWakeOutcome", () => {
       expected: { kind: "cancel_pause_hold" },
     },
     {
-      name: "promote: an active pause hold but a verified tree-hold interaction wake survives it",
+      name: "cancel_pause_hold: verified legacy comment metadata cannot bypass pause",
       facts: { ...baseWakeOutcomeFacts, pauseHold: { activePauseHold: true, treeHoldInteractionWake: true } },
-      expected: { kind: "promote" },
+      expected: { kind: "cancel_pause_hold" },
     },
     {
       name: "promote: an invokable agent and no pause hold",

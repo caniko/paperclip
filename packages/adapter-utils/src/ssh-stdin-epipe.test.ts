@@ -6,6 +6,7 @@ import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync, spawn } from "node:child_process";
 import { prepareWorkspaceForSshExecution, syncDirectoryFromSsh, syncDirectoryToSsh } from "./ssh.js";
+import { configureFixtureGitIdentity } from "../test/helpers/git-fixture.mjs";
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -117,10 +118,9 @@ describe("ssh git-bundle upload stdin EPIPE guard", () => {
   beforeEach(() => {
     localDir = mkdtempSync(path.join(tmpdir(), "paperclip-epipe-git-"));
     execFileSync("git", ["-C", localDir, "init", "-q"]);
+    configureFixtureGitIdentity(localDir);
     execFileSync("git", [
       "-C", localDir,
-      "-c", "user.name=Epipe Test",
-      "-c", "user.email=epipe-test@example.com",
       "commit", "-q", "--allow-empty", "-m", "init",
     ]);
   });

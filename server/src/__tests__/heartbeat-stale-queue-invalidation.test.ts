@@ -764,6 +764,8 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
           source: "connection_intent.resolved",
         },
       });
+      let mutationCommitted!: () => void;
+      const mutationReady = new Promise<void>((resolve) => { mutationCommitted = resolve; });
       beforeContinuationDispatchCheck = async ({ runId: guardedRunId, issueId: guardedIssueId }) => {
         expect(guardedRunId).toBe(runId);
         expect(guardedIssueId).toBe(issueId);
@@ -773,10 +775,14 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
             ? { status: "backlog", updatedAt: new Date() }
             : { assigneeAgentId: replacementAgentId, updatedAt: new Date() })
           .where(eq(issues.id, issueId));
+        mutationCommitted();
       };
 
       await heartbeat.resumeQueuedRuns();
-      await waitForCondition(async () => {
+      // resumeQueuedRuns starts setup asynchronously. Observe the actual race
+      // mutation before waiting for its dispatch-gate cancellation to settle.
+      await mutationReady;
+      expect(await waitForCondition(async () => {
         const [run, wakeup] = await Promise.all([
           db.select({ status: heartbeatRuns.status })
             .from(heartbeatRuns)
@@ -788,7 +794,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
             .then((rows) => rows[0] ?? null),
         ]);
         return run?.status === "cancelled" && wakeup?.status === "skipped";
-      });
+      })).toBe(true);
 
       const [run, wakeup, issue] = await Promise.all([
         db.select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
@@ -1493,18 +1499,18 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(issue?.executionRunId).toBeNull();
   });
 
-  it("promotes deferred issue wakes when a queued holder is cancelled by the daily run cap", async () => {
+  it.each(["same", "peer"])("promotes %s-agent deferred wakes without reentering the queue-start lock", async (target) => {
     const { companyId, agentId } = await seedCompanyAndAgent({
       heartbeatConfig: {
         maxDailyRuns: 1,
       },
     });
-    const peerAgentId = randomUUID();
+    const peerAgentId = target === "same" ? agentId : randomUUID();
     const issueId = randomUUID();
     const wakeupRequestId = randomUUID();
     const queuedRunId = randomUUID();
     const deferredWakeupId = randomUUID();
-    await db.insert(agents).values({
+    if (target === "peer") await db.insert(agents).values({
       id: peerAgentId,
       companyId,
       name: "PeerAgent",
@@ -1582,7 +1588,19 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       .set({ runId: queuedRunId })
       .where(eq(agentWakeupRequests.id, wakeupRequestId));
 
-    await heartbeat.resumeQueuedRuns();
+    const resumed = heartbeat.resumeQueuedRuns();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      expect(await Promise.race([
+        resumed.then(() => true),
+        new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 5_000); }),
+      ]), "promotion must not wait for the held queue-start lock to expire").toBe(true);
+    } finally {
+      clearTimeout(timer);
+      // Let the broken implementation unwind its stale lock before fixture cleanup.
+      await resumed;
+      await heartbeat.drainActiveRunExecutions();
+    }
     await waitForCondition(async () => {
       const [deferred] = await db
         .select({ status: agentWakeupRequests.status, runId: agentWakeupRequests.runId })
@@ -1597,14 +1615,15 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       .where(eq(agentWakeupRequests.id, deferredWakeupId));
     const [promotedRun] = deferred?.runId
       ? await db
-        .select({ agentId: heartbeatRuns.agentId })
+        .select({ agentId: heartbeatRuns.agentId, status: heartbeatRuns.status })
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.id, deferred.runId))
       : [];
 
     expect(deferred?.status).not.toBe("deferred_issue_execution");
     expect(promotedRun?.agentId).toBe(peerAgentId);
-  });
+    expect(promotedRun?.status, "promotion must dispatch without a second queue-resume pass").not.toBe("queued");
+  }, 45_000);
 
   it("cancels queued max-turn continuations when another continuation owns the issue lock", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();

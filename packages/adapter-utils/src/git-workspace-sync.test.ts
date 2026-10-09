@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { workspacePaths } from "./workspace-manifest.js";
 import { runWorkspaceGitProcess } from "./workspace-git-stream.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { configureFixtureGitIdentity } from "../test/helpers/git-fixture.mjs";
 
 import {
   buildRemoteGitDeltaBundleScript,
@@ -211,8 +212,7 @@ describe("git workspace sync", () => {
     await mkdir(repo, { recursive: true });
     await git(repo, ["init"]);
     await git(repo, ["checkout", "-b", "main"]);
-    await git(repo, ["config", "user.name", "Paperclip Test"]);
-    await git(repo, ["config", "user.email", "test@paperclip.dev"]);
+    configureFixtureGitIdentity(repo);
     await writeFile(path.join(repo, "tracked.txt"), "base\n", "utf8");
     await git(repo, ["add", "tracked.txt"]);
     await git(repo, ["commit", "-m", "base"]);
@@ -377,8 +377,7 @@ describe("git workspace sync", () => {
       localDir: repo,
       snapshot: snapshot!,
     }, async (cloneDir) => {
-      await git(cloneDir, ["config", "user.name", "Paperclip Sandbox"]);
-      await git(cloneDir, ["config", "user.email", "sandbox@paperclip.dev"]);
+      configureFixtureGitIdentity(cloneDir);
       await writeFile(path.join(cloneDir, "change.txt"), "sandbox change\n", "utf8");
       await git(cloneDir, ["add", "change.txt"]);
       await git(cloneDir, ["commit", "-m", "sandbox change"]);
@@ -418,8 +417,7 @@ describe("git workspace sync", () => {
       })]);
       expect((await stat(emptyBundle)).size).toBe(0);
 
-      await git(remoteDir, ["config", "user.name", "Paperclip Remote"]);
-      await git(remoteDir, ["config", "user.email", "remote@paperclip.dev"]);
+      configureFixtureGitIdentity(remoteDir);
       await writeFile(path.join(remoteDir, "tracked.txt"), "remote\n", "utf8");
       await git(remoteDir, ["commit", "-am", "remote update"]);
       const remoteHead = await git(remoteDir, ["rev-parse", "HEAD"]);
@@ -464,8 +462,7 @@ describe("git workspace sync", () => {
     // local-only commit S that forked from B and diverges from H.
     const sandbox = path.join(rootDir, "sandbox");
     await git(rootDir, ["clone", host, sandbox]);
-    await git(sandbox, ["config", "user.name", "Paperclip Remote"]);
-    await git(sandbox, ["config", "user.email", "remote@paperclip.dev"]);
+    configureFixtureGitIdentity(sandbox);
     await writeFile(path.join(sandbox, "advance.txt"), "advance\n", "utf8");
     await git(sandbox, ["add", "-A"]);
     await git(sandbox, ["commit", "-m", "advance"]);
@@ -517,8 +514,7 @@ describe("git workspace sync", () => {
 
     const sandbox = path.join(rootDir, "sandbox");
     await git(rootDir, ["clone", host, sandbox]);
-    await git(sandbox, ["config", "user.name", "Paperclip Remote"]);
-    await git(sandbox, ["config", "user.email", "remote@paperclip.dev"]);
+    configureFixtureGitIdentity(sandbox);
     // Advance the merge-base past the host, then baseSha past that, then a
     // divergent local commit — so merge-base(baseSha, HEAD) is itself a commit
     // the host does not hold.
@@ -526,18 +522,32 @@ describe("git workspace sync", () => {
     await git(sandbox, ["add", "-A"]);
     await git(sandbox, ["commit", "-m", "fork point"]);
     const forkPoint = await git(sandbox, ["rev-parse", "HEAD"]);
-    await writeFile(path.join(sandbox, "advance.txt"), "advance\n", "utf8");
-    await git(sandbox, ["add", "-A"]);
-    await git(sandbox, ["commit", "-m", "advance"]);
-    const baseSha = await git(sandbox, ["rev-parse", "HEAD"]);
-    await git(sandbox, ["reset", "--hard", forkPoint]);
+    // Four real commits form A -> B -> {H, S}. Independent repositories let
+    // the two children of B run hooks/signing concurrently without sharing an
+    // index or HEAD. Wait for both commits before cleanup, including failures.
+    const advanced = path.join(rootDir, "advanced");
+    await git(rootDir, ["clone", "--no-hardlinks", sandbox, advanced]);
+    configureFixtureGitIdentity(advanced);
+    await writeFile(path.join(advanced, "advance.txt"), "advance\n", "utf8");
+    await git(advanced, ["add", "-A"]);
     await writeFile(path.join(sandbox, "local.txt"), "local\n", "utf8");
     await git(sandbox, ["add", "-A"]);
-    await git(sandbox, ["commit", "-m", "local-only"]);
+    const commits = await Promise.allSettled([
+      git(advanced, ["commit", "-m", "advance"]),
+      git(sandbox, ["commit", "-m", "local-only"]),
+    ]);
+    const commitErrors = commits.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (commitErrors.length) throw new AggregateError(commitErrors, "Fixture commits failed");
+    const baseSha = await git(advanced, ["rev-parse", "HEAD"]);
     const sandboxHead = await git(sandbox, ["rev-parse", "HEAD"]);
+    await git(sandbox, ["fetch", advanced, baseSha]);
+    expect(await git(sandbox, ["merge-base", baseSha, sandboxHead])).toBe(forkPoint);
 
     // Host holds only the initial commit; it lacks both baseSha and the fork point.
     expect(await git(host, ["rev-parse", "HEAD"])).toBe(ancestor);
+    await expect(git(host, ["cat-file", "-e", `${baseSha}^{commit}`])).rejects.toThrow();
     await expect(git(host, ["cat-file", "-e", `${forkPoint}^{commit}`])).rejects.toThrow();
 
     const exportRef = createRemoteGitExportRef("test");
@@ -627,31 +637,31 @@ describe("git workspace sync", () => {
   it("creates the concurrent-history merge commit with a deterministic identity", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-merge-identity-"));
     cleanupDirs.push(rootDir);
-    // No repo-local user.name/user.email on purpose: execution hosts are
-    // containers without git config, where commit-tree cannot auto-detect an
-    // identity. Setup commits pass their identity inline so only the merge
-    // commit under test depends on the sync-supplied identity.
-    const setupIdentity = ["-c", "user.name=Setup", "-c", "user.email=setup@paperclip.dev"];
+    // Setup commits use the caller's identity. Remove fixture-local identity
+    // before integration so the merge still proves the sync-supplied identity.
     const repo = path.join(rootDir, "repo");
     await mkdir(repo, { recursive: true });
     await git(repo, ["init"]);
     await git(repo, ["checkout", "-b", "main"]);
+    configureFixtureGitIdentity(repo);
     await writeFile(path.join(repo, "tracked.txt"), "base\n", "utf8");
     await git(repo, ["add", "tracked.txt"]);
-    await git(repo, [...setupIdentity, "commit", "-m", "base"]);
+    await git(repo, ["commit", "-m", "base"]);
     const baseHead = await git(repo, ["rev-parse", "HEAD"]);
 
     await writeFile(path.join(repo, "local.txt"), "local\n", "utf8");
     await git(repo, ["add", "local.txt"]);
-    await git(repo, [...setupIdentity, "commit", "-m", "local advance"]);
+    await git(repo, ["commit", "-m", "local advance"]);
     const currentHead = await git(repo, ["rev-parse", "HEAD"]);
 
     await git(repo, ["checkout", "-b", "imported", baseHead]);
     await writeFile(path.join(repo, "imported.txt"), "imported\n", "utf8");
     await git(repo, ["add", "imported.txt"]);
-    await git(repo, [...setupIdentity, "commit", "-m", "sandbox change"]);
+    await git(repo, ["commit", "-m", "sandbox change"]);
     const importedHead = await git(repo, ["rev-parse", "HEAD"]);
     await git(repo, ["checkout", "main"]);
+    await git(repo, ["config", "--local", "--unset", "user.name"]);
+    await git(repo, ["config", "--local", "--unset", "user.email"]);
 
     // Ambient identity env vars would override the `-c` flags and make the
     // assertion machine-dependent, so clear them for the call under test.
@@ -681,25 +691,25 @@ describe("git workspace sync", () => {
   it("grafts an imported head onto the current head when histories share no ancestor", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-graft-"));
     cleanupDirs.push(rootDir);
-    const setupIdentity = ["-c", "user.name=Setup", "-c", "user.email=setup@paperclip.dev"];
     const repo = path.join(rootDir, "repo");
     await mkdir(repo, { recursive: true });
     await git(repo, ["init"]);
     await git(repo, ["checkout", "-b", "main"]);
+    configureFixtureGitIdentity(repo);
     await writeFile(path.join(repo, "tracked.txt"), "base\n", "utf8");
     await git(repo, ["add", "tracked.txt"]);
-    await git(repo, [...setupIdentity, "commit", "-m", "base"]);
+    await git(repo, ["commit", "-m", "base"]);
     const baseHead = await git(repo, ["rev-parse", "HEAD"]);
 
     await writeFile(path.join(repo, "local.txt"), "local\n", "utf8");
     await git(repo, ["add", "local.txt"]);
-    await git(repo, [...setupIdentity, "commit", "-m", "local advance"]);
+    await git(repo, ["commit", "-m", "local advance"]);
     const currentHead = await git(repo, ["rev-parse", "HEAD"]);
 
     // The shape a depth-1 shallow clone produces after `git commit --amend`:
     // a parentless root commit that shares no ancestor with the host history.
     const importedTree = await git(repo, ["rev-parse", `${baseHead}^{tree}`]);
-    const importedHead = await git(repo, [...setupIdentity, "commit-tree", importedTree, "-m", "sandbox rewrite"]);
+    const importedHead = await git(repo, ["commit-tree", importedTree, "-m", "sandbox rewrite"]);
 
     await integrateImportedGitHead({ localDir: repo, importedHead });
 
@@ -716,14 +726,14 @@ describe("git workspace sync", () => {
   it("does not graft when merge-base fails for a reason other than missing ancestry", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-no-graft-"));
     cleanupDirs.push(rootDir);
-    const setupIdentity = ["-c", "user.name=Setup", "-c", "user.email=setup@paperclip.dev"];
     const repo = path.join(rootDir, "repo");
     await mkdir(repo, { recursive: true });
     await git(repo, ["init"]);
     await git(repo, ["checkout", "-b", "main"]);
+    configureFixtureGitIdentity(repo);
     await writeFile(path.join(repo, "tracked.txt"), "base\n", "utf8");
     await git(repo, ["add", "tracked.txt"]);
-    await git(repo, [...setupIdentity, "commit", "-m", "base"]);
+    await git(repo, ["commit", "-m", "base"]);
     const currentHead = await git(repo, ["rev-parse", "HEAD"]);
 
     // A well-formed sha the repository does not hold: merge-base fails with an

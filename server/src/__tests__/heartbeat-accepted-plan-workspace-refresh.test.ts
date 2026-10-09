@@ -33,6 +33,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { configureFixtureGitIdentity } from "./helpers/git-fixture.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
@@ -83,8 +84,7 @@ async function createGitRepo() {
   const repoRoot = await mkdtemp(path.join(os.tmpdir(), "paperclip-accepted-plan-repo-"));
   await runGit(repoRoot, ["init"]);
   await runGit(repoRoot, ["checkout", "-B", "master"]);
-  await runGit(repoRoot, ["config", "user.email", "paperclip-test@example.com"]);
-  await runGit(repoRoot, ["config", "user.name", "Paperclip Test"]);
+  configureFixtureGitIdentity(repoRoot);
   await writeFile(path.join(repoRoot, "README.md"), "accepted plan workspace refresh\n");
   await runGit(repoRoot, ["add", "README.md"]);
   await runGit(repoRoot, ["commit", "-m", "initial"]);

@@ -12,12 +12,16 @@ import { EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, getEmbeddedPostgresTestSupport, star
 type TestSql = ReturnType<typeof connectPostgres>;
 type JournalEntry = { idx: number; version: string; when: number; tag: string; breakpoints: boolean };
 type Journal = { version: string; dialect: string; entries: JournalEntry[] };
-const nativeFile = "0291_deployment_resources.sql";
+const nativeFile = "0295_nostalgic_rhodey.sql";
 const nativeHash = "ac20d3f6626b23aaf07e7bc7f6502bbcd728a2808d4b4adb56b2116bb30e6412";
 // Authentic entry and SQL from 843bb5b, whose upstream prefix through 0288 is unchanged.
 const oldEntry: JournalEntry = { idx: 289, version: "7", when: 1790713813737, tag: "0289_messy_vivisector", breakpoints: true };
 const oldSqlUrl = new URL("./__tests__/fixtures/deployment-history/0289_messy_vivisector.sql", import.meta.url);
-const pendingFiles = ["0289_drop_user_keyboard_shortcuts.sql", "0290_browser_use_cloud.sql"];
+const pendingFiles = [
+  "0289_drop_user_keyboard_shortcuts.sql", "0290_browser_use_cloud.sql",
+  "0291_conscious_secret_warriors.sql", "0292_powerful_devos.sql",
+  "0293_broad_rattler.sql", "0294_chilly_marvel_apes.sql",
+];
 const browserTables = ["browser_use_browsers", "browser_use_runs", "browser_use_sessions", "browser_use_settings"];
 const guardedTables = ["agent_api_keys", "agents", "companies", "company_secret_versions", "company_secrets", "project_workspaces", "projects", "routine_triggers", "routines"];
 const sha256 = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
@@ -83,7 +87,7 @@ async function readHistory(sql: TestSql) {
 
 async function readSchema(sql: TestSql) {
   const tables = await sql<{ table_name: string }[]>`SELECT table_name FROM information_schema.tables
-    WHERE table_schema = 'public' AND table_name IN ${sql([...browserTables, "deployment_resources"])} ORDER BY table_name`;
+    WHERE table_schema = 'public' AND table_name = ANY(${sql.array([...browserTables, "deployment_resources"])}::text[]) ORDER BY table_name`;
   const [keyboard] = await sql`SELECT EXISTS (SELECT 1 FROM information_schema.columns
     WHERE table_schema = 'public' AND table_name = 'user' AND column_name = 'keyboard_shortcuts') AS present`;
   const guards = await sql`SELECT c.relname AS table_name, t.tgenabled AS enabled,
@@ -160,7 +164,7 @@ async function assertGuardsAndCipher(sql: TestSql, row: Awaited<ReturnType<typeo
 }
 
 describePostgres("deployment migration upgrade from authentic native history", () => {
-  it("backfills the two upstream gaps without rewriting native history, ownership or ciphertext", async () => {
+  it("backfills upstream gaps without rewriting native history, ownership or ciphertext", async () => {
     await withEmptyDatabase(async (sql, url) => {
       await applyOldHistory(sql, url);
       const row = await seed(sql);
@@ -188,7 +192,7 @@ describePostgres("deployment migration upgrade from authentic native history", (
       expect(await preservedRows(sql, row)).toEqual(beforeRows);
       expect(await readSchema(sql)).toEqual({ tables: [...browserTables, "deployment_resources"], keyboard: false, guards: beforeSchema.guards });
       await assertGuardsAndCipher(sql, row);
-      expect(await inspectMigrations(url)).toMatchObject({ status: "upToDate", journalEntryCount: beforeHistory.length + 2 });
+       expect(await inspectMigrations(url)).toMatchObject({ status: "upToDate", journalEntryCount: beforeHistory.length + pendingFiles.length });
       await applyPendingMigrations(url);
       expect(await readHistory(sql)).toEqual(afterHistory);
       expect(await preservedRows(sql, row)).toEqual(beforeRows);

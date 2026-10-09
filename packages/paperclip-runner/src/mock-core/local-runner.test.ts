@@ -1,4 +1,11 @@
+import { execFile } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
+import { resolveCargoBinary, resolveCargoTargetDirectory } from "../../scripts/cargo-artifacts.mjs";
 
 import {
   applyLocalRunnerLiveEvent,
@@ -13,9 +20,38 @@ import {
   startLocalRunnerScenario,
 } from "./local-runner.js";
 
+const targetDirectory = resolveCargoTargetDirectory();
+const binaries = {
+  runnerBinaryPath: resolveCargoBinary({ binary: "paperclip-runnerd", targetDirectory }),
+  fakeHarnessBinaryPath: resolveCargoBinary({ binary: "fake-harness", targetDirectory }),
+};
+
 describe.sequential("Local runner and fake harness", () => {
+  it("runs the CLI with relative binary overrides from another cwd without Cargo", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "local-runner-caller-"));
+    try {
+      const { stdout } = await promisify(execFile)(process.execPath, [
+        "--import", import.meta.resolve("tsx"),
+        fileURLToPath(new URL("../cli/local-runner.ts", import.meta.url)),
+        "--runner-binary", relative(directory, binaries.runnerBinaryPath),
+        "--fake-harness-binary", relative(directory, binaries.fakeHarnessBinaryPath),
+        "--scenario", "happy-path",
+        "--quiet",
+      ], { cwd: directory, env: { ...process.env, PATH: "" } });
+      expect(JSON.parse(stdout)).toMatchObject({
+        scenario: "happy-path",
+        semanticResult: "done",
+        terminalCount: 1,
+        runnerProcessExit: { code: 0, signal: null },
+        harnessProcessExit: { exitCode: 0, success: true, signal: null },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("runs lifecycle, tool, file, structured-result, and process-exit events", async () => {
-    const trace = await runLocalRunnerScenario({ scenario: "happy-path", delayMs: 1 });
+    const trace = await runLocalRunnerScenario({ ...binaries, scenario: "happy-path", delayMs: 1 });
     const eventTypes = trace.events.map((event) => event.eventType);
 
     expect(eventTypes).toContain("harness.ready");
@@ -52,6 +88,7 @@ describe.sequential("Local runner and fake harness", () => {
 
   it("deduplicates an equivalent turn command before driver side effects", async () => {
     const trace = await runLocalRunnerScenario({
+      ...binaries,
       scenario: "happy-path",
       delayMs: 5,
       duplicateTurnCommand: true,
@@ -66,6 +103,7 @@ describe.sequential("Local runner and fake harness", () => {
 
   it("round-trips permission and input requests before completion", async () => {
     const trace = await runLocalRunnerScenario({
+      ...binaries,
       scenario: "permission-input",
       delayMs: 1,
     });
@@ -79,7 +117,7 @@ describe.sequential("Local runner and fake harness", () => {
   });
 
   it("interrupts one turn and still emits one structured result and terminal", async () => {
-    const trace = await runLocalRunnerScenario({ scenario: "interrupted", delayMs: 1 });
+    const trace = await runLocalRunnerScenario({ ...binaries, scenario: "interrupted", delayMs: 1 });
 
     expect(trace.events.filter((event) => event.eventType === "turn.interrupted"))
       .toHaveLength(1);
@@ -93,6 +131,7 @@ describe.sequential("Local runner and fake harness", () => {
 
   it("collapses duplicate terminal messages to one terminal event", async () => {
     const trace = await runLocalRunnerScenario({
+      ...binaries,
       scenario: "duplicate-terminal",
       delayMs: 1,
     });
@@ -117,7 +156,7 @@ describe.sequential("Local runner and fake harness", () => {
   });
 
   it("keeps an error process exit distinct from its semantic result", async () => {
-    const trace = await runLocalRunnerScenario({ scenario: "error", delayMs: 1 });
+    const trace = await runLocalRunnerScenario({ ...binaries, scenario: "error", delayMs: 1 });
 
     expect(trace.harnessProcessExit).toEqual({ exitCode: 7, success: false, signal: null });
     expect(trace.result?.summary).toContain("scripted error");
@@ -128,6 +167,7 @@ describe.sequential("Local runner and fake harness", () => {
 
   it("cleans up the harness process group when the controller closes", async () => {
     const handle = await startLocalRunnerScenario({
+      ...binaries,
       scenario: "happy-path",
       delayMs: 1_000,
     });
@@ -145,6 +185,7 @@ describe.sequential("Local runner and fake harness", () => {
 
   it("rejects commands after completion with an operator-safe restart message", async () => {
     const handle = await startLocalRunnerScenario({
+      ...binaries,
       scenario: "happy-path",
       delayMs: 1,
     });
@@ -159,7 +200,7 @@ describe.sequential("Local runner and fake harness", () => {
   });
 
   it("produces the same snapshot for validated live events and replay", async () => {
-    const trace = await runLocalRunnerScenario({ scenario: "happy-path", delayMs: 1 });
+    const trace = await runLocalRunnerScenario({ ...binaries, scenario: "happy-path", delayMs: 1 });
     let live = createLocalRunnerLiveSnapshot(trace);
     for (const event of trace.events) {
       const next = applyLocalRunnerLiveEvent(live, event);

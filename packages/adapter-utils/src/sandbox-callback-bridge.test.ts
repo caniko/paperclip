@@ -1,9 +1,10 @@
-import { execFile as execFileCallback, spawn } from "node:child_process";
+import { execFile as execFileCallback, fork, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { getActiveStepContext, measureStartupStep } from "./acpx-engine/startup-timing.js";
@@ -1533,6 +1534,105 @@ describe("sandbox callback bridge", () => {
     ];
     for (const request of attachmentRequests) {
       expect(authorizeSandboxCallbackBridgeRequestWithRoutes(request)).toBeNull();
+    }
+  });
+
+  it.each([
+    [4 * 60 * 60 * 1000, 30_000],
+    [250, 250],
+  ])("bounds a hung bridge read configured for %i ms to %i ms", async (configuredMs, expectedMs) => {
+    vi.useFakeTimers();
+    try {
+      const runner = { execute: vi.fn(() => new Promise<RunProcessResult>(() => {})) };
+      const client = createCommandManagedSandboxCallbackBridgeQueueClient({
+        runner, remoteCwd: "/workspace", timeoutMs: configuredMs,
+      });
+      let error: unknown;
+      const read = client.readTextFile("/workspace/events/1.json").catch((caught) => { error = caught; });
+      await vi.advanceTimersByTimeAsync(expectedMs - 1);
+      expect(error).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(error).toEqual(new Error(`Sandbox bridge control command timed out after ${expectedMs}ms.`));
+      await read;
+      expect(runner.execute).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        timeoutMs: expectedMs, bypassSession: true,
+      }));
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("abandons a timed-out upload without replaying it or continuing after a late response", async () => {
+    vi.useFakeTimers();
+    try {
+      const success: RunProcessResult = {
+        exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "", pid: null,
+        startedAt: new Date().toISOString(),
+      };
+      let finishAppend!: (result: RunProcessResult) => void;
+      const runner = {
+        execute: vi.fn(async (input: { args?: string[] }) => {
+          if (input.args?.[1]?.startsWith("printf")) {
+            return new Promise<RunProcessResult>((resolve) => { finishAppend = resolve; });
+          }
+          return success;
+        }),
+      };
+      const client = createCommandManagedSandboxCallbackBridgeQueueClient({
+        runner, remoteCwd: "/workspace", timeoutMs: 4 * 60 * 60 * 1000,
+      });
+      let error: unknown;
+      const write = client.writeTextFile("/workspace/stdin/1.json", "sensitive-input")
+        .catch((caught) => { error = caught; });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(error).toEqual(new Error("Sandbox bridge control command timed out after 30000ms."));
+      await write;
+      finishAppend(success);
+      await vi.advanceTimersByTimeAsync(0);
+      const scripts = runner.execute.mock.calls.map(([input]) => input.args?.[1] ?? "");
+      expect(scripts.filter((script) => script.startsWith("printf"))).toHaveLength(1);
+      expect(scripts.some((script) => script.startsWith("base64 -d"))).toBe(false);
+      expect(scripts.at(-1)).toMatch(/^rm -f .*paperclip-upload/);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["start", "stop"])("bounds a hung callback bridge %s while preserving its launch environment", async (stage) => {
+    vi.useFakeTimers();
+    try {
+      const runner = {
+        execute: vi.fn(async (input: { args?: string[]; env?: Record<string, string> }) => {
+          const script = input.args?.[1] ?? "";
+          if ((stage === "start" && script.includes("nohup")) ||
+              (stage === "stop" && script.includes('kill "$pid"'))) {
+            return new Promise<RunProcessResult>(() => {});
+          }
+          return {
+            exitCode: 0, signal: null, timedOut: false, stderr: "", pid: null,
+            startedAt: new Date().toISOString(), stdout: JSON.stringify({ port: 3101 }),
+          };
+        }),
+      };
+      let error: unknown;
+      const operation = startSandboxCallbackBridgeServer({
+        runner, remoteCwd: "/workspace", assetRemoteDir: "/workspace/assets",
+        queueDir: "/workspace/queue", bridgeToken: "private-bridge-token", timeoutMs: 4 * 60 * 60 * 1000,
+      }).then(async (bridge) => { if (stage === "stop") await bridge.stop(); })
+        .catch((caught) => { error = caught; });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(error).toEqual(new Error("Sandbox bridge control command timed out after 30000ms."));
+      await operation;
+      expect(runner.execute.mock.calls[0]?.[0].env).toMatchObject({
+        PAPERCLIP_BRIDGE_TOKEN: "private-bridge-token",
+        PAPERCLIP_SANDBOX_EXEC_CHANNEL: "bridge",
+      });
+      expect(runner.execute).toHaveBeenLastCalledWith(expect.objectContaining({ timeoutMs: 30_000 }));
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
     }
   });
 
@@ -3136,6 +3236,47 @@ describe("sandbox callback bridge", () => {
     expect(stderr).toContain("Unsupported PAPERCLIP_API_BRIDGE_MODE: totally_unknown_mode");
   }, 15_000);
 
+  async function spawnHttp2GatewayForTest(
+    entrypoint: string,
+    env: NodeJS.ProcessEnv,
+    beforeSpawn?: (port: number) => Promise<void>,
+  ) {
+    const reservation = createServer();
+    const assignedPort = await new Promise<number>((resolve, reject) => {
+      reservation.once("error", reject);
+      reservation.listen(0, "127.0.0.1", () => {
+        const address = reservation.address();
+        if (!address || typeof address === "string") {
+          reject(new Error("Could not reserve a loopback port for the test."));
+          return;
+        }
+        resolve(address.port);
+      });
+    });
+    let released: Promise<void> | undefined;
+    const releaseReservation = () => released ??= new Promise<void>((resolve) => {
+      reservation.close(() => resolve());
+    });
+    cleanupFns.push(releaseReservation);
+    await beforeSpawn?.(assignedPort);
+    const child = fork(fileURLToPath(new URL("../test/helpers/reserved-gateway-listener.mjs", import.meta.url)), [], {
+      execArgv: [],
+      env: { ...env, PAPERCLIP_BRIDGE_PORT: String(assignedPort) },
+      stdio: ["pipe", "pipe", "pipe", "ipc"],
+    });
+    const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+    cleanupFns.push(async () => {
+      child.kill();
+      await closed;
+    });
+    child.send({ entrypoint, port: assignedPort }, reservation, { keepOpen: true }, (error) => {
+      if (error) child.emit("error", error);
+    });
+    const { stdin, stdout, stderr } = child;
+    if (!stdin || !stdout || !stderr) throw new Error("Gateway fixture requires piped stdio");
+    return { child: Object.assign(child, { stdin, stdout, stderr }), assignedPort, releaseReservation };
+  }
+
   it("test_http2_gateway_writes_no_frame_between_ready_and_the_preface", async () => {
     // Spawn the real generated gateway in http2_v1 mode and read its raw
     // stdout bytes. The only frame-codec write on this path is the READY
@@ -3148,32 +3289,12 @@ describe("sandbox callback bridge", () => {
     const entrypoint = path.join(rootDir, "paperclip-bridge-server.mjs");
     await writeFile(entrypoint, getSandboxCallbackBridgeServerSource(), "utf8");
 
-    const probe = createServer();
-    const assignedPort = await new Promise<number>((resolve, reject) => {
-      probe.once("error", reject);
-      probe.listen(0, "127.0.0.1", () => {
-        const address = probe.address();
-        if (!address || typeof address === "string") {
-          reject(new Error("Could not reserve a loopback port for the test."));
-          return;
-        }
-        probe.close(() => resolve(address.port));
-      });
-    });
-
     const nonce = "test-nonce-http2";
-    const child = spawn(process.execPath, [entrypoint], {
-      env: {
-        ...process.env,
-        PAPERCLIP_API_BRIDGE_MODE: "http2_v1",
-        PAPERCLIP_BRIDGE_TOKEN: "test-token",
-        PAPERCLIP_BRIDGE_PORT: String(assignedPort),
-        PAPERCLIP_BRIDGE_NONCE: nonce,
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    cleanupFns.push(async () => {
-      child.kill();
+    const { child, releaseReservation } = await spawnHttp2GatewayForTest(entrypoint, {
+      ...process.env,
+      PAPERCLIP_API_BRIDGE_MODE: "http2_v1",
+      PAPERCLIP_BRIDGE_TOKEN: "test-token",
+      PAPERCLIP_BRIDGE_NONCE: nonce,
     });
     let stderr = "";
     child.stderr.on("data", (chunk: Buffer) => {
@@ -3196,12 +3317,16 @@ describe("sandbox callback bridge", () => {
           resolve(total);
         }
       });
-      child.once("error", reject);
+      child.once("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
       child.once("exit", (code) => {
         clearTimeout(timer);
         reject(new Error("The http2 gateway exited early with code " + String(code) + ". stderr: " + stderr));
       });
     });
+    await releaseReservation();
 
     const newlineIndex = firstBytes.indexOf(0x0a);
     expect(newlineIndex).toBeGreaterThan(0);
@@ -3227,6 +3352,7 @@ describe("sandbox callback bridge", () => {
   async function startHttp2GatewayForTest(options: {
     bridgeToken: string;
     maxBodyBytes?: number;
+    beforeSpawn?: (port: number) => Promise<void>;
     forwardRequest: (request: Http2BridgeForwardRequest) => Promise<Http2BridgeForwardResult>;
   }): Promise<{ baseUrl: string; stop: () => Promise<void> }> {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-bridge-http2-test-"));
@@ -3234,32 +3360,15 @@ describe("sandbox callback bridge", () => {
     const entrypoint = path.join(rootDir, "paperclip-bridge-server.mjs");
     await writeFile(entrypoint, getSandboxCallbackBridgeServerSource(), "utf8");
 
-    const probe = createServer();
-    const assignedPort = await new Promise<number>((resolve, reject) => {
-      probe.once("error", reject);
-      probe.listen(0, "127.0.0.1", () => {
-        const address = probe.address();
-        if (!address || typeof address === "string") {
-          reject(new Error("Could not reserve a loopback port for the test."));
-          return;
-        }
-        probe.close(() => resolve(address.port));
-      });
-    });
-
-    const child = spawn(process.execPath, [entrypoint], {
-      env: {
-        ...process.env,
-        PAPERCLIP_API_BRIDGE_MODE: "http2_v1",
-        PAPERCLIP_BRIDGE_TOKEN: options.bridgeToken,
-        PAPERCLIP_BRIDGE_PORT: String(assignedPort),
-        PAPERCLIP_BRIDGE_NONCE: "test-nonce",
-        ...(options.maxBodyBytes != null
-          ? { PAPERCLIP_BRIDGE_MAX_BODY_BYTES: String(options.maxBodyBytes) }
-          : {}),
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    const { child, assignedPort, releaseReservation } = await spawnHttp2GatewayForTest(entrypoint, {
+      ...process.env,
+      PAPERCLIP_API_BRIDGE_MODE: "http2_v1",
+      PAPERCLIP_BRIDGE_TOKEN: options.bridgeToken,
+      PAPERCLIP_BRIDGE_NONCE: "test-nonce",
+      ...(options.maxBodyBytes != null
+        ? { PAPERCLIP_BRIDGE_MAX_BODY_BYTES: String(options.maxBodyBytes) }
+        : {}),
+    }, options.beforeSpawn);
     let stderr = "";
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
@@ -3308,6 +3417,10 @@ describe("sandbox callback bridge", () => {
         rejectReady(new Error("The http2 gateway exited early with code " + String(code) + ". stderr: " + stderr));
       }
     });
+    child.once("error", (error) => {
+      clearTimeout(readyTimer);
+      rejectReady(error);
+    });
 
     const channel: CommandManagedDuplexChannel = {
       write: (data) => {
@@ -3328,6 +3441,7 @@ describe("sandbox callback bridge", () => {
     };
 
     await readyPromise;
+    await releaseReservation();
 
     const handle = createHttp2BridgeServer({
       bridgeToken: options.bridgeToken,
@@ -3353,6 +3467,30 @@ describe("sandbox callback bridge", () => {
 
     return { baseUrl: `http://127.0.0.1:${assignedPort}`, stop };
   }
+
+  it("keeps the assigned HTTP/2 listener reserved until the gateway adopts it", async () => {
+    const bridgeToken = createSandboxCallbackBridgeToken();
+    const gateway = await startHttp2GatewayForTest({
+      bridgeToken,
+      beforeSpawn: async (port) => {
+        const competitor = createServer();
+        const occupied = await new Promise<boolean>((resolve, reject) => {
+          competitor.once("error", (error: NodeJS.ErrnoException) => {
+            if (error.code === "EADDRINUSE") resolve(true);
+            else reject(error);
+          });
+          competitor.listen(port, "127.0.0.1", () => competitor.close(() => resolve(false)));
+        });
+        expect(occupied).toBe(true);
+      },
+      forwardRequest: async () => ({ status: 200, body: Buffer.from("reserved listener") }),
+    });
+    const response = await fetch(`${gateway.baseUrl}/api/agents/me`, {
+      headers: { authorization: `Bearer ${bridgeToken}` },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("reserved listener");
+  }, 15_000);
 
   it("forwards the exact request body bytes to the HTTP/2 host handler, including a non-ASCII character", async () => {
     const bridgeToken = createSandboxCallbackBridgeToken();

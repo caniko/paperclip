@@ -78,6 +78,55 @@ not restore a removed membership; company access remains application-managed.
 `remote-only` is reserved and refuses every command before credentials, adapter
 loading, or database changes. The supported profile is `trusted-local`.
 
+### Optional Nix integration for a Hermes gateway
+
+The flake exports `homeManagerModules.paperclip` for personal declarations,
+`nixosModules.homeManager` for explicit integrated Home Manager selection, and
+`lib.mkHermesWorkerEnv` for a **separately managed** Hermes gateway instance.
+For a `flake = false` source input, import
+`"${inputs.paperclip}/nix/lib/hermes-worker-env.nix"` with `{ inherit lib pkgs; }`
+instead of accessing the flake's `lib` output.
+The latter is an optional systemd companion, not a new Paperclip adapter or
+credential backend. It does not install Hermes, enable Paperclip, choose a
+package, or create a worker account. With the corresponding Hermes NixOS
+instance module imported, a host can compose it as follows:
+
+```nix
+systemd.services = lib.mkIf config.services.paperclip.instances.operations.enable (
+  inputs.paperclip.lib.mkHermesWorkerEnv { inherit lib pkgs; } {
+    name = "operations"; # existing hermes-agent-operations.service
+    gatewayFile = "/run/credentials/paperclip/operations-gateway";
+    researchFile = "/run/credentials/hermes/operations-research"; # optional
+    restartTriggers = [ encryptedGatewaySource encryptedResearchSource ];
+  }
+);
+```
+
+Set `services.paperclip.instances.operations.credentialFiles.gateway` to the
+same gateway credential path, and bind the agent's `credentials.apiKey` to
+`gateway` in its native manifest. The companion renders a root-only environment
+file in a root-only `/run` directory and systemd reads it before applying the
+Hermes worker's filesystem isolation. It validates the original credential
+bytes (one optional final LF, no NULs, embedded newlines or quotes) and fails
+startup rather than changing malformed credentials. The optional research key
+becomes worker-wide `TAVILY_API_KEY`; enable the Hermes `web` toolset separately
+only for workers intended to use it. Select source files and rotation triggers
+in the host's secret manager; do not put values in Nix or the manifest.
+
+The Hermes instance and the Paperclip controller still need a host-owned
+startup relationship, network policy, and recovery procedure. During rotation,
+hold dispatch and account for active worker runs before restarting either
+service. Qualify the real worker and a failed-cutover path before enabling
+unattended dispatch. A test-only `checks.<system>.hermes-worker-env` covers the
+portable environment graph and synthetic malformed credentials.
+
+The Simit-generated `Nix installable builds` PR gate builds
+`checks.x86_64-linux.hermes-worker-env` in hosted CI. It retains the checkout
+revision, installable, raw build result, and log for 31 days. Keep the companion
+module revision distinct from the packaged application revision when freezing
+a deployment bundle. A green renderer check proves the synthetic credential
+contract; the real worker and rotation recovery still need their own receipts.
+
 ## Native resource manifest
 
 ```json
@@ -106,6 +155,12 @@ reuses native validators. Supported declaration adapters are `hermes_gateway`,
 `process`, and `http`; `server/src/deployment/adapter-config.ts` defines their
 allowed fields. Worker credentials are native encrypted secret references.
 Manifest fields must contain nonsecret values.
+
+Hermes declarations accept the boolean `adapterConfig.waitForJobs`. When enabled,
+the existing adapter binds a selected execution target and requires the worker's
+`wait_for_jobs` and Stop-admission capabilities. Run ownership is retained until
+the execution-host jobs and descendants settle. This uses the same execution
+preconditions as application-managed Hermes configuration.
 
 Identity is `owner + kind + key`, independent of display names. Existing
 resources need explicit `adopt` UUIDs. Cross-company references, duplicate
@@ -140,6 +195,10 @@ The controller reserves a database connection for its full lifetime. Managed
 startup checks migration hashes before applying migrations, then bootstraps and
 reconciles transactionally. Failure stops startup before the application listener
 or dispatch services. Unexpected lease loss terminates the controller or apply.
+The service journal emits a bounded failure phase, reconciliation step when
+available, and validated error code. It omits exception messages, SQL text,
+credential paths, and manifest values; check runtime credentials and database
+privileges using the reported step without posting secret-bearing logs.
 
 Bindings publish after database commit to
 `<home>/instances/<instance>/deployment-bindings.json`, mode `0600`, by file sync,
@@ -153,16 +212,20 @@ local encrypted material without recording secret-access timestamps. Preserve
 that key, runtime credentials, storage, and the migration journal in backups.
 Application generation rollback is not database rollback.
 
-Migration `0291_deployment_resources` follows upstream `0290`. Older
-fork-only `0284_bizarre_mastermind` / `0285_deployment_workspaces` databases are
-not upgrade-qualified; unknown hashes fail closed. Use a separate verified
-migration or restore procedure. Fresh disposable staging does not prove
-retained-data production recovery.
+Migration `0295_nostalgic_rhodey` follows upstream `0294`. It retains
+the earlier fork's `0289_messy_vivisector` SQL hash, so the applied journal
+entry and guards survive while the upstream `0289`–`0294` gap is filled. The
+embedded PostgreSQL upgrade fixture checks retained ciphertext, ownership,
+and history. Older fork-only `0284_bizarre_mastermind` /
+`0285_deployment_workspaces` databases are not upgrade-qualified; unknown
+hashes fail closed. Use a separate verified migration or restore procedure.
+Fresh disposable staging does not prove retained-data production recovery.
 
 ## Verification
 
 Focused tests live in `server/src/deployment/`,
-`packages/db/src/deployment-ownership.test.ts`, and
+`packages/db/src/deployment-ownership.test.ts`,
+`packages/db/src/deployment-migration-upgrade.test.ts`, and
 `packages/shared/src/deployment-manifest.test.ts`. They exercise actual
 PostgreSQL, the real launcher, authenticated API calls, a fake HTTP gateway,
 ownership/adoption, no-op reapply, failure rollback, lease loss, and logical

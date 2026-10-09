@@ -9,7 +9,7 @@ import type {
   PaperclipSemanticStoredOutcome,
   PaperclipSemanticToolCall,
 } from "./types.js";
-import { PAPERCLIP_SEMANTIC_REDACTED } from "./redaction.js";
+import { PAPERCLIP_SEMANTIC_REDACTED, redactPaperclipSemanticValue } from "./redaction.js";
 import {
   validatePrpEvent,
   type PrpEvent,
@@ -24,6 +24,21 @@ const correlation = {
 };
 
 describe("run-scoped semantic tool authority", () => {
+  it("masks qualified credential fields and standalone opaque bearer values in audit copies", () => {
+    expect(redactPaperclipSemanticValue({ authorizationHeader: "abcdefghijkl", apiKeyProduction: "sensitivevalue", body: "Bearer abcdefghijkl" }))
+      .toEqual({ authorizationHeader: PAPERCLIP_SEMANTIC_REDACTED, apiKeyProduction: PAPERCLIP_SEMANTIC_REDACTED, body: PAPERCLIP_SEMANTIC_REDACTED });
+  });
+  it("preserves credential-related prose and metadata in diagnostic copies", () => {
+    const value = {
+      body: "Use a secret manager for credential handling and bearer authentication with bearer tokens.",
+      tokenBudget: 4000, tokenPolicy: "least privilege", credentialHandling: "harness",
+    };
+    expect(redactPaperclipSemanticValue(value)).toEqual(value);
+    expect(redactPaperclipSemanticValue({ credentials: { provider: "opaque-value" }, passwordValue: "opaque-value" }))
+      .toEqual({ credentials: PAPERCLIP_SEMANTIC_REDACTED, passwordValue: PAPERCLIP_SEMANTIC_REDACTED });
+    expect(redactPaperclipSemanticValue({ body: "Bearer opaque-credential-value" })).toEqual({ body: PAPERCLIP_SEMANTIC_REDACTED });
+  });
+
   it("projects only bound and currently authorized actions", async () => {
     let context = runContext({
       actorClaims: ["discovery:tasks:read", "discovery:agents:read"],
@@ -59,6 +74,59 @@ describe("run-scoped semantic tool authority", () => {
     );
   });
 
+  it("discovers and binds skill updates with version guards, mutation receipts, and current mode checks", async () => {
+    let context = runContext();
+    let executions = 0;
+    const input = {
+      skillId: "skill_semantic_test",
+      expectedVersionId: "version_semantic_original",
+      idempotencyKey: "update_semantic_test",
+      markdown: "---\nname: release-review\ndescription: Review release notes.\n---\n# Review\nInspect the changes.\n",
+    };
+    const value = {
+      skillId: input.skillId,
+      path: "SKILL.md",
+      versionId: "version_semantic_updated",
+      studioPath: `/skills/studio/${input.skillId}`,
+    };
+    const dispatcher = new PaperclipSemanticDispatcher({
+      contextProvider: () => context,
+      idempotencyStore: new MemoryIdempotencyStore(),
+      bindings: [{
+        operationId: "update_skill",
+        execute: ({ input: executedInput }) => {
+          expect(executedInput).toEqual(input);
+          executions += 1;
+          return { value };
+        },
+      }],
+    });
+
+    await expect(dispatcher.listAlwaysAvailableTools(correlation.runId)).resolves.toEqual([]);
+    await expect(dispatcher.discoverTools({
+      runId: correlation.runId, query: "update skill", namespace: "skills",
+    })).resolves.toMatchObject({ operations: [{ name: "update_skill" }] });
+    await expect(dispatcher.dispatch(call("update_skill", input, "call_skill_first")))
+      .resolves.toMatchObject({ ok: true, duplicate: false, value });
+    await expect(dispatcher.dispatch(call("update_skill", input, "call_skill_retry")))
+      .resolves.toMatchObject({ ok: true, duplicate: true, value });
+    expect(executions).toBe(1);
+
+    context = runContext({ workMode: "planning" });
+    await expect(dispatcher.discoverTools({
+      runId: correlation.runId, query: "update skill", namespace: "skills",
+    })).resolves.toMatchObject({ operations: [] });
+    await expect(dispatcher.dispatch(call("update_skill", input, "call_skill_planning")))
+      .resolves.toMatchObject({ ok: false, error: { code: "task_mode_denied" } });
+    expect(executions).toBe(1);
+
+    context = runContext();
+    const { expectedVersionId: _expectedVersionId, ...missingVersion } = input;
+    await expect(dispatcher.dispatch(call("update_skill", missingVersion, "call_skill_missing_version")))
+      .resolves.toMatchObject({ ok: false, error: { code: "input_invalid" } });
+    expect(executions).toBe(1);
+  });
+
   it("rechecks ownership after projection and before invocation", async () => {
     let context = runContext();
     let executions = 0;
@@ -88,8 +156,9 @@ describe("run-scoped semantic tool authority", () => {
     expect(executions).toBe(0);
   });
 
-  it("rejects forged scope and protected input before a binding executes", async () => {
+  it("rejects forged scope while passing credential content unchanged to authorized bindings", async () => {
     let executions = 0;
+    const query = "Find Authorization: Bearer intentional-credential";
     const dispatcher = new PaperclipSemanticDispatcher({
       contextProvider: () =>
         runContext({
@@ -99,7 +168,8 @@ describe("run-scoped semantic tool authority", () => {
       bindings: [
         {
           operationId: "search_tasks",
-          execute: () => {
+          execute: ({ input }) => {
+            expect(input).toEqual({ query });
             executions += 1;
             return { value: { tasks: [] } };
           },
@@ -112,13 +182,13 @@ describe("run-scoped semantic tool authority", () => {
     ).resolves.toMatchObject({ ok: false, error: { code: "input_invalid" } });
     await expect(
       dispatcher.dispatch(
-        call("search_tasks", { query: "work", apiKey: "sk_not-for-a-tool" }),
+        call("search_tasks", { query }),
       ),
     ).resolves.toMatchObject({
-      ok: false,
-      error: { code: "protected_data_denied" },
+      ok: true,
     });
-    expect(executions).toBe(0);
+    expect(executions).toBe(1);
+    expect(JSON.stringify(dispatcher.authorizationRecords())).not.toContain("intentional-credential");
   });
 
   it("redacts binding output and emits schema-valid digest-only receipts", async () => {
@@ -175,6 +245,7 @@ describe("run-scoped semantic tool authority", () => {
 
   it("replays exact mutation retries and rejects key reuse with changed input", async () => {
     let executions = 0;
+    const input = { ...writeDocumentInput(), body: "Credential handling: Authorization: Bearer intentional-document-credential" };
     const store = new MemoryIdempotencyStore();
     const dispatcher = new PaperclipSemanticDispatcher({
       contextProvider: () => runContext(),
@@ -182,7 +253,8 @@ describe("run-scoped semantic tool authority", () => {
       bindings: [
         {
           operationId: "write_document",
-          execute: () => {
+          execute: ({ input: executedInput }) => {
+            expect(executedInput).toEqual(input);
             executions += 1;
             return {
               value: mutationReceipt("write-command"),
@@ -198,15 +270,15 @@ describe("run-scoped semantic tool authority", () => {
     });
 
     const first = await dispatcher.dispatch(
-      call("write_document", writeDocumentInput(), "call_write_first"),
+      call("write_document", input, "call_write_first"),
     );
     const retry = await dispatcher.dispatch(
-      call("write_document", writeDocumentInput(), "call_write_retry"),
+      call("write_document", input, "call_write_retry"),
     );
     const conflict = await dispatcher.dispatch(
       call(
         "write_document",
-        { ...writeDocumentInput(), body: "Different body" },
+        { ...input, body: "Different body" },
         "call_write_conflict",
       ),
     );
@@ -226,6 +298,7 @@ describe("run-scoped semantic tool authority", () => {
       error: { code: "idempotency_conflict" },
     });
     expect(executions).toBe(1);
+    expect(JSON.stringify(dispatcher.authorizationRecords())).not.toContain("intentional-document-credential");
     if (!first.ok || !retry.ok) throw new Error("expected successes");
     expect(retry.resultReceipt.operationReceiptId).toBe(
       first.resultReceipt.operationReceiptId,
@@ -438,6 +511,7 @@ function runContext(
     delegatedClaims?: readonly string[];
     actorCompanyId?: string;
     executionRunId?: string;
+    workMode?: PaperclipSemanticRunContext["activeTask"]["workMode"];
   } = {},
 ): PaperclipSemanticRunContext {
   return {
@@ -456,7 +530,7 @@ function runContext(
       assigneeActorId: "actor_semantic_test",
       executionRunId: overrides.executionRunId ?? correlation.runId,
       status: "in_progress",
-      workMode: "standard",
+      workMode: overrides.workMode ?? "standard",
     },
     delegatedClaims: overrides.delegatedClaims ?? [],
   };

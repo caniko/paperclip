@@ -29,10 +29,10 @@ function readTrustedPrWorkflow() {
   const caller = readFileSync(prCallerWorkflow, "utf8");
   assert.match(
     caller,
-    /^\s+uses: paperclipai\/paperclip\/\.github\/workflows\/pr-trusted\.yml@master\s*$/m,
-    "pr.yml must call the trusted workflow from CODEOWNERS-protected master",
+    /^\s+uses: caniko\/paperclip\/\.github\/workflows\/pr-trusted\.yml@[0-9a-f]{40}\s*$/m,
+    "the owned candidate must call its own immutable qualification workflow",
   );
-  // Validate proposed workflow changes locally; CI executes the merged master version.
+  // Validate the owned workflow here; hosted run metadata records its pinned source.
   return readFileSync(trustedPrWorkflow, "utf8");
 }
 
@@ -157,7 +157,7 @@ test("shard arguments are validated", () => {
   }
 });
 
-test("pr.yml calls the trusted PR workflow from master", () => {
+test("pr.yml calls the owned qualification workflow by immutable commit", () => {
   assert.ok(readTrustedPrWorkflow().length > 0);
 });
 
@@ -174,8 +174,8 @@ test("the trusted PR workflow keeps a stable aggregate check named e2e over the 
   assert.match(aggregate, /^ {4}if: \$\{\{ always\(\) \}\}$/m, "the aggregate must run even when a shard fails");
   assert.match(
     aggregate,
-    /^ {4}needs: \[gate, (?:policy, )?e2e_shards\]$/m,
-    "the aggregate must depend on the runner gate, optional policy gate, and shard matrix",
+    /^ {4}needs: \[gate, policy, e2e_shards, native_composer_stop\]$/m,
+    "the aggregate must depend on the runner gate, policy gate, shards and mandatory native Stop",
   );
   assert.match(
     aggregate,
@@ -225,6 +225,7 @@ test("the trusted PR workflow limits full CI to merge-relevant stack layers", ()
     "verify_serialized_server",
     "canary_dry_run",
     "e2e_shards",
+    "native_composer_stop",
   ]) {
     assert.match(
       jobs.get(jobId),
@@ -261,9 +262,33 @@ test("the trusted PR workflow limits full CI to merge-relevant stack layers", ()
   assert.match(verify, /test "\$DOCKER_CONTEXT_INTEGRITY_RESULT" = "skipped"/);
 
   const e2e = jobs.get("e2e");
-  assert.match(e2e, /^ {4}needs: \[gate, policy, e2e_shards\]$/m);
+  assert.match(e2e, /^ {4}needs: \[gate, policy, e2e_shards, native_composer_stop\]$/m);
   assert.match(e2e, /POLICY_RESULT: \$\{\{ needs\.policy\.result \}\}/);
-  assert.match(e2e, /false\) test "\$E2E_SHARDS_RESULT" = "skipped"/);
+  assert.match(e2e, /false\)[\s\S]*test "\$E2E_SHARDS_RESULT" = "skipped"/);
+  assert.match(e2e, /NATIVE_COMPOSER_STOP_RESULT: \$\{\{ needs\.native_composer_stop\.result \}\}/);
+  assert.match(e2e, /true\)[\s\S]*test "\$NATIVE_COMPOSER_STOP_RESULT" = "success"/);
+  assert.match(e2e, /false\)[\s\S]*test "\$NATIVE_COMPOSER_STOP_RESULT" = "skipped"/);
+});
+
+test("the e2e aggregate refuses failed or missing native Stop qualification", () => {
+  const aggregate = readWorkflowJobs(readTrustedPrWorkflow()).get("e2e");
+  const script = aggregate.split("        run: |\n")[1]
+    .split("\n").map(line => line.replace(/^ {10}/, "")).join("\n");
+  for (const [full, policy, shards, native, succeeds] of [
+    ["true", "success", "success", "success", true],
+    ["true", "success", "success", "failure", false],
+    ["true", "success", "success", "skipped", false],
+    ["true", "success", "failure", "success", false],
+    ["true", "failure", "success", "success", false],
+    ["false", "success", "skipped", "skipped", true],
+    ["false", "success", "skipped", "success", false],
+  ]) {
+    const result = spawnSync("bash", ["-e", "-c", script], { env: {
+      ...process.env, FULL_CI: full, POLICY_RESULT: policy,
+      E2E_SHARDS_RESULT: shards, NATIVE_COMPOSER_STOP_RESULT: native,
+    } });
+    assert.equal(result.status === 0, succeeds, `${full}/${policy}/${shards}/${native}`);
+  }
 });
 
 test("the stacked PR scope selector runs full CI only where intended", () => {
@@ -330,7 +355,7 @@ test("the trusted PR workflow regenerates stale stacked lockfiles", () => {
   ) ?? [];
   assert.equal(
     fallbackInstalls.length,
-    7,
+    8,
     "every downstream install job must resolve a stale lockfile inline",
   );
   assert.doesNotMatch(

@@ -10,6 +10,7 @@ import {
   readWorktreeSeedManifest,
 } from "../../../cli/src/commands/worktree.ts";
 import { realizeExecutionWorkspace } from "../services/workspace-runtime.ts";
+import { configureFixtureGitIdentity } from "./helpers/git-fixture.js";
 
 const execFileAsync = promisify(execFile);
 const cleanup: string[] = [];
@@ -101,8 +102,7 @@ describe("managed worktree seed source through the server spawn path", () => {
 
     await fs.mkdir(repoRoot, { recursive: true });
     await runGit(repoRoot, ["init", "-q"]);
-    await runGit(repoRoot, ["config", "user.email", "paperclip@example.com"]);
-    await runGit(repoRoot, ["config", "user.name", "Paperclip Test"]);
+    configureFixtureGitIdentity(repoRoot);
     await fs.mkdir(path.join(repoRoot, "scripts"), { recursive: true });
     await fs.writeFile(path.join(repoRoot, "README.md"), "server spawn regression\n", "utf8");
     await fs.copyFile(

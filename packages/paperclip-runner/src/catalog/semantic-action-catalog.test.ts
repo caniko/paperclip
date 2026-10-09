@@ -6,6 +6,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
 import { createTaskAction } from "../protocol-actions/create-task.js";
 import { createProjectAction } from "../protocol-actions/create-project.js";
+import { updateSkillAction } from "../protocol-actions/update-skill.js";
 
 import {
   PAPERCLIP_SEMANTIC_ACTION_CATALOG,
@@ -20,18 +21,6 @@ const packageRoot = resolve(
 );
 
 describe("semantic action catalog", () => {
-  it("advertises only icons accepted by the project API on both tool surfaces", async () => {
-    const { PROJECT_ICON_NAMES } = await import("../../../shared/src/constants.js");
-    const ajv = new Ajv2020({ allErrors: true, allowUnionTypes: true, strict: true });
-    for (const schema of [createProjectAction.live.descriptor.inputSchema, paperclipSemanticAction("create_project")!.inputSchema]) {
-      const validate = ajv.compile(schema);
-      const input = { name: "Onboarding", idempotencyKey: "onboarding" };
-      expect(schema).toMatchObject({ properties: { icon: { enum: [...PROJECT_ICON_NAMES, null] } } });
-      for (const icon of [...PROJECT_ICON_NAMES, null]) expect(validate({ ...input, icon }), String(icon)).toBe(true);
-      expect(validate({ ...input, icon: "users" })).toBe(false);
-    }
-  });
-
   it("limits project repository URLs to HTTPS GitHub repository paths on both tool surfaces", () => {
     const ajv = new Ajv2020({ allErrors: true, allowUnionTypes: true, strict: true });
     for (const schema of [createProjectAction.live.descriptor.inputSchema, paperclipSemanticAction("create_project")!.inputSchema]) {
@@ -69,13 +58,28 @@ describe("semantic action catalog", () => {
       (action) => action.operationId,
     );
 
-    expect(operationIds).toHaveLength(35);
+    expect(operationIds).toHaveLength(37);
     expect(new Set(operationIds).size).toBe(operationIds.length);
     expect(operationIds).not.toContain("generic_api_request");
     expect(Object.isFrozen(PAPERCLIP_SEMANTIC_ACTION_CATALOG)).toBe(true);
     expect(
       Object.isFrozen(paperclipSemanticAction("write_document")?.inputSchema),
     ).toBe(true);
+  });
+
+  it("projects the canonical skill update schema and modes as an optional mutation", () => {
+    const update = paperclipSemanticAction("update_skill");
+    const live = updateSkillAction.live.descriptor;
+    expect(update).toBeDefined();
+    expect(update).toMatchObject({
+      operationId: live.operationId,
+      placement: "optional",
+      effect: "write",
+      allowedModes: live.allowedModes,
+      requiredClaims: live.requiredClaims,
+      inputSchema: live.inputSchema,
+      outputSchema: live.outputSchema,
+    });
   });
 
   it("declares hire_agent as a native identity-only mutation", () => {

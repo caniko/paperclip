@@ -27,6 +27,7 @@ const nonServerProjects = [
   "@paperclipai/adapter-claude-local",
   "@paperclipai/adapter-codex-local",
   "@paperclipai/adapter-grok-local",
+  "@paperclipai/hermes-paperclip-adapter",
   "@paperclipai/adapter-openclaw-gateway",
   "@paperclipai/adapter-opencode-local",
   "@paperclipai/plugin-daytona",
@@ -340,7 +341,15 @@ function runVitest(args, label, testShard = null) {
     args = [...args.filter((arg) => arg !== chatSuite), ...filters];
     assertSelectedTests(selected.tests, collect(args, "selected"), file);
     console.log(`[test:run] chat shard ${testShard.index + 1}/${testShard.count}: ${selected.tests.length}/${collected.length} tests, ${selected.lines.length} source lines; exact filter coverage verified`);
+  }
+  if (testShard || process.env.PAPERCLIP_TEST_REPORT_DIR) {
     args.push("--allowOnly=false");
+  }
+  if (process.env.PAPERCLIP_TEST_REPORT_DIR) {
+    const reportDir = path.resolve(process.env.PAPERCLIP_TEST_REPORT_DIR);
+    mkdirSync(reportDir, { recursive: true });
+    args.push("--retry=0", "--reporter=default", "--reporter=junit",
+      `--outputFile.junit=${path.join(reportDir, `${invocationIndex}.xml`)}`);
   }
   const result = spawnSync("pnpm", ["exec", "vitest", "run", ...sourceOnlyVitestArgs, ...args], {
     cwd: repoRoot,

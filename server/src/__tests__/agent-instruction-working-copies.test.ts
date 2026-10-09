@@ -12,6 +12,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { eq } from "drizzle-orm";
 import { agents, companies, authUsers, companyMemberships, principalPermissionGrants, heartbeatRuns, agentInstructionWorkingCopies, createDb } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { configureFixtureGitIdentity } from "./helpers/git-fixture.js";
 import { agentInstructionRevisionService } from "../services/agent-instruction-revisions.js";
 import { agentInstructionWorkingCopyService } from "../services/agent-instruction-working-copies.js";
 import { appendHeartbeatRunEvent } from "../services/heartbeat-run-events.js";
@@ -221,6 +222,20 @@ describe("registered run instruction copies", () => {
     expect(await fs.readFile(path.join(root, entryFile), "utf8")).toBe(initial);
   });
 
+  it("preserves the specific low-trust denial in the instruction-save receipt", async () => {
+    const copy = await run();
+    await fs.writeFile(path.join(copy.localRoot, entryFile), "Unauthorized persistent edit");
+    await db.update(agents).set({ permissions: {
+      trustPreset: "low_trust_review",
+      authorizationPolicy: { trustBoundary: { mode: "low_trust_review", companyId, rootIssueId: randomUUID() } },
+    } }).where(eq(agents.id, agentId));
+    const denied = await copies.collectStopped({ companyId, runId: copy.runId });
+    expect(denied?.state).toBe("conflict");
+    expect(denied?.errorMessage).toContain("This low-trust run cannot change persistent agent instructions, including AGENTS.md");
+    expect(denied?.candidateBase64).not.toBeNull();
+    expect(await fs.readFile(path.join(root, entryFile), "utf8")).toBe(initial);
+  });
+
   it("does not import a symlink or confuse a removed entry with an empty file", async () => {
     const linked = await run();
     await fs.unlink(path.join(linked.localRoot, entryFile));
@@ -307,7 +322,8 @@ describe("registered run instruction copies", () => {
     const workspace = path.join(home, `workspace-${randomUUID()}`);
     await fs.mkdir(workspace);
     await execFile("git", ["init", workspace]);
-    await execFile("git", ["-C", workspace, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-m", "fixture"]);
+    configureFixtureGitIdentity(workspace);
+    await execFile("git", ["-C", workspace, "commit", "--allow-empty", "-m", "fixture"]);
     const runId = randomUUID();
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, invocationSource: "on_demand", responsibleUserId: userId });
     const copy = (await copies.prepare({ legacy: true, ...target(), runId, cwd: workspace }))!;

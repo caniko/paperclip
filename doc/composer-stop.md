@@ -27,6 +27,12 @@ operator can release the pause without waking agents, then use the existing
 execution-reconciliation flow after reviewing the stopped run. Resume does not
 claim that unknown provider actions completed or were never performed.
 
+A native attempt cancelled before runtime selection has a durable no-dispatch
+fence. Its preparer retains the task lock through workspace and lease cleanup,
+then records settled preparation and releases the lock. This unused attempt
+does not create an execution-reconciliation blocker. Cancellation after runtime
+selection still requires the native startup or provider-termination proofs.
+
 A completed release remains successful if a best-effort wake fails. Its response
 includes optional `wakeFailures`, the page reports them inline, and remaining
 eligible tasks still receive their wake requests. No new endpoint is introduced.
@@ -45,6 +51,13 @@ pause hold. New board messages require Resume first. Both comment creation and
 updates that include a comment return `409` while an effective task or ancestor
 pause hold is active. Interrupted agents may still report their results. Neither path permits a fresh-session fallback
 when the interrupted checkpoint cannot be restored.
+
+Comments accepted before the pause also require release before they can start
+new work. Verified comment authorship and historical `treeHoldInteraction`
+metadata do not bypass the hold at enqueue, deferred-wake promotion, queued-run
+claim, checkout, or the final provider-dispatch check. A pause committed during
+preparation cancels that unused attempt without dispatching a provider; its
+record retains the pause's originating actor and hold identity.
 
 The credential-free ACP regression journey uses an actual ACP child process:
 
@@ -160,6 +173,40 @@ The suite boots a disposable local-trusted instance on port 3199 (override with
 `PAPERCLIP_E2E_PORT`). It never attaches to an existing server. Native coverage
 is explicitly skipped without the fixture; it must not use a logged-in provider
 as a fallback. Test companies are archived during cleanup.
+
+Full PR CI runs both journeys in the mandatory `Native composer Stop` lane.
+The owned candidate calls its reusable CI workflow through an immutable commit.
+It checks out the exact PR head and sets `PAPERCLIP_STOP_REQUIRE_NATIVE=true`.
+Missing or non-executable fixture/runner binaries refuse startup. The required
+`e2e` check includes this lane. Qualification refuses missing cases, failures,
+retries, skips or missing timing/status evidence. The retained receipt binds
+the tested revision, Playwright JSON/JUnit reports, attachment bytes and both
+binaries by SHA-256. Reports,
+receipts and test attachments use a 31-day upload policy. Independent evidence
+verification requires an advertised interval of at least 30 full days; it does
+not round up short intervals or substitute the requested policy for actual
+artifact expiry. The extra day accommodates GitHub's timestamp rounding.
+The receipt records Node/pnpm versions and hashes both the source and effective
+dependency lockfiles. Both lockfiles are retained. A changed resolution is
+explicitly marked `lockfileRegenerated`; bundle freezing must compare that
+tested dependency graph with the packaged resolution.
+The native case also retains a redacted parent-run cancellation record with its
+intent/acknowledgement audit IDs and deterministic-provider method names observed
+during Stop. Qualification refuses child or mismatched bindings, nonterminal or
+unacknowledged cancellation, missing audits, and missing fixture interrupts.
+Provider output and raw run result payloads are excluded from that record.
+The proposed source-separated lane uses an immutable owned checkout for its
+Playwright configuration/spec, imported fixtures, browser tooling, deterministic
+provider and dependency-free verifier. It explicitly supplies the candidate's
+absolute `PAPERCLIP_E2E_SOURCE_ROOT` as the application working directory; mandatory
+native mode refuses a missing source root. A harness tracked-source SHA-256 manifest
+is checked before acceptance and qualification, and retained with the trusted
+revision, manifest digest and verifier digest in the receipt. The active reusable
+workflow caller must be promoted only after this source is reviewed and passes
+hosted qualification; merely editing the candidate workflow does not activate it.
+The suite also retains scalar task, agent, and run admission state before
+archiving its disposable company. Archive cleanup pauses agents and cancels
+remaining runs, so post-cleanup screenshots alone cannot diagnose resume failures.
 
 For each runner, the journey starts a parent, child, and unrelated task, plus a
 terminal child. It sends while running and verifies the durable queue, clicks

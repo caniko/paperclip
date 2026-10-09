@@ -6,6 +6,7 @@ import type { SshRemoteExecutionSpec } from "./ssh.js";
 import type { AdapterExecutionTarget } from "./execution-target.js";
 import type { RuntimeStatusSink } from "./runtime-progress.js";
 import type { ExecutionContinuationEnvelope, FilesystemOwnershipPolicy, NativeFinalizationResult } from "@paperclipai/shared";
+import type { AdapterExecutionPhaseSink } from "./execution-phase.js";
 
 export interface AdapterAgent {
   id: string;
@@ -67,6 +68,7 @@ export interface AdapterRuntimeServiceReport {
 }
 
 export type AdapterExecutionErrorFamily =
+  | "configuration"
   | "transient_upstream"
   | "provider_quota"
   | "model_refusal"
@@ -201,11 +203,15 @@ export interface AdapterRuntimeEvent {
   color?: string;
   message?: string;
   payload?: Record<string, unknown>;
+  /** Stable provider receipt; the host deduplicates it in the local run log. */
+  providerSource?: { runId: string; sequence: number; canonicalPayload: Record<string, unknown> };
 }
 
 export interface AdapterExecutionContext {
   /** Immutable intent acquired by core before preparing a protected workspace. */
   workspaceOwnership?: WorkspaceOwnershipIntent;
+  /** Synchronous, content-free diagnostic scope; never stop or collection authority. */
+  onExecutionPhase?: AdapterExecutionPhaseSink;
   /** Run-scoped operator cancellation; adapters must settle before returning. */
   signal?: AbortSignal;
   /** Opt in to signal-based cancellation before starting provider work. */
@@ -214,6 +220,8 @@ export interface AdapterExecutionContext {
    * credentials: the host must encrypt it and must not publish it in events/logs.
    * Rejection means no provider work may start. */
   onExecutionCheckpoint?: (checkpoint: Record<string, unknown>) => Promise<void>;
+  /** Mutable observation state, kept separately from the immutable admission. */
+  onExecutionProgress?: (progress: Record<string, unknown>) => Promise<void>;
   /** Host-owned stop of this run's sandbox during setup or direct CLI execution. Resolves only after
    * provider termination is verified; never accepts an agent-selected lease. */
   stopRemoteStartup?: () => Promise<void>;
@@ -227,6 +235,8 @@ export interface AdapterExecutionContext {
   runtime: AdapterRuntime;
   config: Record<string, unknown>;
   context: Record<string, unknown>;
+  /** Build bounded history only when an actual provider attempt starts fresh. */
+  getFreshSessionHandoff?: () => Promise<string | null>;
   runtimeCommandSpec?: AdapterRuntimeCommandSpec | null;
   executionTarget?: AdapterExecutionTarget | null;
   /**
@@ -489,7 +499,7 @@ export interface ServerAdapterModule {
   execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult>;
   /** One bounded stop/reconcile attempt using the exact persisted admission.
    * A missing/failed control channel is pending, never proof of settlement. */
-  reconcileExecution?: (checkpoint: Record<string, unknown>) => Promise<"pending" | "settled">;
+  reconcileExecution?: (checkpoint: Record<string, unknown>, progress?: Record<string, unknown>) => Promise<"pending" | "settled">;
   prepareWorkspaceOwnership?: (ctx: WorkspaceOwnershipContext) => Promise<WorkspaceOwnershipIntent>;
   reconcileWorkspaceOwnership?: (checkpoint: Record<string, unknown>) => Promise<"pending" | "settled">;
   testEnvironment(ctx: AdapterEnvironmentTestContext): Promise<AdapterEnvironmentTestResult>;
@@ -498,6 +508,8 @@ export interface ServerAdapterModule {
   syncSkills?: (ctx: AdapterSkillContext, desiredSkills: string[]) => Promise<AdapterSkillSnapshot>;
   sessionCodec?: AdapterSessionCodec;
   sessionManagement?: import("./session-compaction.js").AdapterSessionManagement;
+  /** Selected harness can resume its conversation with this run's tool bindings. */
+  supportsToolRefreshOnResume?: boolean | ((config: Record<string, unknown>) => boolean);
   supportsLocalAgentJwt?: boolean;
   /** How this adapter receives Paperclip's run-scoped control tools. */
   runtimeToolDelivery?: AdapterRuntimeToolDelivery;

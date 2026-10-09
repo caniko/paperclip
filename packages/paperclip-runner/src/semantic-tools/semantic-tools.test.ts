@@ -43,6 +43,83 @@ async function running(
 }
 
 describe("Capability semantic catalog and authorization", () => {
+  it("updates an existing skill once, rejects a stale version, and denies an ungranted capability", async () => {
+    const adapter = await running();
+    const dispatcher = new CapabilitySemanticDispatcher(adapter);
+    const markdown = "---\nname: release-review\ndescription: Review release notes.\n---\n# Review\nCheck each note.";
+    const created = await dispatcher.dispatch({ runId: OPEN.identity.runId, callId: "create", operationId: "create_skill",
+      input: { name: "release-review", description: "Review release notes.", markdown, idempotencyKey: "create" } });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const args = { skillId: (created.result as { id: string }).id, expectedVersionId: (created.result as { versionId: string }).versionId,
+      markdown: markdown + " Inspect tests.", idempotencyKey: "update-once" };
+    const call = { runId: OPEN.identity.runId, callId: "update", operationId: "update_skill" as const, input: args };
+    const first = await dispatcher.dispatch(call);
+    expect(first).toMatchObject({ ok: true, result: { skillId: args.skillId, path: "SKILL.md", versionId: expect.any(String) } });
+    expect(await dispatcher.dispatch({ ...call, callId: "retry" })).toMatchObject({ ok: true, result: first.ok ? first.result : {} });
+    expect(await dispatcher.dispatch({ ...call, callId: "stale", input: { ...args, idempotencyKey: "next" } })).toMatchObject({ ok: false });
+    const denied = new CapabilitySemanticDispatcher(adapter, { scenario: { id: "no-update", claims: [], denyOperations: ["update_skill"] } });
+    expect(await denied.dispatch({ ...call, callId: "denied", input: { ...args, idempotencyKey: "denied" } })).toMatchObject({ ok: false, denial: { code: "scenario_denied" } });
+  });
+
+  it.each(["live", "restored"] as const)("replays the original skill update receipt after an intervening edit (%s adapter)", async (mode) => {
+    const adapter = await running();
+    const dispatcher = new CapabilitySemanticDispatcher(adapter);
+    const markdown = "---\nname: release-review\ndescription: Review release notes.\n---\n# Review\nCheck each note.";
+    const created = await dispatcher.dispatch({
+      runId: OPEN.identity.runId, callId: "create", operationId: "create_skill",
+      input: { name: "release-review", description: "Review release notes.", markdown, idempotencyKey: "create" },
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const initial = created.result as { id: string; versionId: string };
+    const firstCall = {
+      runId: OPEN.identity.runId, callId: "edit1", operationId: "update_skill" as const,
+      input: { skillId: initial.id, expectedVersionId: initial.versionId,
+        markdown: markdown + " Inspect tests.", idempotencyKey: "edit1" },
+    };
+    const first = await dispatcher.dispatch(firstCall);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const firstVersionId = (first.result as { versionId: string }).versionId;
+    expect(firstVersionId).not.toBe(initial.versionId);
+    expect(first.result).toStrictEqual({
+      skillId: initial.id, path: "SKILL.md", versionId: firstVersionId,
+      studioPath: `/skills/studio/${initial.id}`,
+    });
+
+    const secondMarkdown = markdown.replace("Review release notes.", "Review release notes and tests.") + " Verify the final release.";
+    const second = await dispatcher.dispatch({
+      ...firstCall, callId: "edit2",
+      input: { skillId: initial.id, expectedVersionId: firstVersionId,
+        markdown: secondMarkdown, idempotencyKey: "edit2" },
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    const secondVersionId = (second.result as { versionId: string }).versionId;
+    expect(secondVersionId).not.toBe(firstVersionId);
+    expect(second.stateRevision).toBeGreaterThan(first.stateRevision);
+
+    const replayAdapter = mode === "restored"
+      ? CapabilityMockControlPlaneAdapter.restore(adapter.serialize())
+      : adapter;
+    const beforeRetry = replayAdapter.snapshot();
+    expect(beforeRetry.skills).toEqual([expect.objectContaining({
+      id: initial.id, markdown: secondMarkdown, versionId: secondVersionId,
+      description: "Review release notes and tests.",
+    })]);
+    const replay = await new CapabilitySemanticDispatcher(replayAdapter).dispatch({
+      ...firstCall, callId: "retry-edit1",
+    });
+    const afterRetry = replayAdapter.snapshot();
+    expect(replay).toStrictEqual({
+      ...first, callId: "retry-edit1", stateRevision: afterRetry.revision,
+    });
+    expect(afterRetry.skills).toStrictEqual(beforeRetry.skills);
+    expect(afterRetry.audit).toStrictEqual(beforeRetry.audit);
+    expect(afterRetry.idempotency).toStrictEqual(beforeRetry.idempotency);
+  });
+
   it("creates a durable skill once and returns its reference on retry", async () => {
     const adapter = await running();
     const dispatcher = new CapabilitySemanticDispatcher(adapter);
@@ -94,7 +171,7 @@ describe("Capability semantic catalog and authorization", () => {
   it("publishes a stable narrow catalog without credentials or control-plane-owned tools", () => {
     const names = CAPABILITY_SEMANTIC_TOOL_CATALOG.map((tool) => tool.operationId);
     expect(new Set(names).size).toBe(names.length);
-    expect(names).toHaveLength(40);
+    expect(names).toHaveLength(42);
     expect(names).toContain("get_task_context");
     expect(names).toContain("finish_task");
     expect(names).not.toContain("checkout_task");
@@ -286,7 +363,7 @@ describe("Capability semantic catalog and authorization", () => {
     })).resolves.toMatchObject({ ok: false, denial: { code: "task_mode_denied" } });
   });
 
-  it("rejects protected inputs before mutation and redacts authorization records", async () => {
+  it("preserves credential payloads for execution while redacting authorization records", async () => {
     const claim = "governance:approvals:request";
     const adapter = await running([claim]);
     const dispatcher = new CapabilitySemanticDispatcher(adapter, {
@@ -305,8 +382,9 @@ describe("Capability semantic catalog and authorization", () => {
         payload: { authorization: secret },
       },
     });
-    expect(result).toMatchObject({ ok: false, denial: { code: "protected_data_denied" } });
-    expect(adapter.snapshot().revision).toBe(before);
+    expect(result).toMatchObject({ ok: true });
+    expect(adapter.snapshot().revision).toBeGreaterThan(before);
+    expect(adapter.snapshot().approvals).toEqual([expect.objectContaining({ payload: { authorization: secret } })]);
     const serialized = JSON.stringify(dispatcher.authorizationRecords());
     expect(serialized).not.toContain(secret);
     expect(serialized).toContain("[REDACTED]");

@@ -1,4 +1,5 @@
 import { isAcknowledgedNativeReassignmentStop, isAcknowledgedNativeStop } from "../../../services/acknowledged-native-stop.js";
+import { isCancelledNativeStartup } from "../../../services/cancelled-native-startup.js";
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
 import { instanceSettingsService } from "../../../services/instance-settings.js";
 import { currentConversationCommentCondition } from "../../../services/agent-conversations.js";
@@ -19,7 +20,7 @@ import {
   nativeRunFinalizations,
 } from "@paperclipai/db";
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
-import { legacyExecutionNeedsReconciliation } from "../../../services/legacy-execution-recovery.js";
+import { legacyExecutionNeedsReconciliationWithEvidence } from "../../../services/legacy-execution-recovery.js";
 import {
   authorizeFailedChatRunRetryWake,
   FailedChatRunRetryAuthorizationError,
@@ -27,7 +28,7 @@ import {
 import { isRetiredExternalChatQuestionSource } from "../../../services/question-response-delivery.js";
 import { HttpError } from "../../../errors.js";
 import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokability.js";
-import { issueTreeControlService, isVerifiedIssueTreeControlInteractionWake } from "../../../services/issue-tree-control.js";
+import { issueTreeControlService } from "../../../services/issue-tree-control.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "../../../services/recovery/pause-hold-guard.js";
 import { classifyContinuationFailure } from "../../../services/recovery/service.js";
 import { issueService } from "../../../services/issues.js";
@@ -336,7 +337,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
       return rows.length > 0;
     },
 
-    async getPauseHoldFacts({ companyId, issueId, wakeAgentId, deferredContextSeed, requestedByActorType, requestedByActorId }) {
+    async getPauseHoldFacts({ companyId, issueId }) {
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(companyId, issueId);
       if (!activePauseHold) {
         return {
@@ -349,17 +350,9 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
           releasePolicy: null,
         };
       }
-      const treeHoldInteractionWake = await isVerifiedIssueTreeControlInteractionWake(tx, {
-        companyId,
-        issueId,
-        agentId: wakeAgentId,
-        contextSnapshot: deferredContextSeed,
-        requestedByActorType,
-        requestedByActorId,
-      });
       return {
         activePauseHold: true,
-        treeHoldInteractionWake,
+        treeHoldInteractionWake: false,
         holdId: activePauseHold.holdId,
         rootIssueId: activePauseHold.rootIssueId,
         mode: activePauseHold.mode,
@@ -724,6 +717,19 @@ async function recordNativeTerminalRecoveryIfNeeded(tx: Db, run: HeartbeatRunRow
     issue.assigneeAgentId === run.agentId &&
     !["done", "cancelled"].includes(issue.status);
   if (!applies || isAcknowledgedNativeStop(run) || isAcknowledgedNativeReassignmentStop(run)) return false;
+
+  if (run.status === "cancelled") {
+    // Match native claim's coordinator-before-run lock order. Cancellation is
+    // not a provider failure when no executor ever claimed this native attempt
+    // and the preparer has finished the independently verified lease cleanup.
+    const [coordinator] = await tx.select().from(nativeRunFinalizations).where(and(
+      eq(nativeRunFinalizations.companyId, run.companyId), eq(nativeRunFinalizations.runId, run.id),
+    )).for("update");
+    const [lockedRun] = await tx.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id),
+    )).for("update");
+    if (lockedRun && await isCancelledNativeStartup(tx, lockedRun, coordinator)) return false;
+  }
 
   const existing = await tx
     .select({ id: issueRecoveryActions.id, evidence: issueRecoveryActions.evidence })
@@ -1104,7 +1110,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
           issueStatus: issueRow?.status ?? "",
           hasAssigneeUser: Boolean(issueRow?.assigneeUserId),
           assigneeAgentMatchesRunAgent: issueRow?.assigneeAgentId === run.agentId,
-          legacyExecutionNeedsReconciliation: legacyExecutionNeedsReconciliation(run),
+          legacyExecutionNeedsReconciliation: await legacyExecutionNeedsReconciliationWithEvidence(tx as unknown as Db, run),
           // An operator stop never promotes old queued work by itself. The
           // next explicit wake adopts those messages atomically when it
           // queues a run.

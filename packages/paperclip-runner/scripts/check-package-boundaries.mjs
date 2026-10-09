@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkEvalKernelBoundary, checkPublicRuntimeClosure } from "./lib/package-boundaries.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const evalKernelRoot = resolve(packageRoot, "../paperclip-eval-kernel");
@@ -8,7 +9,10 @@ const runnerManifest = JSON.parse(await readFile(resolve(packageRoot, "package.j
 const evalKernelManifest = JSON.parse(await readFile(resolve(evalKernelRoot, "package.json"), "utf8"));
 const runtimeIndex = await readFile(resolve(packageRoot, "src/index.ts"), "utf8");
 
-const violations = [];
+const violations = [
+  ...await checkEvalKernelBoundary({ kernelRoot: evalKernelRoot }),
+  ...await checkPublicRuntimeClosure({ packageRoot }),
+].map(({ file, line, specifier, reason }) => `${file}:${line} ${JSON.stringify(specifier)}: ${reason}`);
 if (runnerManifest.exports?.["./testing"] === undefined) {
   violations.push("runner package must declare the ./testing export");
 }

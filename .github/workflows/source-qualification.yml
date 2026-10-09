@@ -1,0 +1,206 @@
+name: Exact-head source qualification
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: source-qualification-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  harness_identity:
+    name: Exact head / trusted harness identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Prove trusted Stop source and receipt binding
+        run: |
+          set -euo pipefail
+          node --test scripts/__tests__/qualify-composer-stop.test.mjs scripts/__tests__/composer-candidate-sandbox.test.mjs scripts/__tests__/composer-provider-bridge.test.mjs .github/scripts/tests/pr-dependency-cache.test.mjs 2>&1 | tee "$RUNNER_TEMP/trusted-stop-identity.log"
+      - name: Retain trusted harness identity assertions
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: trusted-stop-identity-${{ github.event.pull_request.head.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 31
+          if-no-files-found: error
+          path: ${{ runner.temp }}/trusted-stop-identity.log
+
+  application:
+    name: Exact head / ${{ matrix.lane }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        lane: [typecheck, tests, build, regression]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Check exact head and retention readiness
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          EVIDENCE="$RUNNER_TEMP/qualification"
+          mkdir -p "$EVIDENCE"
+          printf '%s\n' "EVIDENCE=$EVIDENCE" "PAPERCLIP_TEST_REPORT_DIR=$EVIDENCE/junit" "PAPERCLIP_HOME=$RUNNER_TEMP/paperclip-fixture" "PAPERCLIP_CONFIG=$RUNNER_TEMP/paperclip-fixture/config.json" >> "$GITHUB_ENV"
+          set -o pipefail
+          python3 .github/scripts/qualification-evidence.py initialize "$EVIDENCE" 2>&1 | tee "$EVIDENCE/readiness.log"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          version: 9.15.4
+          run_install: false
+      - name: Install declared dependencies
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee "$EVIDENCE/install.log"
+          pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+          pnpm run preflight:workspace-links
+      - name: Run mandatory application lane once
+        env:
+          LANE: ${{ matrix.lane }}
+        run: |
+          set -euo pipefail
+          case "$LANE" in
+            typecheck) pnpm -r typecheck 2>&1 | tee "$EVIDENCE/typecheck.log" ;;
+            tests) pnpm test:run 2>&1 | tee "$EVIDENCE/tests.log" ;;
+            build) pnpm build 2>&1 | tee "$EVIDENCE/build.log" ;;
+            regression)
+              python3 -m unittest discover -s .github/scripts -p 'test_qualification_evidence.py' 2>&1 | tee "$EVIDENCE/receipt-tests.log"
+              pnpm check:token-gates 2>&1 | tee "$EVIDENCE/token-gates.log"
+              pnpm exec vitest run packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts packages/adapters/hermes/src/gateway/server/recovery-lineage.test.ts packages/adapters/hermes/src/gateway/server/run-lifetime.test.ts server/src/__tests__/adapter-execution-settlement-postgres.test.ts server/src/__tests__/runtime-mcp-admission.test.ts server/src/__tests__/vitest-chat-shards.test.ts server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts server/src/__tests__/skill-sources.test.ts server/src/__tests__/company-skills-routes.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter=junit --outputFile.junit="$EVIDENCE/regression.xml" 2>&1 | tee "$EVIDENCE/regression.log"
+              ;;
+          esac
+      - name: Seal raw source and result evidence
+        if: always()
+        env:
+          OUTCOME: ${{ job.status }}
+          LANE: ${{ matrix.lane }}
+        run: |
+          set -euo pipefail
+          strict=()
+          case "$LANE" in tests|regression) strict+=(--strict-reports) ;; esac
+          python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" "$OUTCOME" "${strict[@]}"
+      - name: Retain original evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: source-proof-${{ matrix.lane }}-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          retention-days: 31
+          if-no-files-found: error
+          path: ${{ runner.temp }}/qualification/
+
+  retention:
+    name: Exact head / required artifact retention
+    needs: [application, expected_red, harness_identity]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LANES: ${{ needs.application.result }}
+      EXPECTED_RED: ${{ needs.expected_red.result }}
+      HARNESS_IDENTITY: ${{ needs.harness_identity.result }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Read actual provider expiry and digest for every required artifact
+        run: |
+          python3 .github/scripts/qualification-evidence.py artifacts source-proof- 5 retention.json
+          python3 .github/scripts/qualification-evidence.py artifacts trusted-stop-identity- 1 harness-retention.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: source-retention-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          retention-days: 31
+          if-no-files-found: error
+          path: |
+            retention.json
+            harness-retention.json
+      - name: Require all mandatory lanes and retained audit evidence
+        run: |
+          test "$LANES" = success
+          test "$EXPECTED_RED" = success
+          test "$HARNESS_IDENTITY" = success
+          python3 .github/scripts/qualification-evidence.py artifacts source-retention- 1 retention-audit.json
+
+  expected_red:
+    name: Regression evidence / original F645 RED
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Bind successor test source before baseline execution
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          EVIDENCE="$RUNNER_TEMP/qualification"
+          mkdir -p "$EVIDENCE"
+          printf '%s\n' "EVIDENCE=$EVIDENCE" "PAPERCLIP_HOME=$RUNNER_TEMP/paperclip-red-fixture" "PAPERCLIP_CONFIG=$RUNNER_TEMP/paperclip-red-fixture/config.json" >> "$GITHUB_ENV"
+          python3 .github/scripts/qualification-evidence.py initialize "$EVIDENCE"
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: f6451f242d5cbb803e3c265e90f05b642e573203
+          path: baseline
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          version: 9.15.4
+          run_install: false
+      - name: Install original dependencies and overlay only successor regression fixture
+        run: |
+          set -euo pipefail
+          test "$(git -C baseline rev-parse HEAD)" = f6451f242d5cbb803e3c265e90f05b642e573203
+          cp packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts baseline/packages/adapters/hermes/src/gateway/server/
+          cd baseline
+          pnpm install --frozen-lockfile 2>&1 | tee "$EVIDENCE/install.log"
+          pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+      - name: Require original assertion RED separately from successor GREEN
+        run: |
+          set -uo pipefail
+          set +e
+          (cd baseline && pnpm exec vitest run packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter=junit --outputFile.junit="$EVIDENCE/regression.xml") 2>&1 | tee "$EVIDENCE/regression.log"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$EVIDENCE/exit-status.txt"
+          test "$status" = 1 || exit 1
+          python3 .github/scripts/qualification-evidence.py expected-red "$EVIDENCE"
+      - name: Bind failed original evidence
+        if: failure()
+        run: python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" failure
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: source-proof-expected-red-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          retention-days: 31
+          if-no-files-found: error
+          path: ${{ runner.temp }}/qualification/

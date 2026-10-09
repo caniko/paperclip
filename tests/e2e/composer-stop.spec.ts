@@ -275,18 +275,19 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
         await request.get(`/api/issues/${parent.id}/comments`),
       );
       expect(JSON.stringify(comments)).toContain("Please check mobile too.");
-      const queue = await json(
-        await request.get(`/api/issues/${parent.id}/queued-comments`),
-      );
-      expect(JSON.stringify(queue.entries)).toContain(
-        "Please check mobile too.",
-      );
+      await expect.poll(async () => {
+        const queue = await json(await request.get(`/api/issues/${parent.id}/queued-comments`));
+        return JSON.stringify(queue.entries);
+      }, { timeout: 15_000 }).toContain("Please check mobile too.");
 
       let dispatchedAt = 0;
       page.on("request", (req) => {
         if (req.method() === "POST" && req.url().endsWith(`/heartbeat-runs/${parentRun.id}/cancel`))
           dispatchedAt = Date.now();
       });
+      const providerCallsBeforeStop = adapter === "paperclip_runner"
+        ? (await readFile(process.env.PAPERCLIP_STOP_CODEX_LOG!, "utf8")).split("\n").filter(Boolean).length
+        : 0;
       const clickedAt = Date.now();
       await stop.click();
       await expect(page.getByRole("dialog")).toHaveCount(0);
@@ -315,9 +316,37 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
         expect(finalRun.resultJson?.nativeCancellation?.dispatchState).toBe(
           "acknowledged",
         );
-        expect(
-          await readFile(process.env.PAPERCLIP_STOP_CODEX_LOG!, "utf8"),
-        ).toContain("turn/interrupt");
+        const nativeCancellation = finalRun.resultJson.nativeCancellation;
+        expect(finalRun.id).toBe(parentRun.id);
+        expect(nativeCancellation).toMatchObject({
+          schema: "paperclip.native-cancellation.v1", companyId: company.id,
+          issueId: parent.id, runId: parentRun.id, scope: "run",
+          reasonCode: "cancellation_run_only", dispatched: true,
+        });
+        for (const field of ["intentAuditId", "acknowledgementAuditId"]) {
+          expect(typeof nativeCancellation[field]).toBe("string");
+          expect(nativeCancellation[field].length).toBeGreaterThan(0);
+        }
+        // Keep only protocol method names emitted after this parent's Stop.
+        // Provider output, tokens, tool payloads and raw resultJson are excluded.
+        const callsDuringStop = (await readFile(process.env.PAPERCLIP_STOP_CODEX_LOG!, "utf8"))
+          .split("\n").filter(Boolean).slice(providerCallsBeforeStop)
+          .filter(method => ["turn/start", "turn/interrupt"].includes(method));
+        expect(callsDuringStop).toContain("turn/interrupt");
+        const receipt = Object.fromEntries([
+          "schema", "runId", "companyId", "issueId", "scope", "reasonCode",
+          "dispatchState", "dispatched", "intentAuditId", "acknowledgementAuditId",
+          "recordedAt", "acknowledgedAt",
+        ].map(field => [field, nativeCancellation[field]]));
+        await testInfo.attach("paperclip_runner-cancellation", {
+          body: JSON.stringify({
+            schema: "paperclip.composer-stop-cancellation.v1", companyId: company.id,
+            issueId: parent.id, runId: parentRun.id, status: finalRun.status,
+            nativeCancellation: receipt,
+            provider: { fixture: "fake-codex-app-server", callsDuringStop },
+          }),
+          contentType: "application/json",
+        });
       }
       await testInfo.attach(`${adapter}-timing`, {
         body: JSON.stringify({
@@ -376,6 +405,14 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
           await json(await request.get(`/api/issues/${child.id}/live-runs`)),
         ).toEqual([]);
       }
+      if (adapter === "paperclip_runner") {
+        // A queued comment cancelled under the pause must not manufacture a
+        // recovery incident for a provider that never claimed the run.
+        for (const issue of [parent, child]) {
+          const recovery = await json(await request.get(`/api/issues/${issue.id}/recovery-actions`));
+          expect(recovery.active).toBeNull();
+        }
+      }
       await menu(page, "Resume subtree");
       await page.getByRole("dialog").getByRole("checkbox").check();
       await page
@@ -391,17 +428,36 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
         await reconcileDemoExecution(request, parent.id, parentRun.id);
         await reconcileDemoExecution(request, child.id, childRun.id);
       }
-      // A verified stopped native runner can honor the explicitly selected
-      // Wake agents option without another manual reconciliation step.
-      const resumedParentRun = await running(request, parent.id, adapter);
+      // A verified stopped runner can honor Wake agents without a false
+      // recovery gate. If the child is still active, the parent may instead
+      // remain blocked by that real subtask dependency.
       const resumedChildRun = await running(request, child.id, adapter);
-      expect(resumedParentRun.id).not.toBe(parentRun.id);
       expect(resumedChildRun.id).not.toBe(childRun.id);
+      let resumedParentRun: { id: string } | null = null;
+      if (adapter === "paperclip_runner") {
+        for (const issue of [parent, child]) {
+          const recovery = await json(await request.get(`/api/issues/${issue.id}/recovery-actions`));
+          expect(recovery.active).toBeNull();
+        }
+        const currentParent = await json(await request.get(`/api/issues/${parent.id}`));
+        if (currentParent.status === "blocked") {
+          expect((await json(await request.get(`/api/issues/${child.id}`))).status).toBe("in_progress");
+          expect(await json(await request.get(`/api/issues/${parent.id}/live-runs`))).toEqual([]);
+          await expect(page.getByRole("button", {
+            name: /Change status \(current: Blocked · waiting on active sub-task/,
+          })).toBeVisible();
+        } else {
+          resumedParentRun = await running(request, parent.id, adapter);
+        }
+      } else {
+        resumedParentRun = await running(request, parent.id, adapter);
+      }
+      if (resumedParentRun) expect(resumedParentRun.id).not.toBe(parentRun.id);
       if (adapter === "paperclip_runner") {
         await expect.poll(async () => {
           const calls = await readFile(process.env.PAPERCLIP_STOP_CODEX_LOG!, "utf8");
           return calls.split("turn/start").length - 1;
-        }, { timeout: 30_000 }).toBeGreaterThanOrEqual(5);
+        }, { timeout: 30_000 }).toBeGreaterThanOrEqual(resumedParentRun ? 5 : 4);
         await page.screenshot({ path: testInfo.outputPath("native-resumed.png"), fullPage: true });
       }
       await menu(page, "Pause subtree");
@@ -470,21 +526,50 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
       });
     } finally {
       const statusEvidence = JSON.stringify(statusMetadata, null, 2);
-      // The company is disposable and scoped to this test invocation.
-      await request.patch(`/api/companies/${company.id}`, {
-        data: { status: "archived" },
-      });
-      await request.patch("/api/instance/settings/experimental", {
-        data: {
-          enableClassicTaskInterface:
-            originalSettings.enableClassicTaskInterface,
-          enableNativeRunner: originalSettings.enableNativeRunner,
-        },
-      });
-      await testInfo.attach("owned-company-status-metadata", {
-        body: statusEvidence,
-        contentType: "application/json",
-      });
+      // Archiving pauses agents and cancels remaining runs. Preserve admission
+      // state before that cleanup, using only owned scalar routing fields.
+      try {
+        const pick = (row: Record<string, unknown>, fields: string[]) =>
+          Object.fromEntries(fields.filter(field =>
+            row[field] === null || ["string", "number", "boolean"].includes(typeof row[field]),
+          ).map(field => [field, row[field]]));
+        const [issues, agents, runs] = await Promise.all([
+          json(await request.get(`/api/companies/${company.id}/issues`)),
+          json(await request.get(`/api/companies/${company.id}/agents`)),
+          json(await request.get(`/api/companies/${company.id}/heartbeat-runs`)),
+        ]);
+        await testInfo.attach("owned-company-pre-cleanup-admission", {
+          body: JSON.stringify({
+            companyId: company.id,
+            issues: issues.map((row: Record<string, unknown>) => pick(row, [
+              "id", "status", "assigneeAgentId", "parentId", "executionRunId", "checkoutRunId",
+            ])),
+            agents: agents.map((row: Record<string, unknown>) => pick(row, ["id", "status", "pauseReason"])),
+            runs: runs.map((row: Record<string, unknown>) => ({
+              ...pick(row, ["id", "agentId", "status", "runtimeMode", "nativeIssueId", "errorCode", "executionStage"]),
+              context: pick((row.contextSnapshot ?? {}) as Record<string, unknown>, ["issueId", "source", "wakeReason"]),
+              stop: pick((row.resultJson ?? {}) as Record<string, unknown>, ["cancelledByActorType", "finalizationReasonCode"]),
+            })),
+          }),
+          contentType: "application/json",
+        });
+      } finally {
+        // The company is disposable and scoped to this test invocation.
+        await request.patch(`/api/companies/${company.id}`, {
+          data: { status: "archived" },
+        });
+        await request.patch("/api/instance/settings/experimental", {
+          data: {
+            enableClassicTaskInterface:
+              originalSettings.enableClassicTaskInterface,
+            enableNativeRunner: originalSettings.enableNativeRunner,
+          },
+        });
+        await testInfo.attach("owned-company-status-metadata", {
+          body: statusEvidence,
+          contentType: "application/json",
+        });
+      }
     }
   });
 }

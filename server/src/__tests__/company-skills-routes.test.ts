@@ -2,6 +2,9 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { hoistModuleGraph } from "./helpers/hoist-module-graph.js";
+import type { SkillSourceContext } from "../services/skill-sources.js";
+
+const mockSkillSourceService = vi.hoisted(() => ({ sourceForSkill: vi.fn(), importFromUrl: vi.fn(), discover: vi.fn() }));
 
 const mockAgentService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -61,6 +64,8 @@ const mockCompanySkillPolicyService = vi.hoisted(() => ({
   resolveAgentPrincipal: vi.fn(),
   evaluate: vi.fn(),
 }));
+const mockAccessServiceFactory = vi.hoisted(() => vi.fn(() => mockAccessService));
+const mockSkillPolicyServiceFactory = vi.hoisted(() => vi.fn(() => mockCompanySkillPolicyService));
 
 const mockIssueService = vi.hoisted(() => ({
   create: vi.fn(),
@@ -131,6 +136,7 @@ function denySkillPolicy(action = "skills.import") {
 }
 
 function registerModuleMocks() {
+  vi.doMock("../services/skill-sources.js", () => ({ skillSourceService: () => mockSkillSourceService }));
   vi.doMock("../routes/authz.js", async () => vi.importActual("../routes/authz.js"));
 
   vi.doMock("@paperclipai/shared/telemetry", () => ({
@@ -143,10 +149,12 @@ function registerModuleMocks() {
   }));
 
   vi.doMock("../services/access.js", () => ({
-    accessService: () => mockAccessService,
+    accessService: mockAccessServiceFactory,
   }));
 
   vi.doMock("../services/activity-log.js", () => ({
+    persistActivity: vi.fn(),
+    publishActivity: vi.fn(),
     logActivity: mockLogActivity,
   }));
 
@@ -170,7 +178,7 @@ function registerModuleMocks() {
     );
     return {
       ...actual,
-      companySkillPolicyService: () => mockCompanySkillPolicyService,
+      companySkillPolicyService: mockSkillPolicyServiceFactory,
     };
   });
 
@@ -187,7 +195,7 @@ function registerModuleMocks() {
   });
 
   vi.doMock("../services/index.js", () => ({
-    accessService: () => mockAccessService,
+    accessService: mockAccessServiceFactory,
     agentService: () => mockAgentService,
     companySkillService: () => mockCompanySkillService,
     issueService: () => mockIssueService,
@@ -205,12 +213,13 @@ describe("company skill mutation permissions", () => {
     return { companySkillRoutes, errorHandler };
   });
 
-  function createApp(actor: Record<string, unknown>) {
+  function createApp(actor: Record<string, unknown>, onResponse?: (res: express.Response) => void) {
     const { companySkillRoutes, errorHandler } = routeModules.value;
     const app = express();
     app.use(express.json());
-    app.use((req, _res, next) => {
+    app.use((req, res, next) => {
       (req as any).actor = actor;
+      onResponse?.(res);
       next();
     });
     app.use("/api", companySkillRoutes({} as any));
@@ -220,6 +229,8 @@ describe("company skill mutation permissions", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSkillSourceService.sourceForSkill.mockResolvedValue(null);
+    mockSkillSourceService.importFromUrl.mockImplementation((companyId, source) => mockCompanySkillService.importFromSource(companyId, source));
     mockGetTelemetryClient.mockReturnValue({ track: vi.fn() });
     mockCompanySkillService.importFromSource.mockResolvedValue({
       imported: [],
@@ -1355,6 +1366,125 @@ describe("company skill mutation permissions", () => {
       sourceType: "github",
       skillRef: "vercel-labs/agent-browser/find-skills",
     });
+  });
+
+  it("binds source access, agent principal and policy evaluation to the supplied transaction", async () => {
+    const tx = {} as NonNullable<Parameters<SkillSourceContext["authorize"]>[2]>;
+    const decide = vi.fn().mockResolvedValue(allowSkillChangeDecision());
+    const resolveAgentPrincipal = vi.fn().mockResolvedValue({ type: "agent", id: "agent-1", role: "engineer" });
+    const evaluate = vi.fn().mockResolvedValue({ allowed: true });
+    mockAccessServiceFactory.mockReturnValueOnce(mockAccessService).mockReturnValueOnce({ ...mockAccessService, decide });
+    mockSkillPolicyServiceFactory.mockReturnValueOnce(mockCompanySkillPolicyService).mockReturnValueOnce({ resolveAgentPrincipal, evaluate });
+    mockSkillSourceService.discover.mockImplementation(async (_input, context: SkillSourceContext) => {
+      await context.authorize("skills.import", { sourceType: "git", sourceLocator: "https://github.com/acme/skills" }, tx);
+      return { candidates: [] };
+    });
+    await request(createApp({ type: "agent", agentId: "agent-1", companyId: "company-1", source: "agent_key" }))
+      .post("/api/companies/company-1/skill-sources/discover")
+      .send({ repositoryUrl: "https://github.com/acme/skills" })
+      .expect(200);
+    expect(mockAccessServiceFactory).toHaveBeenCalledTimes(2);
+    expect(mockAccessServiceFactory).toHaveBeenLastCalledWith(tx);
+    expect(mockSkillPolicyServiceFactory).toHaveBeenCalledTimes(2);
+    expect(mockSkillPolicyServiceFactory).toHaveBeenLastCalledWith(tx);
+    expect(decide).toHaveBeenCalledWith(expect.objectContaining({ resource: { type: "company", companyId: "company-1" } }));
+    expect(resolveAgentPrincipal).toHaveBeenCalledWith("company-1", "agent-1");
+    expect(evaluate).toHaveBeenCalledWith(expect.objectContaining({ companyId: "company-1", action: "skills.import" }));
+    expect(mockAccessService.decide).not.toHaveBeenCalled();
+    expect(mockCompanySkillPolicyService.resolveAgentPrincipal).not.toHaveBeenCalled();
+    expect(mockCompanySkillPolicyService.evaluate).not.toHaveBeenCalled();
+  });
+
+  it('streams discovery updates and a final result while retaining JSON compatibility', async () => {
+    const result = { candidates: [], commitSha: 'a'.repeat(40) };
+    mockSkillSourceService.discover.mockImplementation(async (_input, _context, options) => {
+      await options?.onProgress({ type: 'progress', phase: 'listing', totalSkills: null, checkedSkills: 0, currentPath: null, checkedFiles: 0, totalFiles: null });
+      return result;
+    });
+    const app = createApp({ type: 'board', userId: 'board', companyIds: ['company-1'], source: 'local_implicit' });
+    const base = '/api/companies/company-1/skill-sources/discover';
+    const stream = await request(app).post(base).set('Accept', 'application/x-ndjson').send({ repositoryUrl: 'https://github.com/acme/skills' }).expect(200);
+    expect(stream.headers['content-type']).toContain('application/x-ndjson');
+    expect(stream.headers['cache-control']).toBe('no-cache, no-transform');
+    expect(stream.text.trim().split('\n').map((line: string) => JSON.parse(line))).toEqual([
+      expect.objectContaining({ type: 'progress', phase: 'listing' }), { type: 'complete', discovery: result },
+    ]);
+    const json = await request(app).post(base).send({ repositoryUrl: 'https://github.com/acme/skills' }).expect(200);
+    expect(json.body).toEqual(result);
+  });
+  it('terminates failed streams with an error instead of a complete or partial discovery', async () => {
+    mockSkillSourceService.discover.mockImplementation(async (_input, _context, options) => {
+      await options.onProgress({ type: 'progress', phase: 'listing' });
+      throw new Error('Internal credential detail must not leak');
+    });
+    const res = await request(createApp({ type: 'board', userId: 'board', companyIds: ['company-1'], source: 'local_implicit' }))
+      .post('/api/companies/company-1/skill-sources/discover').set('Accept', 'application/x-ndjson').send({ repositoryUrl: 'https://github.com/acme/skills' }).expect(200);
+    const events = res.text.trim().split('\n').map((line: string) => JSON.parse(line));
+    expect(events.at(-1)).toEqual({ type: 'error', error: 'Repository scan interrupted. Try again.', status: 500 });
+    expect(events.some((event: { type: string }) => event.type === 'complete')).toBe(false);
+    expect(res.text).not.toContain('credential detail');
+  });
+  it('aborts discovery and closes a connected client whose progress stream never drains', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let response: express.Response | undefined;
+    let signal: AbortSignal | undefined;
+    const write = vi.fn(() => false);
+    mockSkillSourceService.discover.mockImplementation(async (_input, _context, options) => {
+      signal = options.signal;
+      await options.onProgress({ type: 'progress', phase: 'downloading' });
+      throw new Error('A stalled scan must abort before continuing');
+    });
+    try {
+      const app = createApp({ type: 'board', userId: 'board', companyIds: ['company-1'], source: 'local_implicit' }, res => {
+        response = res;
+        res.write = write;
+      });
+      const pending = request(app).post('/api/companies/company-1/skill-sources/discover')
+        .set('Accept', 'application/x-ndjson').send({ repositoryUrl: 'https://github.com/acme/skills' })
+        .then(() => null, error => error);
+      await vi.waitFor(() => expect(write).toHaveBeenCalledTimes(1));
+      expect(signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await pending).toBeTruthy();
+      expect(signal?.aborted).toBe(true);
+      expect(response?.destroyed).toBe(true);
+      expect(response?.listenerCount('drain')).toBe(0);
+      expect(write).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+      response?.destroy();
+    }
+  });
+
+  it("rejects cross-company source reads and mutations for board users and agents", async () => {
+    for (const actor of [
+      { type: "board", userId: "member", companyIds: ["company-1"], isInstanceAdmin: true, source: "session" },
+      { type: "agent", agentId: "agent-1", companyId: "company-1" },
+    ]) {
+      const app = createApp(actor);
+      const base = "/api/companies/company-2/skill-sources";
+      const responses = await Promise.all([
+        request(app).get(base), request(app).get(`${base}/repositories`), request(app).get(`${base}/source-id`),
+        request(app).post(`${base}/discover`).send({ repositoryUrl: "https://github.com/acme/skills" }),
+        request(app).post(`${base}/discover`).set('Accept', 'application/x-ndjson').send({ repositoryUrl: "https://github.com/acme/skills" }),
+        request(app).post(`${base}/preview`).send({ repositoryUrl: "https://github.com/acme/skills", commitSha: "a".repeat(40), skillPath: "SKILL.md", filePath: "SKILL.md" }),
+        request(app).post(base).send({ repositoryUrl: "https://github.com/acme/skills", commitSha: "a".repeat(40), selectedPaths: [] }),
+        request(app).patch(`${base}/source-id`).send({ revision: 0, selectedPaths: [], excludedFolders: [] }),
+        request(app).post(`${base}/source-id/refresh`), request(app).delete(`${base}/source-id`),
+      ]);
+      for (const response of responses) expect(response.status).toBe(403);
+    }
+    expect(mockCompanySkillService.importFromSource).not.toHaveBeenCalled();
+  });
+
+  it("omits source-managed repository identities from import telemetry", async () => {
+    mockCompanySkillService.importFromSource.mockResolvedValue({ imported: [{
+      sourceType: "github", key: "github/private-repo/private-skill-name", slug: "private-skill-name",
+      metadata: { hostname: "github.com", skillSourceId: "source-1" },
+    }], warnings: [] });
+    await request(createApp({ type: "board", userId: "local-board", companyIds: ["company-1"], source: "local_implicit" }))
+      .post("/api/companies/company-1/skills/import").send({ source: "https://github.com/acme/private" }).expect(201);
+    expect(mockTrackSkillImported).toHaveBeenCalledWith(expect.anything(), { sourceType: "github", skillRef: null });
   });
 
   it("does not expose a skill reference for non-public skill imports", async () => {

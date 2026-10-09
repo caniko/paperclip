@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import { prepareCursorSandboxCommand } from "./remote-command.js";
+import { createFixtureSupportBin } from "./sandbox-fixture-tools.js";
 
 function createLocalSandboxRunner() {
   let counter = 0;
@@ -46,6 +47,7 @@ printf '%s\\n' ok
 describe("prepareCursorSandboxCommand", () => {
   it("prefers the Cursor installer bin directory when the default agent entrypoint is installed there", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-cursor-remote-command-cursor-bin-"));
+    const supportBin = await createFixtureSupportBin(root, ["bash"]);
     const systemHomeDir = path.join(root, "system-home");
     const managedHomeDir = path.join(root, "managed-home");
     const remoteWorkspace = path.join(root, "workspace");
@@ -68,7 +70,7 @@ describe("prepareCursorSandboxCommand", () => {
         cwd: remoteWorkspace,
         env: {
           HOME: managedHomeDir,
-          PATH: "/usr/bin:/bin",
+          PATH: supportBin,
         },
         remoteSystemHomeDirHint: systemHomeDir,
         timeoutSec: 30,
@@ -92,6 +94,7 @@ describe("prepareCursorSandboxCommand", () => {
 
   it("keeps probing the original sandbox home after managed HOME overrides", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-cursor-remote-command-"));
+    const supportBin = await createFixtureSupportBin(root, ["bash"]);
     const systemHomeDir = path.join(root, "system-home");
     const managedHomeDir = path.join(root, "managed-home");
     const remoteWorkspace = path.join(root, "workspace");
@@ -114,7 +117,7 @@ describe("prepareCursorSandboxCommand", () => {
         cwd: remoteWorkspace,
         env: {
           HOME: managedHomeDir,
-          PATH: "/usr/bin:/bin",
+          PATH: supportBin,
         },
         remoteSystemHomeDirHint: systemHomeDir,
         timeoutSec: 30,

@@ -492,7 +492,7 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
     let result: CapabilityCommandResult;
     try {
       const commandId = this.#id("command");
-      const { entityRefs, scheduledWakeIds } = this.#executeCommand(validatedRun, envelope.command);
+      const { entityRefs, scheduledWakeIds, skillUpdateReceipt } = this.#executeCommand(validatedRun, envelope.command);
       this.#recordMutation(validatedRun.id, validatedRun.actorId, "semantic_command.applied", "command", commandId, {
         kind: envelope.command.kind,
         idempotencyKey: envelope.idempotencyKey,
@@ -505,6 +505,7 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         stateRevision: this.#state.revision,
         entityRefs,
         scheduledWakeIds,
+        ...(skillUpdateReceipt === undefined ? {} : { skillUpdateReceipt }),
       };
       this.#state.idempotency.push({
         scope,
@@ -698,10 +699,11 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
   #executeCommand(
     run: CapabilityFixtureRun,
     command: CapabilitySemanticCommand,
-  ): { entityRefs: string[]; scheduledWakeIds: string[] } {
+  ): { entityRefs: string[]; scheduledWakeIds: string[]; skillUpdateReceipt?: CapabilityCommandResult["skillUpdateReceipt"] } {
     const task = this.#commandTask(run, command);
     const entityRefs = [`task:${task.id}`];
     const scheduledWakeIds: string[] = [];
+    let skillUpdateReceipt: CapabilityCommandResult["skillUpdateReceipt"];
     switch (command.kind) {
       case "report_progress": {
         requireText(command.body, "progress body");
@@ -732,6 +734,25 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
           slug, description: command.description.trim(), markdown: command.markdown, versionId: this.#id("skill-version") };
         skills.push(skill);
         entityRefs.push(`skill:${skill.id}`);
+        break;
+      }
+      case "update_skill": {
+        const skill = this.#state.skills?.find(candidate => candidate.id === command.skillId && candidate.companyId === run.companyId);
+        if (!skill) throw new CapabilityMockControlPlaneError("fixture_state_invalid", "Skill not found");
+        if (skill.versionId !== command.expectedVersionId) throw new CapabilityMockControlPlaneError("fixture_state_invalid", "Skill version changed");
+        const document = parseFrontmatterMarkdown(command.markdown);
+        if (!document.hasFrontmatter || !validateSkillFrontmatter(document.frontmatter) || !document.body.trim()) {
+          throw new CapabilityMockControlPlaneError("invalid_skill_document", "Provide a complete SKILL.md with valid frontmatter and a nonempty body");
+        }
+        skill.name = String(document.frontmatter.name);
+        skill.description = String(document.frontmatter.description);
+        skill.markdown = command.markdown;
+        skill.versionId = this.#id("skill-version");
+        entityRefs.push(`skill:${skill.id}`);
+        skillUpdateReceipt = {
+          skillId: skill.id, path: "SKILL.md", versionId: skill.versionId,
+          studioPath: `/skills/studio/${skill.id}`,
+        };
         break;
       }
       case "write_document": {
@@ -1193,7 +1214,8 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
       default:
         return assertNever(command);
     }
-    return { entityRefs: sortedUnique(entityRefs), scheduledWakeIds };
+    return { entityRefs: sortedUnique(entityRefs), scheduledWakeIds,
+      ...(skillUpdateReceipt === undefined ? {} : { skillUpdateReceipt }) };
   }
 
   #reconcileDisposition(

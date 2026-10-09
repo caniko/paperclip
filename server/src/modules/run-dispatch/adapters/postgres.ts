@@ -27,7 +27,6 @@ import { emitAgentTaskRun } from "../../../services/agent-task-run-telemetry.js"
 import { issueService } from "../../../services/issues.js";
 import {
   issueTreeControlService,
-  isVerifiedIssueTreeControlInteractionWake,
   ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
 } from "../../../services/issue-tree-control.js";
 import {

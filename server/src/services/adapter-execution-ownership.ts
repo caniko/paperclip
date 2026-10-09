@@ -61,10 +61,12 @@ export function leaseAdapterExecutionNotHeldCondition() {
 /** Call inside the terminal writer's transaction, BEFORE its conditional update.
  * A subquery in an UPDATE alone keeps a pre-lock statement snapshot and can miss
  * an admission that commits while it waits for this row. The next statement must
- * see the checkpoint committed by prepareAdapterExecution under the same lock. */
+ * see the checkpoint committed by prepareAdapterExecution under the same lock.
+ * Settlement changes no parent key. NO KEY UPDATE still fences admission and
+ * terminal writers, while permitting audit inserts' foreign-key KEY SHARE. */
 export async function lockRunForAdapterSettlement(db: Pick<Db, "select">, runId: string): Promise<void> {
   await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
-    .where(eq(heartbeatRuns.id, runId)).for("update");
+    .where(eq(heartbeatRuns.id, runId)).for("no key update");
 }
 
 /** Serialize protected finalization writes with recovery and remote release.
@@ -142,6 +144,27 @@ async function prepareCheckpoint(db: Db, input: OwnershipIdentity & {
 
 export function prepareAdapterExecution(db: Db, input: OwnershipIdentity & { adapterType: string; checkpoint: Record<string, unknown> }) {
   return prepareCheckpoint(db, input, KEY);
+}
+
+export async function recordAdapterExecutionProgress(db: Db, input: OwnershipIdentity & { progress: Record<string, unknown> }): Promise<void> {
+  await db.transaction(async (tx) => {
+    const [run] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId),
+      eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
+      eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
+      sql`${heartbeatRuns.controllerLeaseExpiresAt} > clock_timestamp()`,
+    )).for("no key update");
+    if (!run) throw new Error("Adapter observation no longer owns the controller lease");
+    const [lease] = await tx.select().from(environmentLeases).where(and(
+      eq(environmentLeases.id, input.leaseId), eq(environmentLeases.companyId, input.companyId),
+      eq(environmentLeases.heartbeatRunId, input.runId), eq(environmentLeases.status, "active"),
+    )).for("update");
+    const ownership = record(lease?.metadata?.[KEY]);
+    if (!lease || ownership.state !== "pending" || !ownership.material) throw new Error("Adapter observation has no pending admission");
+    await tx.update(environmentLeases).set({ metadata: { ...lease.metadata,
+      [KEY]: { ...ownership, progress: input.progress } }, updatedAt: new Date(),
+    }).where(eq(environmentLeases.id, input.leaseId));
+  });
 }
 
 export function prepareWorkspaceOwnershipCheckpoint(db: Db, input: OwnershipIdentity & { adapterType: string; checkpoint: Record<string, unknown> }) {
@@ -257,8 +280,10 @@ export async function reconcileAdapterExecution(db: Db, input: {
         await input.finalizeWorkspace(record(envelope.checkpoint));
         await recordWorkspaceFinalizationBoundary(db, { companyId: input.companyId, runId: input.runId, leaseId: lease.id });
       }
-      const reconcile = key === KEY ? adapter?.reconcileExecution : adapter?.reconcileWorkspaceOwnership;
-      if (await reconcile?.(record(envelope.checkpoint)) !== "settled") return "pending";
+       const result = key === KEY
+         ? await adapter?.reconcileExecution?.(record(envelope.checkpoint), record(ownership.progress))
+         : await adapter?.reconcileWorkspaceOwnership?.(record(envelope.checkpoint));
+       if (result !== "settled") return "pending";
       if (key === KEY) await settleAdapterExecution(db, { ...input, leaseId: lease.id });
       else await db.update(environmentLeases).set({
         metadata: sql`jsonb_set(${environmentLeases.metadata}, '{workspaceOwnership}',
