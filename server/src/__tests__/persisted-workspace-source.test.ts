@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolvePersistedGitWorkspaceSource } from "../services/persisted-workspace-source.js";
+import { configureFixtureGitIdentity } from "./helpers/git-fixture.js";
 
 const exec = promisify(execFile);
 const roots: string[] = [];
@@ -21,7 +22,8 @@ async function fixture() {
   const worktree = path.join(root, "task");
   for (const repo of [original, replacement]) {
     await exec("git", ["init", repo]);
-    await exec("git", ["-C", repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "initial"]);
+    configureFixtureGitIdentity(repo);
+    await exec("git", ["-C", repo, "commit", "--allow-empty", "-m", "initial"]);
     await exec("git", ["-C", repo, "remote", "add", "origin", `https://example.invalid/${path.basename(repo)}.git`]);
   }
   await exec("git", ["-C", original, "worktree", "add", "-b", "task", worktree]);
@@ -155,7 +157,8 @@ describe("persisted Git workspace source", () => {
     const storage = path.join(root, "git-storage");
     const task = path.join(root, "separate-task");
     await exec("git", ["init", "--separate-git-dir", storage, owner]);
-    await exec("git", ["-C", owner, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "initial"]);
+    configureFixtureGitIdentity(owner);
+    await exec("git", ["-C", owner, "commit", "--allow-empty", "-m", "initial"]);
     await exec("git", ["-C", owner, "worktree", "add", "-b", "retained", task]);
     expect(await resolvePersistedGitWorkspaceSource({ ...input,
       workspace: { ...input.workspace, repoUrl: null, cwd: task, providerRef: task, projectWorkspaceId: "bound" }, candidateBaseCwds: [],

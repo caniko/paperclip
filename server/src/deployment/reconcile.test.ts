@@ -167,7 +167,7 @@ it("allocates colliding company prefixes within one atomic deployment transactio
   expect((await reconcile(declaration, false)).differences).toEqual([]);
 });
 
-it.each(["company", "agent"])("preserves %s budget pause and policy on an unrelated declared edit", async (kind) => {
+it.each(["company", "agent"] as const)("preserves %s budget pause and policy on an unrelated declared edit", async (kind) => {
   const declaration = { ...structuredClone(manifest), owner: `budget-fields-${kind}`, projects: {}, routines: {}, taskBridges: {} };
   declaration.companies.example.fields.name = `Budget fields ${kind}`;
   const first = await reconcile(declaration);
