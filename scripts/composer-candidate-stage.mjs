@@ -11,7 +11,7 @@ export function stageComposerCandidate({ source, revision, temporaryDirectory })
     throw new Error("Candidate staging requires absolute paths and an exact revision");
   }
   const location = relative(realpathSync(source), realpathSync(temporaryDirectory));
-  if (!location || (!location.startsWith("../") && !isAbsolute(location))) {
+  if (!location || (location !== ".." && !location.startsWith("../") && !isAbsolute(location))) {
     throw new Error("Candidate staging must be outside the source workspace");
   }
   const head = execFileSync("git", ["--no-replace-objects", "-C", source, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -66,7 +66,7 @@ function captureComposerCandidateLock(candidate, output) {
     throw new Error("Effective lock evidence requires absolute candidate and output paths");
   }
   const location = relative(realpathSync(candidate), realpathSync(dirname(output)));
-  if (!location || (!location.startsWith("../") && !isAbsolute(location))) {
+  if (!location || (location !== ".." && !location.startsWith("../") && !isAbsolute(location))) {
     throw new Error("Effective lock evidence must be outside the candidate directory");
   }
   // Candidate preparation has stopped. Never follow a candidate lock symlink on

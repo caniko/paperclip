@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { qualifyComposerStop } from "../qualify-composer-stop.mjs";
 import { stageComposerCandidate } from "../composer-candidate-stage.mjs";
@@ -130,6 +130,17 @@ test("the proposed caller retains the staged effective lock before candidate run
     effectiveLockSha256: createHash("sha256").update(readFileSync(output)).digest("hex") });
   assert.equal(receipt.lockfileRegenerated, true);
   assert.notEqual(receipt.sourceLockSha256, receipt.effectiveLockSha256);
+  const descendant = join(candidate, "evidence");
+  const alias = join(directory, "candidate-alias");
+  mkdirSync(descendant);
+  symlinkSync(candidate, alias, "dir");
+  for (const destination of [candidate, descendant, alias]) {
+    const refused = spawnSync("bash", ["-c", statement], { cwd: directory, encoding: "utf8", timeout: 10000,
+      env: { ...process.env, COMPOSER_STOP_CANDIDATE_ROOT: candidate, RUNNER_TEMP: destination } });
+    assert.notEqual(refused.status, 0, destination);
+    assert.match(refused.stderr, /must be outside the candidate directory/);
+    assert.equal(existsSync(join(destination, "composer-stop-effective-lock.yaml")), false);
+  }
   rmSync(join(candidate, "pnpm-lock.yaml"));
   for (const fault of ["symlink", "directory", "fifo", "oversized"]) {
     const lock = join(candidate, "pnpm-lock.yaml");
@@ -257,8 +268,12 @@ test("candidate staging retains exact committed source and excludes untracked tr
   assert.equal(readFileSync(join(candidate, "package.json"), "utf8"),
     spawnSync("git", ["-C", source, "show", `${revision}:package.json`], { encoding: "utf8" }).stdout);
   for (const path of [".git", ".trusted-composer-stop", "node_modules", basename(untracked)]) assert.equal(existsSync(join(candidate, path)), false, path);
+  const parentCandidate = stageComposerCandidate({ source, revision, temporaryDirectory: dirname(source) });
+  t.after(() => rmSync(dirname(parentCandidate), { recursive: true, force: true }));
+  assert.equal(readFileSync(join(parentCandidate, "package.json"), "utf8"), readFileSync(join(candidate, "package.json"), "utf8"));
   assert.throws(() => stageComposerCandidate({ source, revision: "0".repeat(40), temporaryDirectory: directory }), /not the declared PR head/);
   assert.throws(() => stageComposerCandidate({ source, revision, temporaryDirectory: source }), /outside the source workspace/);
+  assert.throws(() => stageComposerCandidate({ source, revision, temporaryDirectory: untracked }), /outside the source workspace/);
 });
 
 test("candidate dependency and compiler execution cannot rewrite trusted verifier, tools or provenance", { timeout: 300000 }, (t) => {
