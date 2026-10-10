@@ -722,6 +722,45 @@ requests 32-day retention and verifies actual provider expiry and SHA-256. A
 successful collection or custody receipt does not qualify the producer or
 authorize deployment.
 
+`.github/workflows/qualification-environments.yml` executes nine available
+source-backed profiles from the exact PR head: actual macOS and Windows,
+non-Linux containment denial, import and search benchmarks, OpenTelemetry SDK
+presence and absence, the real Sentry SDK, and actual Linux containment. Each profile runtime-collects every
+expanded case at its unchanged mapping rules before running it once. Missing
+prerequisites, changed source hashes, missing cases, failures, mandatory skips,
+retries and repeated identities fail the profile. Test and hook deadlines are
+inherited from the original fixtures and project configuration.
+
+SDKs use separate committed npm locks under `.github/qualification/sdks/`, with
+direct versions matching `server/package.json`. `npm ci --ignore-scripts` installs
+them outside the workspace. Their complete transitive integrity pins, installed
+file hashes and resolver paths are retained. Preparation preserves an existing
+byte-identical OpenTelemetry API dependency and releases only its own links;
+SDK-present and SDK-absent profiles run in separate disposable environments.
+Linux containment uses the existing disposable-hosted Bubblewrap preparation,
+the actual `/usr/bin/bwrap` identity and the unchanged confined-build, network,
+descendant and authority-loss assertions.
+
+Every original raw sibling outcome remains in `raw-results.junit` and
+`profile-raw-results.json`. `profile.xml` is a verified projection of all mandatory
+cases for that profile, with truthful scoped counts and unchanged titles and
+framework IDs. Filtering a sibling for a different environment grants it no
+execution credit. The artifacts request 32 days and read back actual provider
+expiry and SHA-256; a GREEN profile does not qualify the full source producer or
+complete the environment union. The original strict source gate remains intact.
+
+For an isolated local diagnostic, use a fresh evidence directory and the real
+profile prerequisites:
+
+```sh
+NODE_ENV=test node .github/scripts/run-qualification-profile.mjs --diagnostic otel-absent /path/to/fresh-evidence
+python3 .github/scripts/verify_profile_evidence.py /path/to/fresh-evidence
+```
+
+Local diagnostics grant no hosted acceptance. The Cloud, runner, managed warm
+transition and live-provider profiles retain their separate
+source, environment and credential requirements.
+
 ### Task search evaluation
 
 The task search relevance rubric and regression corpus are documented in

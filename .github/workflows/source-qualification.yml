@@ -159,7 +159,7 @@ jobs:
               ;;
             build) pnpm build 2>&1 | tee "$EVIDENCE/build.log" ;;
             regression)
-              python3 -m unittest discover -s .github/scripts -p 'test_qualification_evidence.py' 2>&1 | tee "$EVIDENCE/receipt-tests.log"
+              python3 -m unittest discover -s .github/scripts -p 'test_qualification_*.py' 2>&1 | tee "$EVIDENCE/receipt-tests.log"
               node --test .github/scripts/test_qualification_junit_reporter.mjs 2>&1 | tee "$EVIDENCE/reporter-contract.log"
               node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/qualification-node-junit-reporter.mjs --test-reporter-destination="$EVIDENCE/policy-regression.xml" '.github/scripts/tests/*.test.mjs' 2>&1 | tee "$EVIDENCE/policy-regression.log"
               pnpm exec vitest run packages/db/src/deployment-migration-upgrade.test.ts packages/db/src/private-task-draft-assets-migration.test.ts server/src/__tests__/cli-auth-routes.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter=./scripts/qualification-junit-reporter.mjs --outputFile.junit="$EVIDENCE/migration-regression.xml" 2>&1 | tee "$EVIDENCE/migration-regression.log"

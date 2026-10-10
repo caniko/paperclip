@@ -1,0 +1,147 @@
+name: Exact-head required environment profiles
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+concurrency:
+  group: required-profiles-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  profile:
+    name: Exact head / required ${{ matrix.profile }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - profile: macos
+            runner: macos-15
+          - profile: windows
+            runner: windows-2025
+          - profile: nonlinux-containment-denial
+            runner: macos-15
+          - profile: import-benchmark
+            runner: ubuntu-24.04
+          - profile: search-benchmark
+            runner: ubuntu-24.04
+          - profile: otel-absent
+            runner: ubuntu-24.04
+          - profile: otel-sdk
+            runner: ubuntu-24.04
+          - profile: sentry-sdk
+            runner: ubuntu-24.04
+          - profile: linux-containment
+            runner: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.13'
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          version: 9.15.4
+          run_install: false
+      - name: Bind the actual source and isolated environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/required-profile"
+          mkdir -p "$EVIDENCE" "$RUNNER_TEMP/profile-instance" "$RUNNER_TEMP/profile-tmp"
+          printf '%s\n' "EVIDENCE=$EVIDENCE" "NODE_ENV=test" "PAPERCLIP_HOME=$RUNNER_TEMP/profile-instance" "PAPERCLIP_CONFIG=$RUNNER_TEMP/profile-instance/config.json" "TMPDIR=$RUNNER_TEMP/profile-tmp" >> "$GITHUB_ENV"
+          python .github/scripts/qualification-evidence.py initialize "$EVIDENCE"
+      - name: Install frozen workspace dependencies
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee "$EVIDENCE/install.log"
+          pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+          pnpm run preflight:workspace-links
+      - name: Prepare the separately locked optional SDK
+        if: matrix.profile == 'otel-sdk' || matrix.profile == 'sentry-sdk'
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/prepare-qualification-sdk.mjs "$PROFILE" "$RUNNER_TEMP/profile-sdk" "$EVIDENCE" 2>&1 | tee "$EVIDENCE/sdk-install.log"
+      - name: Prepare actual Linux namespace containment
+        if: matrix.profile == 'linux-containment'
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          bash .github/scripts/prepare-candidate-sandbox.sh 2>&1 | tee "$EVIDENCE/containment-preparation.log"
+      - name: Execute every source-mapped profile case once
+        env:
+          PROFILE: ${{ matrix.profile }}
+          PORTABILITY_IMPORT_BENCH: ${{ matrix.profile == 'import-benchmark' && '1' || '' }}
+          SEARCH_EVAL_SCALE: ${{ matrix.profile == 'search-benchmark' && '1' || '' }}
+          PAPERCLIP_REQUIRE_SENTRY_TEST_SDK: ${{ matrix.profile == 'sentry-sdk' && '1' || '' }}
+          PAPERCLIP_TEST_BWRAP: ${{ matrix.profile == 'linux-containment' && '/usr/bin/bwrap' || '' }}
+          PAPERCLIP_TEST_SANDBOX_BUILD: ${{ matrix.profile == 'linux-containment' && '1' || '' }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/run-qualification-profile.mjs "$PROFILE" "$EVIDENCE" 2>&1 | tee "$EVIDENCE/profile.log"
+          python .github/scripts/verify_profile_evidence.py "$EVIDENCE"
+      - name: Release only preparation-owned SDK links
+        if: always() && (matrix.profile == 'otel-sdk' || matrix.profile == 'sentry-sdk')
+        run: |
+          if [ -f "$EVIDENCE/sdk.json" ]; then node .github/scripts/cleanup-qualification-sdk.mjs "$EVIDENCE"; fi
+      - name: Seal the original raw and strict profile reports
+        if: always()
+        env:
+          OUTCOME: ${{ job.status }}
+        run: python .github/scripts/qualification-evidence.py seal "$EVIDENCE" "$OUTCOME" --strict-reports
+      - name: Retain the original attempt-1 environment proof
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: required-profile-${{ matrix.profile }}-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          retention-days: 32
+          if-no-files-found: error
+          path: ${{ runner.temp }}/required-profile/
+
+  retention:
+    name: Exact head / required profile retention
+    needs: profile
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PROFILE_OUTCOME: ${{ needs.profile.result }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Verify actual provider expiry and SHA-256
+        run: python .github/scripts/qualification-evidence.py artifacts required-profile- 9 profile-retention.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: environment-retention-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          retention-days: 32
+          if-no-files-found: error
+          path: profile-retention.json
+      - name: Require all mandatory profiles and the retained audit
+        run: |
+          test "$PROFILE_OUTCOME" = success
+          python .github/scripts/qualification-evidence.py artifacts environment-retention- 1 audit-retention.json
