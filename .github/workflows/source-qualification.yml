@@ -27,8 +27,11 @@ jobs:
           node-version: 24
           package-manager-cache: false
       - name: Prove trusted Stop source and receipt binding
+        # The hostile lifecycle fixture exercises the same namespace boundary.
+        # Package setup happens only on the disposable hosted runner.
         run: |
           set -euo pipefail
+          bash .github/scripts/prepare-candidate-sandbox.sh
           node --test scripts/__tests__/qualify-composer-stop.test.mjs 2>&1 | tee "$RUNNER_TEMP/trusted-stop-identity.log"
       - name: Retain trusted harness identity assertions
         if: always()
@@ -47,7 +50,62 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        lane: [typecheck, tests, build, regression]
+        include:
+          - lane: typecheck
+          - lane: build
+          - lane: regression
+          # Keep the original complete groups and their assertion deadlines.
+          # The full command exceeded the two-hour job limit while still
+          # traversing serialized suites. Only split existing runner groups.
+          - lane: tests-server-1
+            mode: general
+            group: general-server
+            shard_index: 0
+            shard_count: 4
+          - lane: tests-server-2
+            mode: general
+            group: general-server
+            shard_index: 1
+            shard_count: 4
+          - lane: tests-server-3
+            mode: general
+            group: general-server
+            shard_index: 2
+            shard_count: 4
+          - lane: tests-server-4
+            mode: general
+            group: general-server
+            shard_index: 3
+            shard_count: 4
+          - lane: tests-workspaces-a-1
+            mode: general
+            group: general-workspaces-a
+            shard_index: 0
+            shard_count: 2
+          - lane: tests-workspaces-a-2
+            mode: general
+            group: general-workspaces-a
+            shard_index: 1
+            shard_count: 2
+          - lane: tests-workspaces-b
+            mode: general
+            group: general-workspaces-b
+          - lane: tests-serialized-1
+            mode: serialized
+            shard_index: 0
+            shard_count: 4
+          - lane: tests-serialized-2
+            mode: serialized
+            shard_index: 1
+            shard_count: 4
+          - lane: tests-serialized-3
+            mode: serialized
+            shard_index: 2
+            shard_count: 4
+          - lane: tests-serialized-4
+            mode: serialized
+            shard_index: 3
+            shard_count: 4
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -76,19 +134,38 @@ jobs:
           pnpm install --frozen-lockfile 2>&1 | tee "$EVIDENCE/install.log"
           pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
           pnpm run preflight:workspace-links
+      - name: Provision native backup clients and zsh for workspace cases
+        if: matrix.lane == 'tests-workspaces-b'
+        run: |
+          set -euo pipefail
+          node .github/scripts/prepare-source-native-tools.mjs "$EVIDENCE" 2>&1 | tee "$EVIDENCE/native-tools.log"
       - name: Run mandatory application lane once
         env:
           LANE: ${{ matrix.lane }}
+          TEST_MODE: ${{ matrix.mode }}
+          TEST_GROUP: ${{ matrix.group }}
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          SHARD_COUNT: ${{ matrix.shard_count }}
         run: |
           set -euo pipefail
           case "$LANE" in
             typecheck) pnpm -r typecheck 2>&1 | tee "$EVIDENCE/typecheck.log" ;;
-            tests) pnpm test:run 2>&1 | tee "$EVIDENCE/tests.log" ;;
+            tests-*)
+              args=(--mode "$TEST_MODE")
+              if [ -n "$TEST_GROUP" ]; then args+=(--group "$TEST_GROUP"); fi
+              if [ -n "$SHARD_COUNT" ]; then args+=(--shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT"); fi
+              node scripts/run-vitest-stable.mjs "${args[@]}" --dry-run > "$EVIDENCE/shard-plan.json"
+              pnpm test:run -- "${args[@]}" 2>&1 | tee "$EVIDENCE/tests.log"
+              ;;
             build) pnpm build 2>&1 | tee "$EVIDENCE/build.log" ;;
             regression)
-              python3 -m unittest discover -s .github/scripts -p 'test_qualification_evidence.py' 2>&1 | tee "$EVIDENCE/receipt-tests.log"
+              python3 -m unittest discover -s .github/scripts -p 'test_qualification_*.py' 2>&1 | tee "$EVIDENCE/receipt-tests.log"
+              node --test .github/scripts/test_qualification_junit_reporter.mjs 2>&1 | tee "$EVIDENCE/reporter-contract.log"
+              node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/qualification-node-junit-reporter.mjs --test-reporter-destination="$EVIDENCE/policy-regression.xml" '.github/scripts/tests/*.test.mjs' 2>&1 | tee "$EVIDENCE/policy-regression.log"
+              pnpm exec vitest run packages/db/src/deployment-migration-upgrade.test.ts packages/db/src/private-task-draft-assets-migration.test.ts server/src/__tests__/cli-auth-routes.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter=./scripts/qualification-junit-reporter.mjs --outputFile.junit="$EVIDENCE/migration-regression.xml" 2>&1 | tee "$EVIDENCE/migration-regression.log"
+              pnpm --filter @paperclipai/paperclip-runner test:typescript:vitest src/catalog/semantic-action-catalog.test.ts src/mock-core/local-runner.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter="$GITHUB_WORKSPACE/scripts/qualification-junit-reporter.mjs" --outputFile.junit="$EVIDENCE/runner-regression.xml" 2>&1 | tee "$EVIDENCE/runner-regression.log"
               pnpm check:token-gates 2>&1 | tee "$EVIDENCE/token-gates.log"
-              pnpm exec vitest run packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts packages/adapters/hermes/src/gateway/server/recovery-lineage.test.ts packages/adapters/hermes/src/gateway/server/run-lifetime.test.ts server/src/__tests__/adapter-execution-settlement-postgres.test.ts server/src/__tests__/runtime-mcp-admission.test.ts server/src/__tests__/vitest-chat-shards.test.ts server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts server/src/__tests__/skill-sources.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter=junit --outputFile.junit="$EVIDENCE/regression.xml" 2>&1 | tee "$EVIDENCE/regression.log"
+              pnpm exec vitest run packages/adapters/hermes/src/gateway/server/executor-selection.test.ts packages/adapters/hermes/src/gateway/server/executor-admission.test.ts packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts packages/adapters/hermes/src/gateway/server/recovery-lineage.test.ts packages/adapters/hermes/src/gateway/server/run-lifetime.test.ts server/src/__tests__/heartbeat-executor-affinity.test.ts server/src/__tests__/adapter-execution-settlement-postgres.test.ts server/src/__tests__/runtime-mcp-admission.test.ts server/src/__tests__/vitest-chat-shards.test.ts server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts server/src/__tests__/skill-sources.test.ts server/src/__tests__/company-skills-routes.test.ts server/src/deployment/entry.test.ts server/src/deployment/reconcile.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter=./scripts/qualification-junit-reporter.mjs --outputFile.junit="$EVIDENCE/regression.xml" 2>&1 | tee "$EVIDENCE/regression.log"
               ;;
           esac
       - name: Seal raw source and result evidence
@@ -99,7 +176,7 @@ jobs:
         run: |
           set -euo pipefail
           strict=()
-          case "$LANE" in tests|regression) strict+=(--strict-reports) ;; esac
+          case "$LANE" in tests-*|regression) strict+=(--strict-reports) ;; esac
           python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" "$OUTCOME" "${strict[@]}"
       - name: Retain original evidence
         if: always()
@@ -128,7 +205,7 @@ jobs:
           persist-credentials: false
       - name: Read actual provider expiry and digest for every required artifact
         run: |
-          python3 .github/scripts/qualification-evidence.py artifacts source-proof- 5 retention.json
+          python3 .github/scripts/qualification-evidence.py artifacts source-proof- 15 retention.json
           python3 .github/scripts/qualification-evidence.py artifacts trusted-stop-identity- 1 harness-retention.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

@@ -530,6 +530,11 @@ The current implementation includes additional V1-control-plane tables beyond th
 
 - Issue structure and review: `issue_relations` for blockers, `labels`/`issue_labels`, `issue_thread_interactions`, `issue_approvals`, `issue_execution_decisions`, `issue_work_products`, `issue_inbox_archives`, `issue_read_states`, and issue reference mention indexes.
 - Execution and workspace control: `execution_workspaces`, `project_workspaces`, `workspace_runtime_services`, `workspace_operations`, `environments`, `environment_leases`, `agent_task_sessions`, `agent_runtime_state`, `agent_wakeup_requests`, heartbeat events, and watchdog decision tables.
+- Remote conversation affinity: `adapter_session_affinities` keeps the selected
+  worker across controller restarts and issue-local session results. Selection
+  commits with admission before dispatch; reset generations fence stale turns.
+  Run-scoped and unscoped issue-strategy turns select fresh. See
+  [Hermes executor routing](hermes-executor-routing.md).
 - Plugins and routines: `plugins`, plugin config/state/entities/jobs/logs/webhooks, plugin database namespaces/migrations, plugin company settings, `routines`, `routine_revisions`, `routine_triggers`, and `routine_runs`.
 - Access and operations: company memberships, instance roles, principal permission grants, invites, join requests, board API keys, CLI auth challenges, budget policies/incidents, feedback exports/votes, company skills, sidebar preferences, and company logos.
 
@@ -1992,6 +1997,21 @@ Cancellation fences and drains work before explicit release, which follows works
 finalization and tool/instruction teardown. Waiting is durable and states that no
 agent work has started. See [Existing filesystem workspaces](filesystem-workspaces.md)
 for supported preparation paths and remaining host/isolation qualification gates.
+
+### Ordered Hermes execution workers (2026-10-09)
+
+An optional `executorEndpoints` inventory selects the first authenticated Hermes
+worker that advertises live admission eligibility, available capacity and
+admission-bound durable recovery. Selection precedes the immutable admission
+checkpoint. All create replays, events and recovery stay on that endpoint with
+the original idempotency key and wire body. Issue and agent sessions persist
+endpoint affinity. An unavailable pinned session waits for its worker or an
+explicit session reset; it is not moved automatically. Run/none session strategies
+select fresh for each new run. Protected execution targets remain on the primary;
+the inventory grants no filesystem, collector or activation authority.
+
+See [Hermes executor routing](hermes-executor-routing.md) for configuration and
+worker draining requirements.
 
 ## GitHub-synced skill sources
 

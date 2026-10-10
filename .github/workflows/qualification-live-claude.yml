@@ -1,0 +1,93 @@
+name: Isolated hosted Claude prompt characterization
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: live-claude-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  characterize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Bind isolated hosted source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/live-claude"
+          mkdir -p "$EVIDENCE" "$RUNNER_TEMP/live-claude-home" "$RUNNER_TEMP/live-claude-tmp"
+          printf '%s\n' "EVIDENCE=$EVIDENCE" >> "$GITHUB_ENV"
+          python3 .github/scripts/qualification-evidence.py initialize "$EVIDENCE"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          version: 9.15.4
+          run_install: false
+      - name: Install frozen workspace dependencies
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee "$EVIDENCE/install.log"
+          pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+          pnpm run preflight:workspace-links
+      - name: Verify and install the pinned real native CLI
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -v -s .github/scripts -p test_characterization_provider.py 2>&1 | tee "$EVIDENCE/provider-contract.log"
+          python3 .github/scripts/prepare-characterization-provider.py "$EVIDENCE/provider"
+          printf '%s\n' "$EVIDENCE/provider" >> "$GITHUB_PATH"
+      - name: Run the real prompt contract without account credentials
+        run: |
+          set -euo pipefail
+          # The test keeps authorization URL bytes in memory and submits no code.
+          # No token, production HOME or provider account reaches the subprocess.
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/live-claude-home" TMPDIR="$RUNNER_TEMP/live-claude-tmp" CI=true \
+            RUNNER_ENVIRONMENT=github-hosted PAPERCLIP_LIVE_PROFILE=isolated-hosted \
+            RUN_CLAUDE_SETUP_TOKEN_CHARACTERIZATION=1 \
+            pnpm exec vitest run packages/adapters/claude-local/src/server/setup-token-characterization.test.ts \
+              --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false \
+              --reporter=default --reporter=./scripts/qualification-junit-reporter.mjs \
+              --outputFile.junit="$EVIDENCE/characterization.xml" 2>&1 | tee "$EVIDENCE/characterization.log"
+          python3 - <<'PY'
+          import os, xml.etree.ElementTree as ET
+          from pathlib import Path
+          cases = list(ET.parse(Path(os.environ['EVIDENCE']) / 'characterization.xml').getroot().iter('testcase'))
+          assert len(cases) == 1
+          assert cases[0].get('classname', '').endswith('packages/adapters/claude-local/src/server/setup-token-characterization.test.ts')
+          assert 'reads the real sign-in prompt contract and records the Claude Code version [vitest:' in cases[0].get('name', '')
+          PY
+      - name: Seal exact-source live evidence
+        if: always()
+        run: python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" '${{ job.status }}' --strict-reports
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: live-claude-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          retention-days: 32
+          if-no-files-found: error
+          path: ${{ runner.temp }}/live-claude/
+      - name: Verify actual provider retention
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/qualification-evidence.py artifacts live-claude- 1 "$RUNNER_TEMP/live-claude-retention.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: live-claude-retention-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          retention-days: 32
+          if-no-files-found: error
+          path: ${{ runner.temp }}/live-claude-retention.json

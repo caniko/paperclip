@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
@@ -26,12 +27,12 @@ const binaries = {
   fakeHarnessBinaryPath: resolveCargoBinary({ binary: "fake-harness", targetDirectory }),
 };
 
-describe.sequential("Local runner and fake harness", () => {
+describe("Local runner and fake harness", { concurrent: false }, () => {
   it("runs the CLI with relative binary overrides from another cwd without Cargo", async () => {
     const directory = await mkdtemp(join(tmpdir(), "local-runner-caller-"));
     try {
       const { stdout } = await promisify(execFile)(process.execPath, [
-        "--import", import.meta.resolve("tsx"),
+        "--import", createRequire(import.meta.url).resolve("tsx"),
         fileURLToPath(new URL("../cli/local-runner.ts", import.meta.url)),
         "--runner-binary", relative(directory, binaries.runnerBinaryPath),
         "--fake-harness-binary", relative(directory, binaries.fakeHarnessBinaryPath),

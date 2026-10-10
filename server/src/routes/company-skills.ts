@@ -302,10 +302,13 @@ export function companySkillRoutes(db: Db) {
     assertCompanyAccess(req, companyId);
     const actor = getActorInfo(req);
     const publications: ActivityPublication[] = [];
+    const authorize: SkillSourceContext['authorize'] = (action, resource, tx) =>
+      assertCanMutateCompanySkills(req, companyId, action, resource, tx ? tx as unknown as Db : db);
     const result = await operation({
       actor: skillActor(req),
       read: connectionId => skillSourceGitHubReader(db, companyId, req.actor, connectionId),
-      authorize: (action, resource, tx) => assertCanMutateCompanySkills(req, companyId, action, resource, tx ? tx as unknown as Db : db),
+      authorize,
+      authorizeForTransaction: tx => (action, resource) => authorize(action, resource, tx),
       audit: async (tx, sourceId, action, details) => {
         const { publication } = await persistActivity(tx as unknown as Db, { ...actor, companyId, action, entityType: "company_skill_source", entityId: sourceId, details });
         publications.push(publication);

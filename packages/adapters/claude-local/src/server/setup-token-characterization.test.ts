@@ -15,8 +15,10 @@ import {
 //
 // The suite is opt-in. It needs the real `claude` binary, `python3` for the
 // pseudo-terminal, and network access to claude.com to mint the authorization
-// URL, so it never runs in a normal or a continuous-integration test run. Set
+// URL, so it never runs in a normal test run. Set
 // `RUN_CLAUDE_SETUP_TOKEN_CHARACTERIZATION=1` to run it in a real sandbox.
+// The explicitly authorized isolated-hosted profile uses a fresh HOME and a
+// source-pinned real binary without account credentials. Other CI is denied.
 //
 // Security: the suite drives only the prompt phase. It never submits a browser
 // code, so the command never mints a token. It parses the captured bytes in
@@ -26,6 +28,12 @@ import {
 // an assertion message.
 
 const OPT_IN = process.env.RUN_CLAUDE_SETUP_TOKEN_CHARACTERIZATION === "1";
+if (OPT_IN && process.env.CI && (
+  process.env.RUNNER_ENVIRONMENT !== "github-hosted"
+  || process.env.PAPERCLIP_LIVE_PROFILE !== "isolated-hosted"
+)) {
+  throw new Error("Live Claude characterization requires the isolated hosted profile in CI");
+}
 
 // A pseudo-terminal harness. It runs `claude setup-token` on a real
 // pseudo-terminal with a wide window, streams the raw terminal bytes to its own

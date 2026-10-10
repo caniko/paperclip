@@ -27,6 +27,12 @@ export function getConfigSchema(): AdapterConfigSchema {
         hint: "Hermes API server base URL, such as http://127.0.0.1:8642 or a private HTTPS URL. The default dashboard root or chat URL, such as http://127.0.0.1:9119/chat, is accepted and maps to /api.",
       },
       {
+        key: "executorEndpoints",
+        label: "Ordered executor endpoints",
+        type: "textarea",
+        hint: "Optional JSON array of worker URLs, primary first (equal to API base URL). New sessions select the first eligible worker with capacity. Existing sessions and protected targets retain their endpoint.",
+      },
+      {
         key: "apiKey",
         label: "API key",
         type: "text",

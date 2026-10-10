@@ -527,6 +527,14 @@ Hosted AWS provider notes live in [SECRETS-AWS-PROVIDER.md](./SECRETS-AWS-PROVID
 
 Migration `0274_agent_chat.sql` adds conversation identity/state and session generation/boundary columns to `issues`, plus idempotent client request IDs and processed session-boundary generations to `issue_comments`. The company/agent/user unique index resolves concurrent first writes to one issue. A check constraint preserves the assigned-agent identity and prevents terminal conversation status. Comment request IDs are unique per issue and user. There is no separate chat/message store. Provider sessions continue to use `agent_task_sessions`; `/new` removes only the matching conversation session, and session writers fence stale generations against the issue row.
 
+`adapter_session_affinities` stores company/agent/adapter-scoped executor bindings
+independently of provider session results. Agent scope spans tasks; issue scope
+uses the provider's task identity. The first selected endpoint commits atomically
+with the encrypted admission checkpoint. Reset keeps a null-endpoint generation
+tombstone so a preparing older turn cannot restore the worker. This schema-only
+migration neither selects a worker nor enables execution. Existing unambiguous
+session history is adopted on first use. See [Hermes executor routing](hermes-executor-routing.md).
+
 Delegated-task completion deliveries acknowledge only a final persisted reply
 selected by the server. Finalization also acknowledges an existing provider
 comment when it reuses that comment as the final response. The acknowledgement

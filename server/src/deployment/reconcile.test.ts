@@ -14,6 +14,8 @@ import { ensurePostgresDatabase, runDatabaseBackup, runDatabaseRestore } from "@
 import { findServerAdapter } from "../adapters/registry.js";
 import { projectWorkspaces } from "@paperclipai/db";
 import { projectService } from "../services/projects.js";
+import { budgetPolicies } from "@paperclipai/db";
+import { budgetService } from "../services/budgets.js";
 
 let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
 let db: ReturnType<typeof createDb>;
@@ -144,6 +146,64 @@ it.each(["manual", "budget"])("reenables declarations without resuming %s pauses
   expect((await reconcile(enabled)).differences).toEqual([]);
   expect((await db.select().from(agents).where(eq(agents.id, agentId)))[0].status).toBe("idle");
   expect((await db.select().from(routines).where(eq(routines.id, routineId)))[0].status).toBe("active");
+});
+
+it("allocates colliding company prefixes within one atomic deployment transaction", async () => {
+  const declaration = { version: 1, owner: "prefix-collision",
+    companies: {
+      first: { fields: { name: "Colliding transaction first" } },
+      second: { fields: { name: "Colliding transaction second" } },
+    },
+    projects: { main: { company: "second", fields: { name: "Collision project" } } },
+  };
+  const first = await reconcile(declaration);
+  const [one] = await db.select().from(companies).where(eq(companies.id, first.bindings["company/first"]));
+  const [two] = await db.select().from(companies).where(eq(companies.id, first.bindings["company/second"]));
+  expect(one.issuePrefix).toMatch(/^COLA*$/);
+  expect(two.issuePrefix).toMatch(/^COLA*$/);
+  expect(two.issuePrefix).not.toBe(one.issuePrefix);
+  expect((await db.select().from(projects).where(eq(projects.id, first.bindings["project/main"])))[0].companyId).toBe(two.id);
+  expect((await reconcile(declaration)).bindings).toEqual(first.bindings);
+  expect((await reconcile(declaration, false)).differences).toEqual([]);
+});
+
+it.each(["company", "agent"] as const)("preserves %s budget pause and policy on an unrelated declared edit", async (kind) => {
+  const declaration = { ...structuredClone(manifest), owner: `budget-fields-${kind}`, projects: {}, routines: {}, taskBridges: {} };
+  declaration.companies.example.fields.name = `Budget fields ${kind}`;
+  const first = await reconcile(declaration);
+  const id = first.bindings[`${kind}/${kind === "company" ? "example" : "worker"}`];
+  const target = kind === "company" ? declaration.companies.example : declaration.agents.worker;
+  // Native creation stores the legacy limit. Install a real policy before
+  // testing that an unrelated declaration edit preserves its existing state.
+  await budgetService(db).upsertPolicy(first.bindings["company/example"], {
+    scopeType: kind, scopeId: id, amount: target.fields.budgetMonthlyCents, windowKind: "calendar_month_utc",
+  }, null);
+  const pausedAt = new Date("2020-01-01T00:00:00Z");
+  if (kind === "company") {
+    await db.update(companies).set({ status: "paused", pauseReason: "budget", pausedAt }).where(eq(companies.id, id));
+  } else {
+    await db.update(agents).set({ status: "paused", pauseReason: "budget", pausedAt }).where(eq(agents.id, id));
+  }
+  const readScope = async () => kind === "company"
+    ? (await db.select().from(companies).where(eq(companies.id, id)))[0]
+    : (await db.select().from(agents).where(eq(agents.id, id)))[0];
+  const readPolicy = async () => (await db.select().from(budgetPolicies).where(and(
+    eq(budgetPolicies.scopeId, id), eq(budgetPolicies.scopeType, kind),
+    eq(budgetPolicies.windowKind, "calendar_month_utc"), eq(budgetPolicies.metric, "billed_cents"),
+  )))[0];
+  const policy = await readPolicy();
+  expect(policy).toBeDefined();
+  target.fields.name = `Renamed budget fields ${kind}`;
+  expect((await reconcile(declaration)).bindings).toEqual(first.bindings);
+  expect(await readScope()).toMatchObject({ name: target.fields.name, status: "paused", pauseReason: "budget", pausedAt });
+  expect(await readPolicy()).toEqual(policy);
+
+  // A real declared limit change still goes through the native budget policy.
+  target.fields.budgetMonthlyCents += 100;
+  expect((await reconcile(declaration)).bindings).toEqual(first.bindings);
+  expect(await readScope()).toMatchObject({ budgetMonthlyCents: target.fields.budgetMonthlyCents });
+  expect(await readPolicy()).toMatchObject({ amount: target.fields.budgetMonthlyCents, isActive: true });
+  expect((await reconcile(declaration)).differences).toEqual([]);
 });
 
 it("preserves existing and later operator membership decisions for adopted companies", async () => {

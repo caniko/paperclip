@@ -17,6 +17,7 @@ import {
 } from "@paperclipai/db";
 
 import { sanitizeQuarantinedCommentForHigherTrust } from "./source-trust.js";
+import { resetExecutionAffinities } from "./adapter-session-affinity.js";
 
 export type ConversationIdentity = {
   conversationAgentId?: string | null;
@@ -197,6 +198,7 @@ export async function prepareConversationTurn(
           details: { generation, boundaryCommentId: comment.id, expiredInteractionIds: expiredQuestions.map((row) => row.id) },
         })
       ).publication;
+      await resetExecutionAffinities(tx as unknown as Db, issue.companyId, issue.conversationAgentId!, [issue.id]);
       // Deliberately do not touch agentRuntimeState or sessions belonging to other tasks.
       await tx
         .delete(agentTaskSessions)

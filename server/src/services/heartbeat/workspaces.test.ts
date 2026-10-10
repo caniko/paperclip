@@ -10,6 +10,7 @@ import {
   WorkspaceValidationFailure as LegacyWorkspaceValidationFailure,
 } from "../heartbeat.js";
 import { resolveDefaultAgentWorkspaceDir } from "../../home-paths.js";
+import { configureFixtureGitIdentity } from "../../__tests__/helpers/git-fixture.js";
 import {
   createHeartbeatWorkspaceResolver,
   ensureManagedProjectWorkspace,
@@ -68,8 +69,7 @@ async function createRepository(parent: string, text: string) {
   const cwd = path.join(testRoot, parent, "repo");
   await fs.mkdir(cwd, { recursive: true });
   await runGit("git", ["init", cwd]);
-  await runGit("git", ["-C", cwd, "config", "user.email", "workspace-test@example.com"]);
-  await runGit("git", ["-C", cwd, "config", "user.name", "Workspace Test"]);
+  configureFixtureGitIdentity(cwd);
   await fs.writeFile(path.join(cwd, "README.md"), text);
   await runGit("git", ["-C", cwd, "add", "README.md"]);
   await runGit("git", ["-C", cwd, "commit", "-m", "initial"]);

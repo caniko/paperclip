@@ -15,7 +15,7 @@ import { resolveQualifiedAcpxProfile } from "../drivers/acpx/qualified-profiles.
 import { createOpenCodeNativeSessionBackend } from "./opencode-native-backend.js";
 import { nativeSystemInstructions, nativeTaskConstraints } from "./runtime-context.js";
 import { createRunnerdNativeSessionBackend } from "./codex-native-backend.js";
-import { inspectNativeCompletionSourceMetadata } from "../../../../tests/runner-e2e/native-completion-git-source.mjs";
+import { inspectNativeCompletionSourceMetadata } from "../../scripts/lib/native-completion-git-source.mjs";
 
 // This captures Paperclip's real runnerd RPC boundary with a scripted transport.
 // It measures complete Paperclip-supplied instruction/tool/message projections,

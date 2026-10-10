@@ -153,6 +153,7 @@ import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./nativ
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
 import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
 import { adapterExecutionOwnershipNotHeldCondition, lockRunForAdapterSettlement, prepareAdapterExecution, reconcileAdapterExecution, recordAdapterExecutionProgress, settleAdapterExecution } from "./adapter-execution-ownership.js";
+import { loadExecutionAffinity, resetExecutionAffinities } from "./adapter-session-affinity.js";
 import { assertOwnedWorkspacePreparation, filesystemOwnershipPolicy, filesystemOwnershipStateColumn, readFilesystemOwnershipState, prepareRunWorkspaceOwnership } from "./workspace-ownership.js";
 import { bindRuntimeMcpServersToRun } from "./runtime-mcp-admission.js";
 import type { WorkspaceOwnershipIntent } from "@paperclipai/adapter-utils";
@@ -9121,6 +9122,7 @@ export function heartbeatService(
       expectedRunId?: string;
       includeIssueAliases?: boolean;
     },
+    database: Db = db,
   ) {
     const conditions = [
       eq(agentTaskSessions.companyId, companyId),
@@ -9156,7 +9158,7 @@ export function heartbeatService(
       conditions.push(eq(agentTaskSessions.adapterType, opts.adapterType));
     }
 
-    return db.transaction(async (tx) => {
+    return database.transaction(async (tx) => {
       if (opts?.taskKey && opts.expectedRunId) {
         const [issue] = await tx.select().from(issues).where(sql`${issues.id}::text = ${opts.taskKey}`).for("update");
         if (isConversation(issue)) {
@@ -20189,6 +20191,11 @@ export function heartbeatService(
         };
 
         const adapter = getServerAdapter(agent.adapterType);
+        const affinityScope = adapter.executionAffinityScope?.(runtimeConfig, context);
+        const executionAffinity = affinityScope ? await loadExecutionAffinity(db, {
+          companyId: agent.companyId, agentId: agent.id, adapterType: agent.adapterType,
+          ...affinityScope, runtime: runtimeForAdapter,
+        }) : undefined;
         const durableGoalControlRun =
           readNonEmptyString(context.goalControlRequestId) !== null ||
           context.resumeSessionGoalHeartbeat === true;
@@ -21675,6 +21682,7 @@ export function heartbeatService(
                     runId: run.id,
                     agent,
                     runtime: runtimeForAdapter,
+                    executionAffinity,
                     config: runtimeConfig,
                     context: adapterContext,
                     executionContinuation: executionContinuation ?? null,
@@ -21705,9 +21713,10 @@ export function heartbeatService(
                         issueId,
                       );
                     },
-                    onExecutionCheckpoint: async (checkpoint) => {
+                    onExecutionCheckpoint: async (checkpoint, affinityEndpoint) => {
                       await prepareAdapterExecution(db, { companyId: run.companyId, runId: run.id,
-                        leaseId: activeEnvironmentLease.lease.id, adapterType: agent.adapterType, checkpoint });
+                        leaseId: activeEnvironmentLease.lease.id, adapterType: agent.adapterType, checkpoint,
+                        ...(executionAffinity && affinityEndpoint ? { affinity: { ...executionAffinity, selectedEndpoint: affinityEndpoint } } : {}) });
                     },
                     onExecutionProgress: async (progress) => {
                       await recordAdapterExecutionProgress(db, { companyId: run.companyId, runId: run.id,
@@ -27050,41 +27059,55 @@ export function heartbeatService(
       const agent = await getAgent(agentId);
       if (!agent) throw notFound("Agent not found");
       await ensureRuntimeState(agent);
-      const taskKey = readNonEmptyString(opts?.taskKey);
-      const clearedTaskSessions = await clearTaskSessions(
-        agent.companyId,
-        agent.id,
-        taskKey
-          ? {
-              taskKey,
-              adapterType: agent.adapterType,
-              includeIssueAliases: true,
-            }
-          : undefined,
-      );
-      const runtimePatch: Partial<typeof agentRuntimeState.$inferInsert> = {
-        sessionId: null,
-        lastError: null,
-        updatedAt: new Date(),
-      };
-      if (!taskKey) {
-        runtimePatch.stateJson = {};
-      }
+      return db.transaction(async tx => {
+        const taskKey = readNonEmptyString(opts?.taskKey);
+        const affinityTaskKeys = taskKey ? [taskKey] : undefined;
+        if (taskKey) {
+          const [issue] = await tx.select({ id: issues.id, identifier: issues.identifier }).from(issues).where(and(
+            eq(issues.companyId, agent.companyId), isUuidLike(taskKey) ? eq(issues.id, taskKey) : eq(issues.identifier, taskKey.toUpperCase()),
+          ));
+          if (issue) {
+            affinityTaskKeys!.push(issue.id);
+            if (issue.identifier) affinityTaskKeys!.push(issue.identifier);
+          }
+        }
+        await resetExecutionAffinities(tx as unknown as Db, agent.companyId, agent.id, affinityTaskKeys);
+        const clearedTaskSessions = await clearTaskSessions(
+          agent.companyId,
+          agent.id,
+          taskKey
+            ? {
+                taskKey,
+                adapterType: agent.adapterType,
+                includeIssueAliases: true,
+              }
+            : undefined,
+          tx as unknown as Db,
+        );
+        const runtimePatch: Partial<typeof agentRuntimeState.$inferInsert> = {
+          sessionId: null,
+          lastError: null,
+          updatedAt: new Date(),
+        };
+        if (!taskKey) {
+          runtimePatch.stateJson = {};
+        }
 
-      const updated = await db
-        .update(agentRuntimeState)
-        .set(runtimePatch)
-        .where(eq(agentRuntimeState.agentId, agentId))
-        .returning()
-        .then((rows) => rows[0] ?? null);
+        const updated = await tx
+          .update(agentRuntimeState)
+          .set(runtimePatch)
+          .where(eq(agentRuntimeState.agentId, agentId))
+          .returning()
+          .then((rows) => rows[0] ?? null);
 
-      if (!updated) return null;
-      return {
-        ...updated,
-        sessionDisplayId: null,
-        sessionParamsJson: null,
-        clearedTaskSessions,
-      };
+        if (!updated) return null;
+        return {
+          ...updated,
+          sessionDisplayId: null,
+          sessionParamsJson: null,
+          clearedTaskSessions,
+        };
+      });
     },
 
     listEvents: (runId: string, afterSeq = 0, limit = 200) =>

@@ -34,8 +34,20 @@ for (const [, job, body] of installers) {
     // Lanes must not wait on the policy job for a regenerated lockfile; each
     // install resolves a stale one inline and then re-validates frozen.
     const installStep = body.slice(install).split("      - name:")[1] ?? body.slice(install);
-    assert.match(installStep, /if ! pnpm install --frozen-lockfile; then/);
-    assert.match(installStep, /pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile/);
+    if (job === "native_composer_stop") {
+      assert.match(installStep, /candidate\(\) \{/);
+      assert.match(installStep, /bwrap --die-with-parent --new-session --unshare-user --unshare-pid --unshare-ipc --unshare-uts/);
+      assert.match(installStep, /--ro-bind "\$GITHUB_WORKSPACE\/\.trusted-composer-stop" "\$GITHUB_WORKSPACE\/\.trusted-composer-stop"/);
+      assert.match(installStep, /--ro-bind "\$RUNNER_TEMP" "\$RUNNER_TEMP"/);
+      assert.match(installStep, /env -i PATH="\$PATH" HOME=\/tmp CI=true "\$@"/);
+      assert.match(installStep, /if ! candidate pnpm install --frozen-lockfile; then/);
+      assert.match(installStep, /candidate pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile/);
+      assert.match(installStep, /\n\s+candidate pnpm install --frozen-lockfile\n/);
+      assert.doesNotMatch(installStep, /(?:^|\n)\s*(?:if ! )?pnpm install/);
+    } else {
+      assert.match(installStep, /if ! pnpm install --frozen-lockfile; then/);
+      assert.match(installStep, /pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile/);
+    }
     assert.doesNotMatch(installStep, /needs\.policy/);
   });
 }

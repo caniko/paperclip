@@ -1,0 +1,77 @@
+name: Deployment migration source preparation
+
+on:
+  pull_request:
+    paths:
+      - packages/db/**
+      - .github/workflows/deployment-migration-generation.yml
+      - .github/scripts/regenerate-deployment-migration.py
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: deployment-generation-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Bind exact source and preserve original deployment guards
+        id: preparation
+        run: |
+          set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/deployment-generation"
+          mkdir -p "$EVIDENCE"
+          echo "EVIDENCE=$EVIDENCE" >> "$GITHUB_ENV"
+          python3 .github/scripts/qualification-evidence.py initialize "$EVIDENCE"
+          python3 .github/scripts/regenerate-deployment-migration.py prepare "$EVIDENCE"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        if: steps.preparation.outputs.needed == 'true'
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        if: steps.preparation.outputs.needed == 'true'
+        with:
+          version: 9.15.4
+          run_install: false
+      - name: Generate with Drizzle and retain the unchanged custom SQL
+        if: steps.preparation.outputs.needed == 'true'
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee "$EVIDENCE/install.log"
+          pnpm db:generate 2>&1 | tee "$EVIDENCE/generation.log"
+          python3 .github/scripts/regenerate-deployment-migration.py finish "$EVIDENCE"
+          pnpm --filter @paperclipai/db check:migrations 2>&1 | tee "$EVIDENCE/numbering-and-safety.log"
+          pnpm exec vitest run packages/db/src/migration-snapshot-drift.test.ts --retry=0 --allowOnly=false --reporter=default --reporter=junit --outputFile.junit="$EVIDENCE/snapshot-drift.xml" 2>&1 | tee "$EVIDENCE/snapshot-drift.log"
+      - name: Seal source preparation evidence
+        if: always()
+        run: python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" '${{ job.status }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: deployment-generation-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          retention-days: 31
+          if-no-files-found: error
+          path: ${{ runner.temp }}/deployment-generation/
+      - name: Audit actual provider retention
+        if: always()
+        run: python3 .github/scripts/qualification-evidence.py artifacts deployment-generation- 1 deployment-generation-retention.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: deployment-generation-retention-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          retention-days: 31
+          if-no-files-found: error
+          path: deployment-generation-retention.json

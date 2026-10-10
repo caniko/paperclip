@@ -12152,14 +12152,19 @@ export function issueRoutes(
         res.status(404).json({ error: "Project not found" });
         return;
       }
-      const projectDecision = await access.decide({
-        actor: req.actor,
-        action: "project:read",
-        resource: { type: "project", companyId, projectId: selectedProject.id },
-      });
-      if (!projectDecision.allowed) {
-        res.status(404).json({ error: "Project not found" });
-        return;
+      // A task bridge can create inside its approved task boundary without
+      // gaining project API access. assertTaskBridgeCreateAllowed below checks
+      // that boundary and the assignee before any issue write.
+      if (!isTaskBridgeKeyActor(req)) {
+        const projectDecision = await access.decide({
+          actor: req.actor,
+          action: "project:read",
+          resource: { type: "project", companyId, projectId: selectedProject.id },
+        });
+        if (!projectDecision.allowed) {
+          res.status(404).json({ error: "Project not found" });
+          return;
+        }
       }
     }
       const createAssignmentScope = {

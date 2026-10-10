@@ -12,7 +12,7 @@ import { EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, getEmbeddedPostgresTestSupport, star
 type TestSql = ReturnType<typeof connectPostgres>;
 type JournalEntry = { idx: number; version: string; when: number; tag: string; breakpoints: boolean };
 type Journal = { version: string; dialect: string; entries: JournalEntry[] };
-const nativeFile = "0295_nostalgic_rhodey.sql";
+const nativeFile = "0319_exotic_spiral.sql";
 const nativeHash = "ac20d3f6626b23aaf07e7bc7f6502bbcd728a2808d4b4adb56b2116bb30e6412";
 // Authentic entry and SQL from 843bb5b, whose upstream prefix through 0288 is unchanged.
 const oldEntry: JournalEntry = { idx: 289, version: "7", when: 1790713813737, tag: "0289_messy_vivisector", breakpoints: true };
@@ -21,6 +21,19 @@ const pendingFiles = [
   "0289_drop_user_keyboard_shortcuts.sql", "0290_browser_use_cloud.sql",
   "0291_conscious_secret_warriors.sql", "0292_powerful_devos.sql",
   "0293_broad_rattler.sql", "0294_chilly_marvel_apes.sql",
+  "0295_public_captain_cross.sql", "0296_stiff_thaddeus_ross.sql",
+  "0297_foamy_swordsman.sql", "0298_connection_agent_instructions.sql",
+  "0299_absent_ser_duncan.sql", "0300_chunky_chamber.sql",
+  "0301_lumpy_maria_hill.sql", "0302_colossal_otto_octavius.sql",
+  "0303_supreme_garia.sql", "0304_curvy_shadow_king.sql",
+  "0305_chubby_vin_gonzales.sql", "0306_familiar_titania.sql",
+  "0307_cool_naoko.sql", "0308_whole_steel_serpent.sql",
+  "0309_loving_the_hood.sql", "0310_agent_commentary.sql",
+  "0311_mcp_file_transfers.sql", "0312_easy_eternity.sql",
+  "0313_private_task_access.sql", "0314_private_task_draft_assets.sql",
+  "0315_rapid_emma_frost.sql", "0316_premium_slayback.sql",
+  "0317_messy_famine.sql", "0318_strong_blacklash.sql",
+  "0320_previous_richard_fisk.sql",
 ];
 const browserTables = ["browser_use_browsers", "browser_use_runs", "browser_use_sessions", "browser_use_settings"];
 const guardedTables = ["agent_api_keys", "agents", "companies", "company_secret_versions", "company_secrets", "project_workspaces", "projects", "routine_triggers", "routines"];
@@ -42,7 +55,10 @@ async function withEmptyDatabase(action: (sql: TestSql, url: string) => Promise<
     expect(await ensurePostgresDatabase(adminUrl.toString(), name)).toBe("created");
     const url = new URL(cluster.connectionString);
     url.pathname = `/${name}`;
-    sql = connectPostgres(url.toString(), { max: 1, onnotice: () => {} });
+    // This client crosses DDL boundaries. postgres.js caches SELECT * descriptions
+    // for prepared statements; a migration that changes the result shape must be
+    // read with a fresh description, rather than the pre-migration column count.
+    sql = connectPostgres(url.toString(), { max: 1, prepare: false, onnotice: () => {} });
     expect(await inspectMigrations(url.toString())).toMatchObject({
       status: "needsMigrations", reason: "no-migration-journal-empty-db", tableCount: 0, journalEntryCount: 0,
     });
@@ -113,12 +129,12 @@ async function seed(sql: TestSql) {
   await sql`INSERT INTO "user" (id, name, email, email_verified, created_at, updated_at)
     VALUES (${ids.user}, 'Migration board', ${`${ids.user}@example.test`}, true, now(), now())`;
   await sql`INSERT INTO instance_user_roles (user_id, role) VALUES (${ids.user}, 'instance_admin')`;
-  await sql`INSERT INTO companies (id, name, issue_prefix, default_responsible_user_id, budget_monthly_cents)
-    VALUES (${ids.company}, 'Declared company', 'MIG', ${ids.user}, 12345)`;
+  await sql`INSERT INTO companies (id, name, issue_prefix, default_responsible_user_id, budget_monthly_cents, spent_monthly_cents)
+    VALUES (${ids.company}, 'Declared company', 'MIG', ${ids.user}, 12345, 1234)`;
   await sql`INSERT INTO company_memberships (company_id, principal_type, principal_id, membership_role)
     VALUES (${ids.company}, 'user', ${ids.user}, 'owner')`;
-  await sql`INSERT INTO agents (id, company_id, name, role, adapter_type, adapter_config, budget_monthly_cents)
-    VALUES (${ids.agent}, ${ids.company}, 'Declared worker', 'engineer', 'process', ${sql.json(adapterConfig)}, 2345)`;
+  await sql`INSERT INTO agents (id, company_id, name, role, adapter_type, adapter_config, budget_monthly_cents, spent_monthly_cents)
+    VALUES (${ids.agent}, ${ids.company}, 'Declared worker', 'engineer', 'process', ${sql.json(adapterConfig)}, 2345, 345)`;
   await sql`INSERT INTO company_secrets (id, company_id, key, name, provider, created_by_user_id)
     VALUES (${ids.secret}, ${ids.company}, 'worker-token', 'Worker token', 'local_encrypted', ${ids.user})`;
   await sql`INSERT INTO company_secret_versions (id, secret_id, version, material, value_sha256, fingerprint_sha256, created_by_user_id)
@@ -146,6 +162,14 @@ async function preservedRows(sql: TestSql, row: Awaited<ReturnType<typeof seed>>
     sql`SELECT *, material::text AS material_bytes FROM company_secret_versions WHERE id = ${ids.version}`,
     sql`SELECT * FROM deployment_resources WHERE owner = 'migration-fixture' ORDER BY kind, key`,
   ]);
+}
+
+function upgradedRows(before: Awaited<ReturnType<typeof preservedRows>>) {
+  // Preserve every historical column, while asserting the exact defaults and
+  // decimal representation introduced by 0312 and 0299.
+  return before.map((rows, index) => rows.map(row => index === 3 || index === 4
+    ? { ...row, spend_month_utc: null, spent_monthly_cents: Number(row.spent_monthly_cents).toFixed(7) }
+    : index === 5 ? { ...row, ai_session_epoch: 0 } : row));
 }
 
 async function assertGuardsAndCipher(sql: TestSql, row: Awaited<ReturnType<typeof seed>>) {
@@ -189,13 +213,13 @@ describePostgres("deployment migration upgrade from authentic native history", (
       expect(afterHistory.slice(beforeHistory.length)).toEqual(appended);
       expect(afterHistory.filter((entry) => entry.hash === nativeHash)).toEqual(beforeHistory.filter((entry) => entry.hash === nativeHash));
       expect(afterHistory.filter((entry) => entry.hash === nativeHash)).toHaveLength(1);
-      expect(await preservedRows(sql, row)).toEqual(beforeRows);
+      expect(await preservedRows(sql, row)).toEqual(upgradedRows(beforeRows));
       expect(await readSchema(sql)).toEqual({ tables: [...browserTables, "deployment_resources"], keyboard: false, guards: beforeSchema.guards });
       await assertGuardsAndCipher(sql, row);
-       expect(await inspectMigrations(url)).toMatchObject({ status: "upToDate", journalEntryCount: beforeHistory.length + pendingFiles.length });
+      expect(await inspectMigrations(url)).toMatchObject({ status: "upToDate", journalEntryCount: beforeHistory.length + pendingFiles.length });
       await applyPendingMigrations(url);
       expect(await readHistory(sql)).toEqual(afterHistory);
-      expect(await preservedRows(sql, row)).toEqual(beforeRows);
+      expect(await preservedRows(sql, row)).toEqual(upgradedRows(beforeRows));
     });
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 

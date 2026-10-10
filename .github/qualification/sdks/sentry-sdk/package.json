@@ -1,0 +1,6 @@
+{
+  "name": "paperclip-qualification-sentry-sdk",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": { "@sentry/node": "10.71.0" }
+}

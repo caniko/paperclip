@@ -183,11 +183,19 @@ runtime configuration. Declare metadata to preserve it during adoption.
 
 Database guards reject ordinary edits to owned fields and credentials.
 Operational pauses, spending, and run history remain mutable. Reapply does not
-resume paused work. Removing declarations retains history: agents, companies,
+resume paused work. Enablement changes and unrelated field edits do not reapply
+an unchanged company or agent budget. The declaration still owns that budget;
+an explicit limit change uses the native budget policy.
+Removing declarations retains history: agents, companies,
 and routines pause; schedules and secrets disable; task-bridge keys revoke.
 Workspace removal is rejected until an explicit ownership handoff exists.
 Task-bridge rotation requires a new declaration key and token. Existing active
 routine schedules require explicit schedule adoption to avoid duplicates.
+
+Task bridges create issues only inside their declared project/parent boundary
+and assignee scope. They do not gain project-read API access. The create route
+validates the selected project's company, then uses the bridge's task boundary
+instead of requiring general project-read permission.
 
 ## Startup, publication, and recovery
 
@@ -195,6 +203,8 @@ The controller reserves a database connection for its full lifetime. Managed
 startup checks migration hashes before applying migrations, then bootstraps and
 reconciles transactionally. Failure stops startup before the application listener
 or dispatch services. Unexpected lease loss terminates the controller or apply.
+Company-prefix collisions allocate the next unique suffix inside that same
+transaction; other constraint failures still roll back the apply.
 The service journal emits a bounded failure phase, reconciliation step when
 available, and validated error code. It omits exception messages, SQL text,
 credential paths, and manifest values; check runtime credentials and database

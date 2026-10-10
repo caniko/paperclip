@@ -3,7 +3,8 @@ import type {
   AdapterEnvironmentTestContext,
   AdapterEnvironmentTestResult,
 } from "@paperclipai/adapter-utils";
-import { asString } from "@paperclipai/adapter-utils/server-utils";
+import { asString, parseObject } from "@paperclipai/adapter-utils/server-utils";
+import { selectExecutor } from "./executor-selection.js";
 import {
   allowsInsecureRemoteHttp,
   isLoopbackHostname,
@@ -71,7 +72,7 @@ export async function testEnvironment(
     });
   }
 
-  const parsed = apiBaseUrl ? normalizeBaseUrl(apiBaseUrl) : null;
+  let parsed = apiBaseUrl ? normalizeBaseUrl(apiBaseUrl) : null;
   const mappedDefaultDashboardRoot = Boolean(parsed && isDefaultDashboardApiEntry(new URL(apiBaseUrl)));
   if (apiBaseUrl && !parsed) {
     checks.push({
@@ -131,6 +132,8 @@ export async function testEnvironment(
   }
 
   try {
+    const selected = await selectExecutor({ config: ctx.config, runtime: {} });
+    if (selected) parsed = new URL(selected);
     const healthUrl = apiUrl(parsed, "/health");
     const response = await fetch(healthUrl, {
       method: "GET",
@@ -152,7 +155,7 @@ export async function testEnvironment(
     });
   } catch (err) {
     checks.push({
-      code: "hermes_gateway_health_unreachable",
+      code: asString(parseObject(err).code, "hermes_gateway_health_unreachable"),
       level: "error",
       message: "Could not reach Hermes Gateway health endpoint.",
       detail: errorDetail(err),

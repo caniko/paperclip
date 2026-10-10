@@ -56,6 +56,30 @@ direnv exec . pnpm install --resolution-only --ignore-scripts --no-frozen-lockfi
 Keep this local generated lock separate from implementation commits, as required
 by the dependency lockfile policy below.
 
+The Linux development shell also supplies PostgreSQL 18 clients, zsh and dash for
+the native Unix-socket backup, login-profile stream and POSIX profile-error cases.
+The hosted source
+`tests-workspaces-b` lane checks the actual embedded server version, selects
+matching `pg_dump`/`psql` clients and provisions zsh before executing the same
+fixtures. When Ubuntu 24.04 lacks matching clients, it uses the official signed
+PostgreSQL Apt repository with the repository key bound by SHA-256 in the helper.
+It retains `native-tools.json` with source/lock bindings and executable
+versions and SHA-256 hashes. Missing or incompatible tools fail preparation;
+they do not make required skipped cases acceptable. Package installation is
+restricted to hosted attempt 1. For a local inventory without installation:
+
+```sh
+node .github/scripts/prepare-source-native-tools.mjs --verify-only /path/to/fresh-evidence
+```
+
+Local verification grants no hosted qualification credit. The original source
+attempts, assertions, deadlines and strict zero-skip gate remain intact.
+
+SSH profile loading uses native zsh's `.` builtin, since zsh's `command` modifier
+only searches external commands by default. POSIX shells retain `command .` for
+nonfatal profile errors. Startup/profile output and stdin remain isolated from
+the transferred command, tar or Git stream.
+
 ## Dependency Lockfile Policy
 
 GitHub Actions owns `pnpm-lock.yaml`.
@@ -81,6 +105,33 @@ remain governed by the repository ruleset.
 When changing the workflow path or branch, authorize the new reference before
 updating the caller. Retain older authorized SHA references while queued runs or
 supported reruns still use them.
+
+The owned fork qualifies the prepared native composer Stop job independently
+in `.github/workflows/qualification-native-stop.yml` before advancing its
+immutable PR caller. Generate that lane with
+`node scripts/generate-composer-stop-qualification.mjs`; `--check` verifies
+parity. Every prepared environment value, step, command, assertion deadline,
+immutable harness/provider pin and 32-day artifact policy is retained. Only the
+job's gate dependency and runner selection change: the independent lane always
+runs on an actual Ubuntu 24.04 GitHub-hosted runner. A local browser pass gives
+diagnostic evidence only. Caller promotion still needs exact-source attempt-1
+runtime proof, all retained attachment hashes and provider retention readback.
+The prepared policy job installs the same Bubblewrap namespace prerequisites
+before exercising its mandatory hostile-lifecycle contract. Hosted image
+defaults do not guarantee `bwrap`; self-hosted policy runners must already
+provide it. The contract still executes the hostile fixture and rejects writes
+to the immutable verifier, browser tools and provenance.
+
+The owned caller now pins `4fbe02dbc1ebf59f95bee0eb84cb3edd623f7210` after
+[independent hosted attempt 1](https://github.com/caniko/paperclip/actions/runs/37967935165)
+passed both mandatory Stop cases with zero failures, errors, skips, retries or
+flaky outcomes. Custody verified the archive digest, all five attachment hashes,
+the 1,001-file immutable harness manifest, verifier source and lockfile bindings.
+An offline invocation of that immutable verifier reproduced the hosted receipt.
+The provider archive SHA-256 is
+`10bafdc47cd25f48b6d830f6f8cdc25a5795e936e576f44b0b4af7d611aa05c5`;
+actual retention is `2764798` seconds. This qualifies the prepared Stop lane.
+Each new application head still requires its own attempt-1 runtime evidence.
 
 ## Start Dev
 
@@ -559,6 +610,156 @@ assertion deadlines and retries remain unchanged. Use `pnpm dev` separately when
 verifying Vite/HMR behavior.
 
 For normal issue work, start with the smallest targeted check that proves the change. Reserve repo-wide typecheck/build/test runs for PR-ready handoff or changes broad enough that narrow checks do not cover the risk.
+
+### Exact-head hosted test evidence
+
+`PAPERCLIP_TEST_REPORT_DIR` enables per-invocation JUnit evidence in
+`scripts/run-vitest-stable.mjs`, with retries disabled and `.only` rejected.
+The qualification reporter retains each original display title and appends
+Vitest's stable task ID. Separate parameterized cases can share a display title;
+re-emitting the same framework task keeps the same ID and remains detectable as
+a duplicate by the strict receipt verifier. Actual retries or repeated test
+executions fail reporting after the original result file is retained.
+
+The hosted regression lane exercises that contract against real Vitest, including
+explicit negative fixtures for failed/skipped results, retries and duplicate task
+emission. Their raw reports are retained as labeled negative-fixture text files
+alongside the contract log, separate from mandatory application XML.
+
+The exact-head regression lane also retains mandatory XML and raw logs for the
+PR policy scripts, authentic deployment migration upgrade, draft-assets migration,
+CLI authentication routes, semantic action catalog and local Runner lifecycle.
+The Runner package's own lane wrapper builds its real Rust fixtures before the
+focused tests. Each XML report uses the strict verifier; Vitest reports use the
+stable-task reporter. These focused results supplement the original admission,
+lineage, skill authorization and PostgreSQL deployment regressions.
+
+The stable runner stops on its first failing invocation. A server JUnit report
+therefore does not by itself establish that later workspace and serialized
+invocations completed. Acceptance still requires the entire command, unchanged
+strict reports, and verified exact-source artifact digests and provider retention.
+
+The exact-head workflow partitions that same command across four complete server
+shards, two workspace-A file shards, the complete workspace-B group and four
+serialized shards. Each job retains its dry-run plan and strict JUnit reports.
+The full server group includes the chat and native-runner suites. The matrix
+contract checks complete, non-overlapping server membership and every configured
+workspace. All jobs keep the two-hour limit and attempt-1 requirement. The
+retention gate requires all fourteen application artifacts and the original RED
+artifact. Skips still fail strict acceptance; partitioning grants no coverage
+credit to a missing or unexecuted environment.
+
+### Complete required coverage map
+
+`.github/workflows/qualification-coverage.yml` collects the complete configured
+workspace Vitest roster from the exact PR head on a disposable hosted runner.
+Every declared case remains required, including skipped and todo cases. The
+workflow records static declarations as well as runtime-collected parameter
+cases. Vitest's `list --json` output is unsuitable for this map because its
+formatter omits skipped cases.
+
+The artifact includes `coverage-map.json`, the two raw rosters, configured test
+specifications, source-file SHA-256 values, collection errors and a custody
+receipt. Collection does not run assertion bodies and grants no execution
+credit. The source-bound environment rules in
+`.github/qualification/coverage-environments.json` identify real OS, SDK,
+benchmark, Cloud, runner and live-provider prerequisites. A missing generated
+managed-runner parameter remains an explicit required expansion. Source drift,
+unmapped cases and uncollected files remain blockers.
+
+Vitest discovers projects concurrently. The collector retains both raw discovery
+lists and compares sorted file/project/pool identities. Reordering cannot hide
+a changed or missing entry, and duplicate specifications fail collection.
+
+Import-only acceptance entry points retain their original parser errors and all
+configured runtime identities. A source-backed supplement recognizes only
+literal side-effect imports of real test files inside the checkout. It uses
+Vitest's public specification API and the importing project's actual environment
+to collect otherwise undiscovered sources separately. Registration order, full
+case shape, cardinality and independently collected source locations must agree
+before the parser gap is recorded as resolved. Duplicate imports, non-test setup,
+source escapes, missing static declarations and collection errors remain blockers.
+The raw errors, source hashes, supplemental rosters and bijective case bindings
+remain inspectable. This provenance gives no assertion execution credit.
+
+Import-only recognition uses the declared TypeScript 7 scanner entry point.
+It accepts only complete literal side-effect test imports, comments and their
+statement separators. Other syntax keeps the ordinary parser's errors. The
+TypeScript root export supplies version metadata and cannot supply the removed
+legacy `createSourceFile` compiler API. The roster contract covers decoded
+strings, comments, malformed literals and executable setup rejection.
+
+Reconcile the union of actual environment collections before claiming complete
+coverage. Static parsing does not fully expand dynamic parameters or recognize
+every test factory. Framework IDs depend on test order, so parameter changes
+between environments need source-location and parameter review as well as IDs.
+Playwright, Node, Python, Rust and native-package evidence retains its existing
+separate workflow requirements; this workspace roster supplies no credit for
+those lanes.
+
+The first workspace-wide runtime collection at `d3799675`
+([attempt 1](https://github.com/caniko/paperclip/actions/runs/37910691371))
+retained 33,380 cases and 81 skips from 2,119 configured specifications.
+Its source-bound map also covers the opt-in
+Claude Code login characterization, process-sandbox execution and live Daytona
+duplex cases. Each case remains required; collection grants no execution credit.
+
+Each required case still needs exact-source, attempt-1 evidence with zero
+failures, errors, skips and retries. SDK-present and SDK-absent contracts need
+separate real environments. The user authorized isolated hosted profiles for the
+live Tailscale and Claude Code cases on 2026-10-09. Other CI execution of those
+opt-in suites fails closed. The Claude workflow uses a fresh HOME, a source-pinned
+native CLI, real pseudo-terminal and network, and no provider credential. It
+submits no browser code and retains no authorization URL bytes. Its original
+case, assertions and 60-second deadline remain intact. Provider archive and
+binary hashes, strict stable-ID JUnit and non-secret output receive source-bound
+receipts and 32-day custody. The Tailscale profile still requires a disposable
+owned node, HTTPS/MagicDNS and a dedicated real broker with service credentials;
+production host state cannot supply this profile. Neither profile receives
+execution credit until its exact-source result and actual retention pass.
+The collection artifact
+requests 32-day retention and verifies actual provider expiry and SHA-256. A
+successful collection or custody receipt does not qualify the producer or
+authorize deployment.
+
+`.github/workflows/qualification-environments.yml` executes nine available
+source-backed profiles from the exact PR head: actual macOS and Windows,
+non-Linux containment denial, import and search benchmarks, OpenTelemetry SDK
+presence and absence, the real Sentry SDK, and actual Linux containment. Each profile runtime-collects every
+expanded case at its unchanged mapping rules before running it once. Missing
+prerequisites, changed source hashes, missing cases, failures, mandatory skips,
+retries and repeated identities fail the profile. Test and hook deadlines are
+inherited from the original fixtures and project configuration.
+
+SDKs use separate committed npm locks under `.github/qualification/sdks/`, with
+direct versions matching `server/package.json`. `npm ci --ignore-scripts` installs
+them outside the workspace. Their complete transitive integrity pins, installed
+file hashes and resolver paths are retained. Preparation preserves an existing
+byte-identical OpenTelemetry API dependency and releases only its own links;
+SDK-present and SDK-absent profiles run in separate disposable environments.
+Linux containment uses the existing disposable-hosted Bubblewrap preparation,
+the actual `/usr/bin/bwrap` identity and the unchanged confined-build, network,
+descendant and authority-loss assertions.
+
+Every original raw sibling outcome remains in `raw-results.junit` and
+`profile-raw-results.json`. `profile.xml` is a verified projection of all mandatory
+cases for that profile, with truthful scoped counts and unchanged titles and
+framework IDs. Filtering a sibling for a different environment grants it no
+execution credit. The artifacts request 32 days and read back actual provider
+expiry and SHA-256; a GREEN profile does not qualify the full source producer or
+complete the environment union. The original strict source gate remains intact.
+
+For an isolated local diagnostic, use a fresh evidence directory and the real
+profile prerequisites:
+
+```sh
+NODE_ENV=test node .github/scripts/run-qualification-profile.mjs --diagnostic otel-absent /path/to/fresh-evidence
+python3 .github/scripts/verify_profile_evidence.py /path/to/fresh-evidence
+```
+
+Local diagnostics grant no hosted acceptance. The Cloud, runner, managed warm
+transition and live-provider profiles retain their separate
+source, environment and credential requirements.
 
 ### Task search evaluation
 

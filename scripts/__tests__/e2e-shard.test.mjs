@@ -8,6 +8,7 @@ import test from "node:test";
 
 import { defaultSuiteWeight, loadShardDurations } from "../general-server-shard.mjs";
 import { IGNORED_SPECS, listE2eSpecs, selectE2eShard } from "../e2e-shard.mjs";
+import { renderStopQualification } from "../generate-composer-stop-qualification.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const script = path.join(repoRoot, "scripts", "e2e-shard.mjs");
@@ -291,6 +292,26 @@ test("the e2e aggregate refuses failed or missing native Stop qualification", ()
   }
 });
 
+test("the prepared Stop workflow selects the absolute candidate root and retains browser evidence for 32 days", () => {
+  // Check the prepared source before its immutable caller pin is advanced.
+  const jobs = readWorkflowJobs(readFileSync(trustedPrWorkflow, "utf8"));
+  assert.match(jobs.get("native_composer_stop"), /PAPERCLIP_E2E_SOURCE_ROOT: \$\{\{ github\.workspace \}\}/);
+  assert.match(jobs.get("e2e_shards"), /retention-days: 32/);
+});
+
+test("the independent hosted Stop lane keeps the qualified prepared commands", () => {
+  const prepared = readFileSync(trustedPrWorkflow, "utf8");
+  const qualification = readFileSync(path.join(repoRoot, ".github/workflows/qualification-native-stop.yml"), "utf8");
+  assert.equal(qualification, renderStopQualification(prepared));
+  const original = readWorkflowJobs(prepared).get("native_composer_stop");
+  const independent = readWorkflowJobs(qualification).get("native_composer_stop");
+  assert.equal(independent.slice(independent.indexOf("    env:\n")).trimEnd(), original.slice(original.indexOf("    env:\n")).trimEnd());
+  assert.match(independent, /runs-on: ubuntu-24\.04/);
+  assert.match(independent, /timeout-minutes: 20/);
+  assert.doesNotMatch(independent, /needs\.gate/);
+  assert.match(readFileSync(prCallerWorkflow, "utf8"), /pr-trusted\.yml@4fbe02dbc1ebf59f95bee0eb84cb3edd623f7210/);
+});
+
 test("the stacked PR scope selector runs full CI only where intended", () => {
   assert.equal(runStackScope(null, "master").full_ci, "true");
   assert.equal(
@@ -351,7 +372,7 @@ test("the trusted PR workflow regenerates stale stacked lockfiles", () => {
   // resolves a stale lockfile inline, so a manifest-changing or stacked PR
   // still installs while the policy job validates resolution in parallel.
   const fallbackInstalls = workflow.match(
-    /if ! pnpm install --frozen-lockfile; then\n[\s\S]{0,240}?pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile\n\s+pnpm install --frozen-lockfile\n\s+fi/g,
+    /if ! (candidate )?pnpm install --frozen-lockfile; then\n[\s\S]{0,240}?\1pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile\n\s+\1pnpm install --frozen-lockfile\n\s+fi/g,
   ) ?? [];
   assert.equal(
     fallbackInstalls.length,

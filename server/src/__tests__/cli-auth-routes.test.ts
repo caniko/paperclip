@@ -130,7 +130,7 @@ function createOperatorPaperclipSkill() {
   return markdown;
 }
 
-describe.sequential("cli auth routes", () => {
+describe("cli auth routes", { concurrent: false }, () => {
   beforeEach(() => {
     vi.resetModules();
     vi.doUnmock("../services/index.js");
@@ -149,7 +149,7 @@ describe.sequential("cli auth routes", () => {
     tempDirs.length = 0;
   });
 
-  it.sequential("creates a CLI auth challenge with approval metadata", async () => {
+  it("creates a CLI auth challenge with approval metadata", { concurrent: false }, async () => {
     mockBoardAuthService.createCliAuthChallenge.mockResolvedValue({
       challenge: {
         id: "12345678-1234-4123-8123-123456789abc",
@@ -191,7 +191,7 @@ describe.sequential("cli auth routes", () => {
     expect(skillRes.status, skillRes.text || JSON.stringify(skillRes.body)).toBe(401);
   });
 
-  it.sequential("serves the invite-scoped paperclip skill anonymously for active invites", async () => {
+  it("serves the invite-scoped paperclip skill anonymously for active invites", { concurrent: false }, async () => {
     const db = createActiveInviteDb();
 
     const app = await createApp({ type: "none", source: "none" }, db);
@@ -202,7 +202,7 @@ describe.sequential("cli auth routes", () => {
     expect(res.text).toContain("# Paperclip Skill");
   });
 
-  it.sequential("serves bundled invite skill content despite a same-name operator skill", async () => {
+  it("serves bundled invite skill content despite a same-name operator skill", { concurrent: false }, async () => {
     const operatorMarkdown = createOperatorPaperclipSkill();
     const bundledMarkdown = fs.readFileSync(
       new URL("../../../skills/paperclip/SKILL.md", import.meta.url),
@@ -218,7 +218,7 @@ describe.sequential("cli auth routes", () => {
     expect(res.text).not.toContain(operatorMarkdown.trim());
   });
 
-  it.sequential("preserves same-name operator skill content for authenticated generic reads", async () => {
+  it("preserves same-name operator skill content for authenticated generic reads", { concurrent: false }, async () => {
     const operatorMarkdown = createOperatorPaperclipSkill();
     const app = await createApp({ type: "board", userId: "user-1", source: "session" });
     const res = await request(app).get("/api/skills/paperclip");
@@ -228,7 +228,7 @@ describe.sequential("cli auth routes", () => {
     expect(res.text).toBe(operatorMarkdown);
   });
 
-  it.sequential("marks challenge status as requiring sign-in for anonymous viewers", async () => {
+  it("marks challenge status as requiring sign-in for anonymous viewers", { concurrent: false }, async () => {
     mockBoardAuthService.describeCliAuthChallenge.mockResolvedValue({
       id: "12345678-1234-4123-8123-123456789abc",
       status: "pending",

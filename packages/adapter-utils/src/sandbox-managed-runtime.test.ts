@@ -847,8 +847,7 @@ describe("sandbox managed runtime", () => {
     await mkdir(host);
     await git(host, ["init"]);
     await git(host, ["checkout", "-b", "work"]);
-    await git(host, ["config", "user.name", "Paperclip Test"]);
-    await git(host, ["config", "user.email", "test@paperclip.dev"]);
+    configureFixtureGitIdentity(host);
     await writeFile(path.join(host, "pins.txt"), "base\n");
     await writeFile(path.join(host, "notes.txt"), "original notes\n");
     await git(host, ["add", "."]);
@@ -868,8 +867,7 @@ describe("sandbox managed runtime", () => {
       client: makeFilesystemClient(),
       workspaceLocalDir: host,
     });
-    await git(remote, ["config", "user.name", "Paperclip Test"]);
-    await git(remote, ["config", "user.email", "test@paperclip.dev"]);
+    configureFixtureGitIdentity(remote);
     await git(remote, ["fetch", "--unshallow", host, "+refs/heads/*:refs/remotes/source/*"]);
     await expect(git(remote, ["rebase", "refs/remotes/source/upstream"])).rejects.toMatchObject({ code: 1 });
     await writeFile(path.join(remote, "pins.txt"), "resolved pins\n");
@@ -900,8 +898,7 @@ describe("sandbox managed runtime", () => {
     await mkdir(host);
     await git(host, ["init"]);
     await git(host, ["checkout", "-b", "work"]);
-    await git(host, ["config", "user.name", "Paperclip Test"]);
-    await git(host, ["config", "user.email", "test@paperclip.dev"]);
+    configureFixtureGitIdentity(host);
     await writeFile(path.join(host, "tracked.txt"), "original\n");
     await git(host, ["add", "."]);
     await git(host, ["commit", "-m", "original"]);

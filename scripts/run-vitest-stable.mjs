@@ -408,7 +408,8 @@ function runVitest(args, label, testShard = null) {
   if (process.env.PAPERCLIP_TEST_REPORT_DIR) {
     const reportDir = path.resolve(process.env.PAPERCLIP_TEST_REPORT_DIR);
     mkdirSync(reportDir, { recursive: true });
-    args.push("--retry=0", "--reporter=default", "--reporter=junit",
+    args.push("--retry=0", "--reporter=default",
+      `--reporter=${path.join(scriptsDir, "qualification-junit-reporter.mjs")}`,
       `--outputFile.junit=${path.join(reportDir, `${invocationIndex}.xml`)}`);
   }
   const result = spawnSync("pnpm", ["exec", "vitest", "run", ...sourceOnlyVitestArgs, ...args], {
