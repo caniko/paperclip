@@ -80,6 +80,10 @@ only searches external commands by default. POSIX shells retain `command .` for
 nonfatal profile errors. Startup/profile output and stdin remain isolated from
 the transferred command, tar or Git stream.
 
+On local Windows, Codex API-key probes stage a temporary `auth.json` with Node's
+filesystem APIs and use the native command launcher for `.cmd` and `.bat` files.
+The probe removes its temporary credential home after completion or launch failure.
+
 ## Dependency Lockfile Policy
 
 GitHub Actions owns `pnpm-lock.yaml`.

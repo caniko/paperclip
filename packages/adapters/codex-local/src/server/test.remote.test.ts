@@ -253,6 +253,37 @@ describe("codex remote environment diagnostics", () => {
     expect(probeCall?.[3]).toContain("--skip-git-repo-check");
   });
 
+  it.each([false, true])("stages a Windows probe credential and removes it after native launch (rejected=%s)", async (rejected) => {
+    // Platform selection is simulated; the original hosted .cmd case still
+    // supplies actual Windows launcher execution evidence.
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    let home = "";
+    runAdapterExecutionTargetProcess.mockImplementationOnce(async (...call: unknown[]) => {
+      const [, target, command, args, options] = call as [string, unknown, string, string[], { env: Record<string, string> }];
+      home = options.env.CODEX_HOME!;
+      expect(target).toBeNull();
+      expect(command).toBe("codex");
+      expect(args.join(" ")).not.toContain("sk-windows-probe");
+      expect(JSON.parse(await fs.readFile(path.join(home, "auth.json"), "utf8")))
+        .toEqual({ OPENAI_API_KEY: "sk-windows-probe" });
+      if (rejected) throw new Error("native launcher rejected");
+      return versionProbeResult('{"type":"item.completed","item":{"type":"agent_message","text":"hello"}}');
+    });
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const probe = testEnvironment({
+        companyId: "company-1", adapterType: "codex_local",
+        config: { engine: "cli", command: "codex", env: { OPENAI_API_KEY: "sk-windows-probe" } },
+      });
+      if (rejected) await expect(probe).rejects.toThrow("native launcher rejected");
+      else expect((await probe).status).toBe("pass");
+      expect(home).not.toBe("");
+      expect(await fs.stat(home).catch(() => null)).toBeNull();
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
+
   // `sandboxTarget()` is declared later in this describe block; function
   // declarations hoist, so the version-floor cases below reuse it.
   function versionProbeResult(stdout: string) {

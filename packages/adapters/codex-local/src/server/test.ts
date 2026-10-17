@@ -216,6 +216,24 @@ async function prepareCodexHelloProbe(input: {
   }
 
   if (input.probeApiKey) {
+    if (!input.targetIsRemote && process.platform === "win32") {
+      // Keep .cmd/.bat dispatch in the native launcher; a POSIX shell cannot
+      // resolve Windows command wrappers or preserve their argument semantics.
+      probeHomeLocalDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-probe-"));
+      try {
+        await fs.writeFile(path.join(probeHomeLocalDir, "auth.json"),
+          JSON.stringify({ OPENAI_API_KEY: input.probeApiKey }), { mode: 0o600, flag: "wx" });
+      } catch (error) {
+        await cleanup();
+        throw error;
+      }
+      return {
+        command: input.command,
+        args: input.args,
+        env: { ...input.env, CODEX_HOME: probeHomeLocalDir },
+        cleanup,
+      };
+    }
     const probeHome = input.targetIsRemote
       ? path.posix.join(input.cwd, ".paperclip-runtime", "codex", `probe-home-${input.runId}`)
       : path.join(os.tmpdir(), `paperclip-codex-probe-${input.runId}`);
