@@ -155,7 +155,8 @@ if sys.argv[1] != "completion":
     expect(await readFile(join(directory, "output.txt"), "utf8")).toBe("hello");
     const read = await executeWorkspaceTool(directory, "workspace_run", { program: "/bin/cat", args: [secret] }, authorize);
     expect(read).toMatchObject({ exitCode: 1 }); expect(String((read as any).output)).not.toContain("PRIVATE");
-    const write = await executeWorkspaceTool(directory, "workspace_run", { program: "/bin/sh", args: ["-c", 'printf stolen > "$1"', "sh", secret] }, authorize);
+    // Bash returns 1 for a denied redirection; dash returns 2 for the same denial.
+    const write = await executeWorkspaceTool(directory, "workspace_run", { program: "/bin/bash", args: ["-c", 'printf stolen > "$1"', "bash", secret] }, authorize);
     expect(write).toMatchObject({ exitCode: 1 }); expect(await readFile(secret, "utf8")).toBe("PRIVATE");
   });
   it.skipIf(!workspaceCommandSandboxAvailable())("stops its owned process on authority loss and bounds output", async () => {
