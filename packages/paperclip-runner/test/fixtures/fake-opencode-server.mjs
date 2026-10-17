@@ -919,4 +919,8 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, "127.0.0.1");
 for (const signal of ["SIGTERM", "SIGINT"])
-  process.on(signal, () => server.close(() => process.exit(0)));
+  process.on(signal, () => {
+    server.close(() => process.exit(0));
+    // Active SSE connections otherwise hold shutdown until the driver's kill deadline.
+    server.closeAllConnections();
+  });
