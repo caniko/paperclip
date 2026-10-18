@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createVitest } from "vitest/node";
-import { collectRows, mapEnvironments, sha256, specificationRows } from "./qualification-roster.mjs";
+import { collectRows, declarationSites, mapEnvironments, sha256, specificationRows } from "./qualification-roster.mjs";
 import { importEntries, reconcileImportEntry, supplementalSpecifications } from "./qualification-import-provenance.mjs";
 
 const root = process.cwd();
@@ -87,11 +87,7 @@ try {
   const errors = [...unresolvedStaticErrors, ...supplementalStaticErrors, ...unhandledErrors,
     ...supplemental.unhandledErrors, ...moduleErrors(testModules), ...moduleErrors(supplemental.testModules)]
     .map(error => ({ name: error.name, message: error.message, stack: error.stack }));
-  const sites = declarations.map(declaration => ({ ...declaration,
-    matching_requires_environment_union_review: true,
-    runtime_case_ids_at_site: rows.filter(row => row.file === declaration.file && row.project === declaration.project
-      && row.location && declaration.location && row.location.line === declaration.location.line
-      && row.location.column === declaration.location.column).map(row => row.id) }));
+  const sites = declarationSites(declarations, rows, sources);
   const missing = specifications.filter(spec => !rows.some(row => row.file === spec.file && row.project === spec.project));
   const roster = { schema: "paperclip.complete-coverage-map.v1", head: source.head, tree: execFileSync("git", ["rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim(),
     run_id: source.run_id, run_attempt: source.run_attempt, collection_platform: process.platform,

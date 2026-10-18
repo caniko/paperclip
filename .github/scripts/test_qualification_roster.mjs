@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createVitest } from "vitest/node";
-import { collectRows, mapEnvironments, sha256, specificationRows } from "./qualification-roster.mjs";
+import { collectRows, declarationSites, mapEnvironments, sha256, specificationRows } from "./qualification-roster.mjs";
 import { importEntries, reconcileImportEntry, supplementalSpecifications } from "./qualification-import-provenance.mjs";
 
 const module = tasks => ({ task: { filepath: "/checkout/fixture.test.ts", projectName: "fixture", mode: "run", tasks } });
@@ -81,7 +81,10 @@ test("real Vitest collection preserves skipped cases and static-only declaration
       it.each([1, 2])("same display title", () => { throw new Error("collection must not execute assertions"); });
       describe.skip("unavailable SDK", () => { it("required case", () => {}); });
       it.todo("required todo");
-      if (process.pid < 0) { it("conditional declaration", () => {}); }`);
+      if (process.pid < 0) { it("conditional declaration", () => {}); }
+      it("left", () => {}); it("right", () => {});
+      it.skipIf(false)("enabled conditional", () => {});
+      it("contains ordinary helper", () => { testOrdinaryHelper("ordinary call", () => {}); });`);
     const configFile = path.join(root, "vitest.config.mjs");
     writeFileSync(configFile, `export default { test: { name: "roster-contract", root: ${JSON.stringify(root)}, include: ["fixture.test.mjs"] } };`);
     const options = { root, config: configFile, watch: false, reporters: [], includeTaskLocation: true, allowOnly: false, maxWorkers: 1 };
@@ -96,12 +99,23 @@ test("real Vitest collection preserves skipped cases and static-only declaration
     const rows = collectRows(testModules, root);
     assert.deepEqual(unhandledErrors, []);
     assert.ok(testModules.every(module => module.errors().length === 0));
-    assert.equal(rows.length, 4);
+    assert.equal(rows.length, 8);
     assert.equal(rows.filter(row => row.name === "same display title").length, 2);
-    assert.equal(new Set(rows.map(row => row.id)).size, 4);
+    assert.equal(new Set(rows.map(row => row.id)).size, 8);
     assert.equal(rows.filter(row => row.skipped_in_environment).length, 2);
     assert.ok(!rows.some(row => row.name === "conditional declaration"));
     assert.ok(rows.every(row => row.required && row.status === "unexecuted" && row.location?.line > 0));
+    const sites = declarationSites(declarations, rows, { "fixture.test.mjs": readFileSync(path.join(root, "fixture.test.mjs"), "utf8") });
+    for (const name of ["same display title", "left", "right", "enabled conditional", "contains ordinary helper"]) {
+      const site = sites.find(row => row.name === name);
+      assert.deepEqual(site.runtime_case_ids_at_site, rows.filter(row => row.name === name).map(row => row.id));
+    }
+    for (const name of ["conditional declaration", "ordinary call"]) {
+      const site = sites.find(row => row.name === name);
+      assert.ok(site.required && site.matching_requires_environment_union_review);
+      assert.deepEqual(site.runtime_case_ids_at_site, []);
+    }
+    assert.equal(sites.length, declarations.length, "Every original static declaration remains retained");
     if (process.env.EVIDENCE) {
       const directory = path.join(process.env.EVIDENCE, "roster-contract");
       mkdirSync(directory, { recursive: true });

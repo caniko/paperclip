@@ -56,6 +56,31 @@ export function collectRows(modules, root) {
   return rows.sort((a, b) => JSON.stringify([a.project, a.file, a.id]).localeCompare(JSON.stringify([b.project, b.file, b.id]), "en"));
 }
 
+export function declarationSites(declarations, rows, sources) {
+  const byLine = new Map(), sourceLines = new Map();
+  const key = row => JSON.stringify([row.project, row.file, row.location?.line]);
+  for (const row of rows) {
+    if (!row.location) continue;
+    if (!byLine.has(key(row))) byLine.set(key(row), []);
+    byLine.get(key(row)).push(row);
+  }
+  return declarations.map(declaration => {
+    if (!sourceLines.has(declaration.file)) sourceLines.set(declaration.file, sources[declaration.file]?.split("\n") ?? []);
+    const line = sourceLines.get(declaration.file)[declaration.location?.line - 1];
+    const candidates = (byLine.get(key(declaration)) ?? []).filter(row => {
+      if (row.location.column === declaration.location.column) return true;
+      // Vitest's transformed static location can point at the title argument,
+      // while runtime points at `it`/`test` or the final `(` of a chained call.
+      // ponytail: normalize only these literal call boundaries; aliases and
+      // other source-map gaps remain unresolved for explicit provenance review.
+      return row.location.column < declaration.location.column
+        && ["(", "it(", "test("].includes(line?.slice(row.location.column - 1, declaration.location.column - 1));
+    });
+    return { ...declaration, matching_requires_environment_union_review: true,
+      runtime_case_ids_at_site: candidates.map(row => row.id) };
+  });
+}
+
 export function mapEnvironments(rows, sources, policy) {
   assert.equal(policy.all_declared_cases_required, true, "Coverage policy cannot waive declared cases");
   const stale = [];
