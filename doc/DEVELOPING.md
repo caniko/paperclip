@@ -624,6 +624,9 @@ Vitest's stable task ID. Separate parameterized cases can share a display title;
 re-emitting the same framework task keeps the same ID and remains detectable as
 a duplicate by the strict receipt verifier. Actual retries or repeated test
 executions fail reporting after the original result file is retained.
+XML-valid control characters in case titles are emitted as character references,
+preserving their exact parsed identity; titles that XML 1.0 cannot represent fail
+reporting rather than silently dropping characters.
 
 The hosted regression lane exercises that contract against real Vitest, including
 explicit negative fixtures for failed/skipped results, retries and duplicate task

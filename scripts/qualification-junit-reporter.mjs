@@ -10,6 +10,24 @@ export default class QualificationJUnitReporter extends JUnitReporter {
     super({});
   }
 
+  async writeElement(name, attrs, children) {
+    if (name !== "testcase") return super.writeElement(name, attrs, children);
+    // Vitest's attribute sanitizer drops XML-valid C1 characters from titles.
+    // Emit character references so the strict verifier reads the original identity.
+    const pairs = Object.entries(attrs).filter(([, value]) => value !== undefined).map(([key, value]) => {
+      const text = String(value);
+      if (/[^\u0009\u000a\u000d\u0020-\ud7ff\ue000-\ufffd\u{10000}-\u{10ffff}]/u.test(text)) {
+        throw new Error("Qualification case identity is not representable in XML 1.0");
+      }
+      return `${key}="${text.replace(/[&<>"'\t\n\r\u007f-\u009f]/g, character => `&#${character.codePointAt(0)};`)}"`;
+    });
+    await this.logger.log(`<${name}${pairs.length ? ` ${pairs.join(" ")}` : ""}>`);
+    this.logger.indent();
+    await children.call(this);
+    this.logger.unindent();
+    await this.logger.log(`</${name}>`);
+  }
+
   async writeTasks(tasks, filename, fileAbsPath) {
     const identified = tasks.map((task) => {
       if (typeof task.id !== "string" || !task.id) {

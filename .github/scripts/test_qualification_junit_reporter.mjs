@@ -73,6 +73,33 @@ test("real Vitest preserves distinct same-title cases, failures and skips", () =
   }
 });
 
+test("real Vitest retains exact XML-valid control characters and metacharacters in case identities", () => {
+  const suite = "native\u0080suite";
+  const titles = ["native\u0080tool", "native\u0085tool", "native\u009ftool",
+    "literal &#128; & <tool> \"quoted\" 'single'", "tabs\tand\rnew\nlines", "Unicode \ufffd \ufdd0 \u{1f680}"];
+  const result = fixture(`import { describe, it } from "vitest";
+    describe(${JSON.stringify(suite)}, () => {
+      for (const title of ${JSON.stringify(titles)}) it(title, () => {});
+    });`);
+  try {
+    assert.equal(result.status, 0, result.output);
+    assert.equal(result.cases.length, titles.length);
+    assert.deepEqual(result.cases.map(row => row.name.replace(/ \[vitest:[^\]]+\]$/, "")),
+      titles.map(title => `${suite} > ${title}`));
+    assert.equal(new Set(result.cases.map(row => row.name)).size, titles.length);
+    retain("exact-unicode-identities", result.file, result.output);
+  } finally {
+    result.cleanup();
+  }
+});
+
+test("XML-unrepresentable case identities fail instead of silently losing characters", async () => {
+  for (const name of ["native\0tool", "native\ufffetool", "native\ud800tool"]) {
+    await assert.rejects(new QualificationJUnitReporter().writeElement("testcase", { name }, async () => {}),
+      /Qualification case identity is not representable in XML 1\.0/);
+  }
+});
+
 test("an actual failed-then-passed retry still fails qualification and retains its report", () => {
   const result = fixture(`import { it } from "vitest";
     let calls = 0;
