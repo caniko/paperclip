@@ -8,6 +8,8 @@ import { createVitest } from "vitest/node";
 import QualificationJUnitReporter from "../../scripts/qualification-junit-reporter.mjs";
 import { collectRows, sha256, specificationRows } from "./qualification-roster.mjs";
 import { profileSelection, verifyProfileResults } from "./qualification-profiles.mjs";
+import { resolveCargoBinary, resolveCargoTargetDirectory } from "../../packages/paperclip-runner/scripts/cargo-artifacts.mjs";
+import { bindQualificationRunner } from "./qualification-runner.mjs";
 
 const args = process.argv.slice(2);
 const diagnostic = args[0] === "--diagnostic";
@@ -63,6 +65,33 @@ if (profile === "linux-containment") {
     version: execFileSync("/usr/bin/bwrap", ["--version"], { encoding: "utf8" }).trim(),
     preparationHelperSha256: sha256(readFileSync(".github/scripts/prepare-candidate-sandbox.sh")) };
 }
+function runnerBinding() {
+  const packageRoot = path.join(root, "packages/paperclip-runner");
+  const binary = resolveCargoBinary({ binary: "paperclip-runnerd", targetDirectory: resolveCargoTargetDirectory({ packageRoot }) });
+  const binding = bindQualificationRunner(packageRoot, binary);
+  const version = command => execFileSync(command, ["--version", "--verbose"], { cwd: packageRoot, encoding: "utf8" }).trim();
+  const rustcVersion = version("rustc"), cargoVersion = version("cargo");
+  const channel = readFileSync(path.join(packageRoot, "rust-toolchain.toml"), "utf8").match(/^channel = "([0-9.]+)"$/m)?.[1];
+  assert.ok(channel, "The runner requires its declared immutable Rust toolchain");
+  assert.ok(rustcVersion.startsWith(`rustc ${channel} `) && cargoVersion.startsWith(`cargo ${channel} `),
+    "The actual compiler and Cargo must match the declared runner toolchain");
+  const nativeToolsRaw = readFileSync(path.join(evidence, "native-tools.json"));
+  const nativeTools = JSON.parse(nativeToolsRaw);
+  assert.equal(nativeTools.schema, "paperclip.source-native-tools.v1");
+  assert.equal(nativeTools.head, metadata.head);
+  assert.equal(nativeTools.tree, metadata.tree);
+  assert.equal(nativeTools.verificationOnly, diagnostic);
+  assert.equal(nativeTools.helperSha256, sha256(readFileSync(".github/scripts/prepare-source-native-tools.mjs")));
+  assert.equal(nativeTools.nativeRuntimeHelperSha256, sha256(readFileSync("packages/db/src/embedded-postgres-native.ts")));
+  assert.equal(nativeTools.dependencyLockSha256, sha256(readFileSync("pnpm-lock.yaml")));
+  assert.deepEqual(Object.keys(nativeTools.tools).sort(), ["pg_dump", "postgres", "psql", "zsh"]);
+  for (const tool of Object.values(nativeTools.tools)) assert.equal(sha256(readFileSync(tool.binary)), tool.sha256);
+  return { ...binding, rustcVersion, cargoVersion, nativeToolsReceiptSha256: sha256(nativeToolsRaw),
+    bindingHelperSha256: sha256(readFileSync(".github/scripts/qualification-runner.mjs")),
+    resolutionHelperSha256: sha256(readFileSync(path.join(packageRoot, "src/live/runner-binary.ts"))),
+    transportSha256: sha256(readFileSync(path.join(packageRoot, "src/live/runnerd-codex-transport.ts"))) };
+}
+if (profile === "runnerd") metadata.runnerd = runnerBinding();
 write("profile-source.json", metadata);
 const options = { root, watch: false, includeTaskLocation: true, allowOnly: false, retry: 0,
   maxWorkers: 1, fileParallelism: false, exclude: ["**/dist/**"] };
@@ -107,6 +136,7 @@ try {
   const errors = [...executed.unhandledErrors, ...moduleErrors(executed.testModules)];
   write("profile-raw-results.json", { cases: results, errors });
   for (const file of files) assert.equal(sha256(readFileSync(file)), metadata.sourceFiles[file], "Fixture changed during execution");
+  if (profile === "runnerd") assert.deepEqual(runnerBinding(), metadata.runnerd, "Runner prerequisites changed during execution");
   const result = verifyProfileResults(selection, results, errors);
   write("profile-result.json", { ...metadata, ...result });
 } catch (error) {
