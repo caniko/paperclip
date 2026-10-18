@@ -658,7 +658,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let durable_tool_ids = args.iter().any(|value| value == "--durable-tool-ids");
     let expected_canonical_task_context_file =
         argument(&args, "--expected-canonical-task-context-file");
+    let expected_native_task_context_file = argument(&args, "--expected-native-task-context-file");
     let emit_tool_call = args.iter().any(|value| value == "--emit-tool-call");
+    let completion_result_file = argument(&args, "--completion-result-file");
     let replay_completed_tool_call = args
         .iter()
         .any(|value| value == "--replay-completed-tool-call");
@@ -934,6 +936,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             continue;
         }
+        if message.get("method").is_none()
+            && message.get("id") == Some(&json!("completion-request"))
+        {
+            if message.pointer("/result/success") != Some(&json!(true)) {
+                return Err("reserved completion was not accepted".into());
+            }
+            log_call(call_log.as_deref(), "completion-response:accepted")?;
+            finish_turn(&state_path, &mut state, "completed")?;
+            continue;
+        }
         if message.get("method").is_none() && message.get("id") == Some(&json!("tool-request-1")) {
             if message.pointer("/result/success") == Some(&json!(false)) {
                 log_call(call_log.as_deref(), "tool-response:failure")?;
@@ -957,12 +969,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 None
             };
-            if !matches_task_context_result(
-                &result,
-                expected_from_file
-                    .as_ref()
-                    .or(expected_canonical_task_context.as_ref()),
-            ) {
+            let native_binding_matches = if let Some(path) = &expected_native_task_context_file {
+                let expected: Value = serde_json::from_slice(&fs::read(path)?)?;
+                [
+                    ("/company/id", "/companyId"),
+                    ("/actor/id", "/actorId"),
+                    ("/activeTask/id", "/taskId"),
+                    ("/run/id", "/runId"),
+                    ("/activeTask/executionRunId", "/runId"),
+                ]
+                .into_iter()
+                .all(|(actual, binding)| {
+                    let actual = result.pointer(actual).and_then(Value::as_str);
+                    actual.is_some_and(|value| !value.is_empty())
+                        && actual == expected.pointer(binding).and_then(Value::as_str)
+                })
+            } else {
+                matches_task_context_result(
+                    &result,
+                    expected_from_file
+                        .as_ref()
+                        .or(expected_canonical_task_context.as_ref()),
+                )
+            };
+            if !native_binding_matches {
                 return Err("semantic tool response changed the operation result".into());
             }
             log_call(call_log.as_deref(), &format!("tool-response:{text}"))?;
@@ -990,6 +1020,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "callId": "semantic-call-1",
                         "tool": "get_task_context",
                         "arguments": {}
+                    }
+                }))?;
+            } else if let Some(path) = &completion_result_file {
+                let result: Value = serde_json::from_slice(&fs::read(path)?)?;
+                send(json!({
+                    "id": "completion-request",
+                    "method": "item/tool/call",
+                    "params": {
+                        "threadId": state.thread_id,
+                        "turnId": state.active_turn_id,
+                        "callId": "completion-call",
+                        "tool": "paperclip_finish",
+                        "arguments": result
                     }
                 }))?;
             } else if !hold_turn {

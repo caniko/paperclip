@@ -4270,6 +4270,9 @@ function hasRetainedWarmTransitionEvidence(root: string): boolean {
 type VerifiedWarmTransitionBinding = {
   runnerInstanceId: string;
   environmentLeaseId: string;
+  runId: string;
+  turnId: string;
+  itemId: string;
   transitionId: string;
   stateFingerprint: string;
 };
@@ -4330,6 +4333,14 @@ async function verifyWarmTransitionRestart(input: {
     return deny();
   const root = scopedRunnerdStateRoot(input.execution);
   const snapshot = readWarmTransitionSnapshot(root);
+  const selectedIdentity = record(
+    record(record(record(snapshot.runnerState).warmTransition).receipt).newIdentity,
+  );
+  const { turnId, itemId } = selectedIdentity;
+  // Attachment turn/item IDs are protocol nonces, not database run IDs. The
+  // complete command/result/lease proof below must authenticate these exact
+  // values; database ownership still independently binds every scope field.
+  if (typeof turnId !== "string" || typeof itemId !== "string") return deny();
   const artifact = readRunnerdArtifactBinding(resolvePaperclipRunnerBinary());
   const controller = await currentNativeControllerIdentity();
   const binding = input.execution.binding;
@@ -4481,8 +4492,8 @@ async function verifyWarmTransitionRestart(input: {
         environmentLeaseId: expectedEnvironmentLeaseId,
         runId: binding.runId,
         normalizedSessionId: nativeSessionKey(input.execution),
-        turnId: `turn-${binding.runId}`,
-        itemId: `item-${binding.runId}`,
+        turnId,
+        itemId,
       },
       expectedRunnerVersion: artifact.version,
       expectedRunnerDigest: artifact.digest,
@@ -4519,9 +4530,7 @@ async function verifyWarmTransitionRestart(input: {
       proof.receipt.oldIdentity.runnerInstanceId !== prior.runnerInstanceId ||
       proof.receipt.oldIdentity.normalizedSessionId !== prior.nativeSessionId ||
       proof.receipt.oldIdentity.environmentLeaseId !==
-        expectedEnvironmentLeaseId ||
-      proof.receipt.oldIdentity.turnId !== `turn-${prior.id}` ||
-      proof.receipt.oldIdentity.itemId !== `item-${prior.id}`
+        expectedEnvironmentLeaseId
     )
       return deny();
     let previousExecution: NativeExecutionInput;
@@ -4653,6 +4662,9 @@ async function verifyWarmTransitionRestart(input: {
     return {
       runnerInstanceId: current.runnerInstanceId,
       environmentLeaseId: expectedEnvironmentLeaseId,
+      runId: binding.runId,
+      turnId: proof.receipt.newIdentity.turnId,
+      itemId: proof.receipt.newIdentity.itemId,
       transitionId: proof.receipt.transitionId,
       stateFingerprint: snapshot.stateFingerprint,
     };
@@ -5165,6 +5177,8 @@ type RunnerdDurableIdentity = Record<string, unknown> & {
   normalizedSessionId: string;
   runnerInstanceId: string;
   environmentLeaseId: string;
+  turnId?: string;
+  itemId?: string;
 };
 
 function readRunnerdDurableIdentity(
@@ -5215,7 +5229,9 @@ function durableIdentityMatchesSession(
     typeof identity.runnerInstanceId === "string" &&
     identity.runnerInstanceId.length > 0 &&
     typeof identity.environmentLeaseId === "string" &&
-    identity.environmentLeaseId.length > 0,
+    identity.environmentLeaseId.length > 0 &&
+    (identity.turnId === undefined || typeof identity.turnId === "string") &&
+    (identity.itemId === undefined || typeof identity.itemId === "string"),
   );
 }
 
@@ -5253,6 +5269,9 @@ function loadRunnerdDurableBinding(
 ): {
   runnerInstanceId: string;
   environmentLeaseId: string;
+  runId: string;
+  turnId?: string;
+  itemId?: string;
 } | null {
   if (transition) {
     if (
@@ -5269,10 +5288,7 @@ function loadRunnerdDurableBinding(
   // session root; rotateLocalAuthorityEpoch then requires that exact binding
   // before it can archive the prior per-run authority.
   if (!durableIdentityMatchesSession(identity, execution)) return null;
-  return {
-    runnerInstanceId: identity.runnerInstanceId,
-    environmentLeaseId: identity.environmentLeaseId,
-  };
+  return identity;
 }
 
 function nativeSessionConfigDigest(
@@ -13062,8 +13078,14 @@ async function createRunnerdBackendWithinSessionClaim(
           normalizedSessionId:
             input.execution.session.normalizedSessionId ??
             `session-${input.execution.binding.runId}`,
-          turnId: `turn-${input.execution.binding.runId}`,
-          itemId: `item-${input.execution.binding.runId}`,
+          turnId:
+            durableBinding?.runId === input.execution.binding.runId
+              ? durableBinding.turnId ?? `turn-${input.execution.binding.runId}`
+              : `turn-${input.execution.binding.runId}`,
+          itemId:
+            durableBinding?.runId === input.execution.binding.runId
+              ? durableBinding.itemId ?? `item-${input.execution.binding.runId}`
+              : `item-${input.execution.binding.runId}`,
         },
         warmTransitionRegistrationMode: retainedTransition
           ? "routed_connect"
