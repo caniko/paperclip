@@ -84,6 +84,10 @@ test("real Vitest collection preserves skipped cases and static-only declaration
       if (process.pid < 0) { it("conditional declaration", () => {}); }
       it("left", () => {}); it("right", () => {});
       it.skipIf(false)("enabled conditional", () => {});
+      it.each([3, 4])(
+        "multiline title", () => {});
+      it(
+        "multiline direct", () => {});
       it("contains ordinary helper", () => { testOrdinaryHelper("ordinary call", () => {}); });`);
     const configFile = path.join(root, "vitest.config.mjs");
     writeFileSync(configFile, `export default { test: { name: "roster-contract", root: ${JSON.stringify(root)}, include: ["fixture.test.mjs"] } };`);
@@ -99,14 +103,14 @@ test("real Vitest collection preserves skipped cases and static-only declaration
     const rows = collectRows(testModules, root);
     assert.deepEqual(unhandledErrors, []);
     assert.ok(testModules.every(module => module.errors().length === 0));
-    assert.equal(rows.length, 8);
+    assert.equal(rows.length, 11);
     assert.equal(rows.filter(row => row.name === "same display title").length, 2);
-    assert.equal(new Set(rows.map(row => row.id)).size, 8);
+    assert.equal(new Set(rows.map(row => row.id)).size, 11);
     assert.equal(rows.filter(row => row.skipped_in_environment).length, 2);
     assert.ok(!rows.some(row => row.name === "conditional declaration"));
     assert.ok(rows.every(row => row.required && row.status === "unexecuted" && row.location?.line > 0));
     const sites = declarationSites(declarations, rows, { "fixture.test.mjs": readFileSync(path.join(root, "fixture.test.mjs"), "utf8") });
-    for (const name of ["same display title", "left", "right", "enabled conditional", "contains ordinary helper"]) {
+    for (const name of ["same display title", "left", "right", "enabled conditional", "multiline title", "multiline direct", "contains ordinary helper"]) {
       const site = sites.find(row => row.name === name);
       assert.deepEqual(site.runtime_case_ids_at_site, rows.filter(row => row.name === name).map(row => row.id));
     }

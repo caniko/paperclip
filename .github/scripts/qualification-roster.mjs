@@ -57,28 +57,31 @@ export function collectRows(modules, root) {
 }
 
 export function declarationSites(declarations, rows, sources) {
-  const byLine = new Map(), sourceLines = new Map();
-  const key = row => JSON.stringify([row.project, row.file, row.location?.line]);
+  const byPosition = new Map(), sourceLines = new Map();
+  const key = row => {
+    const source = sources[row.file];
+    if (!row.location || typeof source !== "string") return null;
+    if (!sourceLines.has(row.file)) sourceLines.set(row.file, [0, ...Array.from(source.matchAll(/\n/g), match => match.index + 1)]);
+    const lines = sourceLines.get(row.file);
+    const start = lines[row.location.line - 1];
+    if (start === undefined || !Number.isSafeInteger(row.location.column) || row.location.column < 1) return null;
+    const offset = start + row.location.column - 1;
+    if (offset >= (lines[row.location.line] ?? source.length + 1)) return null;
+    // Static source maps can point at the title; runtime can point at `it`,
+    // `test`, or a chained call's final `(`, including before a newline.
+    // ponytail: normalize only literal call boundaries and whitespace; aliases
+    // and other source-map gaps still need explicit provenance review.
+    const boundary = source.slice(offset).match(/^(?:it|test)?\(\s*/)?.[0].length ?? 0;
+    return JSON.stringify([row.project, row.file, offset + boundary]);
+  };
   for (const row of rows) {
-    if (!row.location) continue;
-    if (!byLine.has(key(row))) byLine.set(key(row), []);
-    byLine.get(key(row)).push(row);
+    const position = key(row);
+    if (position === null) continue;
+    if (!byPosition.has(position)) byPosition.set(position, []);
+    byPosition.get(position).push(row.id);
   }
-  return declarations.map(declaration => {
-    if (!sourceLines.has(declaration.file)) sourceLines.set(declaration.file, sources[declaration.file]?.split("\n") ?? []);
-    const line = sourceLines.get(declaration.file)[declaration.location?.line - 1];
-    const candidates = (byLine.get(key(declaration)) ?? []).filter(row => {
-      if (row.location.column === declaration.location.column) return true;
-      // Vitest's transformed static location can point at the title argument,
-      // while runtime points at `it`/`test` or the final `(` of a chained call.
-      // ponytail: normalize only these literal call boundaries; aliases and
-      // other source-map gaps remain unresolved for explicit provenance review.
-      return row.location.column < declaration.location.column
-        && ["(", "it(", "test("].includes(line?.slice(row.location.column - 1, declaration.location.column - 1));
-    });
-    return { ...declaration, matching_requires_environment_union_review: true,
-      runtime_case_ids_at_site: candidates.map(row => row.id) };
-  });
+  return declarations.map(declaration => ({ ...declaration, matching_requires_environment_union_review: true,
+    runtime_case_ids_at_site: byPosition.get(key(declaration)) ?? [] }));
 }
 
 export function mapEnvironments(rows, sources, policy) {
