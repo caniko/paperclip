@@ -421,7 +421,7 @@ describeEmbeddedPostgres("native runner restart recovery with real processes", (
       .where(eq(nativeRunFinalizations.runId, input.fixture.runId));
   }
 
-  it.each([null, process.pid])("claims sandbox recovery without interpreting remote PID %s locally", async (remotePid) => {
+  it.each([null, process.pid])("claims sandbox recovery without interpreting the remote PID locally (case %#)", async (remotePid) => {
     const fixture = await seedRun(`remote-${remotePid ?? "warm"}`);
     await fixture.db.update(heartbeatRuns).set({
       processPid: remotePid,

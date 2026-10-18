@@ -671,7 +671,7 @@ describe("durable inbound chat scheduler receipts", () => {
     { resumeSessionParams: { sessionId: "unrelated-provider-session" } },
     { resumeSessionDisplayId: "unrelated-provider-session" },
   ])(
-    "does not admit routing overrides on an exact retry (%j)",
+    "does not admit routing overrides on an exact retry (case %#)",
     async (override) => {
       const f = await retryFixture();
       f.register();
