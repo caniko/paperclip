@@ -726,12 +726,13 @@ requests 32-day retention and verifies actual provider expiry and SHA-256. A
 successful collection or custody receipt does not qualify the producer or
 authorize deployment.
 
-`.github/workflows/qualification-environments.yml` executes ten available
+`.github/workflows/qualification-environments.yml` executes eleven available
 source-backed profiles from the exact PR head: actual macOS and Windows,
 non-Linux containment denial, import and search benchmarks, OpenTelemetry SDK
 presence and absence, the real Sentry SDK, actual Linux containment, and the
-source-built native runner. Each profile runtime-collects every
-expanded case at its unchanged mapping rules before running it once. Missing
+source-built native runner and guarded warm-transition restart admission. Each
+profile runtime-collects every expanded case at its source-bound mapping rules
+before running it once. Missing
 prerequisites, changed source hashes, missing cases, failures, mandatory skips,
 retries and repeated identities fail the profile. Test and hook deadlines are
 inherited from the original fixtures and project configuration.
@@ -746,13 +747,37 @@ Linux containment uses the existing disposable-hosted Bubblewrap preparation,
 the actual `/usr/bin/bwrap` identity and the unchanged confined-build, network,
 descendant and authority-loss assertions.
 
-The native-runner profile executes a locked Cargo build with the declared Rust
-toolchain on its disposable Linux runner, provisions the actual embedded
-PostgreSQL prerequisites, and retains their executable identities. Its pre/post
+The native-runner profiles execute a locked Cargo build with the declared Rust
+toolchain on their disposable Linux runners, provision the actual embedded
+PostgreSQL prerequisites, and retain their executable identities. Their pre/post
 bindings reject packaged binaries shadowing the source fallback, redirected or
 wrong-target executables, compiler drift and changed prerequisite bytes. The
 unchanged normalized-event, real-runner session-resume and authenticated HTTP
 cases supply execution evidence; binary presence and binding alone do not.
+Both the runner and its source-built provider fixture receive pre/post executable
+hash and target checks.
+
+The runner profile also executes six real restarted-execution cases: all five
+warm-attachment commit-loss boundaries and a stable managed-workspace binding.
+Only the provider boundary and pre-restart loss injection are synthetic. The
+production native backend, driver, authenticated PRP routes, restart classifier,
+tool authority and PostgreSQL event/result writer must resume the original
+provider thread, execute one turn and persist one accepted result. Capture and
+completed journals, database results and provider calls are retained separately.
+Attachment turn/item IDs are protocol nonces. Restart verifies them against the
+complete command/result/lease receipt and independent database ownership, then
+retains the exact IDs only for that run; they are not derived from run IDs.
+
+The warm-transition profile captures five transient loss windows and one managed
+loss window with the original private-runner tests on that same hosted runner.
+It retains their raw reports and journals, including the observed Linux runner
+process-start fingerprint, before running the existing guarded-admission suite.
+The suite uses an explicitly supplied migrated `PAPERCLIP_TEST_DATABASE_URL` or
+the existing helper's fresh disposable PostgreSQL. Its refusal cases include
+altered attachment nonces, expired/revoked leases, live owners, changed claims,
+scope/artifact drift and uncommitted cleanup. A missing managed fixture expansion
+fails profile selection. This classifier/admission proof supplements the real
+restarted-execution cases; it does not supply their execution credit.
 
 Every original raw sibling outcome remains in `raw-results.junit` and
 `profile-raw-results.json`. `profile.xml` is a verified projection of all mandatory
@@ -770,9 +795,8 @@ NODE_ENV=test node .github/scripts/run-qualification-profile.mjs --diagnostic ot
 python3 .github/scripts/verify_profile_evidence.py /path/to/fresh-evidence
 ```
 
-Local diagnostics grant no hosted acceptance. The Cloud, managed warm
-transition and live-provider profiles retain their separate
-source, environment and credential requirements.
+Local diagnostics grant no hosted acceptance. The Cloud and live-provider
+profiles retain their separate source, environment and credential requirements.
 
 ### Task search evaluation
 
