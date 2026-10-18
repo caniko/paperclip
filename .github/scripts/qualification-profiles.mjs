@@ -8,7 +8,7 @@ export function profileSelection(profile, platform, rows, sources, policy) {
   assert.equal(policy.all_declared_cases_required, true, "Profiles cannot waive declared cases");
   assert.equal(policy.environments[profile]?.platform, platform, "An actual matching operating system is required");
   const allCasesRequired = profile === "runner-package";
-  const rules = policy.rules.filter(rule => rule.environment === profile);
+  const rules = [...policy.rules, ...(policy.supplemental_rules ?? [])].filter(rule => rule.environment === profile);
   assert.ok(rules.length || allCasesRequired, "Profile has no source-backed mapping rules");
   for (const rule of rules) {
     assert.equal(sha256(sources[rule.file]), rule.source_sha256, `Profile source drift: ${rule.file}`);

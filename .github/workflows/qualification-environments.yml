@@ -26,6 +26,8 @@ jobs:
       max-parallel: 2
       matrix:
         include:
+          - profile: tailscale-mock
+            runner: ubuntu-24.04
           - profile: macos
             runner: macos-15
           - profile: windows
@@ -81,6 +83,11 @@ jobs:
           pnpm install --frozen-lockfile 2>&1 | tee "$EVIDENCE/install.log"
           pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
           pnpm run preflight:workspace-links
+      - name: Verify mocked-provider evidence and environment boundaries
+        if: matrix.profile == 'tailscale-mock'
+        run: |
+          set -euo pipefail
+          node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/qualification-node-junit-reporter.mjs --test-reporter-destination="$EVIDENCE/tailscale-policy.xml" .github/scripts/tests/qualification-profiles.test.mjs .github/scripts/tests/qualification-tailscale-mock.test.mjs 2>&1 | tee "$EVIDENCE/tailscale-policy.log"
       - name: Prepare the separately locked optional SDK
         if: matrix.profile == 'otel-sdk' || matrix.profile == 'sentry-sdk'
         env:
@@ -95,10 +102,15 @@ jobs:
           test "$GITHUB_RUN_ATTEMPT" = 1
           bash .github/scripts/prepare-candidate-sandbox.sh 2>&1 | tee "$EVIDENCE/containment-preparation.log"
       - name: Prepare actual native PostgreSQL prerequisites
-        if: matrix.profile == 'runnerd' || matrix.profile == 'warm-transition' || matrix.profile == 'runner-package'
+        if: matrix.profile == 'runnerd' || matrix.profile == 'warm-transition' || matrix.profile == 'runner-package' || matrix.profile == 'tailscale-mock'
         run: |
           set -euo pipefail
           node .github/scripts/prepare-source-native-tools.mjs "$EVIDENCE" 2>&1 | tee "$EVIDENCE/native-tools.log"
+      - name: Build the actual Linux peer-credential bridge for the mocked provider
+        if: matrix.profile == 'tailscale-mock'
+        run: |
+          set -euo pipefail
+          pnpm --filter @paperclipai/tailscale-https-broker build 2>&1 | tee "$EVIDENCE/broker-build.log"
       - name: Build the exact-source native runner with its declared toolchain
         if: matrix.profile == 'runnerd' || matrix.profile == 'warm-transition' || matrix.profile == 'runner-package'
         working-directory: packages/paperclip-runner
@@ -138,6 +150,7 @@ jobs:
           PAPERCLIP_REQUIRE_SENTRY_TEST_SDK: ${{ matrix.profile == 'sentry-sdk' && '1' || '' }}
           PAPERCLIP_TEST_BWRAP: ${{ matrix.profile == 'linux-containment' && '/usr/bin/bwrap' || '' }}
           PAPERCLIP_TEST_SANDBOX_BUILD: ${{ matrix.profile == 'linux-containment' && '1' || '' }}
+          PAPERCLIP_TEST_TAILSCALE_MOCK: ${{ matrix.profile == 'tailscale-mock' && '1' || '' }}
         run: |
           set -euo pipefail
           if [ "$PROFILE" = runnerd ]; then
@@ -178,7 +191,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - name: Verify actual provider expiry and SHA-256
-        run: python .github/scripts/qualification-evidence.py artifacts required-profile- 12 profile-retention.json
+        run: python .github/scripts/qualification-evidence.py artifacts required-profile- 13 profile-retention.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

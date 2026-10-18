@@ -10,6 +10,7 @@ import { collectRows, sha256, specificationRows } from "./qualification-roster.m
 import { profileSelection, verifyProfileResults } from "./qualification-profiles.mjs";
 import { resolveCargoBinary, resolveCargoTargetDirectory } from "../../packages/paperclip-runner/scripts/cargo-artifacts.mjs";
 import { bindQualificationRunner } from "./qualification-runner.mjs";
+import { bindMockTailscale, verifyMockTailscaleExercise } from "./qualification-tailscale-mock.mjs";
 
 const args = process.argv.slice(2);
 const diagnostic = args[0] === "--diagnostic";
@@ -30,7 +31,7 @@ else {
 }
 const policyRaw = readFileSync(".github/qualification/coverage-environments.json");
 const policy = JSON.parse(policyRaw);
-const rules = policy.rules.filter(rule => rule.environment === profile);
+const rules = [...policy.rules, ...(policy.supplemental_rules ?? [])].filter(rule => rule.environment === profile);
 assert.ok(rules.length || completePackage, "Unknown or unmapped profile");
 let files = [...new Set(rules.map(rule => rule.file))];
 let sources;
@@ -102,6 +103,7 @@ function runnerBinding() {
     transportSha256: sha256(readFileSync(path.join(packageRoot, "src/live/runnerd-codex-transport.ts"))) };
 }
 if (["runnerd", "warm-transition", "runner-package"].includes(profile)) metadata.runnerd = runnerBinding();
+if (profile === "tailscale-mock") metadata.tailscaleMock = bindMockTailscale(root);
 const options = { root: testRoot, ...(completePackage ? { config: path.join(testRoot, "vitest.config.ts") } : {}),
   watch: false, includeTaskLocation: true, allowOnly: false, retry: 0,
   maxWorkers: 1, fileParallelism: false, exclude: ["**/dist/**"] };
@@ -159,6 +161,12 @@ try {
   if (completePackage) assert.equal(sha256(readFileSync(path.join(testRoot, "vitest.config.ts"))), metadata.scope.configSha256,
     "The package configuration changed during execution");
   if (["runnerd", "warm-transition", "runner-package"].includes(profile)) assert.deepEqual(runnerBinding(), metadata.runnerd, "Runner prerequisites changed during execution");
+  if (profile === "tailscale-mock") {
+    assert.deepEqual(bindMockTailscale(root), metadata.tailscaleMock, "Mock broker prerequisites changed during execution");
+    const mockReceipt = readFileSync(path.join(evidence, "tailscale-mock.json"));
+    verifyMockTailscaleExercise(JSON.parse(mockReceipt), metadata.tailscaleMock);
+    metadata.mockExerciseReceiptSha256 = sha256(mockReceipt);
+  }
   const result = verifyProfileResults(selection, results, errors);
   write("profile-result.json", { ...metadata, ...result });
 } catch (error) {

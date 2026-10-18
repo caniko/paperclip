@@ -726,17 +726,37 @@ requests 32-day retention and verifies actual provider expiry and SHA-256. A
 successful collection or custody receipt does not qualify the producer or
 authorize deployment.
 
-`.github/workflows/qualification-environments.yml` executes twelve available
+`.github/workflows/qualification-environments.yml` executes thirteen available
 source-backed profiles from the exact PR head: actual macOS and Windows,
 non-Linux containment denial, import and search benchmarks, OpenTelemetry SDK
 presence and absence, the real Sentry SDK, actual Linux containment, and the
 source-built native runner, the complete separately configured Runner package,
-and guarded warm-transition restart admission. Each
+guarded warm-transition restart admission, and the mocked Tailscale backfill. Each
 profile runtime-collects every expanded case at its source-bound mapping rules
 before running it once. Missing
 prerequisites, changed source hashes, missing cases, failures, mandatory skips,
 retries and repeated identities fail the profile. Test and hook deadlines are
 inherited from the original fixtures and project configuration.
+
+The `tailscale-mock` profile removes the tailnet-credential prerequisite for
+application integration testing. It runs the original HTTPS backfill case with
+`PAPERCLIP_TEST_TAILSCALE_MOCK=1`, using Vitest's existing mocks for Tailscale Serve
+argv and routing. The actual Unix-socket broker, compiled Linux `SO_PEERCRED`
+bridge, `/proc` ownership checks, migrated PostgreSQL, runtime processes,
+backfill and idempotence assertions still execute. Its private HTTPS fixture
+verifies the certificate chain and original hostname, explicitly rejects an
+untrusted certificate and a wrong hostname, and trusts the fixture certificate
+only for that request. Teardown requires removal of both owned listeners, an
+empty lease registry, and an unchanged primary `:443` route.
+
+`tailscale-mock.json` labels this proof `providerMocked: true` and
+`liveProviderVerified: false`. Pre/post source, OpenSSL and native-addon hashes
+bind the fixture and receipt to the executing lane. Its supplemental profile
+mapping grants no live-provider coverage: the canonical coverage map still
+requires `live-tailscale` for actual MagicDNS, tailnet reachability and public
+certificate issuance. The two opt-ins cannot be combined. The original test
+name, assertions and 180-second deadline remain intact; original live-provider
+evidence and obligations remain required for that environment.
 
 SDKs use separate committed npm locks under `.github/qualification/sdks/`, with
 direct versions matching `server/package.json`. `npm ci --ignore-scripts` installs

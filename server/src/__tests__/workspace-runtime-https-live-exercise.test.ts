@@ -2,7 +2,7 @@
  * Opt-in LIVE exercise of the PAP-17158 in-place HTTPS backfill.
  *
  * Unlike `workspace-runtime.test.ts`, which drives the backfill through an
- * injected broker fake, this test uses the production exposure dependencies: the
+ * injected broker fake, live mode uses the production exposure dependencies: the
  * real Unix-socket broker client, real Tailscale MagicDNS resolution, and a real
  * cert-validating HTTPS probe. It is the check that the fail-closed lifecycle
  * actually terminates in a browser-trusted `https://<node>.<tailnet>.ts.net:<port>`
@@ -14,6 +14,11 @@
  *
  *   - `PAPERCLIP_LIVE_BROKER_EXERCISE=1`
  *   - the broker socket exists (`PAPERCLIP_TAILSCALE_BROKER_SOCKET` or the default)
+ *
+ * PAPERCLIP_TEST_TAILSCALE_MOCK=1 runs the same journey in a separately labelled
+ * mocked-provider profile. Vitest mocks only Serve and routing to a private TLS
+ * fixture; the broker, peer credentials, /proc, database, and assertions are real.
+ * This profile is not evidence of a live tailnet or public certificate issuance.
  *
  * Run it on a broker-provisioned host with:
  *
@@ -48,6 +53,7 @@ import {
   stopRuntimeServicesForProjectWorkspace,
   type RealizedExecutionWorkspace,
 } from "../services/workspace-runtime.ts";
+import { startMockTailscaleBroker } from "./helpers/mock-tailscale-broker.js";
 
 const DEFAULT_BROKER_SOCKET = "/run/paperclip-tailscale-broker/broker.sock";
 const brokerSocketPath = process.env.PAPERCLIP_TAILSCALE_BROKER_SOCKET ?? DEFAULT_BROKER_SOCKET;
@@ -61,6 +67,10 @@ async function brokerSocketPresent() {
 }
 
 const optedIn = process.env.PAPERCLIP_LIVE_BROKER_EXERCISE === "1";
+const mocked = process.env.PAPERCLIP_TEST_TAILSCALE_MOCK === "1";
+if (mocked && (optedIn || process.platform !== "linux" || (process.env.CI && process.env.RUNNER_ENVIRONMENT !== "github-hosted"))) {
+  throw new Error("Mocked Tailscale requires separate Linux fixtures and a disposable hosted runner in CI");
+}
 if (optedIn && process.env.CI && (
   process.env.RUNNER_ENVIRONMENT !== "github-hosted"
   || process.env.PAPERCLIP_LIVE_PROFILE !== "isolated-hosted"
@@ -68,6 +78,7 @@ if (optedIn && process.env.CI && (
   throw new Error("Live HTTPS exercise requires the isolated hosted profile in CI");
 }
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
+if (mocked && !embeddedPostgresSupport.supported) throw new Error("Mocked Tailscale requires actual embedded PostgreSQL");
 const live = optedIn && embeddedPostgresSupport.supported && (await brokerSocketPresent());
 
 if (optedIn && !live) {
@@ -77,18 +88,24 @@ if (optedIn && !live) {
   );
 }
 
-(live ? describe : describe.skip)("PAP-17158 live HTTPS backfill exercise", () => {
+((live || mocked) ? describe : describe.skip)("PAP-17158 live HTTPS backfill exercise", () => {
   let db: Db;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
+  let mock: Awaited<ReturnType<typeof startMockTailscaleBroker>> | undefined;
 
   beforeAll(async () => {
+    if (mocked) mock = await startMockTailscaleBroker();
     tempDb = await startEmbeddedPostgresTestDatabase("pap17158-live");
     db = createDb(tempDb.connectionString);
   }, 60_000);
 
   afterAll(async () => {
-    await resetRuntimeServicesForTests();
-    await tempDb?.stop?.();
+    try {
+      await resetRuntimeServicesForTests();
+      await tempDb?.stop?.();
+    } finally {
+      await mock?.cleanup();
+    }
   }, 60_000);
 
   it("upgrades a pre-existing HTTP workspace in place to a browser-trusted HTTPS URL", async () => {
@@ -170,7 +187,7 @@ if (optedIn && !live) {
       },
     });
 
-    const evidence: Record<string, unknown> = {};
+    const evidence: Record<string, unknown> = { providerMocked: mocked };
     try {
       // ---- Before: the workspace as it exists today, plain HTTP. ----
       process.env.PAPERCLIP_MANAGED_RUNTIME_HTTPS = "off";
@@ -245,7 +262,7 @@ if (optedIn && !live) {
       evidence.repeatUrl = repeatRow.url;
     } finally {
       // eslint-disable-next-line no-console
-      console.log("[PAP-17158 live exercise]", JSON.stringify(evidence, null, 2));
+      console.log(mocked ? "[PAP-17158 mocked-provider exercise]" : "[PAP-17158 live exercise]", JSON.stringify(evidence, null, 2));
       // Deprovisions the broker lease as well as the backend process.
       await stopRuntimeServicesForProjectWorkspace({
         db,
