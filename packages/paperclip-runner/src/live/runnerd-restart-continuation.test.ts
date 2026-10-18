@@ -11,6 +11,8 @@ import { createRunnerdCodexTransport, defaultCapabilityRunnerdBinary } from "./r
 
 it.each(["none", "before-start", "after-start"] as const)("completes after the real runner and provider are killed (second crash: %s)", async (crash) => {
   const root = await mkdtemp(join(tmpdir(), "runner-restart-continuation-"));
+  // Hosted TMPDIR lives under HOME, so admit only this fixture's workspace.
+  const environment = { ...process.env, PAPERCLIP_WORKSPACE_CWD: root };
   const identity = { runId: "run-restart", sessionId: "session-restart", companyId: "company-restart", issueId: "issue-restart", agentId: "agent-restart" };
   const execution: NativeExecutionInputV1 = {
     schema: "paperclip.native-execution-input.v1",
@@ -42,7 +44,7 @@ it.each(["none", "before-start", "after-start"] as const)("completes after the r
     try { process.kill(pid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
   };
   try {
-    const backend = createRunnerdNativeSessionBackend(execution, { runnerInstanceId: "runner-restart", transportFactory: () => first.transport });
+    const backend = createRunnerdNativeSessionBackend(execution, { runnerInstanceId: "runner-restart", environment, transportFactory: () => first.transport });
     const session = await backend.openSession({ identity, workingDirectory: root });
     await session.startTurn({ message: { role: "user", text: execution.task.prompt } });
     const persisted = await session.snapshot();
@@ -65,7 +67,7 @@ it.each(["none", "before-start", "after-start"] as const)("completes after the r
     providerState.activeTurnId = null;
     await writeFile(join(root, "fake-state.json"), JSON.stringify(providerState));
     restored = createRunnerdCodexTransport({ ...options, resumeDynamicTools: [], resumeActiveTurnId: persisted.activeTurnId });
-    let recovering = createRunnerdNativeSessionBackend(execution, { runnerInstanceId: "runner-restart", transportFactory: () => restored!.transport });
+    let recovering = createRunnerdNativeSessionBackend(execution, { runnerInstanceId: "runner-restart", environment, transportFactory: () => restored!.transport });
     const events: PrpEvent[] = [];
     const checkpoints: PersistedNativeSession[] = [];
     let recoveryCheckpoint = persisted;
@@ -100,7 +102,7 @@ it.each(["none", "before-start", "after-start"] as const)("completes after the r
       await expect(execute()).rejects.toBe(interruptedController);
       await restored.transport.close().catch(() => undefined);
       restored = createRunnerdCodexTransport({ ...options, resumeDynamicTools: [], resumeActiveTurnId: recoveryCheckpoint.activeTurnId });
-      recovering = createRunnerdNativeSessionBackend(execution, { runnerInstanceId: "runner-restart", transportFactory: () => restored!.transport });
+      recovering = createRunnerdNativeSessionBackend(execution, { runnerInstanceId: "runner-restart", environment, transportFactory: () => restored!.transport });
     }
     const completion = await execute();
     expect(completion).toMatchObject({ providerSessionId: persisted.providerSessionId, turnId: "provider-turn-2", terminal: { runTerminalState: "succeeded" } });
