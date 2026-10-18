@@ -91,7 +91,7 @@ function runnerBinding() {
     resolutionHelperSha256: sha256(readFileSync(path.join(packageRoot, "src/live/runner-binary.ts"))),
     transportSha256: sha256(readFileSync(path.join(packageRoot, "src/live/runnerd-codex-transport.ts"))) };
 }
-if (profile === "runnerd") metadata.runnerd = runnerBinding();
+if (["runnerd", "warm-transition"].includes(profile)) metadata.runnerd = runnerBinding();
 write("profile-source.json", metadata);
 const options = { root, watch: false, includeTaskLocation: true, allowOnly: false, retry: 0,
   maxWorkers: 1, fileParallelism: false, exclude: ["**/dist/**"] };
@@ -136,7 +136,7 @@ try {
   const errors = [...executed.unhandledErrors, ...moduleErrors(executed.testModules)];
   write("profile-raw-results.json", { cases: results, errors });
   for (const file of files) assert.equal(sha256(readFileSync(file)), metadata.sourceFiles[file], "Fixture changed during execution");
-  if (profile === "runnerd") assert.deepEqual(runnerBinding(), metadata.runnerd, "Runner prerequisites changed during execution");
+  if (["runnerd", "warm-transition"].includes(profile)) assert.deepEqual(runnerBinding(), metadata.runnerd, "Runner prerequisites changed during execution");
   const result = verifyProfileResults(selection, results, errors);
   write("profile-result.json", { ...metadata, ...result });
 } catch (error) {

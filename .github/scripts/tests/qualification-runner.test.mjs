@@ -16,8 +16,25 @@ test("runner binding follows the source fallback and rejects shadowing or incomp
     bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1]);
     bytes.writeUInt16LE(62, 18);
     writeFileSync(binary, bytes, { mode: 0o755 });
+    const providerFixture = path.join(path.dirname(binary), "fake-codex-app-server");
+    writeFileSync(providerFixture, bytes, { mode: 0o755 });
     const bind = () => bindQualificationRunner(root, binary, "linux", "x64");
     const original = bind();
+    bytes[31] = 2;
+    writeFileSync(providerFixture, bytes);
+    assert.notEqual(bind().providerFixture.binarySha256, original.providerFixture.binarySha256,
+      "Changed provider fixture bytes must change the retained binding");
+    chmodSync(providerFixture, 0o644);
+    assert.throws(bind, /executable/);
+    chmodSync(providerFixture, 0o755);
+    const retainedFixture = providerFixture + ".retained";
+    writeFileSync(retainedFixture, bytes, { mode: 0o755 });
+    rmSync(providerFixture);
+    assert.throws(bind, /ENOENT/);
+    symlinkSync(retainedFixture, providerFixture);
+    assert.throws(bind, /redirect/);
+    rmSync(providerFixture);
+    writeFileSync(providerFixture, bytes, { mode: 0o755 });
     bytes[31] = 1;
     writeFileSync(binary, bytes);
     assert.notEqual(bind().binarySha256, original.binarySha256, "Changed artifact bytes must change the retained binding");

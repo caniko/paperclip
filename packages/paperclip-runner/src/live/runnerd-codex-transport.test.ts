@@ -5424,7 +5424,9 @@ it.each([
                 { encoding: "utf8", timeout: 1_500 },
               ).trim(),
             ).toISOString()
-          : null;
+          : process.platform === "linux"
+            ? new Date((await stat(`/proc/${handles[0]!.child.pid}`)).ctimeMs).toISOString()
+            : null;
       if ((first.evidence().codexPid ?? 0) > 0)
         providerPids.add(first.evidence().codexPid!);
       const core = cores[0]!;
@@ -5578,6 +5580,7 @@ it.each([
       const fixtureOutput =
         process.env.PAPERCLIP_ATTACH_TRANSITION_FIXTURE_DIRECTORY;
       if (fixtureOutput && recoveryFault === "none") {
+        expect(runnerProcessStartedAt).toBeTypeOf("string");
         const retainedArtifact = join(fixtureOutput, "paperclip-runnerd");
         await cp(options.runnerBinary, retainedArtifact, { force: false });
         expect(

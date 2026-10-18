@@ -21,7 +21,11 @@ import {
   nativeRunFinalizations,
 } from "@paperclipai/db";
 import type { NativeExecutionInputV1 } from "@paperclipai/paperclip-runner";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  getEmbeddedPostgresTestSupport,
+  startEmbeddedPostgresTestDatabase,
+} from "../../__tests__/helpers/embedded-postgres.js";
 import { nativeSha256 } from "./canonical.js";
 import {
   nativeToolContractFingerprintForTarget,
@@ -36,16 +40,19 @@ import {
 // These are captured from the actual private runner in the package's fresh
 // controller/runner loss-window test, not hand-authored protocol receipts.
 // Generate with PAPERCLIP_ATTACH_TRANSITION_FIXTURE_DIRECTORY, then explicitly
-// supply that directory and a fresh migrated PAPERCLIP_TEST_DATABASE_URL here.
+// supply that directory here. Without PAPERCLIP_TEST_DATABASE_URL, the existing
+// embedded-Postgres helper owns a fresh migrated database for this suite.
 // The post-admission backend is mocked: this qualifies classifier→server route
 // admission, not a second provider execution or end-to-end restart.
 const fixtureDirectory =
   process.env.PAPERCLIP_WARM_TRANSITION_FIXTURE_DIRECTORY;
 const managedFixtureDirectory =
   process.env.PAPERCLIP_WARM_TRANSITION_MANAGED_FIXTURE_DIRECTORY;
-const databaseUrl = process.env.PAPERCLIP_TEST_DATABASE_URL;
-const generated =
-  fixtureDirectory && databaseUrl ? describe : describe.skip;
+let databaseUrl = process.env.PAPERCLIP_TEST_DATABASE_URL;
+const support = await getEmbeddedPostgresTestSupport();
+const generated = fixtureDirectory && (databaseUrl || support.supported)
+  ? describe
+  : describe.skip;
 
 type Identity = {
   runnerInstanceId: string;
@@ -223,6 +230,8 @@ const cases = [
   ["before-result-routed", "expired_participant"],
   ["before-result-routed", "revoked_participant"],
   ["before-result-routed", "changed_receipt"],
+  ["before-result-routed", "changed_turn_id"],
+  ["before-result-routed", "changed_item_id"],
   ["before-result-routed", "changed_before_registration"],
   ["before-result-routed", "claim_changed_before_registration"],
   ["before-result-routed", "bootstrap_claim"],
@@ -249,6 +258,20 @@ const cases = [
 generated(
   "generated warm transition → real restart classifier → guarded server admission",
   () => {
+    let temporary:
+      | Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>
+      | undefined;
+    beforeAll(async () => {
+      if (!databaseUrl) {
+        temporary = await startEmbeddedPostgresTestDatabase(
+          "native-warm-admission-db-",
+        );
+        databaseUrl = temporary.connectionString;
+      }
+    });
+    afterAll(async () => {
+      await temporary?.cleanup();
+    });
     it.each(cases)("%s / %s", async (fixtureName, fault) => {
       const fixtureRoot =
         fixtureName === "managed-before-result-routed"
@@ -566,9 +589,13 @@ generated(
           }
           await writeFile(corePath, JSON.stringify(core));
         }
-        if (fault === "changed_receipt") {
+        if (["changed_receipt", "changed_turn_id", "changed_item_id"].includes(fault)) {
           const runner = JSON.parse(await readFile(runnerPath, "utf8"));
-          runner.warmTransition.receipt.resultDigest = "0".repeat(64);
+          if (fault === "changed_turn_id")
+            runner.warmTransition.receipt.newIdentity.turnId = "turn_attachment_unproven";
+          else if (fault === "changed_item_id")
+            runner.warmTransition.receipt.newIdentity.itemId = "item_attachment_unproven";
+          else runner.warmTransition.receipt.resultDigest = "0".repeat(64);
           await writeFile(runnerPath, JSON.stringify(runner));
         }
         if (fault === "wrong_artifact") {

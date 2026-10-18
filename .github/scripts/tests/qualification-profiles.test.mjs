@@ -22,6 +22,15 @@ test("profile scope retains every expanded identity, with literal name matching"
   assert.equal(verifyProfileResults(selected, results, []).passed, 2);
 });
 
+test("source-declared managed expansions remain mandatory even when their environment variable is absent", () => {
+  const p = { ...policy, conditional_expansions: [{ ...policy.rules[0], name_contains: "real SDK > managed" }] };
+  assert.throws(() => select([row], p), /expansion/);
+  const managed = { ...row, id: "managed-1", name: "real SDK > managed" };
+  assert.equal(select([row, managed], p).requiredCases.length, 2);
+  assert.throws(() => select([row, { ...managed, skipped_in_environment: true }], p), /prerequisite/);
+  assert.throws(() => select([row, managed], { ...p, conditional_expansions: [{ ...p.conditional_expansions[0], source_sha256: "wrong" }] }), /drift/);
+});
+
 test("source, platform, policy, missing mapping and skipped prerequisite substitutions fail closed", () => {
   for (const run of [
     () => select([row], policy, { [file]: source + "changed" }),

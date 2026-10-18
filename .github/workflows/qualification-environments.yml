@@ -46,6 +46,8 @@ jobs:
             runner: ubuntu-24.04
           - profile: runnerd
             runner: ubuntu-24.04
+          - profile: warm-transition
+            runner: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -91,12 +93,12 @@ jobs:
           test "$GITHUB_RUN_ATTEMPT" = 1
           bash .github/scripts/prepare-candidate-sandbox.sh 2>&1 | tee "$EVIDENCE/containment-preparation.log"
       - name: Prepare actual native PostgreSQL prerequisites
-        if: matrix.profile == 'runnerd'
+        if: matrix.profile == 'runnerd' || matrix.profile == 'warm-transition'
         run: |
           set -euo pipefail
           node .github/scripts/prepare-source-native-tools.mjs "$EVIDENCE" 2>&1 | tee "$EVIDENCE/native-tools.log"
       - name: Build the exact-source native runner with its declared toolchain
-        if: matrix.profile == 'runnerd'
+        if: matrix.profile == 'runnerd' || matrix.profile == 'warm-transition'
         working-directory: packages/paperclip-runner
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/packages/paperclip-runner/runner/target
@@ -105,7 +107,19 @@ jobs:
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$GITHUB_RUN_ATTEMPT" = 1
           rustup show
-          cargo build --manifest-path runner/Cargo.toml --locked --bin paperclip-runnerd --jobs 2 2>&1 | tee "$EVIDENCE/runner-build.log"
+          cargo build --manifest-path runner/Cargo.toml --locked --bin paperclip-runnerd --bin fake-codex-app-server --jobs 2 2>&1 | tee "$EVIDENCE/runner-build.log"
+      - name: Capture original transient and managed loss windows on this runner
+        if: matrix.profile == 'warm-transition'
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE/warm-fixtures/transient" "$EVIDENCE/warm-fixtures/managed"
+          export PAPERCLIP_ATTACH_TRANSITION_FIXTURE_DIRECTORY="$EVIDENCE/warm-fixtures/transient"
+          export PAPERCLIP_ATTACH_TRANSITION_FIXTURE_SCOPE=transient
+          pnpm --filter @paperclipai/paperclip-runner exec vitest run src/live/runnerd-codex-transport.test.ts -t '^recovers a warm attachment with a fresh controller and runner \((before-result|after-result|after-activation|before-confirmation|after-confirmation), routed=true, fault=none, followup=undefined\)$' --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter="$GITHUB_WORKSPACE/scripts/qualification-junit-reporter.mjs" --outputFile.junit="$EVIDENCE/transient-producer.junit" 2>&1 | tee "$EVIDENCE/transient-producer.log"
+          export PAPERCLIP_ATTACH_TRANSITION_FIXTURE_DIRECTORY="$EVIDENCE/warm-fixtures/managed"
+          export PAPERCLIP_ATTACH_TRANSITION_FIXTURE_SCOPE=managed
+          pnpm --filter @paperclipai/paperclip-runner exec vitest run src/live/runnerd-codex-transport.test.ts -t '^recovers a warm attachment with a fresh controller and runner \(before-result, routed=true, fault=none, followup=undefined\)$' --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter="$GITHUB_WORKSPACE/scripts/qualification-junit-reporter.mjs" --outputFile.junit="$EVIDENCE/managed-producer.junit" 2>&1 | tee "$EVIDENCE/managed-producer.log"
+          printf '%s\n' "PAPERCLIP_WARM_TRANSITION_FIXTURE_DIRECTORY=$EVIDENCE/warm-fixtures/transient" "PAPERCLIP_WARM_TRANSITION_MANAGED_FIXTURE_DIRECTORY=$EVIDENCE/warm-fixtures/managed" >> "$GITHUB_ENV"
       - name: Execute every source-mapped profile case once
         env:
           PROFILE: ${{ matrix.profile }}
@@ -116,6 +130,9 @@ jobs:
           PAPERCLIP_TEST_SANDBOX_BUILD: ${{ matrix.profile == 'linux-containment' && '1' || '' }}
         run: |
           set -euo pipefail
+          if [ "$PROFILE" = runnerd ]; then
+            export PAPERCLIP_WARM_TRANSITION_EXECUTION_EVIDENCE="$EVIDENCE/warm-transition-execution"
+          fi
           node .github/scripts/run-qualification-profile.mjs "$PROFILE" "$EVIDENCE" 2>&1 | tee "$EVIDENCE/profile.log"
           python .github/scripts/verify_profile_evidence.py "$EVIDENCE"
       - name: Release only preparation-owned SDK links
@@ -151,7 +168,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - name: Verify actual provider expiry and SHA-256
-        run: python .github/scripts/qualification-evidence.py artifacts required-profile- 10 profile-retention.json
+        run: python .github/scripts/qualification-evidence.py artifacts required-profile- 11 profile-retention.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

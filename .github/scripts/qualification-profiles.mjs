@@ -16,6 +16,12 @@ export function profileSelection(profile, platform, rows, sources, policy) {
   }
   const requiredCases = rows.filter(row => rules.some(rule => rule.file === row.file && row.name.includes(rule.name_contains)));
   assert.ok(requiredCases.length, "Profile collection is empty");
+  for (const expansion of (policy.conditional_expansions ?? []).filter(rule => rule.environment === profile)) {
+    assert.equal(sha256(sources[expansion.file]), expansion.source_sha256, `Profile expansion source drift: ${expansion.file}`);
+    assert.ok(sources[expansion.file].includes(expansion.anchor), "Required expansion anchor is missing");
+    assert.ok(requiredCases.some(row => row.file === expansion.file && row.name.includes(expansion.name_contains)),
+      `Required profile expansion was not collected: ${expansion.name_contains}`);
+  }
   assert.equal(new Set(requiredCases.map(identity)).size, requiredCases.length, "Duplicate profile case");
   assert.equal(new Set(requiredCases.map(row => row.id)).size, requiredCases.length, "Ambiguous framework identity");
   for (const row of requiredCases) {
