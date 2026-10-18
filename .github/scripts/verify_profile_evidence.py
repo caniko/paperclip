@@ -21,7 +21,7 @@ def project_profile_report(raw, selection):
     for suite in root.findall("testsuite"):
         selected = []
         for case in suite.findall("testcase"):
-            match = re.fullmatch(r"(.+) \[vitest:([^\]]+)\]", case.get("name", ""))
+            match = re.fullmatch(r"(.+) \[vitest:([^\]]+)\]", case.get("name", ""), re.DOTALL)
             assert match, "Missing raw framework identity"
             name, identity = match.groups()
             assert identity not in seen, "Duplicate raw execution identity"

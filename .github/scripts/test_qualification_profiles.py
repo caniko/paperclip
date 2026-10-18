@@ -18,6 +18,19 @@ class ProfileEvidence(unittest.TestCase):
         self.assertEqual(root.find(".//testcase").get("name"), "real SDK > passing [vitest:1]")
         self.assertFalse(root.findall(".//skipped"))
 
+    def test_xml_valid_title_round_trip_retains_exact_identity(self):
+        for title in ["native\u0080tool", "native\u009ftool", "tabs\tand\rnew\nlines",
+                      "literal &#128; & <tool> \"quoted\" 'single'", "Unicode \ufffd \ufdd0 \U0001f680"]:
+            with self.subTest(title=title):
+                selection = {**self.selection, "requiredCases": [{**self.selection["requiredCases"][0], "name": title}]}
+                raw = ET.fromstring(self.raw)
+                raw.find(".//testcase").set("name", f"{title} [vitest:1]")
+                projected = ET.fromstring(project_profile_report(ET.tostring(raw), selection))
+                self.assertEqual(projected.find(".//testcase").get("name"), f"{title} [vitest:1]")
+                raw.find(".//testcase").set("name", f"{title}! [vitest:1]")
+                with self.assertRaisesRegex(AssertionError, "Raw case title differs"):
+                    project_profile_report(ET.tostring(raw), selection)
+
     def test_missing_duplicate_cross_source_renamed_skipped_and_failed_evidence_is_rejected(self):
         for raw in [self.raw.replace(b"[vitest:1]", b"[vitest:3]"),
                     self.raw.replace(b"[vitest:2]", b"[vitest:1]"),
