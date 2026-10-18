@@ -25,7 +25,7 @@ const COMMENT_MARKER = '<!-- paperclip-quality-gates -->';
 function buildComment(author, failures, informational, identity) {
   const signature = `${COMMENT_MARKER}\n\n— ${identity.slug}`;
   if (failures.length === 0 && informational.length === 0) {
-    return `✅ All checks passing — ready for Greptile review and maintainer approval.\n\n${signature}`;
+    return `✅ PR metadata and change-policy checks passed. Required CI results and maintainer approval remain separate merge gates.\n\n${signature}`;
   }
 
   const lines = [
