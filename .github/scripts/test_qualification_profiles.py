@@ -31,6 +31,13 @@ class ProfileEvidence(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(AssertionError):
                 project_profile_report(raw, self.selection)
 
+    def test_complete_package_cannot_project_away_an_uncollected_raw_case(self):
+        selection = {**self.selection, "allCasesRequired": True}
+        with self.assertRaisesRegex(AssertionError, "uncollected"):
+            project_profile_report(self.raw, selection)
+        raw = self.raw.replace(b'<testcase classname="source.test.ts" name="other OS [vitest:2]"><skipped/></testcase>', b'')
+        self.assertEqual(len(ET.fromstring(project_profile_report(raw, selection)).findall(".//testcase")), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

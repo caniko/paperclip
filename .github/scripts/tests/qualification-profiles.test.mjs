@@ -63,3 +63,23 @@ test("unrelated raw skips are retained but cannot supply mandatory credit or con
   assert.throws(() => verifyProfileResults(selected, [unrelated], []));
   assert.throws(() => verifyProfileResults(selected, [passed, { ...unrelated, outcome: "failed" }], []));
 });
+
+test("the separately configured Runner package requires its entire collected roster and all three benchmarks", () => {
+  const benchmark = "src/live/runnerd-final-output-burst.benchmark.test.ts";
+  const rows = [16, 128, 512].map(deltaCount => ({ ...row, file: benchmark, id: `burst-${deltaCount}`,
+    name: `measures ${deltaCount} final deltas, repetition 1, without relaxing durable handoff` }));
+  rows.push({ ...row, file: "src/live/runnerd-codex-transport.test.ts" });
+  const p = { ...policy, environments: { "runner-package": { platform: "linux" } }, rules: [] };
+  const selected = profileSelection("runner-package", "linux", rows, {}, p);
+  assert.deepEqual(selected.requiredCases, rows);
+  assert.equal(selected.allCasesRequired, true);
+  assert.equal(selected.testNamePattern, undefined, "A complete package cannot filter test names");
+  const passed = rows.map(c => ({ ...c, outcome: "passed", retryCount: 0, repeatCount: 0 }));
+  assert.equal(verifyProfileResults(selected, passed, []).passed, 4);
+  assert.throws(() => verifyProfileResults(selected, passed.slice(1), []));
+  assert.throws(() => verifyProfileResults(selected, [...passed, { ...passed[0], id: "uncollected" }], []));
+  for (const cases of [rows.slice(1), rows.map(c => ({ ...c, skipped_in_environment: true })),
+    rows.map(c => ({ ...c, required: false })), [...rows, rows[0]]]) {
+    assert.throws(() => profileSelection("runner-package", "linux", cases, {}, p));
+  }
+});

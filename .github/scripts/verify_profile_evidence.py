@@ -42,6 +42,8 @@ def project_profile_report(raw, selection):
             target = ET.SubElement(projected, "testsuite", attributes)
             target.extend(selected)
     assert found == expected.keys(), "Required profile execution is missing"
+    if selection.get("allCasesRequired"):
+        assert seen == found, "Complete-package raw report contains uncollected cases"
     return ET.tostring(projected, encoding="utf-8", xml_declaration=True) + b"\n"
 
 

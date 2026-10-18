@@ -46,6 +46,8 @@ jobs:
             runner: ubuntu-24.04
           - profile: runnerd
             runner: ubuntu-24.04
+          - profile: runner-package
+            runner: ubuntu-24.04
           - profile: warm-transition
             runner: ubuntu-24.04
     steps:
@@ -93,21 +95,27 @@ jobs:
           test "$GITHUB_RUN_ATTEMPT" = 1
           bash .github/scripts/prepare-candidate-sandbox.sh 2>&1 | tee "$EVIDENCE/containment-preparation.log"
       - name: Prepare actual native PostgreSQL prerequisites
-        if: matrix.profile == 'runnerd' || matrix.profile == 'warm-transition'
+        if: matrix.profile == 'runnerd' || matrix.profile == 'warm-transition' || matrix.profile == 'runner-package'
         run: |
           set -euo pipefail
           node .github/scripts/prepare-source-native-tools.mjs "$EVIDENCE" 2>&1 | tee "$EVIDENCE/native-tools.log"
       - name: Build the exact-source native runner with its declared toolchain
-        if: matrix.profile == 'runnerd' || matrix.profile == 'warm-transition'
+        if: matrix.profile == 'runnerd' || matrix.profile == 'warm-transition' || matrix.profile == 'runner-package'
         working-directory: packages/paperclip-runner
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/packages/paperclip-runner/runner/target
+          PROFILE: ${{ matrix.profile }}
         run: |
           set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$GITHUB_RUN_ATTEMPT" = 1
           rustup show
-          cargo build --manifest-path runner/Cargo.toml --locked --bin paperclip-runnerd --bin fake-codex-app-server --jobs 2 2>&1 | tee "$EVIDENCE/runner-build.log"
+          if [ "$PROFILE" = runner-package ]; then
+            cargo build --manifest-path runner/Cargo.toml --locked --workspace --bins --jobs 2 2>&1 | tee "$EVIDENCE/runner-build.log"
+            pnpm run ensure:eval-build-deps 2>&1 | tee "$EVIDENCE/eval-build-deps.log"
+          else
+            cargo build --manifest-path runner/Cargo.toml --locked --bin paperclip-runnerd --bin fake-codex-app-server --jobs 2 2>&1 | tee "$EVIDENCE/runner-build.log"
+          fi
       - name: Capture original transient and managed loss windows on this runner
         if: matrix.profile == 'warm-transition'
         run: |
@@ -125,6 +133,8 @@ jobs:
           PROFILE: ${{ matrix.profile }}
           PORTABILITY_IMPORT_BENCH: ${{ matrix.profile == 'import-benchmark' && '1' || '' }}
           SEARCH_EVAL_SCALE: ${{ matrix.profile == 'search-benchmark' && '1' || '' }}
+          PAPERCLIP_FINAL_BURST_BENCHMARK: ${{ matrix.profile == 'runner-package' && '1' || '' }}
+          PAPERCLIP_FINAL_BURST_REPETITIONS: ${{ matrix.profile == 'runner-package' && '1' || '' }}
           PAPERCLIP_REQUIRE_SENTRY_TEST_SDK: ${{ matrix.profile == 'sentry-sdk' && '1' || '' }}
           PAPERCLIP_TEST_BWRAP: ${{ matrix.profile == 'linux-containment' && '/usr/bin/bwrap' || '' }}
           PAPERCLIP_TEST_SANDBOX_BUILD: ${{ matrix.profile == 'linux-containment' && '1' || '' }}
@@ -168,7 +178,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - name: Verify actual provider expiry and SHA-256
-        run: python .github/scripts/qualification-evidence.py artifacts required-profile- 11 profile-retention.json
+        run: python .github/scripts/qualification-evidence.py artifacts required-profile- 12 profile-retention.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

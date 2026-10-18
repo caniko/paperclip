@@ -726,11 +726,12 @@ requests 32-day retention and verifies actual provider expiry and SHA-256. A
 successful collection or custody receipt does not qualify the producer or
 authorize deployment.
 
-`.github/workflows/qualification-environments.yml` executes eleven available
+`.github/workflows/qualification-environments.yml` executes twelve available
 source-backed profiles from the exact PR head: actual macOS and Windows,
 non-Linux containment denial, import and search benchmarks, OpenTelemetry SDK
 presence and absence, the real Sentry SDK, actual Linux containment, and the
-source-built native runner and guarded warm-transition restart admission. Each
+source-built native runner, the complete separately configured Runner package,
+and guarded warm-transition restart admission. Each
 profile runtime-collects every expanded case at its source-bound mapping rules
 before running it once. Missing
 prerequisites, changed source hashes, missing cases, failures, mandatory skips,
@@ -756,6 +757,18 @@ unchanged normalized-event, real-runner session-resume and authenticated HTTP
 cases supply execution evidence; binary presence and binding alone do not.
 Both the runner and its source-built provider fixture receive pre/post executable
 hash and target checks.
+
+The `runner-package` profile uses the package's own `vitest.config.ts`, separate
+from the root workspace roster. It runtime-collects every configured specification
+and case, binds their source hashes and the configuration, then executes the exact
+roster without a test-name filter. It enables all three original final-output-burst
+benchmarks with exactly one repetition and the source-built runner. Every collected
+identity must pass once; missing, additional, skipped, retried or repeated cases
+fail verification. The artifact retains the complete collection, raw execution
+ledger, strict JUnit, benchmark measurements and pre/post native executable bindings.
+These filesystem measurements do not claim CPU-isolated performance. This package
+scope does not supply coverage for its separately configured Rust, Node or browser
+suites, or resolve the root workspace's outstanding live-environment obligations.
 
 The runner profile also executes six real restarted-execution cases: all five
 warm-attachment commit-loss boundaries and a stable managed-workspace binding.

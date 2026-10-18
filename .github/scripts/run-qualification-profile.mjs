@@ -16,6 +16,8 @@ const diagnostic = args[0] === "--diagnostic";
 assert.equal(args.length, diagnostic ? 3 : 2, "Pass a profile and new evidence directory, optionally preceded by --diagnostic");
 const [profile, directory] = args.slice(diagnostic ? 1 : 0);
 const root = process.cwd();
+const completePackage = profile === "runner-package";
+const testRoot = completePackage ? path.join(root, "packages/paperclip-runner") : root;
 const evidence = path.resolve(directory);
 const write = (name, data) => writeFileSync(path.join(evidence, name), JSON.stringify(data, null, 2) + "\n", { flag: "wx" });
 if (diagnostic) mkdirSync(evidence, { recursive: true });
@@ -29,9 +31,9 @@ else {
 const policyRaw = readFileSync(".github/qualification/coverage-environments.json");
 const policy = JSON.parse(policyRaw);
 const rules = policy.rules.filter(rule => rule.environment === profile);
-assert.ok(rules.length, "Unknown or unmapped profile");
-const files = [...new Set(rules.map(rule => rule.file))];
-const sources = Object.fromEntries(files.map(file => [file, readFileSync(file, "utf8")]));
+assert.ok(rules.length || completePackage, "Unknown or unmapped profile");
+let files = [...new Set(rules.map(rule => rule.file))];
+let sources;
 const serverRequire = createRequire(path.join(root, "server/package.json"));
 if (profile === "otel-absent") {
   const peers = Object.keys(serverRequire("./package.json").peerDependencies).filter(name => name.startsWith("@opentelemetry/"));
@@ -47,7 +49,15 @@ const metadata = { schema: "paperclip.required-profile-execution.v1", profile, p
   diagnostic, hostedAcceptance: false, producerAcceptanceQualified: false,
   nodeVersion: process.version, nodeExecutable: process.execPath, nodeSha256: sha256(readFileSync(process.execPath)),
   vitestVersion: createRequire(path.join(root, "package.json"))("vitest/package.json").version,
-  policySha256: sha256(policyRaw), sourceFiles: Object.fromEntries(files.map(file => [file, sha256(sources[file])])) };
+  policySha256: sha256(policyRaw) };
+if (completePackage) {
+  assert.equal(process.env.PAPERCLIP_FINAL_BURST_BENCHMARK, "1");
+  assert.equal(process.env.PAPERCLIP_FINAL_BURST_REPETITIONS, "1");
+  assert.ok(!process.env.PAPERCLIP_FINAL_BURST_BINARY, "The benchmark must use the source-built runner");
+  metadata.scope = { kind: "configured-package-vitest", root: "packages/paperclip-runner",
+    config: "packages/paperclip-runner/vitest.config.ts", configSha256: sha256(readFileSync(path.join(testRoot, "vitest.config.ts"))),
+    benchmarkEnabled: true, benchmarkRepetitions: 1 };
+}
 if (["otel-sdk", "sentry-sdk"].includes(profile)) {
   const sdkRaw = readFileSync(path.join(evidence, "sdk.json"));
   const sdk = JSON.parse(sdkRaw);
@@ -81,35 +91,45 @@ function runnerBinding() {
   assert.equal(nativeTools.head, metadata.head);
   assert.equal(nativeTools.tree, metadata.tree);
   assert.equal(nativeTools.verificationOnly, diagnostic);
-  assert.equal(nativeTools.helperSha256, sha256(readFileSync(".github/scripts/prepare-source-native-tools.mjs")));
-  assert.equal(nativeTools.nativeRuntimeHelperSha256, sha256(readFileSync("packages/db/src/embedded-postgres-native.ts")));
-  assert.equal(nativeTools.dependencyLockSha256, sha256(readFileSync("pnpm-lock.yaml")));
+  assert.equal(nativeTools.helperSha256, sha256(readFileSync(path.join(root, ".github/scripts/prepare-source-native-tools.mjs"))));
+  assert.equal(nativeTools.nativeRuntimeHelperSha256, sha256(readFileSync(path.join(root, "packages/db/src/embedded-postgres-native.ts"))));
+  assert.equal(nativeTools.dependencyLockSha256, sha256(readFileSync(path.join(root, "pnpm-lock.yaml"))));
   assert.deepEqual(Object.keys(nativeTools.tools).sort(), ["pg_dump", "postgres", "psql", "zsh"]);
   for (const tool of Object.values(nativeTools.tools)) assert.equal(sha256(readFileSync(tool.binary)), tool.sha256);
   return { ...binding, rustcVersion, cargoVersion, nativeToolsReceiptSha256: sha256(nativeToolsRaw),
-    bindingHelperSha256: sha256(readFileSync(".github/scripts/qualification-runner.mjs")),
+    bindingHelperSha256: sha256(readFileSync(path.join(root, ".github/scripts/qualification-runner.mjs"))),
     resolutionHelperSha256: sha256(readFileSync(path.join(packageRoot, "src/live/runner-binary.ts"))),
     transportSha256: sha256(readFileSync(path.join(packageRoot, "src/live/runnerd-codex-transport.ts"))) };
 }
-if (["runnerd", "warm-transition"].includes(profile)) metadata.runnerd = runnerBinding();
-write("profile-source.json", metadata);
-const options = { root, watch: false, includeTaskLocation: true, allowOnly: false, retry: 0,
+if (["runnerd", "warm-transition", "runner-package"].includes(profile)) metadata.runnerd = runnerBinding();
+const options = { root: testRoot, ...(completePackage ? { config: path.join(testRoot, "vitest.config.ts") } : {}),
+  watch: false, includeTaskLocation: true, allowOnly: false, retry: 0,
   maxWorkers: 1, fileParallelism: false, exclude: ["**/dist/**"] };
 let ctx;
 let selection;
 try {
+  // Package tests historically run from this directory; config.root alone does
+  // not set the cwd inherited by their real subprocesses and filesystem probes.
+  process.chdir(testRoot);
   // Runtime collection preserves all parameters and inactive sibling declarations.
   // https://vitest.dev/api/advanced/vitest#collecttests
   ctx = await createVitest({ ...options, reporters: [] });
   const specs = await ctx.globTestSpecifications(files);
-  const specifications = specificationRows(specs, root);
+  const specifications = specificationRows(specs, testRoot);
+  if (completePackage) files = [...new Set(specifications.map(spec => spec.file))];
+  assert.ok(specifications.length, "The configured test roster must not be empty");
   assert.deepEqual([...new Set(specifications.map(spec => spec.file))].sort(), files.slice().sort());
+  sources = Object.fromEntries(files.map(file => [file, readFileSync(path.join(testRoot, file), "utf8")]));
+  metadata.sourceFiles = Object.fromEntries(files.map(file => [file, sha256(sources[file])]));
+  write("profile-source.json", metadata);
   const collection = await ctx.collectTests(specs);
   const moduleErrors = modules => modules.flatMap(module => [module, ...module.children.allSuites()].flatMap(suite => suite.errors()));
   const collectionErrors = [...collection.unhandledErrors, ...moduleErrors(collection.testModules)];
-  const rows = collectRows(collection.testModules, root);
+  const rows = collectRows(collection.testModules, testRoot);
   write("profile-collection.json", { specifications, cases: rows, errors: collectionErrors });
   assert.equal(collectionErrors.length, 0, "Profile collection contains errors");
+  for (const spec of specifications) assert.ok(rows.some(row => row.file === spec.file && row.project === spec.project),
+    `Configured specification collected no cases: ${spec.file}`);
   selection = profileSelection(profile, process.platform, rows, sources, policy);
   write("profile-selection.json", selection);
   await ctx.close();
@@ -120,10 +140,10 @@ try {
   ctx = await createVitest({ ...options, testNamePattern: selection.testNamePattern,
     reporters: ["default", rawReporter] });
   const executionSpecs = await ctx.globTestSpecifications(files);
-  assert.deepEqual(specificationRows(executionSpecs, root), specifications);
+  assert.deepEqual(specificationRows(executionSpecs, testRoot), specifications);
   // https://vitest.dev/api/advanced/vitest#start — run once, no retries or timeout overrides.
   const executed = await ctx.start(files);
-  const executedRows = collectRows(executed.testModules, root);
+  const executedRows = collectRows(executed.testModules, testRoot);
   const tasks = executed.testModules.flatMap(module => [...module.children.allTests()].map(test => test.task));
   const byId = new Map(tasks.map(task => [task.id, task]));
   assert.equal(byId.size, tasks.length, "Execution emitted duplicate framework identities");
@@ -135,8 +155,10 @@ try {
   });
   const errors = [...executed.unhandledErrors, ...moduleErrors(executed.testModules)];
   write("profile-raw-results.json", { cases: results, errors });
-  for (const file of files) assert.equal(sha256(readFileSync(file)), metadata.sourceFiles[file], "Fixture changed during execution");
-  if (["runnerd", "warm-transition"].includes(profile)) assert.deepEqual(runnerBinding(), metadata.runnerd, "Runner prerequisites changed during execution");
+  for (const file of files) assert.equal(sha256(readFileSync(path.join(testRoot, file))), metadata.sourceFiles[file], "Fixture changed during execution");
+  if (completePackage) assert.equal(sha256(readFileSync(path.join(testRoot, "vitest.config.ts"))), metadata.scope.configSha256,
+    "The package configuration changed during execution");
+  if (["runnerd", "warm-transition", "runner-package"].includes(profile)) assert.deepEqual(runnerBinding(), metadata.runnerd, "Runner prerequisites changed during execution");
   const result = verifyProfileResults(selection, results, errors);
   write("profile-result.json", { ...metadata, ...result });
 } catch (error) {
@@ -144,4 +166,5 @@ try {
   throw error;
 } finally {
   await ctx?.close();
+  process.chdir(root);
 }

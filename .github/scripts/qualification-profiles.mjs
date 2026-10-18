@@ -7,15 +7,23 @@ const escape = text => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 export function profileSelection(profile, platform, rows, sources, policy) {
   assert.equal(policy.all_declared_cases_required, true, "Profiles cannot waive declared cases");
   assert.equal(policy.environments[profile]?.platform, platform, "An actual matching operating system is required");
+  const allCasesRequired = profile === "runner-package";
   const rules = policy.rules.filter(rule => rule.environment === profile);
-  assert.ok(rules.length, "Profile has no source-backed mapping rules");
+  assert.ok(rules.length || allCasesRequired, "Profile has no source-backed mapping rules");
   for (const rule of rules) {
     assert.equal(sha256(sources[rule.file]), rule.source_sha256, `Profile source drift: ${rule.file}`);
     assert.ok(sources[rule.file].includes(rule.anchor), "Profile prerequisite anchor is missing");
     assert.ok(rows.some(row => row.file === rule.file && row.name.includes(rule.name_contains)), "Required mapping collected no cases");
   }
-  const requiredCases = rows.filter(row => rules.some(rule => rule.file === row.file && row.name.includes(rule.name_contains)));
+  const requiredCases = allCasesRequired ? rows
+    : rows.filter(row => rules.some(rule => rule.file === row.file && row.name.includes(rule.name_contains)));
   assert.ok(requiredCases.length, "Profile collection is empty");
+  if (allCasesRequired) {
+    const benchmarks = rows.filter(row => row.file === "src/live/runnerd-final-output-burst.benchmark.test.ts");
+    assert.deepEqual(benchmarks.map(row => row.name).sort(), [16, 128, 512].map(count =>
+      `measures ${count} final deltas, repetition 1, without relaxing durable handoff`).sort(),
+    "All three original final-output-burst benchmarks must be collected exactly once");
+  }
   for (const expansion of (policy.conditional_expansions ?? []).filter(rule => rule.environment === profile)) {
     assert.equal(sha256(sources[expansion.file]), expansion.source_sha256, `Profile expansion source drift: ${expansion.file}`);
     assert.ok(sources[expansion.file].includes(expansion.anchor), "Required expansion anchor is missing");
@@ -28,8 +36,8 @@ export function profileSelection(profile, platform, rows, sources, policy) {
     assert.equal(row.required, true, "Every expanded profile case is mandatory");
     assert.equal(row.skipped_in_environment, false, `Profile prerequisite not met: ${row.name}`);
   }
-  return { profile, platform, rules, requiredCases,
-    testNamePattern: rules.map(rule => escape(rule.name_contains)).join("|") };
+  return { profile, platform, rules, requiredCases, allCasesRequired,
+    testNamePattern: allCasesRequired ? undefined : rules.map(rule => escape(rule.name_contains)).join("|") };
 }
 
 export function verifyProfileResults(selection, results, errors) {
@@ -37,6 +45,8 @@ export function verifyProfileResults(selection, results, errors) {
   assert.equal(new Set(results.map(identity)).size, results.length, "Duplicate/replayed execution identity");
   assert.ok(results.every(row => !["failed", "error"].includes(row.outcome)), "Raw execution contains a failure");
   assert.ok(results.every(row => row.retryCount === 0 && row.repeatCount === 0), "Retried/repeated execution cannot qualify");
+  if (selection.allCasesRequired) assert.deepEqual(results.map(identity).sort(), selection.requiredCases.map(identity).sort(),
+    "Complete-package execution must match every collected identity without additions or omissions");
   const actual = new Map(results.map(row => [identity(row), row]));
   for (const required of selection.requiredCases) {
     const row = actual.get(identity(required));
