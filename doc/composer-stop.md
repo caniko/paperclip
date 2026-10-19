@@ -172,7 +172,9 @@ pnpm exec playwright test --config tests/e2e/playwright-composer-stop.config.ts
 The suite boots a disposable local-trusted instance on port 3199 (override with
 `PAPERCLIP_E2E_PORT`). It never attaches to an existing server. Native coverage
 is explicitly skipped without the fixture; it must not use a logged-in provider
-as a fallback. Test companies are archived during cleanup.
+as a fallback. The acceptance server pins its Codex command resolver to the fixture
+and uses an empty credential home, because an installed Codex dependency takes
+precedence over `PATH`. Test companies are archived during cleanup.
 
 Full PR CI runs both journeys in the mandatory `Native composer Stop` lane.
 The owned candidate calls its reusable CI workflow through an immutable commit.

@@ -205,6 +205,9 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
                         "-e",
                         "console.log('stop fixture ready'); setInterval(() => console.log('working'), 200);",
                       ],
+                      // The child only runs this script; server-only fixture
+                      // loaders must not follow NODE_OPTIONS into the adapter.
+                      env: { NODE_OPTIONS: "" },
                       graceSec: 1,
                     }
                   : { provider: "codex", model: "gpt-5.1-codex-mini" },
@@ -276,7 +279,9 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
       );
       expect(JSON.stringify(comments)).toContain("Please check mobile too.");
       await expect.poll(async () => {
-        const queue = await json(await request.get(`/api/issues/${parent.id}/queued-comments`));
+        const queue = await json(
+          await request.get(`/api/issues/${parent.id}/queued-comments`),
+        );
         return JSON.stringify(queue.entries);
       }, { timeout: 15_000 }).toContain("Please check mobile too.");
 

@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::codex_provider::{
-    CodexProvider, CodexProviderConfig, CodexProviderEvent, CodexSkillInput,
+    CodexProvider, CodexProviderConfig, CodexProviderEvent, CodexSkillInput, CodexTurnOptions,
     ProviderStartupObservation, ProviderStartupStage, RejectedAcceptedTurn,
     MAX_SETTLED_PROVIDER_TURN_IDS,
 };
@@ -324,6 +324,25 @@ fn authorized_tool_set(payload: &Value) -> Result<AuthorizedToolSet, DurableRunn
         catalog_digest,
         operations,
     })
+}
+
+fn mcp_permission_event(
+    identity: &ProviderEventIdentity,
+    request_id: String,
+    params: Value,
+) -> NormalizedProviderEvent {
+    NormalizedProviderEvent {
+        event_type: "runtime_request.created".to_owned(),
+        priority: EventPriority::P0,
+        payload: json!({"request":{
+            "schema":"paperclip.runtime_request.v2", "requestKind":"permission_approval", "type":"permission",
+            "requestId":request_id, "status":"pending", "turnId":identity.turn_id, "itemId":identity.item_id,
+            "prompt":params["message"],
+            "choices":[{"key":"accept","label":"Allow once"},{"key":"decline","label":"Deny"},{"key":"cancel","label":"Cancel"}],
+            "details":params,
+            "origin":{"adapter":"codex-app-server","provider":"codex","method":"mcpServer/elicitation/request"}
+        }}),
+    }
 }
 
 fn semantic_correlation(identity: &ProviderEventIdentity) -> Value {
@@ -2627,7 +2646,14 @@ impl CodexCommandExecutor {
             .as_ref()
             .and_then(|state| state.thread_id.as_ref())
             .is_some();
-        let (thread_id, provider_session_id, process_id, active_provider_turn_id, goal_probe) = {
+        let (
+            thread_id,
+            provider_session_id,
+            process_id,
+            active_provider_turn_id,
+            goal_probe,
+            observed_model,
+        ) = {
             let provider = self.ensure_provider()?;
             (
                 provider.thread_id().to_owned(),
@@ -2635,6 +2661,7 @@ impl CodexCommandExecutor {
                 provider.process_id(),
                 provider.active_provider_turn_id().map(str::to_owned),
                 provider.get_goal(),
+                provider.observed_model().map(str::to_owned),
             )
         };
         let (goal_capability, goal) = match goal_probe {
@@ -2722,6 +2749,7 @@ impl CodexCommandExecutor {
                         "providerSessionId": thread_id,
                         "providerAccountSessionId": provider_session_id,
                         "processId": process_id,
+                        "providerDescriptor": { "driver": driver, "providerVersion": provider_version, "effectiveModel": observed_model },
                     }),
                 ),
                 (
@@ -2922,7 +2950,24 @@ impl CodexCommandExecutor {
                 .validate()
                 .map_err(|error| DurableRunnerError::invalid(error.to_string()))?;
         }
+        let reasoning_mode = match payload.get("reasoningMode") {
+            None => None,
+            Some(Value::String(mode)) if matches!(mode.as_str(), "default" | "disabled") => {
+                Some(mode.as_str())
+            }
+            Some(_) => return Err(DurableRunnerError::invalid("invalid turn.reasoningMode")),
+        };
         self.restore_provider_if_needed()?;
+        if reasoning_mode.is_some()
+            && self
+                .state
+                .as_ref()
+                .is_none_or(|state| state.config.provider != "opencode")
+        {
+            return Err(DurableRunnerError::invalid(
+                "turn.reasoningMode requires OpenCode",
+            ));
+        }
         if self
             .state
             .as_ref()
@@ -3005,7 +3050,15 @@ impl CodexCommandExecutor {
             rejected_accepted_turn,
         ) = {
             let provider = self.ensure_provider()?;
-            let result = provider.start_turn_with_skills(text, &cwd, &skills);
+            let result = provider.start_turn_with_options_and_effort(
+                text,
+                &cwd,
+                CodexTurnOptions {
+                    skills: &skills,
+                    reasoning_mode,
+                },
+                payload.get("effort"),
+            );
             (
                 result,
                 provider.completed_turn_authority().is_some(),
@@ -3438,9 +3491,25 @@ impl CodexCommandExecutor {
                 "cannot resolve a {provider_name} runtime request outside an active turn"
             )));
         }
+        if payload
+            .get("turnId")
+            .and_then(Value::as_str)
+            .is_some_and(|turn| {
+                self.event_identity
+                    .as_ref()
+                    .is_none_or(|identity| turn != identity.turn_id)
+            })
+        {
+            return Err(DurableRunnerError::invalid(
+                "Codex runtime response belongs to a stale turn",
+            ));
+        }
         let response = payload
             .get("response")
-            .ok_or_else(|| DurableRunnerError::invalid("request.resolve requires response"))?;
+            .or_else(|| payload.get("resolution"))
+            .ok_or_else(|| {
+                DurableRunnerError::invalid("request.resolve requires response or resolution")
+            })?;
         self.ensure_provider()?
             .resolve_runtime_request(request_id, response)
             .map_err(|error| {
@@ -3613,7 +3682,9 @@ impl CodexCommandExecutor {
         state.receipt_limit_interrupt_accepted = false;
         state.receipt_limit_interrupt_attempts = 0;
         state.receipt_limit_interrupt_deadline_unix_ms = None;
-        state.lifecycle = "provider_exited".to_owned();
+        // Deadline settlement retires this run permanently. Polling its terminal
+        // outbox must not reopen a provider that still reports the stopped turn.
+        state.lifecycle = "closed".to_owned();
         let terminal_event_type = if interrupt_accepted {
             "turn.interrupted"
         } else {
@@ -4360,6 +4431,20 @@ impl CodexCommandExecutor {
                         );
                     }
                 }
+                CodexProviderEvent::McpPermissionRequest { request_id, params } => {
+                    let identity = self.event_identity()?;
+                    let state = self
+                        .state
+                        .as_mut()
+                        .expect("Codex state remains available while polling");
+                    let event = mcp_permission_event(&identity, request_id, params);
+                    if receipt_limit_terminal_poll {
+                        state.push_receipt_limit_cleanup_event(event)?;
+                    } else {
+                        state.push_event(event)?;
+                    }
+                    self.save_state()?;
+                }
                 CodexProviderEvent::RuntimeRequest {
                     request_id,
                     question_set,
@@ -4651,6 +4736,26 @@ impl CommandExecutor for CodexCommandExecutor {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn mcp_permission_requests_use_durable_turn_and_item_identity() {
+        let identity = ProviderEventIdentity {
+            runner_instance_id: "runner".into(),
+            run_id: "run".into(),
+            normalized_session_id: "session".into(),
+            turn_id: "durable-turn".into(),
+            item_id: "durable-item".into(),
+        };
+        let params = json!({"threadId":"provider-thread", "turnId":"provider-turn",
+            "itemId":"provider-item", "message":"Allow tool?", "serverName":"assigned"});
+        let event = mcp_permission_event(&identity, "request-1".into(), params.clone());
+        let request = &event.payload["request"];
+        assert_eq!(event.event_type, "runtime_request.created");
+        assert_eq!(request["requestKind"], "permission_approval");
+        assert_eq!(request["turnId"], identity.turn_id);
+        assert_eq!(request["itemId"], identity.item_id);
+        assert_eq!(request["details"], params);
+    }
 
     #[test]
     fn startup_evidence_save_failure_cannot_become_an_empty_drain_or_admission() {
@@ -4993,6 +5098,7 @@ mod tests {
                 externally_sandboxed: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
+                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5376,6 +5482,7 @@ mod tests {
                 externally_sandboxed: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
+                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5469,6 +5576,7 @@ mod tests {
                 externally_sandboxed: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
+                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5524,6 +5632,7 @@ mod tests {
                 externally_sandboxed: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
+                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5569,6 +5678,7 @@ mod tests {
                 externally_sandboxed: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
+                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5663,6 +5773,7 @@ mod tests {
                 externally_sandboxed: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
+                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5732,6 +5843,7 @@ mod tests {
                 externally_sandboxed: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
+                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5784,6 +5896,7 @@ mod tests {
                 externally_sandboxed: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
+                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5910,6 +6023,7 @@ mod tests {
                 externally_sandboxed: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
+                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6024,6 +6138,7 @@ mod tests {
                 externally_sandboxed: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
+                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6083,6 +6198,7 @@ mod tests {
                 externally_sandboxed: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
+                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6106,6 +6222,27 @@ mod tests {
         let mut executor = CodexCommandExecutor::new(PathBuf::from("unused-test-state"));
         executor.state = Some(state);
         executor.restore_checked = true;
+
+        for mode in [
+            json!(null),
+            json!(false),
+            json!("bad"),
+            json!("disabled"),
+            json!("default"),
+        ] {
+            let error = executor
+                .start_turn(&json!({"text": "must not reach the provider", "reasoningMode": mode}))
+                .unwrap_err();
+            assert!(error.to_string().contains("reasoningMode"));
+            assert!(executor.provider.is_none());
+            assert!(
+                !executor
+                    .state
+                    .as_ref()
+                    .unwrap()
+                    .ambiguous_turn_start_pending
+            );
+        }
 
         let error = executor
             .start_turn(&json!({"text": "must not reach the provider"}))
@@ -6206,6 +6343,7 @@ mod tests {
                 externally_sandboxed: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
+                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6249,6 +6387,7 @@ mod tests {
                 externally_sandboxed: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
+                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6289,6 +6428,7 @@ mod tests {
                 externally_sandboxed: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
+                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6355,7 +6495,7 @@ mod tests {
                 provider: "codex".to_owned(),
                 driver: "codex_app_server".to_owned(),
                 provider_version: "test".to_owned(),
-                command: PathBuf::from("codex"),
+                command: PathBuf::from("/definitely-missing-receipt-deadline-provider"),
                 args: vec!["app-server".to_owned()],
                 cwd: std::env::current_dir()
                     .unwrap()
@@ -6368,6 +6508,7 @@ mod tests {
                 externally_sandboxed: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
+                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6404,7 +6545,7 @@ mod tests {
         executor.maintain_backpressured_provider().unwrap();
 
         let state = executor.state.as_ref().unwrap();
-        assert_eq!(state.lifecycle, "provider_exited");
+        assert_eq!(state.lifecycle, "closed");
         assert!(state.active_provider_turn_id.is_none());
         assert!(!state.receipt_limit_interrupt_pending);
         assert!(state.pending_events.iter().any(|event| {
@@ -6422,6 +6563,13 @@ mod tests {
             settled
         );
         assert!(executor.provider.is_none());
+        // Reading terminal evidence must not restart work whose interruption
+        // exhausted its deadline, even after a controller reconnects.
+        assert!(!executor.poll_events().unwrap().is_empty());
+        assert!(executor.provider.is_none());
+        let mut restarted = CodexCommandExecutor::new(&directory);
+        assert!(!restarted.poll_events().unwrap().is_empty());
+        assert!(restarted.provider.is_none());
         fs::remove_dir_all(directory).unwrap();
     }
 }

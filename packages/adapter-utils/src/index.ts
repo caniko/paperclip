@@ -130,6 +130,7 @@ export {
   normalizeLegacyRunnerProvider,
   resolvePaperclipRunnerPermissionMode,
   resolvePaperclipRunnerCursorMode,
+  resolvePaperclipRunnerPiThinkingLevel,
 } from "./paperclip-runner-permissions.js";
 export {
   PAPERCLIP_RUNNER_INGRESS_PORT,

@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { adapterSessionAffinities, agentTaskSessions, agents, companies, createDb, environmentLeases, heartbeatRuns, issues } from "@paperclipai/db";
+import { adapterSessionAffinities, agentTaskSessions, agents, authUsers, companies, companyMemberships, createDb, environmentLeases, heartbeatRuns, issues } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { heartbeatService } from "../services/heartbeat.js";
@@ -68,6 +68,7 @@ describe("controller conversation executor affinity", () => {
     vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", randomBytes(32).toString("base64"));
     database = await startEmbeddedPostgresTestDatabase("paperclip-affinity-db-");
     db = createDb(database.connectionString);
+    await db.insert(authUsers).values({ id: "fixture-user", name: "Affinity user", email: "affinity@example.test", createdAt: new Date(), updatedAt: new Date() });
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
     origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -85,6 +86,7 @@ describe("controller conversation executor affinity", () => {
     primarySlots = 0; secondarySlots = 1;
     const companyId = randomUUID(), agentId = randomUUID(), first = randomUUID(), second = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Affinity", issuePrefix: companyId.slice(0, 8), defaultResponsibleUserId: "fixture-user" });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "fixture-user", status: "active", membershipRole: "member" });
     await db.insert(agents).values({ id: agentId, companyId, name: "Gateway", role: "engineer", adapterType: "hermes_gateway",
       adapterConfig: { apiBaseUrl: `${origin}/atlas`, executorEndpoints: [`${origin}/atlas`, `${origin}/nomad`],
         apiKey: "fixture-key", sessionKeyStrategy: strategy, timeoutSec: 5, pollIntervalMs: 250, eventReconnectMs: 250 },

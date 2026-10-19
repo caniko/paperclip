@@ -331,7 +331,7 @@ local encrypted material without recording secret-access timestamps. Preserve
 that key, runtime credentials, storage, and the migration journal in backups.
 Application generation rollback is not database rollback.
 
-Migration `0295_nostalgic_rhodey` follows upstream `0294`. It retains
+Migration `0355_sweet_titanium_man` follows upstream `0354`. It retains
 the earlier fork's `0289_messy_vivisector` SQL hash, so the applied journal
 entry and guards survive while the upstream `0289`–`0294` gap is filled. The
 embedded PostgreSQL upgrade fixture checks retained ciphertext, ownership,

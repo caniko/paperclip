@@ -46,12 +46,15 @@ test("the exact-head matrix covers every server suite once, including chat and n
 test("the exact-head matrix covers each configured workspace and each native file shard", () => {
   const a = lanes.filter(lane => lane.group === "general-workspaces-a");
   const b = lanes.filter(lane => lane.group === "general-workspaces-b");
+  const c = lanes.filter(lane => lane.group === "general-workspaces-c");
   assert.ok(a.length > 0);
   assert.equal(b.length, 1);
+  assert.equal(c.length, 1);
   const aPlans = a.map(lane => plan(args(lane)));
   assert.deepEqual(aPlans.map(p => p.workspacesVitestShard).sort(), ["1/2", "2/2"]);
   for (const p of aPlans) assert.deepEqual(p.workspaceProjects, aPlans[0].workspaceProjects);
-  const actual = [...aPlans[0].workspaceProjects, ...plan(args(b[0])).workspaceProjects].sort();
+  const actual = [...aPlans[0].workspaceProjects, ...plan(args(b[0])).workspaceProjects,
+    ...plan(args(c[0])).workspaceProjects].sort();
   const config = readFileSync(path.join(root, "vitest.config.ts"), "utf8");
   const projects = [...config.matchAll(/^\s+"([^"]+)",?\s*$/gm)].map(match => match[1]).filter(p => p !== "server");
   const expected = projects.map(p => JSON.parse(readFileSync(path.join(root, p, "package.json"), "utf8")).name).sort();
@@ -66,6 +69,7 @@ test("all source shards retain strict reports, the two-hour deadline and their o
   assert.match(application, /fail-fast: false\n/);
   assert.match(application, /max-parallel: 2\n/);
   assert.match(application, /tests-\*\|regression\|managed-opencode\) strict\+=\(--strict-reports\)/);
+  assert.match(application, /if: matrix\.lane == 'tests-workspaces-b' \|\| matrix\.lane == 'tests-workspaces-c' \|\| matrix\.lane == 'managed-opencode'/);
   assert.match(application, /pnpm test:run -- "\$\{args\[@\]\}"/);
   assert.match(application, /name: source-proof-\$\{\{ matrix.lane \}\}/);
   assert.match(application, /retention-days: 31\n/);
@@ -82,4 +86,7 @@ test("all source shards retain strict reports, the two-hour deadline and their o
   assert.match(declarations, /nix-instantiate "\$\{args\[@\]\}" --expr '[^']*builtins.attrNames/);
   assert.match(declarations, /nix-instantiate "\$\{args\[@\]\}" nix\/tests\/personal-declarations.nix -A "\$name"/);
   assert.match(declarations, /name: source-proof-home-manager-/);
+  const red = workflow.split("\n  expected_red:\n")[1];
+  assert.match(red, /qualification-evidence\.py retain-original-red/);
+  assert.doesNotMatch(red, /vitest run|pnpm install|path: baseline/);
 });

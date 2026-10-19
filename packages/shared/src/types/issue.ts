@@ -1,3 +1,4 @@
+import type { TaskWorkspaceIntent, TaskWorkspacePendingSelection } from "./task-workspace.js";
 import type { ExecutionProjection, ExecutionBlocker } from "./execution-projection.js";
 import type {
   IssueCommentAuthorType,
@@ -126,6 +127,22 @@ export interface IssueLabel {
   color: string;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * The task a run was executing when it created this issue, from recorded run
+ * provenance. Independent of the structural parent and of blockers. Only
+ * present when the viewer may read the source task and its run.
+ */
+export interface IssueCreationSource {
+  issue: {
+    id: string;
+    identifier: string | null;
+    title: string;
+    status: string;
+  };
+  run: { id: string; agentId: string };
+  agent: { id: string; name: string } | null;
 }
 
 export interface IssueAssigneeAdapterOverrides {
@@ -839,6 +856,8 @@ export interface Issue {
   /** Immediate task from which private access flows downward, including chat handoffs. */
   privacyParentIssueId?: string | null;
   ancestors?: IssueAncestor[];
+  /** Detail responses only: access-checked creation provenance, or null. */
+  createdFrom?: IssueCreationSource | null;
   title: string;
   description: string | null;
   descriptionTruncated?: boolean;
@@ -873,6 +892,9 @@ export interface Issue {
   monitorAttemptCount?: number;
   monitorNotes?: string | null;
   monitorScheduledBy?: IssueMonitorScheduledBy | null;
+  workspaceBindingRevision?: number;
+  workspaceSelection?: TaskWorkspaceIntent | null;
+  workspacePendingSelection?: TaskWorkspacePendingSelection | null;
   executionWorkspaceId: string | null;
   executionWorkspacePreference: string | null;
   executionWorkspaceSettings: IssueExecutionWorkspaceSettings | null;
@@ -1003,6 +1025,9 @@ export interface IssueComment {
   companyId: string;
   issueId: string;
   authorType: IssueCommentAuthorType;
+  /** Server-generated receipt provenance; not writable by comment callers. */
+  origin?: "comment" | "fast_response";
+  fastResponseRequestId?: string | null;
   authorAgentId: string | null;
   authorUserId: string | null;
   /** Responsible user attribution. Legacy and plugin-provided comment values may omit it. */
@@ -1242,6 +1267,8 @@ export interface PaperclipQuestionSetQuestion {
   helpText?: string;
   required: boolean;
   answerMode: "single_select" | "multi_select" | "text";
+  /** Editable starting text, never an implicit or submitted answer. Text mode only. */
+  initialText?: string;
   options?: PaperclipQuestionSetOption[];
   customAnswer?: {
     enabled: true;
