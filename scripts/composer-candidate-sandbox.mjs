@@ -21,7 +21,9 @@ export function composerCandidateDockerArgs({ candidate, phase, command, uid, gi
     "--pids-limit", "512", "--memory", "3g", "--cpus", "2",
     "--network", phase === "runtime" ? "none" : "bridge",
     "--tmpfs", "/tmp:rw,nosuid,nodev,size=1g,mode=1777",
-    "--env", "HOME=/tmp", "--env", "CARGO_HOME=/tmp/cargo",
+    "--env", "HOME=/tmp", "--env", "CARGO_HOME=/candidate/.composer-tools/cargo",
+    "--env", "npm_config_cache=/candidate/.composer-tools/npm-cache",
+    "--env", "npm_config_store_dir=/candidate/.composer-tools/pnpm-store",
     "--mount", `type=bind,src=${root},dst=/candidate`, "--workdir", "/candidate",
     phase === "build"
       ? "rust:1.97-bookworm@sha256:408fe88047cef61a2087653b0c5255fa51c0f2d6d94ddedd7a2562a9b91a46f6"

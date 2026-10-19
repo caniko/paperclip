@@ -178,6 +178,9 @@ host PID absence is never evidence that an isolated child stopped. The prepared
 workflow retains the container image, actual Node/platform/architecture, runner
 hash and mount receipt. These changes require new hosted qualification before
 promoting the immutable PR caller.
+Dependency and Cargo caches stay on the candidate's sole writable disk mount,
+not its 1 GiB temporary filesystem or a shared host cache. Runtime still has no
+network access or write authority over trusted tools and evidence.
 
 General server shards run at most two test files at a time in separate Vitest
 forks. Each file retains its own home, config and process state, and its test
