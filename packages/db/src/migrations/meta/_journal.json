@@ -2507,6 +2507,27 @@
       "when": 1792412426771,
       "tag": "0359_agent_connector_access_hooks",
       "breakpoints": true
+    },
+    {
+      "idx": 360,
+      "version": "7",
+      "when": 1792452964464,
+      "tag": "0360_sticky_wendell_vaughn",
+      "breakpoints": true
+    },
+    {
+      "idx": 361,
+      "version": "7",
+      "when": 1792452964465,
+      "tag": "0361_issue_assignment_status_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 362,
+      "version": "7",
+      "when": 1792452964466,
+      "tag": "0362_commentary_view_human_defaults",
+      "breakpoints": true
     }
   ]
 }

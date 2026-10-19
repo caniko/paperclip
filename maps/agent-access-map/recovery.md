@@ -46,6 +46,16 @@ cannot authorize replacement or erase the original ownership marker. This is
 internal supervision; it grants no new agent recovery action. Existing task,
 company, process-identity and workspace-recovery checks remain required.
 
+An execution-hold denial before legacy runtime selection is not a provider
+attempt. The server verifies the dispatch receipt and task identity against
+persisted execution, lease and coordinator evidence. The same proof excludes
+historical false incidents from effective holds while retaining audit history.
+This internal classification grants no new agent API or resolution authority.
+The original hold, file recovery, company scope and normal admission gates stay
+effective. Local [database regressions](../../server/src/__tests__/heartbeat-undispatched-execution-wait.test.ts)
+cover automatic saved-message admission and denied cases; live provider recovery
+remains a separate verification step.
+
 Evidence: `source-only` — [implementation](../../server/src/routes/issues.ts#L9478) at
 the reviewed commit above.
 

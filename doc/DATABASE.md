@@ -9,6 +9,13 @@ hooks as `0358_agent_tool_definition_hooks` and
 and combined-schema snapshots remain unchanged. The imported hooks follow that
 history; they do not replace it or introduce another schema snapshot.
 
+Upstream master `f4d21e2b8` is integrated after that history. Drizzle generated
+the combined `0360` snapshot; `0360_sticky_wendell_vaughn.sql` retains the exact
+SQL from upstream `0357_naive_wolfpack.sql`, including its duplicate-object
+guards. Upstream's SQL-only assignment-version and commentary-grant migrations
+retain their SQL bytes as `0361` and `0362`. Existing journal entries and retained
+snapshots are unchanged; only the oldest snapshot is pruned by `db:generate`.
+
 ### Task query performance
 
 Run-context lookups use expression indexes for both `context_snapshot.issueId`
@@ -525,10 +532,13 @@ is unique, so retries return the original accepted action. Provider source
 ordering fences duplicate and stale updates, and a cleared projection retains
 its revision/cursor tombstone so an older provider event cannot resurrect it.
 
-Issue `status_version` advances only when `status` changes. The JavaScript backup
-path includes user-defined functions and triggers so a restored database keeps
-that invariant. Removing or disabling a future native rollout flag must not
-delete these records; persisted experimental runs remain available for recovery
+Issue `status_version` advances when `status`, `assignee_agent_id`, or
+`assignee_user_id` changes. A combined status and assignment write advances it
+once. Writing the same assignee alone does not advance it. A new blocking
+decision can also advance the revision. The assignment trigger has its own name so replay of the historical status migration cannot remove it. The
+JavaScript backup path includes user-defined functions and triggers so a restored
+database keeps that invariant. Removing or disabling a future native rollout
+flag must not delete these records; persisted experimental runs remain available for recovery
 and inspection.
 
 `native_run_finalizations` also stores restart ownership and recovery state.
@@ -834,7 +844,9 @@ Project `privacy_owner_user_id` records who may manage its audience independentl
 The Audit viewer uses the existing company/kind/created index.
 List reads select bounded previews; details load a single full body. Both reads
 and list counts apply company and source-task visibility. The viewer requires
-no experimental toggle or commentary schema migration.
+no experimental toggle. A permission-only migration grants `commentary:view` to
+existing active human company members, including viewers, without changing
+existing grants or the commentary schema.
 
 `agent_commentary` stores company-scoped, attributed complaints and suggestions
 as free-form text in the instance database. Legacy agents use the default

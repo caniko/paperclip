@@ -1,4 +1,5 @@
 import { isPreDispatchReviewWait } from "./pre-dispatch-review-wait.js";
+import { preDispatchExecutionWaitRecoveryActionPredicate } from "./pre-dispatch-execution-wait.js";
 import { and, desc, eq, gt, inArray, not, or, sql } from "drizzle-orm";
 import { conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
 import { z } from "zod";
@@ -43,6 +44,7 @@ export async function hasPendingRunCleanup(db: Db, companyId: string, runId: str
 export function executionBlockerPredicate() {
   return and(
     not(conversationRecoveryActionPredicate()!),
+    not(preDispatchExecutionWaitRecoveryActionPredicate()),
     or(unreconciledNativeExportPredicate(), and(
       inArray(issueRecoveryActions.cause, [...EXECUTION_RECONCILIATION_CAUSES]),
       or(inArray(issueRecoveryActions.status, ["active", "escalated"]),

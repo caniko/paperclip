@@ -248,6 +248,8 @@ export interface AgentRuntimeIdentity {
 export interface AdapterExecutionContext {
   /** Immutable intent acquired by core before preparing a protected workspace. */
   workspaceOwnership?: WorkspaceOwnershipIntent;
+  /** Company-owned exporter credentials. Transient; never persist or merge into config. */
+  observability?: import("./agent-observability.js").ProviderObservabilityLaunch;
   /** Server-owned credentials. Never persist this object or merge it into config. */
   agentIdentity?: AgentRuntimeIdentity;
   /** Synchronous, content-free diagnostic scope; never stop or collection authority. */

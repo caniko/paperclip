@@ -343,6 +343,46 @@ it.each([true, false])("defers hidden content until history is ready and keeps i
   expect(container.querySelector('.task-chat-history-pending')).toBeNull();
 });
 
+it("defers initial history for a saved conversation with its own draft key", () => {
+  render(<TaskChatThread comments={[]} onAdd={async () => {}} issueId="saved-chat"
+    conversationMode draftKey="agent-chat:company:saved-agent" initialHistoryPending />);
+  expect(container.querySelector('[data-testid="mock-editor"]')).toBeNull();
+  expect(container.querySelector('[data-testid="task-chat-composer-dock"]')?.hasAttribute("inert")).toBe(true);
+});
+
+it.each([true, false])("keeps an upload attached when a conversation draft becomes a saved task (mobile=%s)", async (mobile) => {
+  sidebarState.isMobile = mobile;
+  const onAdd = vi.fn().mockResolvedValue(undefined);
+  let resolveUpload!: (receipt: { id: string; contentPath: string; originalFilename: string }) => void;
+  const onAttachImage = vi.fn().mockReturnValue(new Promise(resolve => { resolveUpload = resolve; }));
+  const props = { comments: [], onAdd, onAttachImage, conversationMode: true, draftKey: "agent-chat:company:agent" };
+  render(<TaskChatThread {...props} issueId="" />);
+  const composer = container.querySelector('[data-testid="mock-editor"]');
+  const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+  const file = new File(["notes"], "chat-notes.txt", { type: "text/plain" });
+  Object.defineProperty(input, "files", { configurable: true, value: [file] });
+  await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
+  expect(onAttachImage).toHaveBeenCalledExactlyOnceWith(file);
+  expect(container.querySelector('[data-testid="task-chat-composer-attachments"]')?.textContent).toContain("chat-notes.txt");
+
+  render(<TaskChatThread {...props} issueId="persisted-chat" initialHistoryPending />);
+  expect(container.querySelector('[data-testid="mock-editor"]')).toBe(composer);
+  expect(container.querySelector('[data-testid="task-chat-composer-attachments"]')?.textContent).toContain("chat-notes.txt");
+  expect(onAdd).not.toHaveBeenCalled();
+  const id = "9af8228f-0be7-45ae-a104-6fbe0af6f1d3";
+  await act(async () => { resolveUpload({ id, contentPath: `/api/attachments/${id}/content`, originalFilename: file.name }); });
+  render(<TaskChatThread {...props} issueId="persisted-chat" initialHistoryPending={false} />);
+  await act(async () => { await new Promise(resolve => requestAnimationFrame(resolve)); });
+  const chip = container.querySelector('[data-testid="task-chat-composer-attachments"] [data-slot="attachment"]');
+  expect(chip?.getAttribute("data-state")).toBe("done");
+  const send = container.querySelector<HTMLButtonElement>('[data-testid="task-chat-composer-send"]')!;
+  expect(send.disabled).toBe(false);
+  await act(async () => { send.click(); });
+  expect(onAdd).toHaveBeenCalledTimes(1);
+  expect(onAdd.mock.calls[0]?.[0]).toBe(`[chat-notes.txt](/api/attachments/${id}/content)`);
+  expect(onAdd.mock.calls[0]?.[3]).toEqual([id]);
+});
+
 it("prepares comment-link history and its composer before reveal", async () => {
   const props = {
     issueId: "linked-issue",

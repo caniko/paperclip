@@ -65,6 +65,16 @@ After a stop, send a new instruction on the same task or inspect one already
 saved while cleanup was pending. Observe the waiting message, continuation, and
 eventual result rather than manually changing the task status to look complete.
 
+A continuation denied before startup by an existing execution hold remains a
+wait. Once the original hold clears, the server verifies the dispatch receipt
+and absence of execution evidence, ignores any historical false incident for
+that unused admission, and reconsiders saved input through normal admission.
+No infrastructure-certification form is needed. The
+[database regressions](../../server/src/__tests__/heartbeat-undispatched-execution-wait.test.ts)
+cover incident prevention, retained audit history, concurrent restart admission,
+ordered messages, contradictory execution evidence, and unchanged pause and
+task gates. These tests do not qualify a live provider or prove task completion.
+
 ### `browser-reconnect`
 
 While viewing an active or recovering task, interrupt the browser connection

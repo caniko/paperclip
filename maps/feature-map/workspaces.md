@@ -74,6 +74,12 @@ and [preparation tests](../../server/src/services/heartbeat/workspace-preparatio
 exercise the real Git isolation and lifecycle guards. They do not qualify live
 remote credentials or a provider deployment.
 
+For a task reusing the shared project checkout, add a private task worktree that
+the assigned agent cannot read. Continue the shared task and verify the
+**Workspace source restricted** notice names a workspace repair action. No agent
+turn or automatic failure retry may start. Preserve the task binding and both
+tasks' files. Repeat with a reused Git worktree to check the same blocker.
+
 For reconstructable Git expiration, finish a disposable task tree, run the
 internal lifecycle sweep after its 24-hour grace, and inspect candidate/reclaimed
 bytes. Advance its upstream first; use the ordinary task/workspace reopen control

@@ -66,6 +66,9 @@ the current company-scoped binding before considering the fallback.
 A retained denial blocks the task as `configuration_incomplete`
 (`workspace_source_restricted`) before dispatch; it grants no access and names the
 owner action on the task.
+The same blocker applies when shared project workspace repository admission finds
+the restricted source. The existing binding and files stay intact; no provider
+starts and no automatic failure retry is queued.
 Local paths, unsupported transports and credential-bearing URLs are not fallback
 sources. Company/task/remote bindings, real paths, Git storage and the exact origin
 are revalidated for reuse, cleanup and reopening. A failed save removes only the

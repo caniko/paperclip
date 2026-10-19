@@ -55,6 +55,16 @@ Manual: Create or fork a disposable skill, edit instructions, save, and reload. 
 
 Automated: [policy service](../../server/src/__tests__/company-skill-policy-service.test.ts) and [agent skills state](../../ui/src/pages/agent-skills/AgentSkillsTab.test.ts) cover policy/state contracts.
 
+The [version-cache regression](../../server/src/__tests__/skill-version-cache.test.ts)
+checks that listing assignments does not create repository caches, validate every
+support file, or extend cache use. Run preparation still restores and repairs the
+selected version. To check attachment, use a repository skill with a cold cache,
+add it to an agent, then reload the skill's Agents tab and the agent's Skills tab.
+Keep another repository skill set to Latest during this check. With beta version
+pins disabled, adding the new skill must preserve that Latest selection and save
+without a beta-pin error. The [HTTP regression](../../server/src/__tests__/agent-skills-routes.test.ts)
+checks this round trip and retention of explicit historical pins.
+
 Manual: Enable the skill for one test agent and leave another without access. Run a small task on each, inspect the available skill context, then change the release/policy and verify the next eligible run uses the intended version.
 
 A Paperclip Runner run with no selected skills must proceed while another run
