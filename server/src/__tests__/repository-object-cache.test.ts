@@ -6,27 +6,31 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { createServer } from "node:http";
 import { createReadStream } from "node:fs";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { withDirectoryMergeLock } from "@paperclipai/adapter-utils/workspace-restore-merge";
 import { materializeManagedProjectWorkspace } from "../services/managed-repository-checkout.js";
 import { assertReproducibleBaseGitStorage } from "../services/git-workspace-restoration.js";
 import { readRepositoryObjectCache, resolveRepositoryObjectCache, publishRepositoryObjectCache } from "../services/repository-object-cache.js";
 import * as preparationTiming from "../services/execution-preparation-timing.js";
+import { configureFixtureGitIdentity } from "./helpers/git-fixture.js";
 
 const execFile = promisify(execute);
 const roots: string[] = [];
+let fixture: Awaited<ReturnType<typeof createFixture>>;
+// Seed signing belongs to fixture setup, outside the unchanged test-body deadline.
+beforeEach(async () => { fixture = await createFixture(); });
 afterEach(async () => {
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
   await Promise.all(roots.splice(0).map(root => fs.rm(root, { recursive: true, force: true })));
 });
-async function fixture() {
+async function createFixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "repository-object-cache-")); roots.push(root);
   vi.stubEnv("PAPERCLIP_HOME", path.join(root, "home"));
   const source = path.join(root, "source"); await fs.mkdir(source);
   const git = async (cwd: string, ...args: string[]) => (await execFile("git", ["-C", cwd, ...args])).stdout.trim();
   await git(source, "init", "-b", "main");
-  await git(source, "config", "user.name", "Fixture"); await git(source, "config", "user.email", "fixture@example.test");
+  configureFixtureGitIdentity(source);
   await fs.writeFile(path.join(source, "work.txt"), "initial\n");
   await git(source, "add", "."); await git(source, "commit", "-m", "initial");
   const repoUrl = pathToFileURL(source).href;
@@ -36,7 +40,7 @@ async function fixture() {
 }
 
 it("retains remote branch tips so a primed clone transfers no existing objects", async () => {
-  const f = await fixture();
+  const f = fixture;
   await f.git(f.source, "checkout", "-b", "feature");
   await fs.writeFile(path.join(f.source, "feature.txt"), "unmerged feature content\n");
   await f.git(f.source, "add", ".");
@@ -60,7 +64,7 @@ it("retains remote branch tips so a primed clone transfers no existing objects",
 });
 
 it("uses current remote refs and produces an independent checkout without private cached refs", async () => {
-  const f = await fixture();
+  const f = fixture;
   await f.git(f.source, "checkout", "-b", "private");
   await fs.writeFile(path.join(f.source, "private.txt"), "private branch bytes");
   await f.git(f.source, "add", "."); await f.git(f.source, "commit", "-m", "private");
@@ -71,12 +75,12 @@ it("uses current remote refs and produces an independent checkout without privat
   expect(await readRepositoryObjectCache(cache)).toBe(cache.directory);
   await f.git(f.source, "branch", "-D", "private");
   await fs.writeFile(path.join(f.source, "work.txt"), "current\n");
-  await f.git(f.source, "commit", "-am", "current"); await f.git(f.source, "tag", "current-tag");
+  await f.git(f.source, "commit", "-am", "current"); await f.git(f.source, "tag", "-m", "current-tag", "current-tag");
   const currentHead = await f.git(f.source, "rev-parse", "HEAD");
   await f.prepare("second");
   const target = path.join(f.root, "second");
   expect(await f.git(target, "rev-parse", "HEAD")).toBe(currentHead);
-  expect(await f.git(target, "rev-parse", "current-tag")).toBe(currentHead);
+  expect(await f.git(target, "rev-parse", "current-tag^{commit}")).toBe(currentHead);
   expect(await fs.readFile(path.join(target, "work.txt"), "utf8")).toBe("current\n");
   await expect(f.git(target, "cat-file", "-e", privateHead)).rejects.toThrow();
   await expect(fs.stat(path.join(target, ".git/objects/info/alternates"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -87,14 +91,14 @@ it("uses current remote refs and produces an independent checkout without privat
 });
 
 it("never substitutes a cached checkout for an unavailable remote", async () => {
-  const f = await fixture(); await f.prepare("first");
+  const f = fixture; await f.prepare("first");
   await fs.rename(f.source, `${f.source}-unavailable`);
   await expect(f.prepare("denied")).rejects.toThrow("Failed to prepare managed checkout");
   await expect(fs.stat(path.join(f.root, "denied"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 it("separates company and current credential scopes", async () => {
-  const f = await fixture();
+  const f = fixture;
   const auth = { source: "company_secret" as const, secretName: "GITHUB_TOKEN", configArgs: [], env: { TOKEN: "first-token" } };
   const first = await resolveRepositoryObjectCache(f.company, f.repoUrl, auth);
   const other = await resolveRepositoryObjectCache(f.company, f.repoUrl, { ...auth, env: { TOKEN: "new-token" } });
@@ -104,7 +108,7 @@ it("separates company and current credential scopes", async () => {
 });
 
 it("skips contended optional cache publication without delaying a fresh checkout", async () => {
-  const f = await fixture();
+  const f = fixture;
   await resolveRepositoryObjectCache(f.company, f.repoUrl, null);
   await withDirectoryMergeLock(f.company, async () => {
     await f.prepare("first");
@@ -114,7 +118,7 @@ it("skips contended optional cache publication without delaying a fresh checkout
 });
 
 it("rebuilds from the remote when the cached pack is corrupt", async () => {
-  const f = await fixture(); await f.prepare("first");
+  const f = fixture; await f.prepare("first");
   const cache = (await resolveRepositoryObjectCache(f.company, f.repoUrl, null))!;
   await f.git(cache.directory, "gc", "--prune=now");
   const packs = (await fs.readdir(path.join(cache.directory, "objects/pack"))).filter(entry => entry.endsWith(".pack"));
@@ -130,7 +134,7 @@ it("rebuilds from the remote when the cached pack is corrupt", async () => {
 });
 
 it("still authenticates to the HTTP remote when a matching object cache exists", async () => {
-  const f = await fixture();
+  const f = fixture;
   const remote = path.join(f.root, "remote.git");
   await execFile("git", ["clone", "--bare", f.source, remote]);
   await f.git(remote, "update-server-info");
@@ -167,7 +171,7 @@ it("still authenticates to the HTTP remote when a matching object cache exists",
 });
 
 it("does not follow a cache directory symlink or grow an over-capacity company", async () => {
-  const f = await fixture();
+  const f = fixture;
   const cache = (await resolveRepositoryObjectCache(f.company, f.repoUrl, null))!;
   await fs.symlink(f.source, cache.directory);
   expect(await readRepositoryObjectCache(cache)).toBeNull();
@@ -179,7 +183,7 @@ it("does not follow a cache directory symlink or grow an over-capacity company",
 });
 
 it("skips oversized repositories without creating a cache generation", async () => {
-  const f = await fixture();
+  const f = fixture;
   const cache = (await resolveRepositoryObjectCache(f.company, f.repoUrl, null))!;
   const oversized = path.join(f.source, ".git/oversized");
   await fs.writeFile(oversized, ""); await fs.truncate(oversized, 2 * 1024 ** 3 + 1);
@@ -191,7 +195,7 @@ it("skips oversized repositories without creating a cache generation", async () 
 });
 
 it("reports a symlink found during storage scanning as an invalid cache skip", async () => {
-  const f = await fixture();
+  const f = fixture;
   const cache = (await resolveRepositoryObjectCache(f.company, f.repoUrl, null))!;
   await fs.symlink(f.source, path.join(f.source, ".git/unexpected-link"));
   const detail = vi.spyOn(preparationTiming, "recordRepositoryObjectCacheDetail");
@@ -201,13 +205,13 @@ it("reports a symlink found during storage scanning as an invalid cache skip", a
 });
 
 it.each(["https://user:secret@github.com/fixture/repo", "https://github.com/fixture/repo?token=secret", "https://github.com/fixture/repo#secret"])("does not persist credential-bearing URLs: %s", async (repoUrl) => {
-  const f = await fixture();
+  const f = fixture;
   expect(await resolveRepositoryObjectCache(f.company, repoUrl, null)).toBeNull();
   await expect(fs.stat(f.company)).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 it("does not initialize or publish through a replaced cache parent", async () => {
-  const f = await fixture();
+  const f = fixture;
   const other = path.join(f.root, "other"); await fs.mkdir(other);
   await fs.symlink(other, path.dirname(f.company));
   expect(await resolveRepositoryObjectCache(f.company, f.repoUrl, null)).toBeNull();
