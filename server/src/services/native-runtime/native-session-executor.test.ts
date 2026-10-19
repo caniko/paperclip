@@ -9369,6 +9369,18 @@ describe("native session bounded recovery", () => {
     });
   });
 
+  it("holds exhausted verification without renewing the unchanged reattachment attempt", () => {
+    const cause = nativeSessionFailureSourceCode(new Error(
+      "runner_remote_provider_verification_unavailable: pack unavailable after 2 verification attempts (exitCode=null; timedOut=true)",
+    ));
+    expect(cause).toBe("runner_remote_provider_verification_unavailable");
+    for (const attempt of [1, 2, 3]) {
+      expect(nativeSessionFailureDisposition(attempt, new Date(), cause)).toEqual({
+        phase: "terminal_failure", failureCode: cause, nextAttemptAt: null,
+      });
+    }
+  });
+
   it("preserves stable provider and runner failure causes", () => {
     expect(
       nativeSessionFailureSourceCode(

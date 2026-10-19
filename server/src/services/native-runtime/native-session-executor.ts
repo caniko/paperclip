@@ -33,7 +33,7 @@ import { copyBackCodexAuth } from "@paperclipai/adapter-codex-local/server";
 import { nativeCompletionFeedback } from "./native-completion-feedback.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent } from "../acknowledged-native-stop.js";
 import { stoppedCodexTurnIsTextOnly } from "./stopped-codex-turn.js";
-import { prepareVerifiedRemoteProviderPack } from "./remote-provider-pack.js";
+import { prepareVerifiedRemoteProviderPack, runRemoteProviderVerification } from "./remote-provider-pack.js";
 import { selectRemotePiCompanion } from "./remote-pi-companion.js";
 import { readNativeLocalProcessStop, PROCESS_START_REQUESTED } from "../native-local-process-stop.js";
 import { remoteLeaseCleanupScope } from "../remote-execution-termination.js";
@@ -6254,6 +6254,7 @@ export function nativeSessionFailureDisposition(
     sourceFailureCode === "native_provider_approval_required" ||
     sourceFailureCode === "native_event_replay_conflict" ||
     sourceFailureCode === "runner_remote_provider_artifact_incompatible" ||
+    sourceFailureCode === "runner_remote_provider_verification_unavailable" ||
     sourceFailureCode === "native_provider_terminal_failed" ||
     sourceFailureCode === "native_current_wake_comments_unread" ||
     sourceFailureCode === "native_current_wake_comments_changed_after_read" ||
@@ -6310,6 +6311,7 @@ export function nativeSessionFailureSourceCode(
   | "native_session_cleanup_quarantined"
   | "native_adopted_runner_authentication_timeout"
   | "runner_remote_provider_artifact_incompatible"
+  | "runner_remote_provider_verification_unavailable"
   | "provider_process_exited"
   | "provider_stdout_closed"
   | "provider_process_output_closed"
@@ -6355,6 +6357,9 @@ export function nativeSessionFailureSourceCode(
   }
   if (/runner_remote_provider_artifact_incompatible/i.test(message)) {
     return "runner_remote_provider_artifact_incompatible";
+  }
+  if (/runner_remote_provider_verification_unavailable/i.test(message)) {
+    return "runner_remote_provider_verification_unavailable";
   }
   if (/provider_process_exited/i.test(message)) {
     return "provider_process_exited";
@@ -9346,6 +9351,8 @@ async function executePaperclipNativeSessionWithinScope(
                   ? "Approval required. Review the operation and update the agent's permission setting before retrying. This runner has no interactive approval handler."
                   : sourceFailureCode === "native_session_cleanup_quarantined"
                   ? NATIVE_CLEANUP_OPERATOR_RECOVERY_MESSAGE
+                  : sourceFailureCode === "runner_remote_provider_verification_unavailable"
+                    ? "Provider files could not be verified after two read attempts. Inspect the retained workspace and command transport before retrying the original run."
                   : sourceFailureCode === "native_provider_terminal_failed"
                     ? "The provider session is permanently unusable. Verify stopped execution, completed actions, and task context before starting a linked continuation."
                     : recoveryEvidence.recoveryMode === "ambiguous_state"
@@ -11824,32 +11831,25 @@ async function createRunnerdBackendWithinSessionClaim(
       "const expectedPackages={acpx:manifest.payload.pins.acpx,'@agentclientprotocol/claude-agent-acp':manifest.payload.pins.claudeAcp,'@agentclientprotocol/codex-acp':manifest.payload.pins.codexAcp,'opencode-ai':manifest.payload.pins.opencode}",
       "for(const [pkg,version] of Object.entries(expectedPackages))if(packageVersion(pkg)!==version)throw new Error(pkg+' version mismatch')",
     ].join(";");
-    const verified = await remoteCommandRunner.execute({
+    await runRemoteProviderVerification(() => remoteCommandRunner.execute({
       command: providerNodeCommand,
       args: ["-e", verifyScript, packRoot, expected],
       cwd: remoteTarget.remoteCwd,
       bypassSession: true,
       timeoutMs: 30_000,
-    });
-    if (verified.exitCode !== 0 || verified.timedOut) {
-      throw new Error(
-        `runner_remote_provider_artifact_incompatible: provider pack verification failed (${verified.stderr.trim().slice(-1_024)})`,
-      );
-    }
+    }), "provider pack verification");
     const opencodeCommand = posix.join(
       packRoot,
       expectedProviderPackManifest.payload.artifacts.opencodeCommand.path,
     );
-    const opencodeVersion = await remoteCommandRunner.execute({
+    const opencodeVersion = await runRemoteProviderVerification(() => remoteCommandRunner.execute({
       command: opencodeCommand,
       args: ["--version"],
       cwd: remoteTarget.remoteCwd,
       bypassSession: true,
       timeoutMs: 30_000,
-    });
+    }), "OpenCode version verification");
     if (
-      opencodeVersion.exitCode !== 0 ||
-      opencodeVersion.timedOut ||
       opencodeVersion.stdout.trim() !== REMOTE_PROVIDER_PACK_PINS.opencode
     ) {
       throw new Error(

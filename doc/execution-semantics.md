@@ -423,6 +423,16 @@ An external wait counts as a live or waiting path only when the next move surviv
 
 A one-shot issue monitor consumes its persisted `nextCheckAt` when it dispatches the assignee wake. If that monitor-consuming run is lost before it records a new disposition or future monitor, Paperclip restores exactly one bounded continuation using the existing process-loss retry limit; if that continuation is also lost, the normal recovery-action escalation owns the next step instead of creating another monitor loop.
 
+A native provider may omit `continuation` (or send `null`) when it reports
+`yielded` after saving a monitor. The controller reads current authorized task
+context and fills the canonical `monitor` continuation only if that same task,
+run, assignee, work mode, and monitor remain eligible. Completion admission
+checks that persisted monitor again. This default does not create or renew a
+schedule. A consumed, cleared, exhausted, or ineligible monitor cannot authorize
+a passive wait. An explicit `response_wake` still identifies a real response
+wait; the controller does not invent one from prose. Canonical accepted results
+still require a complete continuation for `yielded`.
+
 An unmanaged local process is not a durable action path. Shell jobs started with `&`, `nohup`, local polling loops, detached PTY sessions, adapter child processes, or similar background watchers do not keep an issue live unless Paperclip persists them as a run or pairs a managed runtime service with a monitor, scheduled wake, blocker, or delegated issue that owns the next check. A PID, session id, log file, comment, or promise to check later is evidence only. The process may be killed when the adapter invocation or heartbeat exits and cannot be assumed observable or recoverable by another worker.
 
 Before a heartbeat finalizes, its issue disposition must therefore be evaluated from durable Paperclip state, not from processes still visible only to that heartbeat. An agent-owned issue may remain `in_progress` after the heartbeat only when another valid action-path primitive already exists. If the only claimed continuation is a local/background watcher, finalization treats the issue as having no live path even when the process has not yet been observed exiting.
@@ -1561,6 +1571,13 @@ Saved process configuration must match before reuse. Old checkpoints, changed
 configuration, and controller-owned credential or instruction resources use
 verified suspension and saved-history resume. This recovery can restart a
 provider; it does not suspend every healthy warm turn.
+
+Plugin sandbox reuse during acquisition uses the configured startup timeout or
+the provider's declared acquisition default, with the host RPC margin. Resume
+attempts and transient retries share that deadline. Providers without either
+timeout retain the one-minute host default. A resume failure still preserves
+the recorded sandbox unless the provider proves it lost and replacement passes
+the existing backup checks.
 
 For the native runner, warm mode requests a reusable sandbox lease **before**
 lease acquisition. The environment's explicit runner lifecycle overrides the

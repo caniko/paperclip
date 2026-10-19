@@ -113,10 +113,12 @@ supports source-only file repair. Board runtime management and recovery-resoluti
 authority are required. The request identifies the exact source action/run and
 records recovered-file evidence; the server verifies the original stop receipt.
 It preserves the current task status and does not wake or replay the agent. The
-task form fails closed without permission or source bindings. Agent Chat retains
-the file diagnosis while this hold exists. The
+task notice does not expose a file-certification form. The API still fails closed
+without permission or source bindings. Agent Chat retains the file diagnosis
+while this hold exists and suppresses the warning only for a verified durable
+recovery path. The
 [repair route regressions](../../server/src/__tests__/workspace-restore-repair-route.test.ts)
-and [file form](../../ui/src/components/WorkspaceFileRecovery.test.tsx) cover the
+and [task notice](../../ui/src/components/ExecutionBlockerNotice.test.tsx) cover the
 local contract; they do not independently recover files or qualify a live provider.
 
 Evidence: `source-only` — [implementation](../../server/src/routes/issues.ts#L9478) at

@@ -5,7 +5,7 @@ import { callTaskWorkspaceTool } from "../task-workspace-tools.js";
 import { TaskAttachmentReadCache, TASK_ATTACHMENT_DEFINITIONS, TASK_ATTACHMENT_SCHEMAS, listTaskAttachments, readTaskAttachment } from "./runner-task-attachments.js";
 import { RUNNER_BRIDGE_SCHEMAS, runnerBridgeDefinitions, readAssignedSkill, executeWorkspaceTool, readWorkspaceUploadFile, settleRunnerBridgeRead, assertRunnerWorkspacePathAllowed } from "./runner-bridge-tools.js";
 import type { NativeRuntimeContextSnapshot } from "../../vendor/paperclip-runner/index.js";
-import { assertCanManageIssueMonitor, prepareIssueMonitorUpdate, setTaskMonitorSchema, summarizeIssueMonitor } from "../issue-monitors.js";
+import { assertCanManageIssueMonitor, eligibleIssueMonitorWait, prepareIssueMonitorUpdate, setTaskMonitorSchema, summarizeIssueMonitor } from "../issue-monitors.js";
 import { readTaskQuestionContext } from "../issue-question-context.js";
 import { isConversation } from "../agent-conversations.js";
 import { setIssueTitle } from "../issue-title.js";
@@ -604,6 +604,9 @@ export class PaperclipRunnerToolAuthority {
         return { ...response, apiOperationId: operationId };
       }
       case "get_task_context": {
+        const monitorCheckAt = !this.binding.nativeReview && context.issue.workMode === "standard" &&
+          context.issue.executionRunId === this.binding.runId
+          ? eligibleIssueMonitorWait(context.issue, this.binding.agentId) : null;
         const childTasks = await this.db.select().from(issues)
           .where(and(
             eq(issues.companyId, this.binding.companyId),
@@ -623,6 +626,11 @@ export class PaperclipRunnerToolAuthority {
             ...this.binding, conversationMode: isConversation(context.issue),
           }),
           activeTask: redactedTask(context.issue),
+          completionContinuation: monitorCheckAt ? {
+            kind: "monitor",
+            summary: "Wait for the saved task monitor.",
+            idempotencyKey: `task-monitor:${context.issue.id}:${monitorCheckAt}`,
+          } : null,
           childTasks: visibleChildTasks.slice(0, 100).map(redactedTask),
           childTasksTruncated: childTasks.length > 100,
           delegationGuidance: "Reuse existing child tasks for delegated work. Inspect a completed child's comments and documents before creating another task for the same deliverable. Use search_tasks if the child task list is truncated.",

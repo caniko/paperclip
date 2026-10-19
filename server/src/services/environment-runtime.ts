@@ -2036,9 +2036,12 @@ function createSandboxEnvironmentDriver(
             });
           }
           try {
-            const resumeDeadline = Date.now() + 60_000;
             const configuredResumeTimeoutMs =
-              resolvePluginSandboxRpcTimeoutMs(workerConfig) ?? 60_000;
+              resolvePluginSandboxRpcTimeoutMs(
+                workerConfig,
+                pluginProvider.resolved.driver.defaultAcquireTimeoutMs,
+              ) ?? 60_000;
+            const resumeDeadline = Date.now() + configuredResumeTimeoutMs;
             let retryDelayMs = 250;
             let resumed: PluginEnvironmentLease;
             while (true) {
