@@ -43,6 +43,8 @@ const launch = (command: string) =>
     { env: { ...process.env, UNRELATED_TEST_SECRET: "must-not-reach-server" }, stdio: ["ignore", "pipe", "pipe"] },
   );
 async function command(name: string) {
+  const started = performance.now();
+  console.info(`[deployment fixture] ${name} started`);
   const process = launch(name);
   let stdout = "",
     stderr = "";
@@ -53,6 +55,7 @@ async function command(name: string) {
     stderr += chunk;
   });
   const [code] = await once(process, "exit");
+  console.info(`[deployment fixture] ${name} exited ${code} after ${Math.round(performance.now() - started)}ms`);
   return { code, stdout, stderr };
 }
 async function stop() {

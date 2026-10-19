@@ -32,6 +32,27 @@ test("pins the fixture even when a bundled Codex dependency is installed", () =>
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("pins the fixture through the server's tsx CLI and TypeScript module resolution", () => {
+  const dir = mkdtempSync(join(tmpdir(), "composer-stop-tsx-loader-"));
+  const command = join(dir, "codex");
+  try {
+    writeFileSync(command, "#!/bin/sh\nprintf 'composer-stop-fixture'\n", { mode: 0o755 });
+    writeFileSync(join(dir, "package.json"), '{"type":"module"}');
+    const entry = join(dir, "server.ts");
+    writeFileSync(entry, `
+      import { resolveCodexCommand } from ${JSON.stringify(resolver.replace(/\.ts$/, ".js"))};
+      import assert from "node:assert/strict";
+      const expected: string = ${JSON.stringify(command)};
+      assert.equal(resolveCodexCommand(), expected);
+    `);
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL("../../../cli/node_modules/tsx/dist/cli.mjs", import.meta.url)), entry], {
+      encoding: "utf8", timeout: 10_000,
+      env: { ...process.env, NODE_ENV: "test", PAPERCLIP_STOP_CODEX_COMMAND: command, NODE_OPTIONS: `--import=${loader}` },
+    });
+    assert.equal(result.status, 0, result.stderr);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 for (const env of [{}, { PAPERCLIP_STOP_CODEX_COMMAND: "codex" }, { NODE_ENV: "production", PAPERCLIP_STOP_CODEX_COMMAND: process.execPath }]) {
   test(`rejects a missing or unsafe fixture configuration: ${JSON.stringify(env)}`, () => {
     const result = launch(env);

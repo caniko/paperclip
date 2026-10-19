@@ -34,6 +34,8 @@ it.each([false, true])("commits idle account switches and close refreshes before
     onCredentialsUpdated,
   });
   const driver = new CodexAppServerDriver({
+    // Hosted TMPDIR is inside HOME; grant only this disposable workspace.
+    environment: { ...process.env, PAPERCLIP_WORKSPACE_CWD: root },
     taskEnvelope: { schema: "paperclip.skillless_task.v1", objective: "Observe credential delivery.",
       completionContract: { revision: "test-v1", criteria: [{ id: "done", requirement: "Done." }] },
       constraints: [], expectedResultSchema: "paperclip.run_result.v1" },

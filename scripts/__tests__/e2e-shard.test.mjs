@@ -309,6 +309,9 @@ test("the prepared Stop workflow selects the absolute candidate root and retains
   // Check the prepared source before its immutable caller pin is advanced.
   const jobs = readWorkflowJobs(readFileSync(trustedPrWorkflow, "utf8"));
   assert.match(jobs.get("native_composer_stop"), /PAPERCLIP_E2E_SOURCE_ROOT: \$\{\{ github\.workspace \}\}/);
+  const evidence = jobs.get("native_composer_stop").split("- name: Retain native composer Stop evidence")[1];
+  assert.match(evidence, /\$\{\{ runner\.temp \}\}\/composer-stop-provider\.log/);
+  assert.match(evidence, /\$\{\{ env\.PAPERCLIP_STOP_FAKE_CODEX \}\}/);
   assert.match(jobs.get("e2e_shards"), /retention-days: 32/);
 });
 

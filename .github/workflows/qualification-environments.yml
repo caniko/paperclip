@@ -136,6 +136,14 @@ jobs:
           cp "$RUNNER_TEMP/profile-pi/pi-distribution.json" "$EVIDENCE/pi-distribution.json"
           cp "$RUNNER_TEMP/profile-pi/native-closure.json" "$EVIDENCE/pi-native-closure.json"
           printf '%s\n' "PAPERCLIP_TEST_PI_DISTRIBUTION_ROOT=$RUNNER_TEMP/profile-pi" >> "$GITHUB_ENV"
+      - name: Verify all four read-only Stop fixture combinations from source
+        if: matrix.profile == 'runnerd'
+        working-directory: packages/paperclip-runner
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/packages/paperclip-runner/runner/target
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path runner/Cargo.toml --locked -p paperclip-runner-core --test codex_provider --jobs 2 stop_fixture_completes_only_opted_in_read_only_toolless_probes -- --exact --test-threads=1 2>&1 | tee "$EVIDENCE/stop-fixture.log"
       - name: Build and prepare the real remote continuity fixture
         if: matrix.profile == 'runnerd'
         working-directory: packages/paperclip-runner

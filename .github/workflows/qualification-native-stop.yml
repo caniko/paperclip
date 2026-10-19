@@ -170,6 +170,8 @@ jobs:
             ${{ runner.temp }}/composer-stop-effective-lock.yaml
             ${{ runner.temp }}/composer-stop-harness-manifest.sha256
             ${{ runner.temp }}/composer-stop-trusted-provenance.json
+            ${{ runner.temp }}/composer-stop-provider.log
+            ${{ env.PAPERCLIP_STOP_FAKE_CODEX }}
             ${{ runner.temp }}/composer-runtime-*/runtime.json
             ${{ runner.temp }}/composer-runtime-*/paperclip-runnerd
             .trusted-composer-stop/tests/e2e/test-results/
