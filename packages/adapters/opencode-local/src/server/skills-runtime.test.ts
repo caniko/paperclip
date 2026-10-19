@@ -25,7 +25,10 @@ import fs from "node:fs/promises";
 const args = process.argv.slice(2);
 const files = args.flatMap((arg, index) => arg === "--file" ? [args[index + 1]] : []);
 const skills = await Promise.all(files.map(file => fs.readFile(file, "utf8")));
-await fs.writeFile(process.env.PAPERCLIP_TEST_CAPTURE, JSON.stringify({args, files, skills, home: process.env.HOME, config: process.env.XDG_CONFIG_HOME}));
+const config = process.env.XDG_CONFIG_HOME;
+const policy = await fs.readFile(config + "/opencode/opencode.jsonc", "utf8");
+const runtimeConfig = JSON.parse(await fs.readFile(config + "/opencode/opencode.json", "utf8"));
+await fs.writeFile(process.env.PAPERCLIP_TEST_CAPTURE, JSON.stringify({args, files, skills, home: process.env.HOME, config, policy, runtimeConfig}));
 process.stdin.resume();
 process.stdin.on("end", () => console.log(JSON.stringify({type:"text",sessionID:process.env.PAPERCLIP_RUN_ID,part:{text:"done"}})));
 `,
@@ -70,12 +73,16 @@ process.stdin.on("end", () => console.log(JSON.stringify({type:"text",sessionID:
         const delivered = JSON.parse(await fs.readFile(capture, "utf8"));
         expect(delivered.skills).toEqual([`Run ${runId} skill\n`]);
         expect(delivered.home).toBe(home);
-        expect(delivered.config).toBe(configHome);
+        expect(delivered.config).not.toBe(configHome);
+        expect(delivered.policy).toBe(policy);
+        expect(delivered.runtimeConfig.permission).not.toBe("allow");
+        await expect(fs.lstat(delivered.config)).rejects.toMatchObject({ code: "ENOENT" });
         for (const file of delivered.files) await expect(fs.lstat(file)).rejects.toMatchObject({ code: "ENOENT" });
         return delivered;
       }),
     );
     expect(captures[0].files[0]).not.toBe(captures[1].files[0]);
+    expect(captures[0].config).not.toBe(captures[1].config);
     expect(await fs.readFile(path.join(personal, "SKILL.md"), "utf8")).toBe("Personal Paperclip skill\n");
     expect(await fs.readFile(configFile, "utf8")).toBe(policy);
     expect(await fs.readdir(path.dirname(personal))).toEqual(["paperclip"]);
