@@ -57,8 +57,11 @@ async function command(name: string) {
 }
 async function stop() {
   if (child && child.exitCode === null) {
+    const exited = once(child, "exit");
     child.kill("SIGTERM");
-    await once(child, "exit");
+    const [code, signal] = await exited;
+    child = undefined;
+    expect({ code, signal }).toEqual({ code: 0, signal: null });
   }
   child = undefined;
 }
@@ -163,14 +166,15 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
       async () => {
         if (child?.exitCode !== null) throw new Error(`Launcher exited: ${output}`);
         try {
-          return (await fetch(`http://127.0.0.1:${port}/api/health`)).status;
+          const response = await fetch(`http://127.0.0.1:${port}/api/health`);
+          return response.ok ? (await response.json()).status : "unhealthy";
         } catch {
           return 0;
         }
       },
       { timeout: 45000, interval: 500 },
     )
-    .toBe(200);
+    .toBe("ok");
   const response = await fetch(`http://localhost:${port}/api/auth/sign-in/email`, {
     method: "POST",
     headers: { "content-type": "application/json", origin: `http://localhost:${port}` },
@@ -406,14 +410,15 @@ it("exits the real server when its database lease is lost", async () => {
       async () => {
         if (child?.exitCode !== null) throw new Error(`Launcher exited: ${logs}`);
         try {
-          return (await fetch(`http://127.0.0.1:${port}/api/health`)).status;
+          const response = await fetch(`http://127.0.0.1:${port}/api/health`);
+          return response.ok ? (await response.json()).status : "unhealthy";
         } catch {
           return 0;
         }
       },
       { timeout: 45000, interval: 500 },
     )
-    .toBe(200);
+    .toBe("ok");
   const exited = once(child, "exit");
   const db = createDb(database.connectionString);
   await db.execute(
@@ -482,14 +487,16 @@ it("preserves embedded controller identity, login and encrypted credentials acro
         async () => {
           if (child?.exitCode !== null) throw new Error(`Launcher exited: ${logs}`);
           try {
-            return (await fetch(`http://127.0.0.1:${port}/api/health`)).status;
+            const response = await fetch(`http://127.0.0.1:${port}/api/health`);
+            // HTTP 200 is liveness during recovery, not startup readiness.
+            return response.ok ? (await response.json()).status : "unhealthy";
           } catch {
             return 0;
           }
         },
         { timeout: 45000, interval: 500 },
       )
-      .toBe(200);
+      .toBe("ok");
     return logs;
   };
   try {
