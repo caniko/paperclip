@@ -62,7 +62,8 @@ a worker sandbox.
 Embedded PostgreSQL additionally requires an `embedded` object with `user`,
 `database`, and `passwordFile`. The password must contain at least 16 characters.
 Managed startup refuses occupied or mismatched ports rather than selecting new
-ports. External or module-managed PostgreSQL is the initial staging target.
+ports. Both external PostgreSQL and a persistent user-owned embedded cluster are
+supported by the launcher.
 
 The bootstrap creates the first account and administrator role in one
 transaction through the native authentication implementation. It creates no
@@ -77,6 +78,69 @@ not restore a removed membership; company access remains application-managed.
 
 `remote-only` is reserved and refuses every command before credentials, adapter
 loading, or database changes. The supported profile is `trusted-local`.
+
+### User-managed controller
+
+The Home Manager module also provides `services.paperclip`. It supervises the
+packaged API and UI with an embedded PostgreSQL cluster, authenticated access,
+and signup disabled. The controller runs as the Home Manager user:
+
+```nix
+programs.paperclip.package = paperclipPackage;
+programs.paperclip.deployments.operations = operationsManifest;
+services.paperclip = {
+  enable = true;
+  instance = "operations";
+  port = 3117;
+  databasePort = 54330;
+  operator = { email = "operator@example.invalid"; name = "Operator"; };
+  afterUnits = [ "opencode.service" ];
+  extraPackages = [ opencodePackage ];
+};
+```
+
+The package must provide `bin/paperclip-deployment` and the production UI. The
+module selects the matching personal declaration by instance name. The service
+does not enable the optional CLI client. Enable `programs.paperclip` separately
+when needed. On NixOS, enable lingering for the user if the controller must run
+without a login session.
+
+State defaults to `$XDG_DATA_HOME/paperclip`, with mode `0700`. Provision four
+protected runtime files under its `credentials/` directory before startup:
+`auth`, `encryption`, `database`, and `bootstrap`. The last file supplies the
+initial operator password. Existing administrator accounts are preserved.
+Credential options accept other runtime paths; their contents never enter Nix
+evaluation. Keep these files, instance storage, and database backups together in
+the recovery set. The database backup runs hourly with 30-day retention; this
+schedule alone does not back up credentials or stored assets.
+
+The unit is `paperclip-operations.service` for this example. It binds only to
+loopback, waits for HTTP readiness, and sends the controller SIGTERM before
+terminating remaining children on its shutdown deadline. HOME, XDG paths and
+PATH are explicit. Embedded PostgreSQL and the API share the controller's 2 GiB
+memory limit. A separate OpenCode unit retains its own resource limits.
+
+### Existing managed OpenCode backend
+
+An `opencode_local` agent can set `adapterConfig.managedService = true` to use
+the user's existing compatible backend. Set `dangerouslySkipPermissions = false`
+and an explicit `provider/model` identifier. The backend owns authentication,
+integrations, permissions, HOME, and XDG configuration. The adapter passes only
+run-specific Paperclip variables and file context. It does not start or replace
+the backend. Managed execution currently requires local placement.
+
+This mode requires OpenCode's authenticated `session external` protocol and
+Paperclip's durable checkpoint and cancellation hooks. Each run gets a separate
+owned root. The encrypted checkpoint binds the original request bytes, SHA-256,
+backend identity, and selected target before admission. Recovery sends Stop with
+those same bytes. It retains ownership until all owned sessions, pending inputs,
+and background jobs settle. A backend process restart requires current-generation
+environment reconciliation. A different backend database cannot accept the old
+checkpoint. Standalone execution never resumes a managed root.
+
+Focused adapter tests use a simulated control transport. OpenCode's core,
+authenticated API, and CLI tests exercise the protocol separately. These checks
+do not establish real-provider execution or live restart and restore acceptance.
 
 ### Optional Nix integration for a Hermes gateway
 
@@ -152,9 +216,34 @@ contract; the real worker and rotation recovery still need their own receipts.
 
 The executable contract is `packages/shared/src/deployment-manifest.ts`. It
 reuses native validators. Supported declaration adapters are `hermes_gateway`,
-`process`, and `http`; `server/src/deployment/adapter-config.ts` defines their
+`opencode_local`, `process`, and `http`; `server/src/deployment/adapter-config.ts` defines their
 allowed fields. Worker credentials are native encrypted secret references.
 Manifest fields must contain nonsecret values.
+
+### Owned SSH environments
+
+Declare `environments.<key>` with a `company` key, `credential` name from the
+descriptor's runtime credential map, and `fields` containing `name`, `driver:
+"ssh"`, and `config`. The SSH config requires `host`, `username`, an absolute
+`remoteWorkspacePath`, `knownHosts`, and `strictHostKeyChecking: true`; `port`
+defaults to 22. Optional in-place workspace ownership uses the native
+`workspaceRealizationMode` and `filesystemOwnership` contract.
+
+Set `agents.<key>.environment` to an environment declaration key in the same
+company. Reconciliation resolves the stable environment ID before creating the
+agent. Explicit `null` clears the binding; omission preserves an existing
+application-managed binding. Raw database IDs and private keys are not manifest
+fields. `opencode_local` declarations require an explicit boolean
+`dangerouslySkipPermissions`; use `false` to retain the executor's permission
+policy.
+
+The SSH key becomes an encrypted native secret with an environment consumer
+binding. Rotation updates its version without changing the environment or agent
+identity. Plans expose changed field names only. Database guards protect the
+owned environment configuration and agent binding. Environment placement changes
+and removal require an explicit ownership handoff, as do workspace removals;
+they cannot silently retarget retained runs or sessions. Declaring an environment
+does not establish reachability or qualify execution, Stop, or recovery.
 
 Hermes declarations accept the boolean `adapterConfig.waitForJobs`. When enabled,
 the existing adapter binds a selected execution target and requires the worker's
