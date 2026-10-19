@@ -3539,6 +3539,16 @@ describe("ACP activity diagnostics", () => {
               inferredKind: "think",
             } as never, { signal: new AbortController().signal }));
             yield { type: "tool_call", toolCallId: "private-task", title: "private task", kind: "think", status: "in_progress" };
+            for (const toolCallId of ["private-peer-asked", "private-peer-shell"]) {
+              await options.onPermissionRequest?.({
+                sessionId: "session-1",
+                raw: { sessionId: "session-1", toolCall: { toolCallId }, options: [] },
+                inferredKind: "other",
+              } as never, { signal: new AbortController().signal });
+            }
+            yield { type: "tool_call", toolCallId: "private-peer-asked", kind: "other", status: "completed" };
+            yield { type: "tool_call", toolCallId: "private-peer-silent", kind: "other", status: "failed" };
+            yield { type: "tool_call", toolCallId: "private-peer-shell", kind: "execute", status: "completed" };
             yield { type: "tool_call", toolCallId: "private-call", title: "private lookup", kind: "other", status: "pending" };
             currentNow = 7000;
             yield { type: "tool_call", tag: "tool_call_update", toolCallId: "private-task", status: "in_progress" };
@@ -3572,6 +3582,8 @@ describe("ACP activity diagnostics", () => {
       acpPendingToolKinds: "other,think",
       acpStalledToolPermissionRequested: false,
       acpPendingToolPermissionRequestedCount: 1,
+      acpSettledSameKindToolCount: 2,
+      acpSettledSameKindToolPermissionRequestedCount: 1,
     });
     // The host only observes the request; ACPX's permission mode decides it.
     expect(permissionDecisions).toEqual([undefined]);
@@ -3669,6 +3681,8 @@ describe("ACP activity diagnostics", () => {
       acpStalledToolKind: "other",
       acpStalledToolPermissionRequested: true,
       acpPendingToolPermissionRequestedCount: 1,
+      acpSettledSameKindToolCount: 0,
+      acpSettledSameKindToolPermissionRequestedCount: 0,
     });
     expect(logs.join("")).toContain("Its permission request reached Paperclip.");
   }, 15_000);

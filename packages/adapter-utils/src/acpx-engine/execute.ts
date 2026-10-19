@@ -4137,6 +4137,8 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       silentMs: number;
       permissionRequested: boolean;
       pendingPermissionRequested: number;
+      settledSameKind: number;
+      settledSameKindPermissionRequested: number;
     } | null = null;
     let stalledToolTimer: ReturnType<typeof setInterval> | undefined;
     let forcedStop = false;
@@ -5055,12 +5057,21 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             }
             if (!oldest) return;
             clearInterval(stalledToolTimer);
+            let settledSameKind = 0;
+            let settledSameKindPermissionRequested = 0;
+            for (const [toolCallId, tool] of interruptionTools) {
+              if (isPendingAcpTool(tool) || tool.kind !== oldest.kind) continue;
+              settledSameKind += 1;
+              if (permissionRequestedToolCallIds.has(toolCallId)) settledSameKindPermissionRequested += 1;
+            }
             const knownKinds: readonly string[] = ACP_TOOL_KINDS;
             stalledTool = {
               kind: oldest.kind && knownKinds.includes(oldest.kind) ? oldest.kind : "unknown",
               silentMs: oldest.silentMs,
               permissionRequested: permissionRequestedToolCallIds.has(oldest.toolCallId),
               pendingPermissionRequested,
+              settledSameKind,
+              settledSameKindPermissionRequested,
             };
             turnStopRequestedAt = checkedAt;
             pendingToolsAtStop = [...interruptionTools.values()].filter(isPendingAcpTool);
@@ -5352,6 +5363,8 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
                   acpStalledToolSilentMs: stalledTool.silentMs,
                   acpStalledToolPermissionRequested: stalledTool.permissionRequested,
                   acpPendingToolPermissionRequestedCount: stalledTool.pendingPermissionRequested,
+                  acpSettledSameKindToolCount: stalledTool.settledSameKind,
+                  acpSettledSameKindToolPermissionRequestedCount: stalledTool.settledSameKindPermissionRequested,
                 }
               : {}),
             ...(failureDiagnostic ? { terminalSessionFailure: failureDiagnostic } : {}),

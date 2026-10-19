@@ -2069,9 +2069,30 @@ function toPolicy(row: typeof toolPolicies.$inferSelect): ToolPolicy {
   };
 }
 
+// Profile summaries and new-tool counts never read schemas, annotations, or
+// provider metadata. Keep those large fields out of these repeated reads.
+const profileCatalogColumns = {
+  id: toolCatalogEntries.id,
+  applicationId: toolCatalogEntries.applicationId,
+  connectionId: toolCatalogEntries.connectionId,
+  toolName: toolCatalogEntries.toolName,
+  riskLevel: toolCatalogEntries.riskLevel,
+  status: toolCatalogEntries.status,
+  firstSeenAt: toolCatalogEntries.firstSeenAt,
+};
+const profileReviewCatalogColumns = {
+  ...profileCatalogColumns,
+  title: toolCatalogEntries.title,
+  description: toolCatalogEntries.description,
+};
+type ProfileCatalogEntry = Pick<typeof toolCatalogEntries.$inferSelect, keyof typeof profileCatalogColumns>
+  & Partial<Pick<typeof toolCatalogEntries.$inferSelect, "title" | "description">>;
+type ProfileApplication = Pick<typeof toolApplications.$inferSelect, "id" | "name">;
+type ProfileConnection = Pick<typeof toolConnections.$inferSelect, "id" | "name">;
+
 function profileEntryMatchesCatalog(
   entry: typeof toolProfileEntries.$inferSelect,
-  catalogEntry: typeof toolCatalogEntries.$inferSelect,
+  catalogEntry: ProfileCatalogEntry,
 ): boolean {
   if (entry.selectorType === "application")
     return entry.applicationId === catalogEntry.applicationId;
@@ -2090,7 +2111,7 @@ function summarizeProfile(input: {
   profile: typeof toolProfiles.$inferSelect;
   entries: Array<typeof toolProfileEntries.$inferSelect>;
   bindings: Array<typeof toolProfileBindings.$inferSelect>;
-  catalog: Array<typeof toolCatalogEntries.$inferSelect>;
+  catalog: ProfileCatalogEntry[];
   agentIds: string[];
 }): ToolProfileSummary {
   const includes = input.entries.filter((entry) => entry.effect === "include");
@@ -2150,8 +2171,8 @@ function summarizeProfile(input: {
 
 function profileCoversCatalogScope(input: {
   entry: typeof toolProfileEntries.$inferSelect;
-  catalogEntry: typeof toolCatalogEntries.$inferSelect;
-  catalogById: Map<string, typeof toolCatalogEntries.$inferSelect>;
+  catalogEntry: ProfileCatalogEntry;
+  catalogById: Map<string, ProfileCatalogEntry>;
 }): boolean {
   if (input.entry.effect !== "include") return false;
   if (input.entry.selectorType === "application")
@@ -2175,9 +2196,9 @@ function profileCoversCatalogScope(input: {
 function pendingNewToolsForProfile(input: {
   profile: typeof toolProfiles.$inferSelect;
   entries: Array<typeof toolProfileEntries.$inferSelect>;
-  catalog: Array<typeof toolCatalogEntries.$inferSelect>;
-  applicationsById?: Map<string, typeof toolApplications.$inferSelect>;
-  connectionsById?: Map<string, typeof toolConnections.$inferSelect>;
+  catalog: ProfileCatalogEntry[];
+  applicationsById?: Map<string, ProfileApplication>;
+  connectionsById?: Map<string, ProfileConnection>;
 }): ToolProfileNewToolReviewItem[] {
   if (
     input.profile.status !== "active" ||
@@ -2224,8 +2245,8 @@ function pendingNewToolsForProfile(input: {
       connectionName:
         input.connectionsById?.get(catalogEntry.connectionId)?.name ?? null,
       toolName: catalogEntry.toolName,
-      title: catalogEntry.title,
-      description: catalogEntry.description,
+      title: catalogEntry.title ?? null,
+      description: catalogEntry.description ?? null,
       capability: catalogEntry.riskLevel,
       riskLevel: catalogEntry.riskLevel,
       addedAt: catalogEntry.firstSeenAt,
@@ -2237,10 +2258,10 @@ function buildProfileDetails(input: {
   profile: typeof toolProfiles.$inferSelect;
   entries: Array<typeof toolProfileEntries.$inferSelect>;
   bindings: Array<typeof toolProfileBindings.$inferSelect>;
-  catalog: Array<typeof toolCatalogEntries.$inferSelect>;
+  catalog: ProfileCatalogEntry[];
   agentIds: string[];
-  applicationsById?: Map<string, typeof toolApplications.$inferSelect>;
-  connectionsById?: Map<string, typeof toolConnections.$inferSelect>;
+  applicationsById?: Map<string, ProfileApplication>;
+  connectionsById?: Map<string, ProfileConnection>;
 }): ToolProfileWithDetails {
   const pendingNewTools = pendingNewToolsForProfile({
     profile: input.profile,
@@ -6078,7 +6099,7 @@ export function toolAccessService(
           asc(toolProfileBindings.createdAt),
         ),
       dbClient
-        .select()
+        .select(profileCatalogColumns)
         .from(toolCatalogEntries)
         .where(
           and(
@@ -6091,11 +6112,11 @@ export function toolAccessService(
         .from(agents)
         .where(eq(agents.companyId, profile.companyId)),
       dbClient
-        .select()
+        .select({ id: toolApplications.id, name: toolApplications.name })
         .from(toolApplications)
         .where(eq(toolApplications.companyId, profile.companyId)),
       dbClient
-        .select()
+        .select({ id: toolConnections.id, name: toolConnections.name })
         .from(toolConnections)
         .where(eq(toolConnections.companyId, profile.companyId)),
     ]);
@@ -6131,7 +6152,7 @@ export function toolAccessService(
         )
         .orderBy(asc(toolProfileEntries.createdAt)),
       db
-        .select()
+        .select(profileReviewCatalogColumns)
         .from(toolCatalogEntries)
         .where(
           and(
@@ -6141,11 +6162,11 @@ export function toolAccessService(
         )
         .orderBy(asc(toolCatalogEntries.toolName)),
       db
-        .select()
+        .select({ id: toolApplications.id, name: toolApplications.name })
         .from(toolApplications)
         .where(eq(toolApplications.companyId, profile.companyId)),
       db
-        .select()
+        .select({ id: toolConnections.id, name: toolConnections.name })
         .from(toolConnections)
         .where(eq(toolConnections.companyId, profile.companyId)),
     ]);
@@ -8033,7 +8054,7 @@ export function toolAccessService(
           ),
         ),
       db
-        .select()
+        .select({ connectionId: toolCatalogEntries.connectionId })
         .from(toolCatalogEntries)
         .where(
           and(
@@ -8042,7 +8063,7 @@ export function toolAccessService(
           ),
         ),
       db
-        .select()
+        .select({ invocationId: toolActionRequests.invocationId })
         .from(toolActionRequests)
         .where(
           and(
@@ -8052,7 +8073,7 @@ export function toolAccessService(
           ),
         ),
       db
-        .select()
+        .select({ id: toolInvocations.id, connectionId: toolInvocations.connectionId })
         .from(toolInvocations)
         .where(eq(toolInvocations.companyId, companyId)),
       db
@@ -8064,7 +8085,7 @@ export function toolAccessService(
         .from(toolProfileEntries)
         .where(eq(toolProfileEntries.companyId, companyId)),
       db
-        .select()
+        .select(profileCatalogColumns)
         .from(toolCatalogEntries)
         .where(
           and(
@@ -19585,7 +19606,7 @@ export function toolAccessService(
             asc(toolProfileBindings.createdAt),
           ),
         db
-          .select()
+          .select(profileCatalogColumns)
           .from(toolCatalogEntries)
           .where(
             and(
@@ -19598,11 +19619,11 @@ export function toolAccessService(
           .from(agents)
           .where(eq(agents.companyId, companyId)),
         db
-          .select()
+          .select({ id: toolApplications.id, name: toolApplications.name })
           .from(toolApplications)
           .where(eq(toolApplications.companyId, companyId)),
         db
-          .select()
+          .select({ id: toolConnections.id, name: toolConnections.name })
           .from(toolConnections)
           .where(eq(toolConnections.companyId, companyId)),
       ]);

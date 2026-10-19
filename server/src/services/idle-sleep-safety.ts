@@ -227,6 +227,11 @@ const WORK_CHECKS = [
         'connection-intent:' || d.interaction_id::text || ':rejected',
         'connection-intent:' || d.interaction_id::text || ':expired')
       AND (${finishedIdleWake('connection_wake')}) IS NOT TRUE)`,
+  // Saved private feedback and acknowledged uploads have no delivery job.
+  // Pending/failed exports and unfamiliar states retain the instance. A sent
+  // label requires its completion stamp and a cleared failure reason.
+  `SELECT 1 FROM feedback_exports WHERE (status = 'local_only'
+    OR (status = 'sent' AND exported_at IS NOT NULL AND failure_reason IS NULL)) IS NOT TRUE`,
   // These less common work sources fail closed on any retained state. Their
   // terminal-state exceptions can be added with tests for the owning service.
   ...[
@@ -236,7 +241,7 @@ const WORK_CHECKS = [
     "execution_workspace_runtime_leases", "pipeline_automation_executions",
     "native_run_finalizations", "company_transfer_runs", "decisions", "decision_effect_executions",
     "decision_archive_notification_outbox", "browser_use_sessions", "browser_use_runs",
-    "browser_use_browsers", "feedback_exports",
+    "browser_use_browsers",
     "company_secret_proposals",
     "mcp_oauth_grants", "mcp_mutation_receipts", "mcp_event_subscriptions",
     "mcp_event_deliveries", "mcp_attachment_uploads", "dot_agent_bindings",
