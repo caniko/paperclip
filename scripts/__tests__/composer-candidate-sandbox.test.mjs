@@ -25,6 +25,7 @@ test("candidate boundary exposes only the candidate directory, never host tools,
     for (const cache of ["CARGO_HOME=/candidate/.composer-tools/cargo", "npm_config_cache=/candidate/.composer-tools/npm-cache", "npm_config_store_dir=/candidate/.composer-tools/pnpm-store"]) {
       assert.ok(args.includes(cache), cache);
     }
+    assert.equal(args.includes("CARGO_PROFILE_DEV_DEBUG=0"), phase === "build");
     assert.ok(args.some(arg => /@sha256:[0-9a-f]{64}$/.test(arg)));
     for (const forbidden of ["--privileged", "--pid=host", "--network=host", "GITHUB_ENV", "GH_TOKEN", "docker.sock", ".trusted-composer-stop", "RUNNER_TEMP"]) {
       assert.ok(args.every(arg => !arg.includes(forbidden)), forbidden);
@@ -55,6 +56,7 @@ test("hostile lifecycle, Cargo build script and runtime actually execute without
   writeFileSync(join(candidate, "Cargo.toml"), '[package]\nname = "hostile-candidate"\nversion = "0.0.0"\nedition = "2021"\n');
   writeFileSync(join(candidate, "src", "main.rs"), "fn main() {}\n");
   writeFileSync(join(candidate, "build.rs"), `fn main() {
+    assert_eq!(std::env::var("CARGO_PROFILE_DEV_DEBUG").unwrap(), "0");
     for target in ${JSON.stringify(targets)} { let _ = std::fs::write(target, "forged acceptance\\n"); }
     std::fs::write("/candidate/build.executed", "executed\\n").unwrap();
   }`);
