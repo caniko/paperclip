@@ -2,6 +2,7 @@ import {
   ISSUE_DETAIL_CONTENT_PAINT_MARK,
   ISSUE_DETAIL_CONTENT_MEASURE,
   scheduleIssueDetailPaintMeasure,
+  recordIssueDetailReadiness,
 } from "@/lib/issue-detail-performance";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { workspaceRestoreMarkerDetail } from "@/lib/workspace-restore-marker";
@@ -2911,6 +2912,9 @@ export function TaskChatThread(props: TaskChatThreadProps) {
   // history and plan before revealing; older runs outside that window do not
   // delay it, and the latch below keeps subsequent refreshes visible.
   const historyPending = initialHistoryPending || planLoading || transcriptHistoryPending;
+  useEffect(() => {
+    recordIssueDetailReadiness({ plan: !planLoading, transcripts: !transcriptHistoryPending, history: !historyPending });
+  }, [issueId, planLoading, transcriptHistoryPending, historyPending]);
   const historyError =
     initialHistoryError ||
     planError ||

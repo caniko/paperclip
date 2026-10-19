@@ -107,7 +107,14 @@ Claude `ANTHROPIC_CUSTOM_HEADERS`, OpenCode provider `options.headers`, and Herm
 config allowlist, preserves Claude headers across environment isolation, sets
 OpenCode proxy headers at the upstream boundary, and attributes Pi's default and
 custom OpenRouter providers in `models.json`. Explicit legacy provider configs
-for Codex, OpenCode, and Pi use the same policy. These paths must preserve model
+for Codex, OpenCode, and Pi use the same policy. Legacy Pi also loads a temporary
+extension at execution time, including on remote targets. It applies attribution
+after credential and model-header resolution on Pi 0.74 and at provider dispatch
+on Pi 1.0. This covers bare `OPENROUTER_API_KEY` setups and existing Pi home
+configurations without replacing the home, credentials, settings, or model catalog.
+The extension checks each request's endpoint, including custom aliases and regional
+hosts; a provider named `openrouter` that points elsewhere retains its headers.
+These paths must preserve model
 overrides, helper-model requests, retries, and recovery. The standalone Runner
 keeps its dependency-free copy of the policy under a parity test.
 

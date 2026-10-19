@@ -361,6 +361,9 @@ export const queryKeys = {
         "execution-workspace",
         executionWorkspaceId,
       ] as const,
+    summaries: (companyId: string) => ["issues", companyId, "summaries"] as const,
+    summaryBatch: (companyId: string, userId: string | null | undefined, sortedIds: readonly string[]) =>
+      ["issues", companyId, "summaries", userId ?? "__local_board__", sortedIds] as const,
     detail: (id: string) => ["issues", "detail", id] as const,
     comments: (issueId: string) => ["issues", "comments", issueId] as const,
     commentsList: (issueId: string) =>

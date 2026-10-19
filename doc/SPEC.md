@@ -818,3 +818,10 @@ A company may use a shared API model to acknowledge accepted human messages acro
 
 Pipelines is no longer a product feature. Its database tables remain for existing
 data preservation; Cases and Routines continue independently.
+
+### Recent task navigation summaries
+
+Recent-task navigation refreshes a bounded, authorized summary projection for
+its saved task IDs. The projection avoids full task/workspace enrichment and
+preserves company/task access rules. The HTTP contract is defined in
+`SPEC-implementation.md` section 10.4.

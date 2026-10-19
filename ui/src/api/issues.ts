@@ -1,4 +1,6 @@
 import type { SetIssueTitle } from "@paperclipai/shared";
+import { ISSUE_SUMMARIES_MAX_IDS } from "@paperclipai/shared";
+import type { IssueSummary } from "@paperclipai/shared";
 import type { ExecutionReconciliation } from "@paperclipai/shared";
 import type {
   AcceptedPlanDecompositionSummary,
@@ -169,6 +171,17 @@ function issueListSearchParams(filters?: IssueListFilters) {
 }
 
 export const issuesApi = {
+  summaries: async (companyId: string, issueIds: readonly string[], options?: RequestOptions): Promise<IssueSummary[]> => {
+    if (issueIds.length > ISSUE_SUMMARIES_MAX_IDS) throw new Error("Too many issue summary IDs");
+    const ids = [...new Set(issueIds.map((id) => id.trim().toLowerCase()))].sort();
+    if (ids.length === 0) return [];
+    const params = new URLSearchParams({ ids: ids.join(",") });
+    const path = `/companies/${companyId}/issues/summaries?${params}`;
+    // React Query deduplicates within an account; URL-only HTTP coalescing must
+    // never join a request sent with the previous account's cookie.
+    detachInflightGet(path);
+    return api.get<IssueSummary[]>(path, { ...options, cache: "no-store" });
+  },
   /** Fetch every page for bounded task-detail relations, not just the default first page. */
   listAll: async (companyId: string, filters: Omit<IssueListFilters, "limit" | "offset" | "sortField" | "sortDir" | "afterId" | "attention">, options?: RequestOptions): Promise<Issue[]> => {
     const pageSize = 500;

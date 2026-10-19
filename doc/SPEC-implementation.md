@@ -1211,6 +1211,7 @@ Invites tab does not hide this Cloud action.
 ## 10.4 Tasks (Issues)
 
 - `GET /companies/:companyId/issues`
+- `GET /companies/:companyId/issues/summaries?ids=<uuid>,<uuid>`
 - `POST /companies/:companyId/issues`
 - `GET /issues/:issueId`
 - `PATCH /issues/:issueId`
@@ -1244,6 +1245,17 @@ revision, and a negotiated action; they return `202`, replay the original result
 for a duplicate request id, and return `409` with the current projection for a
 stale revision or an unconfirmed unfinished-goal replacement. These controls do
 not create issue comments.
+
+The task-summary endpoint accepts one to five comma-separated UUIDs, normalizes
+case and whitespace, and removes duplicates after validating the five-entry
+bound. It returns accessible, non-hidden tasks in request order with only ID,
+company ID, title, identifier, status, update time, and external-conversation
+state. Missing, foreign-company and unauthorized tasks are omitted. Company
+access and normal task-read authorization apply; task-bridge keys are denied.
+Only the `ids` query parameter is accepted. Malformed, repeated, nested, empty
+and oversized ID parameters return `400`, including mixed scalar/nested syntax.
+Responses are private and not stored by HTTP caches. Reads do not trigger
+full-detail enrichment, workspace inspection or execution recovery.
 
 ### 10.4.1 Atomic Checkout Contract
 

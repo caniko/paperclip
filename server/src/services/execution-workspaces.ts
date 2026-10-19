@@ -11,6 +11,7 @@ import { instanceSettingsService } from "./instance-settings.js";
 import { taskWorkspaceSelectableCondition } from "./task-workspace-selection.js";
 import { executionWorkspaceRepositoryService, lockExecutionWorkspaceRootProvenance, preserveExecutionWorkspaceRootProvenance, assertExecutionWorkspaceRootWriteAccess, assertExecutionWorkspaceRootReadAccess, assertIsolatedWorkspaceSourceReadAccess, retainIsolatedWorkspaceSourceAccess, canonicalRepositoryRoot, type IsolatedWorkspaceSourceAccess, type TaskWorkspaceCreationTrustContext } from "./execution-workspace-repositories.js";
 import { forbidden } from "../errors.js";
+import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { taskWorkspaceSelectionSchema, type TaskWorkspaceSelection, type TaskWorkspaceIntent } from "@paperclipai/shared";
 import { authorizationService, executionWorkspaceReadSqlCondition, projectReadSqlCondition, issueReadSqlCondition, type AuthorizationActor } from "./authorization.js";
 import type { SQL } from "drizzle-orm";
@@ -1672,8 +1673,10 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
   let terminalSweepInProgress = false;
 
   async function listWorkspaceIssueTree(workspace: Pick<ExecutionWorkspaceRow, "companyId" | "sourceIssueId">) {
-    if (!workspace.sourceIssueId) return [];
-    return db
+    const sourceIssueId = workspace.sourceIssueId;
+    if (!sourceIssueId) return [];
+    // A read-only lookup: rebuild it after a transient pooled disconnect.
+    return retryIdempotentDatabaseOperation(() => db
       .select({
         id: issues.id,
         status: issues.status,
@@ -1690,7 +1693,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
               SELECT ${issues.id}
               FROM ${issues}
               WHERE ${issues.companyId} = ${workspace.companyId}
-                AND ${issues.id} = ${workspace.sourceIssueId}
+                AND ${issues.id} = ${sourceIssueId}
               UNION ALL
               SELECT child.id
               FROM ${issues} child
@@ -1700,15 +1703,17 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
             SELECT id FROM issue_tree
           )
         `,
-      ));
+      )));
   }
 
   async function listDeliveryPullRequestProducts(
     workspace: Pick<ExecutionWorkspaceRow, "companyId" | "sourceIssueId">,
   ) {
-    if (!workspace.sourceIssueId) return [];
+    const sourceIssueId = workspace.sourceIssueId;
+    if (!sourceIssueId) return [];
 
-    return db
+    // A read-only lookup: rebuild it after a transient pooled disconnect.
+    return retryIdempotentDatabaseOperation(() => db
       .select({
         id: issueWorkProducts.id,
         url: issueWorkProducts.url,
@@ -1721,10 +1726,10 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       .where(and(
         eq(issueWorkProducts.companyId, workspace.companyId),
         eq(issueWorkProducts.type, "pull_request"),
-        eq(issueWorkProducts.issueId, workspace.sourceIssueId),
+        eq(issueWorkProducts.issueId, sourceIssueId),
       ))
       .orderBy(desc(issueWorkProducts.updatedAt))
-      .limit(100);
+      .limit(100));
   }
 
   async function assessDelivery(

@@ -26,6 +26,16 @@ PAPERCLIP_ISSUE_PERF_RUNS=7 PAPERCLIP_ISSUE_PERF_PORT=3210 pnpm exec playwright 
 
 Outputs include `baseline.md`, `baseline.json`, and a Chrome trace for the first run of each scenario/profile. Open `*.trace.json` in Chrome DevTools Performance to inspect the `issue-detail:*` user-timing marks.
 
+Set `PAPERCLIP_ISSUE_PERF_PROFILE=1` to capture actual Chrome CPU samples and
+conversation-readiness transitions in one diagnostic sample per scenario/profile.
+Import the resulting `*.cpuprofile` in DevTools and inspect `*.readiness.json` for
+the task, comments, metadata, activity, runs, runtime, plan and transcript gates.
+Each gate records changes with `detail.ready`; use its last transition before
+content paint when a gate becomes pending after mount. These diagnostic runs
+include profiler overhead. Run without the flag for before/after latency claims.
+Readiness marks stay in the local browser and contain only fixed gate names and
+booleans; the harness enables them before navigation.
+
 For bundle comparisons, build the UI and serve the production assets from an
 isolated local instance with `PAPERCLIP_UI_DEV_MIDDLEWARE=false`. The default
 managed server above uses development middleware, which does not reproduce
@@ -50,6 +60,11 @@ Back navigation, and covers mobile reduced motion and explicit comment links.
 The eight scenarios also exercise same-task hash navigation without remounting
 on desktop and mobile, and stalled native/log reads that expose Retry after
 the 15-second request deadline.
+`plan-startup.spec.ts` also opens tasks with and without a saved plan while
+blocking the separate plan endpoint. Both must reveal the saved conversation
+from the task response without issuing that redundant read.
+It also checks task-list navigation, where a list-only snapshot needs one normal
+plan fetch and must still show a saved plan when present.
 Videos and per-frame `layout.json` measurements are written under each test's
 output directory. The two-pixel assertion measures a logical row's viewport
 offset; total scroll offset legitimately changes when history is prepended.

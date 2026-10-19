@@ -103,6 +103,15 @@ must remain stopped while transient disconnections can still recover.
 The PostgreSQL suite uses controlled provider failures for these cases; live
 provider credential repair remains a separate acceptance check.
 
+GitHub connections in attention or revoked state show a repair notice above the
+settings. **Reconnect GitHub → Reconnect saved App** checks the same App with
+stored credentials and repairs delivery. **Replace App credentials** is the
+fallback, with the saved App ID, a link to its GitHub settings, and PEM upload or
+paste instructions. The production management Storybook's **04 Recovery** group
+covers these views, pending/failure/success, mobile, and light theme with simulated
+provider responses. Verify actual credential validity and restored delivery
+separately against GitHub; a Storybook success does not establish live recovery.
+
 For GitHub, submit a disposable PR and verify the summary heading uses the bot's
 display name and the check remains **Paperclip Review**. For two separate bots on one PR, verify
 their App-scoped checks and comments remain independent.

@@ -662,6 +662,7 @@ export type {
 } from "./external-object.js";
 export type {
   CompactIssue,
+  IssueSummary,
   Issue,
   IssueChangeReceiptEntry,
   IssueChanges,

@@ -40,6 +40,14 @@ narrower/different APIs.
 
 ## `organize`
 
+`GET /api/companies/{companyId}/issues/summaries?ids=...` reads up to five exact
+UUIDs and returns only navigation summaries. Normal company and task-read
+permissions apply to ordinary agent REST calls; task-bridge keys are denied.
+Hidden, missing, foreign and private inaccessible IDs are omitted without an
+existence disclosure. No dedicated CLI/native tool is added. Embedded database
+route tests cover same-company agent access and company/task-bridge denials;
+this does not establish a live native `call_api` journey.
+
 The issue-list API accepts optional `includeAgentCreatedTasks`; false restricts
 independent results to human creation before search/pagination. Omission retains
 existing agent/API behavior. `includeParticipatedTasks=true` requires a board user
