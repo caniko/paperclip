@@ -321,6 +321,24 @@ Asset writes and verification may add only non-negative integer
 `paperclip.execution.fileCount` and `paperclip.execution.bytes` attributes.
 The closed keys are declared in `EXECUTION_PREPARATION_SPAN_ATTRS` in
 `packages/adapter-utils/src/acpx-engine/startup-timing.ts`.
+Repository checkout cache phases also carry the closed
+`paperclip.execution.repositoryCache.outcome` value: `disabled`, `hit`, `miss`,
+`published`, `already_present`, `contended`, `capacity`, `budget`, `invalid`, or `error`.
+The clone span carries the boolean
+`paperclip.execution.repositoryCache.reference_supplied`, including `false` for
+a fallback clone. A lookup hit means a validated cache was found, and supplying
+a reference does not prove Git avoided a download. These attributes carry no
+cache keys, remote URLs, paths, refs, credentials, or error text.
+
+Pristine repository-object cache version 2 mirrors the fresh checkout's refs,
+including remote-tracking refs. Version 1 copied their objects into a bare
+repository but omitted the remote-tracking tips. Git could then download those
+objects again during negotiation. The version is part of the cache key, so the
+first checkout creates a new generation and later checkouts can reuse its tips.
+Existing generations remain under the same storage limits. Cached refs stay
+private to the company and credential scope. Task checkouts still authenticate
+online, use the current remote refs, and dissociate their objects from the cache.
+
 Other execution phases carry only the existing hashed run ID; manual boundaries
 have no attributes. Exceptions set status without exporting their messages.
 
