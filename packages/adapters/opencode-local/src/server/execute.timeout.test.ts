@@ -14,7 +14,7 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async (importOriginal) =>
   ensureAdapterExecutionTargetCommandResolvable: vi.fn(),
   prepareAdapterExecutionTargetRuntime: vi.fn(async () => ({
     runtimeRootDir: "/workspace/runtime", workspaceRemoteDir: "/workspace",
-    assetDirs: {}, restoreWorkspace: mocks.restore,
+    assetDirs: { skills: "/workspace/runtime/skills" }, restoreWorkspace: mocks.restore,
   })),
   readAdapterExecutionTargetHomeDir: vi.fn(async () => "/home/fixture"),
   startAdapterExecutionTargetPaperclipBridge: vi.fn(async () => ({ env: {}, stop: mocks.stop })),

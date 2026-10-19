@@ -81,7 +81,7 @@ describe.skipIf(!sentryPackage)("run failure context with the real Sentry SDK", 
       ensureAdapterExecutionTargetCommandResolvable: vi.fn(),
       prepareAdapterExecutionTargetRuntime: vi.fn(async () => ({
         runtimeRootDir: "/workspace/runtime", workspaceRemoteDir: "/workspace",
-        assetDirs: {}, restoreWorkspace: restore,
+        assetDirs: { skills: "/workspace/runtime/skills" }, restoreWorkspace: restore,
       })),
       readAdapterExecutionTargetHomeDir: vi.fn(async () => "/home/fixture"),
       startAdapterExecutionTargetPaperclipBridge: vi.fn(async () => ({ env: {}, stop })),

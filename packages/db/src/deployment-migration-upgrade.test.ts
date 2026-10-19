@@ -51,7 +51,7 @@ const pendingFiles = [
   "0349_oval_dragon_lord.sql", "0350_friendly_rhodey.sql",
   "0351_hard_albert_cleary.sql", "0352_special_warbound.sql",
   "0353_skinny_gamma_corps.sql", "0354_agent_connection_assignment_hooks.sql",
-  "0356_perpetual_manta.sql",
+  "0356_perpetual_manta.sql", "0357_deployment_environments.sql",
 ];
 const browserTables = ["browser_use_browsers", "browser_use_runs", "browser_use_sessions", "browser_use_settings"];
 const guardedTables = ["agent_api_keys", "agents", "companies", "company_secret_versions", "company_secrets", "project_workspaces", "projects", "routine_triggers", "routines"];
@@ -119,7 +119,7 @@ async function readHistory(sql: TestSql) {
     SELECT id, hash, created_at::text FROM drizzle.__drizzle_migrations ORDER BY id`;
 }
 
-async function readSchema(sql: TestSql) {
+async function readSchema(sql: TestSql, expectedGuards = [...guardedTables, "environments"].sort()) {
   const tables = await sql<{ table_name: string }[]>`SELECT table_name FROM information_schema.tables
     WHERE table_schema = 'public' AND table_name = ANY(${sql.array([...browserTables, "deployment_resources"])}::text[]) ORDER BY table_name`;
   const [keyboard] = await sql`SELECT EXISTS (SELECT 1 FROM information_schema.columns
@@ -128,7 +128,7 @@ async function readSchema(sql: TestSql) {
     pg_get_triggerdef(t.oid) AS trigger_definition, pg_get_functiondef(t.tgfoid) AS function_definition
     FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'public' AND t.tgname = 'deployment_guard' AND NOT t.tgisinternal ORDER BY c.relname`;
-  expect(guards.map((row) => row.table_name)).toEqual(guardedTables);
+  expect(guards.map((row) => row.table_name)).toEqual(expectedGuards);
   expect(guards.every((row) => row.enabled === "O")).toBe(true);
   return { tables: tables.map((row) => row.table_name), keyboard: keyboard.present, guards };
 }
@@ -217,7 +217,7 @@ describePostgres("deployment migration upgrade from authentic native history", (
       await sql`UPDATE "user" SET keyboard_shortcuts = false WHERE id = ${row.ids.user}`;
       const beforeRows = await preservedRows(sql, row);
       const beforeHistory = await readHistory(sql);
-      const beforeSchema = await readSchema(sql);
+      const beforeSchema = await readSchema(sql, guardedTables);
       expect(beforeSchema).toMatchObject({ tables: ["deployment_resources"], keyboard: true });
       await assertGuardsAndCipher(sql, row);
       await expect(assertDeploymentSchemaCompatible(url)).resolves.toBeUndefined();
@@ -236,7 +236,7 @@ describePostgres("deployment migration upgrade from authentic native history", (
       expect(afterHistory.filter((entry) => entry.hash === nativeHash)).toEqual(beforeHistory.filter((entry) => entry.hash === nativeHash));
       expect(afterHistory.filter((entry) => entry.hash === nativeHash)).toHaveLength(1);
       expect(await preservedRows(sql, row)).toEqual(upgradedRows(beforeRows));
-      expect(await readSchema(sql)).toEqual({ tables: [...browserTables, "deployment_resources"], keyboard: false, guards: beforeSchema.guards });
+      expect(await readSchema(sql)).toEqual({ tables: [...browserTables, "deployment_resources"], keyboard: false, guards: expect.arrayContaining(beforeSchema.guards) });
       await assertGuardsAndCipher(sql, row);
       expect(await inspectMigrations(url)).toMatchObject({ status: "upToDate", journalEntryCount: beforeHistory.length + pendingFiles.length });
       await applyPendingMigrations(url);

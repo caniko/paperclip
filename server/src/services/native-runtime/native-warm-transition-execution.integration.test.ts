@@ -90,6 +90,13 @@ generated("warm transition → restarted native execution", () => {
     let detached: Promise<void> | undefined;
     let attachment: Promise<void> | undefined;
     const diagnostics: string[] = [];
+    // Installed Codex takes precedence over PATH; this recovery fixture must
+    // always execute its deterministic provider, never an installed real one.
+    const codexCommandResolver = await vi.importActual<{ resolveCodexCommand: () => string }>(
+      "../../../../packages/paperclip-runner/src/drivers/codex/codex-command.js",
+    );
+    const resolveFixtureCodex = vi.spyOn(codexCommandResolver, "resolveCodexCommand")
+      .mockReturnValue(join(bin, "codex"));
     const createTransport = runtime.createRunnerdCodexTransport;
     const transportSpy = vi.spyOn(runtime, "createRunnerdCodexTransport").mockImplementation(options => {
       const register = options!.controlPlaneRegistration!;
@@ -274,6 +281,7 @@ generated("warm transition → restarted native execution", () => {
       }
       throw new Error(`${error instanceof Error ? error.message : String(error)}\nNative warm execution diagnostics:\n${diagnostics.join("").slice(-16000)}`, { cause: error });
     } finally {
+      resolveFixtureCodex.mockRestore();
       commitSpy?.mockRestore();
       transportSpy.mockRestore();
       await resumed?.close({ reason: "Warm execution cleanup" });

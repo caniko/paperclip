@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { resolveCargoBinary, resolveCargoTargetDirectory } from "../../scripts/cargo-artifacts.mjs";
 import type { ControlPlanePort } from "../contracts/control-plane-port.js";
 import { bindAcpxAgentFiles } from "../drivers/acpx/agent-files-binding.js";
@@ -2190,7 +2190,8 @@ it("trusts a preconfigured workspace through launch flags without editing the us
     codexHome: "/home/executor/.codex", workingDirectory: "/work/task",
   });
   expect(args.join("\n")).toContain('projects={"/work/task"={trust_level="trusted"}}');
-  expect(args.join("\n")).toContain('HOME="/home/executor"');
+  expect(args.join("\n")).toContain('shell_environment_policy.include_only=["HOME"]');
+  expect(args.join("\n")).not.toContain("shell_environment_policy.set=");
   expect(args.join("\n")).not.toContain('"/home/executor"="none"');
 });
 
@@ -8597,7 +8598,7 @@ it.each([true, false])("preserves prepared OpenCode cleanup errors (primary fail
 it.each([
   { model: "openrouter/deepseek/deepseek-v4-flash-0731", supportsReasoning: true },
   { model: "anthropic/claude-sonnet-4", supportsReasoning: false },
-])("preserves prepared input and completion feedback through runnerd and the real OpenCode proxy boundary ($model)", async ({ model, supportsReasoning }, { onTestFinished }) => {
+])("preserves prepared input and completion feedback through runnerd and the real OpenCode proxy boundary ($model)", async ({ model, supportsReasoning }) => {
   const root = await mkdtemp(join(tmpdir(), "runnerd-prepared-opencode-"));
   // Setup can fail before the transport/session cleanup boundary exists.
   onTestFinished(() => rm(root, { recursive: true, force: true }));

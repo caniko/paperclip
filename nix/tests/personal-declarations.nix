@@ -45,6 +45,22 @@
       modules = [
         (homeManagerPath + "/nixos")
         ../modules/nixos/home-manager.nix
+        # Model the consumer-owned system service schema; this fixture checks
+        # declaration selection, not the external service's runtime behavior.
+        {
+          options.services.paperclip.instances = lib.mkOption {
+            default = {};
+            type = lib.types.attrsOf (lib.types.submodule {
+              options = {
+                enable = lib.mkEnableOption "fixture controller";
+                manifest = lib.mkOption {
+                  type = lib.types.attrs;
+                  default = {};
+                };
+              };
+            });
+          };
+        }
         {
           system.stateVersion = "26.05";
           boot.isContainer = true;

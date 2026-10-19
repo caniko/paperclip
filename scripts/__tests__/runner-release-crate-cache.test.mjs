@@ -93,7 +93,8 @@ test("the script's path list and key inputs cover what the release build of the 
   }
   // The stage step copies the uplifted binary; it has to be in the set.
   const stage = readFileSync(path.join(repoRoot, RUNNER_PACKAGE, "scripts/stage-runner-binary.mjs"), "utf8");
-  assert.match(stage, /"runner", "target", "release", executable/);
+  assert.match(stage, /resolveCargoBinary\(\{\s*binary: "paperclip-runnerd", profile: "release",\s*targetDirectory: resolveCargoTargetDirectory\(\{ packageRoot \}\)/);
+  assert.match(stage, /await stageRunnerBinary\(source, path\.join\(binaryRoot, executable\)\)/);
   assert.ok(CACHED_PATHS.includes(`${RELEASE_DIR}/paperclip-runnerd`));
 });
 

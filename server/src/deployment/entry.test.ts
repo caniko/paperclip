@@ -19,7 +19,7 @@ import {
   runDatabaseRestore,
   startEmbeddedPostgresTestDatabase,
 } from "@paperclipai/db";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { paperclipConfigSchema } from "@paperclipai/shared";
 import { secretService } from "../services/secrets.js";
 
@@ -102,10 +102,10 @@ beforeAll(async () => {
           company: "example",
           fields: {
             name: "Bridge worker",
-            adapterType: "hermes_gateway",
-            adapterConfig: { apiBaseUrl: "http://127.0.0.1:1" },
+            adapterType: "process",
+            adapterConfig: { command: process.execPath, args: ["-e", "process.exit(0)"] },
           },
-          credentials: { apiKey: "gateway" },
+          credentials: { "env.FIXTURE_KEY": "gateway" },
         },
       },
       taskBridges: {
@@ -192,6 +192,19 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
   expect(
     (await fetch(`http://localhost:${port}/api/companies/${adoptedCompanyId}`, { headers: { cookie } })).status,
   ).toBe(200);
+  // Server health does not imply that asynchronous agent setup has completed.
+  await expect
+    .poll(
+      async () =>
+        (
+          await db
+            .select({ status: agents.status, lifecycleState: agents.lifecycleState })
+            .from(agents)
+            .where(eq(agents.id, bindings["agent/worker"]))
+        )[0],
+      { timeout: 30000, interval: 100 },
+    )
+    .toEqual({ status: "idle", lifecycleState: "ready" });
   const createIssue = (company: string, project: string) =>
     fetch(`http://localhost:${port}/api/companies/${company}/issues`, {
       method: "POST",

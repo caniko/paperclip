@@ -26,9 +26,15 @@ const SELECT_STEP = "      - name: Select the pinned Runner Rust toolchain";
 // entry. Each one has to agree with the writer on every key input, or that
 // one lane misses and silently recompiles every third-party crate while the
 // others hit.
-const READER_JOBS = ["typecheck_release_registry", "verify_paperclip_runner", "build", "canary_dry_run", "native_composer_stop"];
+const READER_JOBS = ["typecheck_release_registry", "verify_paperclip_runner", "build", "canary_dry_run"];
 const readers = READER_JOBS.map((name) => [name, job(prWorkflow, name)]);
 const release = job(releaseWorkflow, "verify_paperclip_runner");
+
+test("the isolated Stop candidate never receives the host Rust cache", () => {
+  const isolated = job(prWorkflow, "native_composer_stop");
+  assert.doesNotMatch(isolated, /uses: Swatinem\/rust-cache@|runner_rust_workspace|CARGO_TARGET_DIR/);
+  assert.match(isolated, /composer-candidate-stage\.mjs build "\$COMPOSER_STOP_CANDIDATE_ROOT"/);
+});
 
 test("every rust-cache restore in the PR workflow belongs to a guarded reader job", () => {
   const total = prWorkflow.match(/uses: Swatinem\/rust-cache@/g)?.length ?? 0;

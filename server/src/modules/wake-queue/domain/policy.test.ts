@@ -264,10 +264,10 @@ describe("decideWakeOutcome", () => {
       expected: { kind: "cancel_pause_hold" },
     },
     {
-      name: "defer_agent_pause: a permitted tree interaction cannot invoke a paused agent",
+      name: "cancel_pause_hold: legacy tree metadata cannot defer an explicit hold on a paused agent",
       facts: { agent: { agentFound: true, invokable: false, paused: true },
         pauseHold: { activePauseHold: true, treeHoldInteractionWake: true } },
-      expected: { kind: "defer_agent_pause" },
+      expected: { kind: "cancel_pause_hold" },
     },
     {
       name: "fail_not_invokable: the agent is found but not invokable",
