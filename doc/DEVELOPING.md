@@ -92,6 +92,12 @@ GitHub Actions owns `pnpm-lock.yaml`.
 - Pull request CI validates dependency resolution when manifests change.
 - Pushes to `master` regenerate `pnpm-lock.yaml` with `pnpm install --lockfile-only --no-frozen-lockfile`, commit it back if needed, and then run verification with `--frozen-lockfile`.
 
+The owned fork may preserve an unchanged CI-owned lock when importing canonical
+upstream history. Its prepared policy fetches only upstream `master` and
+`chore/refresh-lockfile` directly from `paperclipai/paperclip`, then compares the
+head's lock blob to a common ancestor. Candidate branches, local refs and manual
+lock edits grant no exception. Fetch and object-resolution failures fail closed.
+
 ## Trusted PR Workflow
 
 The PR caller uses `paperclipai/paperclip/.github/workflows/pr-trusted.yml@master`.

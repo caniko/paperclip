@@ -66,15 +66,18 @@ jobs:
           if grep -Fx 'pnpm-lock.yaml' <<< "$changed" >/dev/null; then
             # Synchronizing this fork imports CI-owned upstream locks. Accept
             # only exact bytes from the canonical history already in this head.
-            git fetch --no-tags https://github.com/paperclipai/paperclip.git master
-            imported="$(git merge-base '${{ github.event.pull_request.head.sha }}' FETCH_HEAD)"
             head_lock="$(git rev-parse '${{ github.event.pull_request.head.sha }}:pnpm-lock.yaml')"
-            imported_lock="$(git rev-parse "$imported:pnpm-lock.yaml")"
-            if test "$head_lock" != "$imported_lock"; then
-              echo "Do not commit pnpm-lock.yaml in pull requests. CI owns lockfile updates."
-              exit 1
-            fi
-            echo "Lockfile matches canonical imported ancestor $imported"
+            for ref in master refs/heads/chore/refresh-lockfile; do
+              git fetch --no-tags https://github.com/paperclipai/paperclip.git "$ref"
+              imported="$(git merge-base '${{ github.event.pull_request.head.sha }}' FETCH_HEAD)"
+              imported_lock="$(git rev-parse "$imported:pnpm-lock.yaml")"
+              if test "$head_lock" = "$imported_lock"; then
+                echo "Lockfile matches canonical imported ancestor $imported from $ref"
+                exit 0
+              fi
+            done
+            echo "Do not commit pnpm-lock.yaml in pull requests. CI owns lockfile updates."
+            exit 1
           fi
 
       - name: Setup Node.js for pnpm bootstrap
