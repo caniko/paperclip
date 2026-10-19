@@ -491,7 +491,7 @@ const support = await getEmbeddedPostgresTestSupport();
     { status: "idle", closedAt: new Date() },
     { status: "archived", closedAt: null },
     { status: "in_review", closedAt: null },
-  ])("rejects repository requests for unavailable $status workspaces (closed=$closedAt)", async lifecycle => {
+  ])("rejects repository requests for unavailable $status workspaces (case %#)", async lifecycle => {
     const f = await fixture();
     await db.update(executionWorkspaces).set(lifecycle).where(eq(executionWorkspaces.id, f.workspace.id));
     await expect(f.request({ kind: "url", url: "https://github.com/public/example" })).rejects.toThrow("Execution workspace is unavailable");

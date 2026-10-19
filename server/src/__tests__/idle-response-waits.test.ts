@@ -117,7 +117,7 @@ if (!support.supported) console.warn(`Skipping response-wait database tests: ${s
   it.each([
     { checkoutRunId: randomUUID() }, { executionRunId: randomUUID() },
     { executionState: { status: "pending" } }, { monitorWakeRequestedAt: new Date(now) },
-  ])("does not let a response card hide issue execution: %j", async change => {
+  ])("does not let a response card hide issue execution: case %#", async change => {
     const f = await seed(); await wait(f);
     // Checkout and execution fields reference real run rows.
     const patch = { ...change };

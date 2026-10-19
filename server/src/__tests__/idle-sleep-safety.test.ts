@@ -757,7 +757,7 @@ if (!support.supported) console.warn(`Skipping idle sleep Postgres tests: ${supp
   });
 
   it.each(["fixture-provider-id", "00000000-0000-0000-0000-00000000000z", randomUUID()])(
-    "accepts cleaned external provider reference %s without an unsafe UUID cast", async providerLeaseId => {
+    "accepts cleaned external provider reference case %# without an unsafe UUID cast", async providerLeaseId => {
       const { session, lease } = await seedFinishedLogin();
       await db.update(environmentLeases).set({ providerLeaseId }).where(eq(environmentLeases.id, lease.id));
       await db.update(adapterAuthSessions).set({ providerLeaseId }).where(eq(adapterAuthSessions.id, session.id));
