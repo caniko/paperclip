@@ -3,7 +3,8 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, w
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { bindQualificationRunner } from "../qualification-runner.mjs";
+import { bindQualificationRunner, bindRemoteContinuity } from "../qualification-runner.mjs";
+import { sha256 } from "../qualification-roster.mjs";
 
 test("runner binding follows the source fallback and rejects shadowing or incompatible artifacts", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "qualification-runner-"));
@@ -59,6 +60,74 @@ test("runner binding follows the source fallback and rejects shadowing or incomp
     symlinkSync(retained, binary);
     assert.throws(bind, /redirect/);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("remote continuity binds actual container state and rejects changed source, image, tools and attempts", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "qualification-remote-"));
+  const originalEnvironment = { ...process.env };
+  try {
+    const bin = path.join(root, "commands");
+    mkdirSync(bin);
+    const head = "a".repeat(40), container = "b".repeat(64), runId = "17";
+    const helper = path.join(root, ".github/scripts/prepare-remote-continuity.sh");
+    mkdirSync(path.dirname(helper), { recursive: true });
+    writeFileSync(helper, "selected helper\n");
+    const artifact = (file, text) => {
+      const binary = path.join(root, file);
+      mkdirSync(path.dirname(binary), { recursive: true });
+      writeFileSync(binary, text);
+      return { binary, sha256: sha256(text) };
+    };
+    const receipt = { schema: "paperclip.remote-continuity.v1", head, container, runId, runAttempt: 1,
+      image: "node:24-trixie@sha256:a3e43f3f15bea8c59c689afeebe63c945885677ae469ae8d12578567ef18f1df",
+      imageId: `sha256:${"c".repeat(64)}`, port: "43217", tools: "original container tool hashes",
+      helperSha256: sha256(readFileSync(helper)),
+      runner: artifact("packages/paperclip-runner/runner/target/release/paperclip-runnerd", "runner"),
+      provider: { ...artifact("packages/paperclip-runner/runner/target/release/fake-codex-app-server", "provider"), remote: "/opt/continuity/fake-codex-app-server" },
+      wrapper: artifact("fake-codex", "wrapper"), certificate: artifact("test.crt", "certificate") };
+    const stateFile = path.join(root, "state.json");
+    const actual = { State: { Running: true }, Image: receipt.imageId,
+      Config: { Image: receipt.image, Labels: { "paperclip.qualification.run": runId } },
+      NetworkSettings: { Ports: { "43127/tcp": [{ HostIp: "127.0.0.1", HostPort: receipt.port }] } } };
+    let state = { actual, providerSha256: receipt.provider.sha256, tools: receipt.tools };
+    const write = () => {
+      writeFileSync(stateFile, JSON.stringify(state));
+      writeFileSync(path.join(root, "remote-continuity.json"), JSON.stringify(receipt));
+    };
+    writeFileSync(path.join(bin, "git"), `#!${process.execPath}\nconsole.log(${JSON.stringify(head)});\n`, { mode: 0o755 });
+    writeFileSync(path.join(bin, "docker"), `#!${process.execPath}
+const fs=require('node:fs');
+const state=JSON.parse(fs.readFileSync(${JSON.stringify(stateFile)}));
+const args=process.argv.slice(2);
+if(args[0]==='inspect') console.log(JSON.stringify([state.actual]));
+else if(args[2]==='sha256sum') console.log(state.providerSha256+'  '+args[3]);
+else if(args[2]==='sh') console.log(state.tools);
+else process.exit(1);
+`, { mode: 0o755 });
+    Object.assign(process.env, { PATH: `${bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: runId,
+      PAPERCLIP_TEST_RUNNER_CONTAINER: container, PAPERCLIP_TEST_RUNNER_PORT: receipt.port,
+      PAPERCLIP_TEST_LINUX_RUNNER_BINARY: receipt.runner.binary, PAPERCLIP_TEST_FAKE_CODEX_WRAPPER: receipt.wrapper.binary,
+      NODE_EXTRA_CA_CERTS: receipt.certificate.binary });
+    const bind = () => { write(); return bindRemoteContinuity(root, root); };
+    assert.equal(bind().providerSha256, receipt.provider.sha256);
+    for (const mutate of [
+      () => { state.actual.State.Running = false; },
+      () => { state.actual.Image = "changed"; },
+      () => { state.actual.NetworkSettings.Ports["43127/tcp"][0].HostIp = "0.0.0.0"; },
+      () => { state.providerSha256 = "changed"; },
+      () => { state.tools = "changed"; },
+    ]) {
+      const original = structuredClone(state);
+      mutate(); assert.throws(bind); state = original;
+    }
+    receipt.runAttempt = 2; assert.throws(bind); receipt.runAttempt = 1;
+    receipt.image = receipt.image.replace("a3e4", "0000"); assert.throws(bind);
+    receipt.image = state.actual.Config.Image;
+    writeFileSync(receipt.runner.binary, "changed"); assert.throws(bind, /artifact changed/);
+  } finally {
+    process.env = originalEnvironment;
     rmSync(root, { recursive: true, force: true });
   }
 });

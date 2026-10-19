@@ -65,3 +65,11 @@ pnpm exec vitest run \
 The caller owns the disposable container. Remove it after the run, including
 after failure; failed cases can retain remote processes and files for inspection.
 The test cleans up its database and host session directories.
+
+The fork's exact-head `runnerd` profile provisions this fixture on its disposable
+GitHub-hosted Linux runner. It uses an immutable official Node image and the
+checkout's locked release build for both Rust binaries. The preparation receipt
+binds the image, container, provider binary, wrapper, certificate and actual
+container tools. The profile rechecks those bindings after the four unchanged
+scenarios; cleanup retains container inspection and logs before removing only
+the run-labelled container. The private TLS key stays outside the evidence archive.

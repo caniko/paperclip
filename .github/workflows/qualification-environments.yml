@@ -128,6 +128,16 @@ jobs:
           else
             cargo build --manifest-path runner/Cargo.toml --locked --bin paperclip-runnerd --bin fake-codex-app-server --jobs 2 2>&1 | tee "$EVIDENCE/runner-build.log"
           fi
+      - name: Build and prepare the real remote continuity fixture
+        if: matrix.profile == 'runnerd'
+        working-directory: packages/paperclip-runner
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/packages/paperclip-runner/runner/target
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path runner/Cargo.toml --release --locked --bin paperclip-runnerd --bin fake-codex-app-server --jobs 2 2>&1 | tee "$EVIDENCE/remote-runner-build.log"
+          cd "$GITHUB_WORKSPACE"
+          bash .github/scripts/prepare-remote-continuity.sh "$EVIDENCE" 2>&1 | tee "$EVIDENCE/remote-continuity-preparation.log"
       - name: Capture original transient and managed loss windows on this runner
         if: matrix.profile == 'warm-transition'
         run: |
@@ -162,6 +172,17 @@ jobs:
         if: always() && (matrix.profile == 'otel-sdk' || matrix.profile == 'sentry-sdk')
         run: |
           if [ -f "$EVIDENCE/sdk.json" ]; then node .github/scripts/cleanup-qualification-sdk.mjs "$EVIDENCE"; fi
+      - name: Retain and release the disposable remote continuity container
+        if: always() && matrix.profile == 'runnerd'
+        run: |
+          set -euo pipefail
+          if [ -f "$EVIDENCE/remote-continuity-container.id" ]; then
+            container="$(cat "$EVIDENCE/remote-continuity-container.id")"
+            test "$(docker inspect --format '{{ index .Config.Labels "paperclip.qualification.run" }}' "$container")" = "$GITHUB_RUN_ID"
+            docker logs "$container" > "$EVIDENCE/remote-continuity-container.log" 2>&1
+            docker inspect "$container" > "$EVIDENCE/remote-continuity-container.json"
+            docker rm --force "$container"
+          fi
       - name: Seal the original raw and strict profile reports
         if: always()
         env:
