@@ -5,6 +5,7 @@ import {
   agents,
   builtInManagedResources,
   companies,
+  deploymentResources,
   companySecretBindings,
   environmentCustomImageSetupSessions,
   environmentLeases,
@@ -898,7 +899,10 @@ export function environmentService(db: Db) {
             eq(builtInManagedResources.resourceId, environmentId),
           ),
         );
-      return Array.from(new Set(rows.map((row) => row.companyId)));
+      const declared = await db.select({ companyId: deploymentResources.companyId }).from(deploymentResources).where(and(
+        eq(deploymentResources.kind, "environment"), eq(deploymentResources.resourceId, environmentId),
+      ));
+      return Array.from(new Set([...rows, ...declared].flatMap(row => row.companyId ? [row.companyId] : [])));
     },
 
     getLeaseById: async (id: string): Promise<EnvironmentLease | null> => {

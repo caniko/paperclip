@@ -8,6 +8,29 @@ describe("native declaration adapter contracts", () => {
     }, { "env.WORKER_TOKEN": "worker" })).not.toThrow();
   });
 
+  it("accepts OpenCode's native configuration without replacing personal permissions", () => {
+    expect(() => validateDeclaredAdapterConfig("opencode_local", {
+      command: "opencode", model: "openai/gpt-5.4", cwd: "/workspace",
+      dangerouslySkipPermissions: false, timeoutSec: 900, graceSec: 20,
+      extraArgs: [], env: { MODE: "test" },
+    }, { "env.OPENAI_API_KEY": "provider" })).not.toThrow();
+  });
+
+  it("requires an explicit OpenCode permission choice", () => {
+    expect(() => validateDeclaredAdapterConfig("opencode_local", {}, {})).toThrow();
+  });
+
+  it("declares managed OpenCode without overriding the personal backend", () => {
+    expect(() => validateDeclaredAdapterConfig("opencode_local", {
+      managedService: true, dangerouslySkipPermissions: false, model: "openai/gpt-6.1-sol", cwd: "/workspace",
+    }, {})).not.toThrow();
+    for (const overrides of [{ dangerouslySkipPermissions: true }, { env: { HOME: "/other" } }, { extraArgs: ["--standalone"] }]) {
+      expect(() => validateDeclaredAdapterConfig("opencode_local", {
+        managedService: true, dangerouslySkipPermissions: false, ...overrides,
+      }, {})).toThrow();
+    }
+  });
+
   it("accepts structured HTTP and Hermes payloads without using form field types", () => {
     expect(() => validateDeclaredAdapterConfig("http", {
       url: "https://worker.example.test/invoke", headers: { Accept: "application/json" },
@@ -41,6 +64,14 @@ describe("native declaration adapter contracts", () => {
     ["process", { command: "worker", env: { WORKER_TOKEN: "inline" } }, { "env.WORKER_TOKEN": "worker" }],
     ["process", { command: "worker" }, { "env.NODE_OPTIONS": "worker" }],
     ["process", { command: "worker" }, { "env.PAPERCLIP_API_KEY": "worker" }],
+    ["opencode_local", { dangerouslySkipPermissions: "false" }, {}],
+    ["opencode_local", { timeoutSec: -1 }, {}],
+    ["opencode_local", { extraArgs: "--auto" }, {}],
+    ["opencode_local", { apiBaseUrl: "https://worker.test" }, {}],
+    ["opencode_local", { dangerouslySkipPermissions: false }, { apiKey: "provider" }],
+    ["opencode_local", { dangerouslySkipPermissions: false }, { "env.NODE_OPTIONS": "provider" }],
+    ["opencode_local", { dangerouslySkipPermissions: false }, { "env.PAPERCLIP_API_KEY": "provider" }],
+    ["opencode_local", { dangerouslySkipPermissions: false, env: { OPENAI_API_KEY: "inline" } }, { "env.OPENAI_API_KEY": "provider" }],
     ["invented_remote", {}, {}],
   ] as const)("rejects unsupported, malformed, inline-secret or conflicting %s configuration", (type, config, credentials) => {
     expect(() => validateDeclaredAdapterConfig(type, config, credentials)).toThrow();

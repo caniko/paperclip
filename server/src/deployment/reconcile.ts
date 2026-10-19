@@ -5,9 +5,9 @@ import {
   type Db, deploymentResources, companies, projects, agents, routines,
   routineTriggers, agentApiKeys, companySecrets, companySecretVersions, companyMemberships,
   pluginManagedResources, builtInManagedResources,
-  instanceSettings, projectWorkspaces,
+  instanceSettings, projectWorkspaces, environments,
 } from "@paperclipai/db";
-import { deploymentManifestSchema, type DeploymentManifest } from "@paperclipai/shared";
+import { deploymentManifestSchema, type DeploymentManifest, type Environment } from "@paperclipai/shared";
 import { companyService } from "../services/companies.js";
 import { projectService } from "../services/projects.js";
 import { agentService } from "../services/agents.js";
@@ -22,8 +22,10 @@ import { readCredential, type DeploymentDescriptor } from "./runtime.js";
 import type { Config } from "../config.js";
 import { verifyLocalEncryptedMaterials } from "../secrets/local-encrypted-provider.js";
 import { mergeProjectWorkspaceRuntimeConfig } from "../services/project-workspace-runtime-config.js";
+import { environmentService } from "../services/environments.js";
+import { collectEnvironmentSecretRefs, normalizeEnvironmentConfig } from "../services/environment-config.js";
 
-const tables = { company: companies, project: projects, workspace: projectWorkspaces, agent: agents, routine: routines, schedule: routineTriggers, secret: companySecrets, taskBridge: agentApiKeys };
+const tables = { company: companies, project: projects, workspace: projectWorkspaces, environment: environments, agent: agents, routine: routines, schedule: routineTriggers, secret: companySecrets, taskBridge: agentApiKeys };
 type Kind = keyof typeof tables;
 type Binding = typeof deploymentResources.$inferSelect;
 type Fields = Record<string, unknown>;
@@ -37,6 +39,10 @@ export function changedFields(before: Fields, after: Fields): string[] {
 }
 
 async function validateAdapters(manifest: DeploymentManifest, credentials: Record<string, string>) {
+  for (const e of Object.values(manifest.environments)) {
+    normalizeEnvironmentConfig({ driver: e.fields.driver, config: e.fields.config });
+    if (!credentials[e.credential]) throw new Error("Missing declared execution credential");
+  }
   for (const a of Object.values(manifest.agents)) {
     validateDeclaredAdapterConfig(a.fields.adapterType, a.fields.adapterConfig, a.credentials);
     for (const credential of Object.values(a.credentials)) {
@@ -108,6 +114,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     for (const [key, c] of Object.entries(m.companies)) getId("company", key, c.adopt);
     for (const [key, p] of Object.entries(m.projects)) getId("project", key, p.adopt);
     for (const [key, w] of Object.entries(m.projectWorkspaces)) getId("workspace", key, w.adopt);
+    for (const [key, e] of Object.entries(m.environments)) getId("environment", key, e.adopt);
     for (const [key, a] of Object.entries(m.agents)) getId("agent", key, a.adopt);
     const actorId = await bootstrapOperator(tx, options.config, options.descriptor.bootstrap, false);
     if (Object.keys(m.routines).length && !actorId && !options.descriptor.bootstrap) throw new Error("Declared routines require an operator bootstrap identity");
@@ -126,6 +133,29 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       add({ kind: "project", key, adopt: p.adopt, companyId, enabled: true, fields: () => ({ ...p.fields, companyId }),
         create: async () => (await projectSvc.create(companyId, { ...p.fields, id: getId("project", key) })).id,
         update: (f) => projectSvc.update(getId("project", key), f) });
+    }
+    for (const [key, e] of Object.entries(m.environments).sort()) {
+      const companyId = getId("company", e.company), secretKey = `environment-${key}.privateKey`;
+      const value = credentials[e.credential], digest = createHash("sha256").update(value).digest("hex");
+      add({ kind: "secret", key: secretKey, companyId, enabled: true, fields: () => ({ digest }),
+        create: async () => (await secrets.create(companyId, { name: `deployment.${m.owner}.${secretKey}`, provider: "local_encrypted", value })).id,
+        update: () => secrets.rotate(getId("secret", secretKey), { value }) });
+      const fields = () => ({ ...e.fields, status: "active" as const, envVars: {}, config: normalizeEnvironmentConfig({ driver: "ssh", config: {
+        ...e.fields.config, privateKeySecretRef: { type: "secret_ref", secretId: getId("secret", secretKey), version: "latest" },
+      } }) });
+      const syncRefs = async (environment: Environment) => {
+        await secrets.replaceSecretRefsForInstanceTarget({ targetType: "environment", targetId: environment.id },
+          await collectEnvironmentSecretRefs({ db: tx, environment }));
+        return environment.id;
+      };
+      const svc = environmentService(tx);
+      add({ kind: "environment", key, adopt: e.adopt, companyId, enabled: true, fields,
+        create: async () => syncRefs(await svc.create(fields())),
+        update: async () => {
+          const updated = await svc.update(getId("environment", key), fields());
+          if (!updated) throw new Error("Managed environment is missing; explicit recovery is required");
+          await syncRefs(updated);
+        } });
     }
     // Native services auto-select the first workspace and repair missing primaries.
     // Apply the declared primary first so those repairs never choose a different row.
@@ -173,7 +203,8 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
           if (field.startsWith("env.")) adapterConfig.env = { ...(adapterConfig.env as Fields ?? {}), [field.slice(4)]: ref };
           else adapterConfig[field] = ref;
         }
-        return { ...a.fields, adapterConfig, reportsTo: a.reportsTo ? getId("agent", a.reportsTo) : null, companyId };
+        return { ...a.fields, adapterConfig, reportsTo: a.reportsTo ? getId("agent", a.reportsTo) : null, companyId,
+          ...(a.environment !== undefined ? { defaultEnvironmentId: a.environment ? getId("environment", a.environment) : null } : {}) };
       };
       add({ kind: "agent", key, adopt: a.adopt, companyId, enabled: a.enabled, fields,
         create: async (f) => (await agentSvc.create(companyId, { ...a.fields, ...f, id: getId("agent", key), status: a.enabled ? "idle" : "paused" })).id,
@@ -219,6 +250,13 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       const table = tables[spec.kind];
       const existing = await tx.select({ id: table.id }).from(table).where(eq(table.id, spec.id));
       if ((binding || spec.adopt) && !existing.length) throw new Error("Managed or adopted resource is missing; explicit recovery is required");
+      if (spec.kind === "environment" && binding) {
+        const before = binding.fields.config as Fields, after = spec.fields().config as Fields;
+        if (["host", "port", "username", "remoteWorkspacePath", "workspaceRealizationMode", "filesystemOwnership"]
+          .some(field => stableJson(before[field]) !== stableJson(after[field]))) {
+          throw new Error("Environment placement changes require an explicit ownership handoff");
+        }
+      }
       if (spec.kind === "workspace") {
         const projectId = spec.fields().projectId as string;
         const siblings = await tx.select().from(projectWorkspaces).where(eq(projectWorkspaces.projectId, projectId));
@@ -243,18 +281,18 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
           if (owners.length) throw new Error("Adoption conflicts with an existing managed resource owner");
         }
       }
-      if (!binding && !spec.adopt && ["company", "project", "agent", "routine"].includes(spec.kind)) {
+      if (!binding && !spec.adopt && ["company", "project", "agent", "routine", "environment"].includes(spec.kind)) {
         const fields = spec.fields();
         const label = spec.kind === "routine" ? "title" : "name";
         const matches = await tx.execute(sql`select id from ${table} where ${sql.identifier(label)} = ${fields[label] as string}
-          ${spec.companyId ? sql`and company_id = ${spec.companyId}` : sql``} limit 1`);
+          ${spec.companyId && spec.kind !== "environment" ? sql`and company_id = ${spec.companyId}` : sql``} limit 1`);
         if (matches.length) throw new Error("Existing resource with this name requires explicit adoption");
       }
       if (spec.kind === "taskBridge" && !binding) {
         const matches = await tx.select({ id: agentApiKeys.id }).from(agentApiKeys).where(eq(agentApiKeys.keyHash, spec.fields().keyHash as string));
         if (matches.length) throw new Error("Task bridge tokens must be unique; use a new runtime token");
       }
-      if (spec.adopt && spec.companyId) {
+      if (spec.adopt && spec.companyId && spec.kind !== "environment") {
         const rows = await tx.execute(sql`select company_id from ${table} where id = ${spec.id}`);
         if (rows[0]?.company_id !== spec.companyId) throw new Error("Adopted resource belongs to a different company");
       }
@@ -285,6 +323,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       }
     }
     const removed = owned.filter((b) => b.enabled && !specs.some((s) => s.kind === b.kind && s.key === b.key));
+    if (removed.some((b) => b.kind === "environment")) throw new Error("Environment removal requires an explicit ownership handoff; retain the declaration to preserve execution references");
     if (removed.some((b) => b.kind === "workspace")) throw new Error("Workspace removal requires an explicit ownership handoff; retain the declaration to preserve execution references");
     for (const b of removed) differences.push({ kind: b.kind, key: b.key, action: "disable", fields: [] });
     if (options.descriptor.bootstrap && !actorId) differences.unshift({ kind: "operator", key: "bootstrap", action: "create", fields: [] });

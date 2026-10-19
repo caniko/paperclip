@@ -12,7 +12,9 @@ import { secretService } from "../services/secrets.js";
 import type { DeploymentDescriptor } from "./runtime.js";
 import { ensurePostgresDatabase, runDatabaseBackup, runDatabaseRestore } from "@paperclipai/db";
 import { findServerAdapter } from "../adapters/registry.js";
-import { projectWorkspaces } from "@paperclipai/db";
+import { projectWorkspaces, environments } from "@paperclipai/db";
+import { resolveEnvironmentDriverConfigForRuntime } from "../services/environment-config.js";
+import { environmentService } from "../services/environments.js";
 import { projectService } from "../services/projects.js";
 import { budgetPolicies } from "@paperclipai/db";
 import { budgetService } from "../services/budgets.js";
@@ -487,3 +489,42 @@ it("restores ownership, stable IDs, encrypted credentials and schema guards from
   expect(resolved.config.apiKey).toBe("fixture-only-gateway-key");
   await expect(restored.update(agents).set({ name: "bypass after restore" }).where(eq(agents.id, agent.id))).rejects.toThrow();
 }, 90000);
+
+it("reconciles protected SSH environments and agent references with stable IDs and secret rotation", async () => {
+  writeFileSync(join(root, "executor"), "fixture-only-ssh-private-key", { mode: 0o600 });
+  const sshDescriptor = { ...descriptor, credentialFiles: { ...descriptor.credentialFiles, executor: join(root, "executor") } };
+  const declaration = { version: 1, owner: "ssh-execution", companies: { example: { fields: { name: "SSH execution" } } },
+    environments: { atlas: { company: "example", credential: "executor", fields: { name: "SSH Atlas", driver: "ssh",
+      config: { host: "atlas", port: 1337, username: "can", remoteWorkspacePath: "/work", knownHosts: "atlas ssh-ed25519 AAAA", strictHostKeyChecking: true } } } },
+    agents: { worker: { company: "example", environment: "atlas", fields: { name: "SSH worker", adapterType: "opencode_local",
+      adapterConfig: { dangerouslySkipPermissions: false } } } },
+  };
+  const run = (raw: unknown, apply = true) => reconcileDeployment(db, raw, { descriptor: sshDescriptor, config, apply, singleOwner: false });
+  const plan = await run(declaration, false);
+  expect(plan.differences.some(d => d.kind === "environment")).toBe(true);
+  expect(await db.select().from(environments).where(eq(environments.name, "SSH Atlas"))).toEqual([]);
+  const first = await run(declaration);
+  const environmentId = first.bindings["environment/atlas"];
+  const companyId = first.bindings["company/example"];
+  const [agent] = await db.select().from(agents).where(eq(agents.id, first.bindings["agent/worker"]));
+  expect(agent.defaultEnvironmentId).toBe(environmentId);
+  const environment = await environmentService(db).getById(environmentId);
+  if (!environment) throw new Error("Missing declared environment");
+  expect(await resolveEnvironmentDriverConfigForRuntime(db, companyId, environment))
+    .toMatchObject({ driver: "ssh", config: { privateKey: "fixture-only-ssh-private-key" } });
+  expect(await environmentService(db).listBoundCompanyIds(environmentId)).toEqual([companyId]);
+  expect(JSON.stringify(first)).not.toContain("fixture-only-ssh-private-key");
+  expect(JSON.stringify(environment)).not.toContain("fixture-only-ssh-private-key");
+  expect((await run(declaration)).differences).toEqual([]);
+  writeFileSync(join(root, "executor"), "rotated-fixture-only-ssh-key", { mode: 0o600 });
+  const rotated = await run(declaration);
+  expect(rotated.bindings).toEqual(first.bindings);
+  expect(await resolveEnvironmentDriverConfigForRuntime(db, companyId, environment))
+    .toMatchObject({ driver: "ssh", config: { privateKey: "rotated-fixture-only-ssh-key" } });
+  await expect(db.update(environments).set({ config: {} }).where(eq(environments.id, environmentId))).rejects.toThrow();
+  await expect(db.update(agents).set({ defaultEnvironmentId: null }).where(eq(agents.id, agent.id))).rejects.toThrow();
+  const moved = structuredClone(declaration); moved.environments.atlas.fields.config.host = "nomad";
+  await expect(run(moved)).rejects.toThrow("Environment placement changes require an explicit ownership handoff");
+  await expect(run({ ...declaration, environments: {}, agents: {} })).rejects.toThrow("Environment removal requires an explicit ownership handoff");
+  expect((await run(declaration, false)).differences).toEqual([]);
+});
