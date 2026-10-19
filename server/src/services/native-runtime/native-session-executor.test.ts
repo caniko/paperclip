@@ -2326,17 +2326,19 @@ describe("split durable provider checkpoint identity", () => {
 
   it.each([
     ["codex", "codex_app_server"],
+    ["codex", "codex_app_server_command_environment_v1"],
+    ["codex", "codex_app_server_command_environment_v2"],
     ["opencode", "opencode_server"],
   ] as const)(
     "reads %s identity from the split Codex-provider state",
     (provider, driverKind) => {
       expect(
         providerSessionIdentityFromDurableProviderState({
-          execution: execution({ kind: provider }, driverKind),
+          execution: execution({ kind: provider }, provider === "codex" ? "codex_app_server" : "opencode_server"),
           providerState: {
             schema: "paperclip.runner.codex-provider-state.v1",
             lifecycle: "prepared",
-            config: { provider, driver: driverKind },
+            config: { provider, driver: driverKind, ...(driverKind.includes("command_environment") ? { commandEnvironment: { HOME: "/assigned/home" } } : {}) },
             threadId: "driver-session-1",
             providerSessionId: "provider-session-1",
             activeProviderTurnId: null,
@@ -2350,6 +2352,22 @@ describe("split durable provider checkpoint identity", () => {
       });
     },
   );
+
+  it.each([
+    ["codex", "opencode_server"],
+    ["codex", "codex_app_server_command_environment_v3"],
+    ["opencode", "codex_app_server_command_environment_v2"],
+  ] as const)("rejects unsupported %s checkpoint driver %s", (provider, driver) => {
+    expect(providerSessionIdentityFromDurableProviderState({
+      execution: execution({ kind: provider }, provider === "codex" ? "codex_app_server" : "opencode_server"),
+      providerState: {
+        schema: "paperclip.runner.codex-provider-state.v1", lifecycle: "prepared",
+        config: { provider, driver, commandEnvironment: { HOME: "/assigned/home" } },
+        threadId: "driver-session-1", providerSessionId: "provider-session-1",
+        activeProviderTurnId: null, ambiguousTurnStartPending: false,
+      },
+    })).toEqual({ providerSessionId: null, providerBackendSessionId: null, providerSessionIdentity: null });
+  });
 
   it("rejects active or scope-conflicting provider state", () => {
     const profileDigest = `sha256:${"a".repeat(64)}`;

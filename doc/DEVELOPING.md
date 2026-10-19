@@ -2288,6 +2288,11 @@ new controller upgrades them on settled run attachment, overriding their old
 inline `AGENT_HOME` without changing the immutable base map. A v1 runner rejects
 that upgrade before accepting the attachment.
 
+Checkpoint identity accepts the runner's same closed set of legacy, v1 and v2
+Codex launch drivers. The controller's logical driver remains `codex_app_server`;
+a versioned persisted driver is neither missing identity nor permission to
+downgrade its profile.
+
 ### Sandbox ACP input delivery
 
 The legacy sandbox process bridge retries recognized Daytona and Cloudflare

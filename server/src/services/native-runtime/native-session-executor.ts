@@ -5678,10 +5678,12 @@ export function providerSessionIdentityFromDurableProviderState(input: {
     case "codex":
     case "opencode": {
       const config = record(state.config);
-      const expectedDriver =
+      // Match the runner's closed launch-driver set; versioned Codex profiles
+      // persist the command environment and must not be mistaken for no identity.
+      const expectedDrivers =
         input.execution.provider.kind === "codex"
-          ? "codex_app_server"
-          : "opencode_server";
+          ? ["codex_app_server", "codex_app_server_command_environment_v1", "codex_app_server_command_environment_v2"]
+          : ["opencode_server"];
       if (
         state.schema !== CODEX_PROVIDER_STATE_SCHEMA ||
         !["prepared", "session_open", "provider_exited"].includes(
@@ -5694,7 +5696,7 @@ export function providerSessionIdentityFromDurableProviderState(input: {
         state.activeProviderTurnId !== null ||
         state.ambiguousTurnStartPending === true ||
         config.provider !== input.execution.provider.kind ||
-        config.driver !== expectedDriver
+        !expectedDrivers.includes(String(config.driver))
       ) {
         return emptyIdentity();
       }
