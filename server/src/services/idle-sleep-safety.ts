@@ -2,7 +2,7 @@ import { idleWorkSnapshot } from "./task-admission.js";
 import { readIdleLocalWork, type IdleLocalWork } from "./idle-local-work.js";
 import { readIdleRoutineSchedule, type ScheduledWake } from "./idle-scheduled-work.js";
 import { combineIdleSchedules, readIdleIssueSchedule } from "./idle-issue-schedule.js";
-import { connectionDeliveryWaitingForResponse, finishedIdleRun as finishedRun, finishedIdleWake, passiveBoardRecovery } from "./idle-work-proof.js";
+import { connectionDeliveryWaitingForResponse, finishedIdleRun as finishedRun, finishedIdleWake, finishedFailedIdleLease as finishedFailedLease, passiveBoardRecovery } from "./idle-work-proof.js";
 import type { Db } from "@paperclipai/db";
 import { sql } from "drizzle-orm";
 import { verifiedResourceCleanup } from "./cleanup-verification-proof.js";
@@ -31,32 +31,6 @@ export type InspectIdlePlugins = (hold: { ownerId: string; expiresAt: number }) 
 // cleanup label alone is not provider termination proof. Require the exact
 // host-owned receipt and finished run, and retain all cleanup/export intents.
 // Aliases are fixed at the call sites, never supplied by a client.
-function finishedFailedLease(alias: string): string {
-  const receipt = `${alias}.metadata->'remoteExecutionTermination'`;
-  return `${alias}.status = 'failed' AND ${alias}.lease_policy = 'ephemeral'
-    AND ${alias}.released_at IS NOT NULL
-    AND COALESCE(${alias}.metadata->>'pendingCleanupInFlight', 'false') = 'false'
-    AND NOT (COALESCE(${alias}.metadata, '{}'::jsonb) ?| ARRAY['nativeWorkspaceExportResume', 'sandboxStopAndRetain'])
-    AND (( ${alias}.provider = 'local' AND ${alias}.provider_lease_id IS NULL
-      AND ${alias}.metadata->>'driver' = 'local'
-      AND ${receipt} IS NULL
-      AND EXISTS (SELECT 1 FROM environments local_environment
-        WHERE local_environment.id = ${alias}.environment_id AND local_environment.driver = 'local'))
-    OR (${alias}.cleanup_status = 'success' AND ${alias}.provider IS NOT NULL AND ${alias}.provider <> 'local'
-      AND ${alias}.provider_lease_id IS NOT NULL AND ${alias}.provider_lease_id <> ''
-      AND ((${receipt}->>'schema' = 'paperclip.remote-termination.v1'
-      AND ${receipt}->>'companyId' = ${alias}.company_id::text
-      AND ${receipt}->>'runId' = ${alias}.heartbeat_run_id::text
-      AND ${receipt}->>'leaseId' = ${alias}.id::text
-      AND ${receipt}->>'provider' = ${alias}.provider
-      AND ${receipt}->>'providerLeaseId' = ${alias}.provider_lease_id
-      AND ${receipt}->>'state' IN ('stopped', 'destroyed'))
-        OR (${verifiedResourceCleanup(alias, 'lease')}))))
-    AND ((${alias}.heartbeat_run_id IS NULL AND ${alias}.provider <> 'local'
-      AND (${verifiedResourceCleanup(alias, 'lease')})) OR EXISTS (SELECT 1 FROM heartbeat_runs r WHERE r.id = ${alias}.heartbeat_run_id
-      AND r.company_id = ${alias}.company_id
-      AND ${finishedRun("r")}))`;
-}
 
 // These are deliberately conservative. Completed agent runs and workspace
 // operations are history, not reasons to keep an otherwise idle instance up.
