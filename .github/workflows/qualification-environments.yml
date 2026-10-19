@@ -128,6 +128,14 @@ jobs:
           else
             cargo build --manifest-path runner/Cargo.toml --locked --bin paperclip-runnerd --bin fake-codex-app-server --jobs 2 2>&1 | tee "$EVIDENCE/runner-build.log"
           fi
+      - name: Prepare the actual locked Pi snapshot for the complete Runner package
+        if: matrix.profile == 'runner-package'
+        run: |
+          set -euo pipefail
+          node packages/paperclip-runner/scripts/materialize-pi-distribution.mjs "$RUNNER_TEMP/profile-pi" 2>&1 | tee "$EVIDENCE/pi-preparation.log"
+          cp "$RUNNER_TEMP/profile-pi/pi-distribution.json" "$EVIDENCE/pi-distribution.json"
+          cp "$RUNNER_TEMP/profile-pi/native-closure.json" "$EVIDENCE/pi-native-closure.json"
+          printf '%s\n' "PAPERCLIP_TEST_PI_DISTRIBUTION_ROOT=$RUNNER_TEMP/profile-pi" >> "$GITHUB_ENV"
       - name: Build and prepare the real remote continuity fixture
         if: matrix.profile == 'runnerd'
         working-directory: packages/paperclip-runner
