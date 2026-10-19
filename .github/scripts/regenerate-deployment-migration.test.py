@@ -42,6 +42,21 @@ class JournaledGenerationTest(unittest.TestCase):
         self.assertTrue(receipt["generation_was_noop"])
         self.assertFalse(receipt["qualified"])
 
+    def test_accepts_sql_only_tail_without_inventing_a_snapshot(self):
+        journal_path = self.migrations / "meta/_journal.json"
+        journal = json.loads(journal_path.read_text())
+        previous = journal["entries"][-1]
+        index = previous["idx"] + 1
+        tag = f"{index:04d}_sql_only_fixture"
+        journal["entries"].append({**previous, "idx": index, "when": previous["when"] + 1, "tag": tag})
+        journal_path.write_text(json.dumps(journal))
+        (self.migrations / f"{tag}.sql").write_text("-- SQL-only fixture; no schema change.\n")
+        before = generation.migration_inputs()
+        generation.prepare(self.evidence)
+        generation.finish(self.evidence)
+        self.assertEqual(generation.migration_inputs(), before)
+        self.assertFalse((self.migrations / "meta" / f"{index:04d}_snapshot.json").exists())
+
     def test_rejects_modified_original_guard(self):
         sql = self.migrations / "0355_sweet_titanium_man.sql"
         sql.write_bytes(sql.read_bytes().replace(b"BEFORE UPDATE OR DELETE", b"AFTER UPDATE OR DELETE", 1))

@@ -38,8 +38,11 @@ def prepare_journaled(evidence, source):
     for name, expected in JOURNALED_MIGRATIONS.items():
         require(tags.count(Path(name).stem) == 1, f"Missing or duplicate journaled migration: {name}")
         require(digest((MIGRATIONS / name).read_bytes()) == expected, f"Executable migration changed: {name}")
-    latest = MIGRATIONS / "meta" / f"{journal['entries'][-1]['idx']:04d}_snapshot.json"
-    tables = json.loads(latest.read_text())["tables"]
+    # SQL-only journal entries have no snapshot; use Drizzle's newest existing one.
+    snapshots = sorted((MIGRATIONS / "meta").glob("*_snapshot.json"),
+                       key=lambda path: int(path.name.split("_", 1)[0]))
+    require(snapshots, "Combined schema snapshot is missing")
+    tables = json.loads(snapshots[-1].read_text())["tables"]
     require({"public.deployment_resources", "public.adapter_session_affinities"} <= tables.keys(),
             "Combined snapshot lacks deployment resources or executor affinity")
     (evidence / "journaled-inputs.json").write_text(json.dumps(migration_inputs(), indent=2) + "\n")
