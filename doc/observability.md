@@ -531,9 +531,10 @@ environment variables: `SENTRY_DSN_FRONTEND` for the browser and
 `SENTRY_DSN_BACKEND` for the server. Each variable is optional. A
 specific variable always wins for its own component; a legacy variable,
 `SENTRY_DSN`, supplies a component that has no specific value set. An
-empty string counts as absent for all three variables. SDK configuration uses
-built-in Sentry options only. It adds no `beforeSend` hook. The run-failure
-reporter selects reportable outcomes before calling the SDK, as described below.
+empty string counts as absent for all three variables. The server's `beforeSend`
+hook adds normal task and run navigation links to events with saved run context.
+The run-failure reporter selects reportable outcomes before calling the SDK,
+as described below.
 
 The server is inactive when the backend DSN resolves to `null`; then it
 imports no Sentry package. The browser is inactive when the front-end DSN
@@ -649,12 +650,15 @@ loaded bundle, even if the server has since deployed another version.
 
 ### Privacy settings
 
-The feature uses built-in Sentry options only.
+Both runtimes use Sentry's privacy options. The server also adds saved-run
+navigation links through a bounded `beforeSend` hook.
 
 - `sendDefaultPii` is `false`, on both runtimes.
 - `tracesSampleRate` is `0`, on both runtimes. Paperclip sends no
   performance trace and no profile.
-- There is no `beforeSend` hook and no custom filter, on either runtime.
+- The server hook reads only saved run and company metadata for navigation.
+  It copies no request data and preserves the event if the lookup fails.
+  The browser adds no `beforeSend` hook. Neither runtime adds a custom filter.
 
 ### Server request data
 
@@ -727,6 +731,21 @@ Values with credentials, query parameters, fragments, or a path are omitted.
 The event never includes an API key or an access token. These references grant
 no access. A bot must authenticate to the correct instance and pass its existing
 company, run-output, and private-task access checks.
+
+Server events associated with a saved run also include `task_url` and `run_url`
+tags for the normal company-prefixed board pages, plus `task_identifier` when
+available. The `paperclip` context contains the same navigation links as
+`taskUrl` and `runPageUrl`; the existing `runUrl` remains an API reference.
+This enrichment applies to run failures, adapter Stop timeouts, and server errors
+with authenticated run context. It resolves the saved company, agent, and task
+instead of copying request URLs, queries, or bodies. Taskless runs receive only a
+run link. Missing or unsafe `PAPERCLIP_PUBLIC_URL` values omit these links.
+The optional indexed metadata lookup has a one-second reporting deadline and a
+limit of eight unfinished reads. A failed or slow lookup preserves the original
+event without navigation links.
+URLs longer than Sentry's 200-character tag limit remain in context only.
+Links require the viewer's normal Paperclip access and apply to newly captured
+events; existing Sentry events are not rewritten.
 
 The bot should use the exact run ID to read `GET /api/heartbeat-runs/{runId}`,
 `GET /api/heartbeat-runs/{runId}/events`, and

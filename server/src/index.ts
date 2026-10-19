@@ -23,6 +23,8 @@ import { chatCompletionDeliveryService } from "./services/chat-completion-delive
 // HTTP server, so trace coverage does not depend on incidental timing.
 import { instrumentationReady, shutdownInstrumentation } from "./instrumentation.js";
 import { sentryReady, shutdownSentry, captureException } from "./sentry.js";
+import { setSentryRunLinkResolver } from "./sentry-links.js";
+import { createSentryRunLinkResolver } from "./services/sentry-run-links.js";
 import { waitForPendingRunFailureReports } from "./services/run-failure-report.js";
 import { verifyStoppedNativeSessionForReplacement } from "./services/native-runtime/native-session-executor.js";
 import { embeddedPostgresOwnerPort } from "./embedded-postgres-owner.js";
@@ -681,6 +683,7 @@ async function startServerWithDatabaseTeardown(
   // (after the application services, before the embedded provider stops) and
   // by the fail-loud startup path, so no exit leaves pooled backends behind.
   const closeDatabaseClients = async () => {
+    setSentryRunLinkResolver(null);
     const clients = pluginMigrationDb === db ? [db] : [db, pluginMigrationDb];
     await Promise.all(clients.map((client) => endDatabaseClient(client, 5)));
     await releaseDeploymentLease?.();
@@ -690,6 +693,7 @@ async function startServerWithDatabaseTeardown(
     await closeDatabaseClients();
     if (embeddedPostgresStartedByThisProcess) await (embeddedPostgresSupervisor?.shutdown() ?? embeddedPostgres?.stop());
   };
+  setSentryRunLinkResolver(createSentryRunLinkResolver(db));
 
   if (process.env.PAPERCLIP_DECLARATIVE === "true") {
     await reconcileDeploymentOnStartup(db, config);

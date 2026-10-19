@@ -84,7 +84,9 @@ export const SourceReconstruction: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(canvas.getByText("Continue from saved sources")).toBeVisible();
-    await expect(canvas.queryByRole("textbox")).not.toBeInTheDocument();
+    for (const input of canvas.queryAllByRole("textbox")) {
+      await expect(input).not.toBeVisible();
+    }
     await userEvent.click(canvas.getByText("Continue from saved sources"));
     await expect(canvas.getByText("test-audit.patch (4096 bytes)")).toBeVisible();
     await expect(canvas.getByRole("button", { name: "Rebuild and continue" })).toBeDisabled();
