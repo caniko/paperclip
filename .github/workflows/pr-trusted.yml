@@ -1640,7 +1640,7 @@ jobs:
       PAPERCLIP_STOP_REQUIRE_NATIVE: "true"
       PAPERCLIP_E2E_SOURCE_ROOT: ${{ github.workspace }}
       COMPOSER_STOP_HEAD_REVISION: ${{ github.event.pull_request.head.sha }}
-      COMPOSER_STOP_TRUSTED_REVISION: 44f2a930ef398e007f0cf93ff2a19997775bba99
+      COMPOSER_STOP_TRUSTED_REVISION: 0acbea03ff95cc3427864528969bf5b5b8f52b23
     steps:
       - name: Checkout exact PR head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1653,7 +1653,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: caniko/paperclip
-          ref: 44f2a930ef398e007f0cf93ff2a19997775bba99
+          ref: 0acbea03ff95cc3427864528969bf5b5b8f52b23
           path: .trusted-composer-stop
           persist-credentials: false
 
