@@ -778,13 +778,14 @@ export function toolAccessPolicyService(db: Db) {
 
     return db.transaction(async (tx) => {
       const rows = await tx
-        .update(toolPolicies)
-        .set({ updatedAt: sql`${toolPolicies.updatedAt}` })
+        .select()
+        .from(toolPolicies)
         .where(and(
           eq(toolPolicies.companyId, companyId),
           ne(toolPolicies.policyType, "trust_rule"),
         ))
-        .returning();
+        .orderBy(toolPolicies.id)
+        .for("no key update");
       const byId = new Map(rows.map((row) => [row.id, row]));
       const missingIds = uniquePolicyIds.filter((id) => !byId.has(id));
       if (missingIds.length > 0) {
@@ -798,12 +799,11 @@ export function toolAccessPolicyService(db: Db) {
       }
 
       const now = new Date();
-      for (const [index, policyId] of uniquePolicyIds.entries()) {
-        await tx
-          .update(toolPolicies)
-          .set({ priority: (index + 1) * 100, updatedAt: now })
-          .where(eq(toolPolicies.id, policyId));
-      }
+      await tx.execute(sql`UPDATE tool_policies
+        SET priority = (requested.ordinality * 100)::integer, updated_at = ${now.toISOString()}
+        FROM jsonb_array_elements_text(${JSON.stringify(uniquePolicyIds)}::jsonb)
+          WITH ORDINALITY AS requested(id, ordinality)
+        WHERE tool_policies.company_id = ${companyId} AND tool_policies.id = requested.id::uuid`);
       return tx
         .select()
         .from(toolPolicies)

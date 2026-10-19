@@ -118,7 +118,11 @@ their App-scoped checks and comments remain independent.
 
 For GitHub publication recovery, interrupt a response after GitHub accepts a
 write and verify one summary, finding, and App-scoped check. Retry the same tool
-call and verify it returns the saved receipt. Leave a transient failure queued,
+call and verify it returns the saved receipt. Include text longer than 500
+characters and coverage with more than 50 entries. Change only the text suffix
+or final coverage entry and verify rejection without another write. Remove the
+durable publication and verify that a retry cannot dispatch a new write.
+Leave a transient failure queued,
 restart the instance, and verify publication resumes at its saved deadline
 without another inbound message. Revoked access and permanent rejections must
 stop retries. These recipes are separate from live provider proof.

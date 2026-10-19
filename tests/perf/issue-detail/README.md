@@ -69,6 +69,13 @@ Videos and per-frame `layout.json` measurements are written under each test's
 output directory. The two-pixel assertion measures a logical row's viewport
 offset; total scroll offset legitimately changes when history is prepended.
 
+Ordinary task opens defer the concealed history and composer until their initial
+data is ready. The skeleton and scroll/composer containers retain their geometry.
+Comment-link navigation prepares content eagerly so the target can be positioned
+before reveal. Revealed content stays mounted during refresh. The draft scenario
+holds a background task read, checks the same editor remains mounted, reloads the
+saved draft, sends one reply, and independently checks its persisted comment.
+
 To run against an existing **disposable local test-drive instance**:
 
 ```sh

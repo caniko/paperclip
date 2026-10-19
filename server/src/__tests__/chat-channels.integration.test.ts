@@ -2967,7 +2967,9 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       const tools = await githubBotToolsForSession(db, f.session);
       const tool = tools.find(tool => tool.upstreamToolName === "submit_review")!;
       await githubChatReviewService(db, f.providerFetch).execute(f.session, "begin_review", { reviewedCommit: head });
-      const assessment = { reviewedCommit: head, score: 5, complete: true, summary: "Looks good", rationale: "Reviewed the changed file",
+      const assessment = { reviewedCommit: head, score: 5, complete: true,
+        summary: "Reviewed the changed behavior and its callers. ".repeat(30),
+        rationale: "Checked the mutation boundary and the client retry contract. ".repeat(30),
         coverage: { reviewedPaths: ["src/math.ts"], omittedPaths: [], limitations: [] }, findings: [] };
       const result = await gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: assessment, timeoutMs })
         .then(value => ({ value }), error => ({ error }));
@@ -2990,6 +2992,89 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       expect(invocation).toMatchObject({ status: "succeeded", errorCode: null, errorMessage: null });
       expect(f.responseWrites).toHaveLength(writes);
     }, 40_000);
+    it.each(["submit_review", "comment", "update_comment"] as const)("recovers long %s requests without accepting changes hidden by the audit preview", async name => {
+      const f = await publicationRetryFixture();
+      vi.stubGlobal("fetch", f.providerFetch);
+      onTestFinished(() => vi.unstubAllGlobals());
+      const gateway = createToolGatewayService(db);
+      const session = await gateway.createSession({ companyId: f.companyId, agentId: f.assignedAgentId, runId: f.run.id });
+      const tool = (await githubBotToolsForSession(db, f.session)).find(tool => tool.upstreamToolName === name)!;
+      const text = "Checked the changed behavior, connected callers, and coverage. ".repeat(30);
+      const parameters = name === "submit_review"
+        ? { ...f.assessment, summary: text, rationale: text, coverage: { ...f.assessment.coverage,
+          limitations: Array.from({ length: 51 }, (_, index) => `Coverage limitation ${index}`) } }
+        : { body: text, idempotencyKey: "long-publication" };
+      const first = await gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters });
+      const writes = f.responseWrites.length;
+      const replay = await gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters });
+      expect(replay).toMatchObject({ invocationId: first.invocationId, result: { data: { status: "processed" } } });
+      if (name === "submit_review") {
+        vi.stubEnv("PAPERCLIP_API_URL", "https://paperclip.example.test");
+        onTestFinished(() => vi.unstubAllEnvs());
+        await initializeRunIdentity(db, { companyId: f.companyId, runId: f.run.id, issueId: f.conversation.issueId!,
+          responsibleUserId: "owner-user", messageIds: [String(f.run.contextSnapshot?.wakeCommentId)], cause: "instruction" });
+        const servers = await buildPaperclipRuntimeMcpServers({ db,
+          agent: (await db.select().from(agents).where(eq(agents.id, f.assignedAgentId)))[0], runId: f.run.id });
+        const assigned = await createAssignedMcpTools({ gateway,
+          gatewayPublicId: new URL(servers[0].url).pathname.split("/").at(-1)!, bearerToken: servers[0].token });
+        const found = await assigned.execute({ tool: "paperclip_search_assigned_tools", arguments: { query: "Submit a review assessment" } }) as { tools: { name: string }[] };
+        const submit = found.tools.filter(candidate => candidate.name.includes("__submit_review_"));
+        expect(submit).toHaveLength(1);
+        expect(await assigned.execute({ tool: "paperclip_call_assigned_tool", arguments: { name: submit[0].name, arguments: parameters } }))
+          .toMatchObject({ data: { status: "processed" } });
+      }
+      expect(f.responseWrites).toHaveLength(writes);
+      expect(f.responseComments.size).toBe(1);
+      const changed = name === "submit_review" ? { ...parameters, summary: `${text} Changed conclusion.` }
+        : { ...parameters, body: `${text} Changed conclusion.` };
+      await expect(gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: changed }))
+        .rejects.toMatchObject({ status: 409, reasonCode: "github_idempotency_conflict" });
+      if (name === "submit_review") {
+        const changedCoverage = { ...parameters, coverage: { ...parameters.coverage!,
+          limitations: [...parameters.coverage!.limitations.slice(0, 50), "Changed final limitation"] } };
+        await expect(gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: changedCoverage }))
+          .rejects.toMatchObject({ status: 409, reasonCode: "github_idempotency_conflict" });
+      }
+      await db.insert(toolPolicies).values({ companyId: f.companyId, name: "Revoke publication", policyType: "block", priority: 0,
+        selectors: { catalogEntryId: tool.catalogEntryId! } });
+      await expect(gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters })).rejects.toThrow();
+      expect(f.responseWrites).toHaveLength(writes);
+    });
+    it("reads pending GitHub receipts without dispatch and refuses a missing publication", async () => {
+      const f = await publicationRetryFixture();
+      let attempts = 0;
+      let unavailable = true;
+      f.setSupplementalProviderFetch(async (input, init) => {
+        if (String(input).includes("/issues/comments/") && init?.method === "PATCH") {
+          attempts++;
+          if (unavailable) return new Response("Unavailable", { status: 503, headers: { "retry-after": "120" } });
+        }
+        return f.provider(input, init);
+      });
+      vi.stubGlobal("fetch", f.providerFetch);
+      onTestFinished(() => vi.unstubAllGlobals());
+      const gateway = createToolGatewayService(db);
+      const session = await gateway.createSession({ companyId: f.companyId, agentId: f.assignedAgentId, runId: f.run.id });
+      const tool = (await githubBotToolsForSession(db, f.session)).find(tool => tool.upstreamToolName === "submit_review")!;
+      const input = { sessionToken: session.token, tool: tool.name, parameters: { ...f.assessment, summary: "Review evidence. ".repeat(50) } };
+      const first = await gateway.executeTool(input);
+      expect(first).toMatchObject({ result: { data: { status: "failed", receipt: { retryable: true } } } });
+      unavailable = false;
+      expect(await gateway.executeTool(input)).toMatchObject({ invocationId: first.invocationId,
+        result: { data: { status: "failed", receipt: { retryable: true } } } });
+      expect(attempts).toBe(1);
+      const action = await f.action();
+      await db.update(chatActions).set({ result: { ...action.result, retryAt: new Date(0).toISOString() } }).where(eq(chatActions.id, action.id));
+      await githubChatReviewService(db, f.providerFetch).processPending();
+      expect(await gateway.executeTool(input)).toMatchObject({ invocationId: first.invocationId, result: { data: { status: "processed" } } });
+      expect(attempts).toBe(2);
+      expect(f.responseComments.size).toBe(1);
+      const writes = f.responseWrites.length;
+      await db.delete(chatActions).where(eq(chatActions.id, action.id));
+      await expect(gateway.executeTool(input)).rejects.toMatchObject({ status: 409, reasonCode: "github_publication_unavailable" });
+      expect(attempts).toBe(2);
+      expect(f.responseWrites).toHaveLength(writes);
+    });
     it("does not post a GitHub working comment when the scheduler declines the request", async () => {
       const f = await reviewBotFixture();
       f.wakeup.mockImplementation(async (agentId, opts) => {

@@ -2,6 +2,13 @@
 
 Paperclip uses PostgreSQL via [Drizzle ORM](https://orm.drizzle.team/). There are three ways to run the database, from simplest to most production-ready.
 
+The managed-controller branch imports upstream `2e5bf1241`'s SQL-only connector
+hooks as `0358_agent_tool_definition_hooks` and
+`0359_agent_connector_access_hooks`, retaining their SQL bytes. Existing
+`0355`–`0357` deployment and session-affinity migrations, journal timestamps,
+and combined-schema snapshots remain unchanged. The imported hooks follow that
+history; they do not replace it or introduce another schema snapshot.
+
 ### Task query performance
 
 Run-context lookups use expression indexes for both `context_snapshot.issueId`
@@ -824,6 +831,11 @@ limits and the operator override.
 Project `privacy_owner_user_id` records who may manage its audience independently of project read membership. Creation assigns the authenticated user or run responsible user; migration recovers legacy ownership from creation audit evidence. Missing evidence leaves management with administrators.
 ## Internal agent commentary
 
+The Audit viewer uses the existing company/kind/created index.
+List reads select bounded previews; details load a single full body. Both reads
+and list counts apply company and source-task visibility. The viewer requires
+no experimental toggle or commentary schema migration.
+
 `agent_commentary` stores company-scoped, attributed complaints and suggestions
 as free-form text in the instance database. Legacy agents use the default
 `complain` and `suggestion-box` runtime skills; native runs use dedicated tools
@@ -1085,6 +1097,20 @@ company invalidation within the mutation transaction. Agent runtime journaling
 uses ordered `FOR NO KEY UPDATE` locks, which remain compatible with foreign-key
 references while excluding runtime readers' `FOR SHARE` locks. Connector feature
 switches use the same journal; process-start overlays receive a delivery baseline.
+
+Migration 0355 extends connector invalidation to tool definitions and
+configuration. Statement triggers cover applications, connections, catalogs,
+profiles and entries, bindings, policies, and MCP gateways. They ignore health
+bookkeeping and trust-rule usage counters. Profile creation alone does not change
+an agent's runtime; its assignment does. Entry changes resolve standing profile
+bindings; policies resolve old and new agent selectors. Both retain scoped
+recipients. Credential-only fields remain outside this migration's coverage.
+
+Migration 0356 adds access, referenced credentials and vaults, and chat/email
+endpoint configuration to connector runtime invalidation. Grant and membership
+changes retain company scope. Agent secret bindings and new personal delegations
+use agent scope. Credential values remain outside the journal. Endpoint activity,
+vault health, and other bookkeeping fields remain excluded.
 
 ## Retired Pipelines storage
 

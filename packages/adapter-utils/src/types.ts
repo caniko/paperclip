@@ -772,6 +772,7 @@ export interface CLIAdapterModule {
 
 export interface CreateConfigValues {
   runner?: "auto" | "paperclip" | "legacy";
+  resolvedRunner?: "paperclip" | "legacy";
   adapterType: string;
   codexPermissionMode?: "never" | "on-request" | "untrusted";
   codexLegacySandboxBypass?: boolean;

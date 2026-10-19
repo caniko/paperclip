@@ -8,6 +8,7 @@ test.use({ video: "on", trace: "retain-on-failure", viewport: { width: 1440, hei
 let prefix: string;
 let issue: { id: string; identifier: string };
 let other: { id: string; identifier: string };
+let draftIssue: { id: string; identifier: string };
 let oldestCommentId: string;
 
 test.beforeAll(async ({ request }) => {
@@ -22,6 +23,7 @@ test.beforeAll(async ({ request }) => {
   };
   issue = await createIssue("Stable conversation acceptance");
   other = await createIssue("Rapid navigation destination");
+  draftIssue = await createIssue("Draft stability acceptance");
   for (let i = 0; i < 160; i++) {
     const response = await request.post(`/api/issues/${issue.id}/comments`, {
       data: { body: `## Historical message ${i}\n\n${"Long Markdown with **emphasis**, detail, and enough text to wrap across several lines. ".repeat(8)}\n\n\`\`\`js\nconsole.log(${i});\n\`\`\`\n\n| State | Result |\n|---|---|\n| Complete | Stable |${i === 159 ? `\n\n[Read the oldest message](#comment-${oldestCommentId})` : ""}` },
@@ -149,6 +151,52 @@ test("explicit comment links resolve older pages before revealing at the target"
     const viewport = await page.getByTestId("task-chat-scroller").boundingBox();
     return Math.abs(row!.y - viewport!.y);
   }).toBeLessThanOrEqual(2);
+});
+
+test("a draft survives background task refresh, reload, and one persisted reply", async ({ page, request }) => {
+  await page.goto(`/${prefix}/issues/${draftIssue.identifier}`);
+  await ready(page);
+  const editor = page.getByTestId("task-chat-composer-stack").locator('[contenteditable="true"]');
+  const draft = "This draft survives task refresh and is submitted exactly once.";
+  await editor.fill(draft);
+  await editor.evaluate((el) => { el.setAttribute("data-draft-mount-proof", "retained"); });
+  await expect.poll(() => page.evaluate((id) => localStorage.getItem(`paperclip:issue-comment-draft:${id}`), draftIssue.id)).toBe(draft);
+
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let refreshing = false;
+  await page.route(/\/api\/issues\/[^/?]+$/, async (route) => {
+    if (route.request().method() === "GET") {
+      refreshing = true;
+      await held;
+    }
+    await route.continue();
+  });
+  const title = "Draft stability after background update";
+  const updated = await request.patch(`/api/issues/${draftIssue.id}`, { data: { title } });
+  expect(updated.ok(), await updated.text()).toBeTruthy();
+  try {
+    await expect.poll(() => refreshing).toBe(true);
+    await expect(page.getByTestId("task-chat-history-loading")).toHaveCount(0);
+    await expect(editor).toHaveAttribute("data-draft-mount-proof", "retained");
+    await expect(editor).toHaveText(draft);
+  } finally {
+    release();
+  }
+  await expect(page.getByText(title, { exact: true }).first()).toBeVisible();
+  await expect(editor).toHaveAttribute("data-draft-mount-proof", "retained");
+  await page.reload();
+  await ready(page);
+  await expect(editor).toHaveText(draft);
+  await page.getByTestId("task-chat-composer-send").click();
+  await expect.poll(async () => {
+    const comments = await (await request.get(`/api/issues/${draftIssue.id}/comments`)).json();
+    return comments.filter((comment: { body: string }) => comment.body === draft).length;
+  }).toBe(1);
+  await page.reload();
+  await ready(page);
+  await expect(editor).toHaveText("");
+  await expect(page.getByText(draft, { exact: true })).toHaveCount(1);
 });
 
 test("failed initial comments expose retry, then recover without an indefinite skeleton", async ({ page }) => {

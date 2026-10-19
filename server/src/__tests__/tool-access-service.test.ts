@@ -9376,6 +9376,69 @@ describeEmbeddedPostgres("tool access service", () => {
     }
   });
 
+  it("orders managed reconnect with refresh and rejects superseded secret writes", async () => {
+    const company = await createCompany(db);
+    await createAgent(db, company.id);
+    const userId = `managed-refresh-${randomUUID()}`;
+    await grantBoardUser(db, company.id, userId, [], "owner");
+    const actor = { actorType: "user" as const, actorId: userId };
+    const connector = fakeGmailConnector(company.id, userId);
+    const refreshDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    const service = createTestToolAccessService(db, { paperclipCloudConnector: connector });
+    const definition = getConnectableAppDefinition("gmail")!;
+    const availability = definition.ownershipAvailability;
+    definition.ownershipAvailability = { ...availability, platform_shared: true };
+    mockToolsList([]);
+    let allowRefresh!: () => void; let allowReconnect!: () => void;
+    try {
+      const connected = await service.connectGalleryApp(company.id, { galleryKey: "gmail", connectionMethodKey: "paperclip-draft", grantKind: "user", name: "Managed concurrent refresh" }, actor);
+      const start = () => service.startOAuth(company.id, connected.connectionId, { redirectUri: "https://paperclip.example/api/tools/oauth/cloud-connector/callback", actor });
+      const initial = await start();
+      await service.completePaperclipCloudConnectorCallback({ state: new URL(initial.authorizationUrl).searchParams.get("state")!, claimId: "initial", actor });
+      const [grant] = await db.select().from(connectionGrants).where(and(eq(connectionGrants.connectionId, connected.connectionId), eq(connectionGrants.subjectUserId, userId)));
+      const accessId = grant.credentialSecretRefs.find(ref => ref.configPath === "oauth.access_token")!.secretId;
+      const [before] = await db.select().from(companySecrets).where(eq(companySecrets.id, accessId));
+      const reconnect = await start();
+      const credentials = await connector.refresh({ subject: userId, companyId: company.id, profile: "gmail.draft", refreshToken: "fixture" });
+      let refreshing!: () => void;
+      const providerCalled = new Promise<void>(resolve => { refreshing = resolve; });
+      const mayRefresh = new Promise<void>(resolve => { allowRefresh = resolve; });
+      vi.mocked(connector.refresh).mockImplementation(async () => { refreshing(); await mayRefresh; return credentials; });
+      const [backend] = await refreshDb.execute(sql`SELECT pg_backend_pid() AS pid`);
+      const refresh = createTestToolAccessService(refreshDb, { paperclipCloudConnector: connector }).refreshOAuthGrantCredentials({ companyId: company.id, connectionId: connected.connectionId, grantId: grant.id, forceRefresh: true, actor });
+      const refreshResult = Promise.allSettled([refresh]);
+      await providerCalled;
+      let locked!: () => void;
+      const held = new Promise<void>(resolve => { locked = resolve; });
+      const mayReconnect = new Promise<void>(resolve => { allowReconnect = resolve; });
+      const callback = db.transaction(async tx => {
+        await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+        await tx.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)).for("update");
+        locked(); await mayReconnect;
+        return createTestToolAccessService(tx as unknown as Db, { paperclipCloudConnector: connector }).completePaperclipCloudConnectorCallback({ state: new URL(reconnect.authorizationUrl).searchParams.get("state")!, claimId: "reconnect", actor });
+      });
+      const callbackResult = Promise.allSettled([callback]);
+      await held;
+      allowRefresh();
+      try {
+        await vi.waitFor(async () => {
+          const [row] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${Number(backend.pid)}`);
+          expect(row.wait_event_type).toBe("Lock");
+        }, { timeout: 5000 });
+      } finally { allowReconnect(); }
+      const [completion] = await callbackResult;
+      if (completion.status === "rejected") throw completion.reason;
+      const [refreshCompletion] = await refreshResult;
+      expect(refreshCompletion).toMatchObject({ status: "rejected", reason: { status: 409, details: { code: "oauth_refresh_superseded", retryable: true } } });
+      expect((await db.select().from(companySecrets).where(eq(companySecrets.id, accessId)))[0].latestVersion).toBe(before.latestVersion + 1);
+      expect((await db.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)))[0].status).toBe("active");
+    } finally {
+      allowRefresh?.(); allowReconnect?.();
+      definition.ownershipAvailability = availability;
+      await refreshDb.$client.end({ timeout: 0 }).catch(() => undefined);
+    }
+  }, 20000);
+
   it("keeps brokered OAuth state retryable until credentials are durably stored", async () => {
     const company = await createCompany(db);
     const userId = `gmail-retry-${randomUUID()}`;
@@ -10616,6 +10679,133 @@ describeEmbeddedPostgres("tool access service", () => {
       definition.ownershipAvailability = availability;
     }
   }, 20000);
+
+  it.each(["sharing", "settings", "application"] as const)("orders personal OAuth reconnect credential rotation with concurrent %s", async change => {
+    vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_ID", "slack-client-id");
+    vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_SECRET", "slack-client-secret");
+    const company = await createCompany(db);
+    await createAgent(db, company.id);
+    const userId = `oauth-sharer-${randomUUID()}`;
+    await grantBoardUser(db, company.id, userId, [], "owner");
+    const service = createTestToolAccessService(db);
+    const actor = { actorType: "user" as const, actorId: userId };
+    const connected = await service.connectGalleryApp(company.id, { galleryKey: "slack", name: "Concurrent sharing", grantKind: "user" }, actor);
+    const connection = await service.getConnection(connected.connectionId, company.id);
+    const redirectUri = "https://paperclip.example/api/tools/oauth/callback";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async url => {
+      const href = String(url);
+      if (href === "https://slack.com/api/oauth.v2.access") return mcpHttpResponse(oauthToken("fixture-access-token", "fixture-refresh-token"));
+      if (href === "https://mcp.slack.com/mcp") return mcpHttpResponse(catalogResponse([{ name: "search_messages", annotations: { readOnlyHint: true } }]));
+      throw new Error(`unexpected fetch ${href}`);
+    });
+    const start = () => service.startOAuth(company.id, connected.connectionId, { redirectUri, actor, subjectUserId: userId });
+    const initial = await start();
+    await service.completeOAuthCallback({ state: new URL(initial.authorizationUrl).searchParams.get("state")!, code: "initial", redirectUri, actor });
+    const [grant] = await db.select().from(connectionGrants).where(and(eq(connectionGrants.connectionId, connected.connectionId), eq(connectionGrants.subjectUserId, userId)));
+    const reconnect = await start();
+    let locked!: () => void; let resume!: () => void; let started!: (pid: number) => void;
+    const held = new Promise<void>(resolve => { locked = resolve; });
+    const mayShare = new Promise<void>(resolve => { resume = resolve; });
+    const reconnectStarted = new Promise<number>(resolve => { started = resolve; });
+    const sharing = db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      if (change === "sharing") await tx.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)).for("update");
+      else if (change === "application") await tx.select().from(toolApplications).where(eq(toolApplications.id, connection.applicationId)).for("update");
+      else await tx.select().from(toolConnections).where(eq(toolConnections.id, connected.connectionId)).for("update");
+      locked(); await mayShare;
+      const writer = createTestToolAccessService(tx as unknown as Db);
+      return change === "sharing"
+        ? writer.finalizeOAuthAccess(company.id, connected.connectionId, { grantKind: "organization" }, actor)
+        : change === "application"
+          ? writer.updateApplication(connection.applicationId, { name: "Application saved concurrently" })
+          : writer.updateConnection(connected.connectionId, { name: "Settings saved concurrently" });
+    });
+    await held;
+    const callback = db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      started(Number(row.pid));
+      return createTestToolAccessService(tx as unknown as Db).completeOAuthCallback({ state: new URL(reconnect.authorizationUrl).searchParams.get("state")!, code: "reconnect", redirectUri, actor });
+    });
+    const completed = Promise.allSettled([sharing, callback]);
+    try {
+      const pid = await reconnectStarted;
+      await vi.waitFor(async () => {
+        const [row] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${pid}`);
+        expect(row.wait_event_type).toBe("Lock");
+      }, { timeout: 5000 });
+    } finally { resume(); }
+    const results = await completed;
+    for (const result of results) if (result.status === "rejected") throw result.reason;
+    expect(results.map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect(await service.getConnection(connected.connectionId, company.id)).toMatchObject({ credentialPolicy: "per_user", status: "active" });
+    if (change === "sharing") expect((await service.listConnectionGrants(connected.connectionId, company.id)).grants).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "organization", status: "active" })]));
+    else if (change === "application") {
+      const [application] = await db.select().from(toolApplications).where(eq(toolApplications.id, connection.applicationId));
+      expect(application.name).toBe("Application saved concurrently");
+    } else expect((await service.getConnection(connected.connectionId, company.id)).name).toBe("Settings saved concurrently");
+  }, 15000);
+
+  it.each(["app finishing", "new tool discovery"] as const)("orders %s with OAuth reconnect before either locks the connection", async change => {
+    vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_ID", "slack-client-id");
+    vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_SECRET", "slack-client-secret");
+    const company = await createCompany(db);
+    const userId = `oauth-sharer-${randomUUID()}`;
+    await grantBoardUser(db, company.id, userId, [], "owner");
+    const service = createTestToolAccessService(db);
+    const actor = { actorType: "user" as const, actorId: userId };
+    const connected = await service.connectGalleryApp(company.id, { galleryKey: "slack", name: "Concurrent sharing", grantKind: "user" }, actor);
+    const connection = await service.getConnection(connected.connectionId, company.id);
+    const redirectUri = "https://paperclip.example/api/tools/oauth/callback";
+    let discoverNewTool = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async url => {
+      const href = String(url);
+      if (href === "https://slack.com/api/oauth.v2.access") return mcpHttpResponse(oauthToken("fixture-access-token", "fixture-refresh-token"));
+      if (href === "https://mcp.slack.com/mcp") return mcpHttpResponse(catalogResponse([{ name: "search_messages", annotations: { readOnlyHint: true } }, ...(discoverNewTool ? [{ name: "new_search", annotations: { readOnlyHint: true } }] : [])]));
+      throw new Error(`unexpected fetch ${href}`);
+    });
+    const start = () => service.startOAuth(company.id, connected.connectionId, { redirectUri, actor, subjectUserId: userId });
+    const initial = await start();
+    await service.completeOAuthCallback({ state: new URL(initial.authorizationUrl).searchParams.get("state")!, code: "initial", redirectUri, actor });
+    const reconnect = await start();
+    discoverNewTool = change === "new tool discovery";
+    let locked!: () => void; let release!: () => void;
+    const held = new Promise<void>(resolve => { locked = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    const blocker = db.transaction(async tx => {
+      await tx.select().from(toolApplications).where(eq(toolApplications.id, connection.applicationId)).for("update");
+      locked(); await resume;
+    });
+    await held;
+    const pids: number[] = [];
+    const transaction = db.transaction.bind(db);
+    const transactionSpy = vi.spyOn(db, "transaction").mockImplementation((async (operation, config) => transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      pids.push(Number(row.pid));
+      return operation(tx);
+    }, config)) as typeof db.transaction);
+    const run = (work: (service: ReturnType<typeof createTestToolAccessService>) => Promise<unknown>) => work(createTestToolAccessService(db));
+    const waitForLock = (index: number) => vi.waitFor(async () => {
+      expect(pids.length).toBeGreaterThan(index);
+      const [row] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${pids[index]}`);
+      expect(row.wait_event_type).toBe("Lock");
+    }, { timeout: 5000 });
+    const callback = run(writer => writer.completeOAuthCallback({ state: new URL(reconnect.authorizationUrl).searchParams.get("state")!, code: "reconnect", redirectUri, actor }));
+    let finishing: Promise<unknown> | undefined;
+    try {
+      await waitForLock(0);
+      finishing = run(writer => change === "new tool discovery" ? writer.refreshCatalog(connected.connectionId) : writer.finishGalleryAppConnection(company.id, connected.connectionId, { enabledCatalogEntryIds: [], askFirstCatalogEntryIds: [], access: "all_agents" }, actor));
+      await waitForLock(1);
+    } finally { release(); await blocker; }
+    const results = await Promise.allSettled([callback, finishing]);
+    for (const result of results) if (result.status === "rejected") throw result.reason;
+    transactionSpy.mockRestore();
+    expect(results.map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect(await service.getConnection(connected.connectionId, company.id)).toMatchObject({ credentialPolicy: "per_user", status: "active" });
+    if (change === "new tool discovery") expect(await db.select().from(toolCatalogEntries).where(eq(toolCatalogEntries.connectionId, connected.connectionId))).toEqual(expect.arrayContaining([expect.objectContaining({ toolName: "new_search" })]));
+    else expect(await db.select().from(toolProfiles).where(and(eq(toolProfiles.companyId, company.id), eq(toolProfiles.profileKey, `app:${connected.connectionId}`)))).toHaveLength(1);
+  }, 15000);
 
   it("promotes a personal OAuth identity only after Everyone in the company is chosen", async () => {
     vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_ID", "slack-client-id");
@@ -17582,6 +17772,51 @@ describeEmbeddedPostgres("tool access service", () => {
       }),
     ]);
   });
+
+  it("orders static-key reconnect with concurrent personal grant revocation", async () => {
+    const company = await createCompany(db);
+    await createAgent(db, company.id);
+    const userId = `key-reconnect-${randomUUID()}`;
+    const actor = { actorType: "user" as const, actorId: userId };
+    const service = createTestToolAccessService(db);
+    mockToolsList([readTool("list_zaps", "List")]);
+    await withGalleryServerUrl("github", PUBLIC_MCP_FIXTURE_URL, async () => {
+      const connected = await service.connectGalleryApp(company.id, { galleryKey: "github", connectionMethodKey: "mcp-key", name: "Key reconnect fixture", grantKind: "user", credentialValues: { "credentials.authorization": "fixture-old-key" } }, actor);
+      const { grants } = await service.listConnectionGrants(connected.connectionId, company.id);
+      const grant = grants.find(row => row.kind === "user")!;
+      let locked!: () => void; let resume!: () => void; let started!: (pid: number) => void;
+      const held = new Promise<void>(resolve => { locked = resolve; });
+      const mayRevoke = new Promise<void>(resolve => { resume = resolve; });
+      const reconnectStarted = new Promise<number>(resolve => { started = resolve; });
+      const revocation = db.transaction(async tx => {
+        await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+        await tx.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)).for("update");
+        locked(); await mayRevoke;
+        return createTestToolAccessService(tx as unknown as Db).revokeConnectionGrant(connected.connectionId, grant.id, actor);
+      });
+      await held;
+      const reconnect = db.transaction(async tx => {
+        await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+        const [row] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+        started(Number(row.pid));
+        return createTestToolAccessService(tx as unknown as Db).reconnectGalleryApp(connected.connectionId, company.id, { credentialValues: { "credentials.authorization": "fixture-new-key" } }, actor);
+      });
+      const completed = Promise.allSettled([revocation, reconnect]);
+      try {
+        const pid = await reconnectStarted;
+        await vi.waitFor(async () => {
+          const [row] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${pid}`);
+          expect(row.wait_event_type).toBe("Lock");
+        }, { timeout: 5000 });
+      } finally { resume(); }
+      const results = await completed;
+      for (const result of results) if (result.status === "rejected") throw result.reason;
+      const [updatedGrant] = await db.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id));
+      expect(updatedGrant.status).toBe("active");
+      const [secret] = await db.select().from(companySecrets).where(eq(companySecrets.id, grant.credentialSecretRefs[0]!.secretId));
+      expect(secret.latestVersion).toBe(2);
+    });
+  }, 15000);
 
   it("reconnects a personal key on the existing user grant without creating an organization credential", async () => {
     const company = await createCompany(db);

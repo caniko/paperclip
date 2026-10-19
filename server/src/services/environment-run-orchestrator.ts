@@ -206,6 +206,7 @@ export function environmentRunOrchestrator(
   async function acquireLease(input: {
     companyId: string;
     environment: Environment;
+    configuredEnvironment?: Environment;
     issueId: string | null;
     agentId: string;
     heartbeatRunId: string;
@@ -292,6 +293,7 @@ export function environmentRunOrchestrator(
     const acquisitionInput = {
       companyId: input.companyId,
       environment,
+      configuredEnvironment: selectedEnvironment,
       issueId: input.issueId,
       agentId: input.agentId,
       heartbeatRunId: input.heartbeatRunId,

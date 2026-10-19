@@ -5,9 +5,18 @@ import { join } from "node:path";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { describe, expect, it } from "vitest";
-import { applyPendingMigrations, assertDeploymentSchemaCompatible, ensurePostgresDatabase, inspectMigrations } from "./client.js";
+import {
+  applyPendingMigrations,
+  assertDeploymentSchemaCompatible,
+  ensurePostgresDatabase,
+  inspectMigrations,
+} from "./client.js";
 import { connectPostgres } from "./postgres-connection.js";
-import { EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./test-embedded-postgres.js";
+import {
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
+  getEmbeddedPostgresTestSupport,
+  startEmbeddedPostgresTestDatabase,
+} from "./test-embedded-postgres.js";
 
 type TestSql = ReturnType<typeof connectPostgres>;
 type JournalEntry = { idx: number; version: string; when: number; tag: string; breakpoints: boolean };
@@ -15,52 +24,107 @@ type Journal = { version: string; dialect: string; entries: JournalEntry[] };
 const nativeFile = "0355_sweet_titanium_man.sql";
 const nativeHash = "ac20d3f6626b23aaf07e7bc7f6502bbcd728a2808d4b4adb56b2116bb30e6412";
 // Authentic entry and SQL from 843bb5b, whose upstream prefix through 0288 is unchanged.
-const oldEntry: JournalEntry = { idx: 289, version: "7", when: 1790713813737, tag: "0289_messy_vivisector", breakpoints: true };
+const oldEntry: JournalEntry = {
+  idx: 289,
+  version: "7",
+  when: 1790713813737,
+  tag: "0289_messy_vivisector",
+  breakpoints: true,
+};
 const oldSqlUrl = new URL("./__tests__/fixtures/deployment-history/0289_messy_vivisector.sql", import.meta.url);
 const pendingFiles = [
-  "0289_drop_user_keyboard_shortcuts.sql", "0290_browser_use_cloud.sql",
-  "0291_conscious_secret_warriors.sql", "0292_powerful_devos.sql",
-  "0293_broad_rattler.sql", "0294_chilly_marvel_apes.sql",
-  "0295_public_captain_cross.sql", "0296_stiff_thaddeus_ross.sql",
-  "0297_foamy_swordsman.sql", "0298_connection_agent_instructions.sql",
-  "0299_absent_ser_duncan.sql", "0300_chunky_chamber.sql",
-  "0301_lumpy_maria_hill.sql", "0302_colossal_otto_octavius.sql",
-  "0303_supreme_garia.sql", "0304_curvy_shadow_king.sql",
-  "0305_chubby_vin_gonzales.sql", "0306_familiar_titania.sql",
-  "0307_cool_naoko.sql", "0308_whole_steel_serpent.sql",
-  "0309_loving_the_hood.sql", "0310_agent_commentary.sql",
-  "0311_mcp_file_transfers.sql", "0312_easy_eternity.sql",
-  "0313_private_task_access.sql", "0314_private_task_draft_assets.sql",
-  "0315_rapid_emma_frost.sql", "0316_premium_slayback.sql",
-  "0317_messy_famine.sql", "0318_strong_blacklash.sql",
-  "0319_heavy_captain_midlands.sql", "0320_daily_onslaught.sql",
-  "0321_acoustic_human_fly.sql", "0322_reflective_kree.sql",
-  "0323_petite_shockwave.sql", "0324_long_franklin_storm.sql",
-  "0325_aberrant_machine_man.sql", "0326_blushing_screwball.sql",
-  "0327_sad_proteus.sql", "0328_chunky_mentallo.sql",
-  "0329_free_wolf_cub.sql", "0330_spooky_white_tiger.sql",
-  "0331_panoramic_spyke.sql", "0332_little_night_nurse.sql",
-  "0333_normal_wild_pack.sql", "0334_rare_slipstream.sql",
-  "0335_absurd_bulldozer.sql", "0336_big_crystal.sql",
-  "0337_exotic_proemial_gods.sql", "0338_absurd_vengeance.sql",
-  "0339_luxuriant_iron_monger.sql", "0340_open_warlock.sql",
-  "0341_abnormal_bucky.sql", "0342_dry_shen.sql",
-  "0343_new_mentor.sql", "0344_wide_blue_marvel.sql",
-  "0345_luxuriant_carmella_unuscione.sql", "0346_cloudy_whiplash.sql",
-  "0347_flippant_imperial_guard.sql", "0348_agent_skill_runtime_hooks.sql",
-  "0349_oval_dragon_lord.sql", "0350_friendly_rhodey.sql",
-  "0351_hard_albert_cleary.sql", "0352_special_warbound.sql",
-  "0353_skinny_gamma_corps.sql", "0354_agent_connection_assignment_hooks.sql",
-  "0356_perpetual_manta.sql", "0357_deployment_environments.sql",
+  "0289_drop_user_keyboard_shortcuts.sql",
+  "0290_browser_use_cloud.sql",
+  "0291_conscious_secret_warriors.sql",
+  "0292_powerful_devos.sql",
+  "0293_broad_rattler.sql",
+  "0294_chilly_marvel_apes.sql",
+  "0295_public_captain_cross.sql",
+  "0296_stiff_thaddeus_ross.sql",
+  "0297_foamy_swordsman.sql",
+  "0298_connection_agent_instructions.sql",
+  "0299_absent_ser_duncan.sql",
+  "0300_chunky_chamber.sql",
+  "0301_lumpy_maria_hill.sql",
+  "0302_colossal_otto_octavius.sql",
+  "0303_supreme_garia.sql",
+  "0304_curvy_shadow_king.sql",
+  "0305_chubby_vin_gonzales.sql",
+  "0306_familiar_titania.sql",
+  "0307_cool_naoko.sql",
+  "0308_whole_steel_serpent.sql",
+  "0309_loving_the_hood.sql",
+  "0310_agent_commentary.sql",
+  "0311_mcp_file_transfers.sql",
+  "0312_easy_eternity.sql",
+  "0313_private_task_access.sql",
+  "0314_private_task_draft_assets.sql",
+  "0315_rapid_emma_frost.sql",
+  "0316_premium_slayback.sql",
+  "0317_messy_famine.sql",
+  "0318_strong_blacklash.sql",
+  "0319_heavy_captain_midlands.sql",
+  "0320_daily_onslaught.sql",
+  "0321_acoustic_human_fly.sql",
+  "0322_reflective_kree.sql",
+  "0323_petite_shockwave.sql",
+  "0324_long_franklin_storm.sql",
+  "0325_aberrant_machine_man.sql",
+  "0326_blushing_screwball.sql",
+  "0327_sad_proteus.sql",
+  "0328_chunky_mentallo.sql",
+  "0329_free_wolf_cub.sql",
+  "0330_spooky_white_tiger.sql",
+  "0331_panoramic_spyke.sql",
+  "0332_little_night_nurse.sql",
+  "0333_normal_wild_pack.sql",
+  "0334_rare_slipstream.sql",
+  "0335_absurd_bulldozer.sql",
+  "0336_big_crystal.sql",
+  "0337_exotic_proemial_gods.sql",
+  "0338_absurd_vengeance.sql",
+  "0339_luxuriant_iron_monger.sql",
+  "0340_open_warlock.sql",
+  "0341_abnormal_bucky.sql",
+  "0342_dry_shen.sql",
+  "0343_new_mentor.sql",
+  "0344_wide_blue_marvel.sql",
+  "0345_luxuriant_carmella_unuscione.sql",
+  "0346_cloudy_whiplash.sql",
+  "0347_flippant_imperial_guard.sql",
+  "0348_agent_skill_runtime_hooks.sql",
+  "0349_oval_dragon_lord.sql",
+  "0350_friendly_rhodey.sql",
+  "0351_hard_albert_cleary.sql",
+  "0352_special_warbound.sql",
+  "0353_skinny_gamma_corps.sql",
+  "0354_agent_connection_assignment_hooks.sql",
+  "0356_perpetual_manta.sql",
+  "0357_deployment_environments.sql",
+  "0358_agent_tool_definition_hooks.sql",
+  "0359_agent_connector_access_hooks.sql",
 ];
 const browserTables = ["browser_use_browsers", "browser_use_runs", "browser_use_sessions", "browser_use_settings"];
-const guardedTables = ["agent_api_keys", "agents", "companies", "company_secret_versions", "company_secrets", "project_workspaces", "projects", "routine_triggers", "routines"];
+const guardedTables = [
+  "agent_api_keys",
+  "agents",
+  "companies",
+  "company_secret_versions",
+  "company_secrets",
+  "project_workspaces",
+  "projects",
+  "routine_triggers",
+  "routines",
+];
 const sha256 = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
 const migrationUrl = (file: string) => new URL(`./migrations/${file}`, import.meta.url);
-const journal = JSON.parse(await readFile(new URL("./migrations/meta/_journal.json", import.meta.url), "utf8")) as Journal;
+const journal = JSON.parse(
+  await readFile(new URL("./migrations/meta/_journal.json", import.meta.url), "utf8"),
+) as Journal;
 const support = await getEmbeddedPostgresTestSupport();
 const describePostgres = support.supported ? describe : describe.skip;
-if (!support.supported) console.warn(`Skipping deployment migration upgrade tests: ${support.reason ?? "unsupported environment"}`);
+if (!support.supported)
+  console.warn(`Skipping deployment migration upgrade tests: ${support.reason ?? "unsupported environment"}`);
 
 async function withEmptyDatabase(action: (sql: TestSql, url: string) => Promise<void>) {
   const cluster = await startEmbeddedPostgresTestDatabase("paperclip-deployment-upgrade-");
@@ -78,12 +142,18 @@ async function withEmptyDatabase(action: (sql: TestSql, url: string) => Promise<
     // read with a fresh description, rather than the pre-migration column count.
     sql = connectPostgres(url.toString(), { max: 1, prepare: false, onnotice: () => {} });
     expect(await inspectMigrations(url.toString())).toMatchObject({
-      status: "needsMigrations", reason: "no-migration-journal-empty-db", tableCount: 0, journalEntryCount: 0,
+      status: "needsMigrations",
+      reason: "no-migration-journal-empty-db",
+      tableCount: 0,
+      journalEntryCount: 0,
     });
     await action(sql, url.toString());
   } finally {
-    try { await sql?.end({ timeout: 1 }); }
-    finally { await cluster.cleanup(); }
+    try {
+      await sql?.end({ timeout: 1 });
+    } finally {
+      await cluster.cleanup();
+    }
   }
 }
 
@@ -97,21 +167,31 @@ async function applyOldHistory(sql: TestSql, url: string) {
   const folder = await mkdtemp(join(tmpdir(), "paperclip-deployment-history-"));
   try {
     await mkdir(join(folder, "meta"));
-    await Promise.all(prefix.map((entry) => copyFile(migrationUrl(`${entry.tag}.sql`), join(folder, `${entry.tag}.sql`))));
+    await Promise.all(
+      prefix.map((entry) => copyFile(migrationUrl(`${entry.tag}.sql`), join(folder, `${entry.tag}.sql`))),
+    );
     await copyFile(oldSqlUrl, join(folder, `${oldEntry.tag}.sql`));
     await writeFile(join(folder, "meta", "_journal.json"), JSON.stringify(history));
     // Drizzle installs its own JSON serializers on the client. Keep the raw SQL
     // fixture client separate so its postgres.js JSON encoding stays intact.
     const migrator = connectPostgres(url, { max: 1, onnotice: () => {} });
-    try { await migrate(drizzle(migrator), { migrationsFolder: folder }); }
-    finally { await migrator.end({ timeout: 1 }); }
+    try {
+      await migrate(drizzle(migrator), { migrationsFolder: folder });
+    } finally {
+      await migrator.end({ timeout: 1 });
+    }
     // IDs follow journal array order, including its historical gaps and repeated idx.
-    const expected = await Promise.all(history.entries.map(async (entry, index) => ({
-      id: index + 1, hash: entry === oldEntry ? nativeHash : sha256(await readFile(migrationUrl(`${entry.tag}.sql`))),
-      created_at: String(entry.when),
-    })));
+    const expected = await Promise.all(
+      history.entries.map(async (entry, index) => ({
+        id: index + 1,
+        hash: entry === oldEntry ? nativeHash : sha256(await readFile(migrationUrl(`${entry.tag}.sql`))),
+        created_at: String(entry.when),
+      })),
+    );
     expect(await readHistory(sql)).toEqual(expected);
-  } finally { await rm(folder, { recursive: true, force: true }); }
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
 }
 
 async function readHistory(sql: TestSql) {
@@ -134,7 +214,13 @@ async function readSchema(sql: TestSql, expectedGuards = [...guardedTables, "env
 }
 
 async function seed(sql: TestSql) {
-  const ids = { user: `migration-user-${randomUUID()}`, company: randomUUID(), agent: randomUUID(), secret: randomUUID(), version: randomUUID() };
+  const ids = {
+    user: `migration-user-${randomUUID()}`,
+    company: randomUUID(),
+    agent: randomUUID(),
+    secret: randomUUID(),
+    version: randomUUID(),
+  };
   // Valid local_encrypted_v1 material, using only disposable in-memory key/plaintext.
   // Production secret resolution, old-binary startup and backup/restore are separate qualification.
   const key = randomBytes(32);
@@ -142,8 +228,16 @@ async function seed(sql: TestSql) {
   const plaintext = "disposable migration secret";
   const cipher = createCipheriv("aes-256-gcm", key, iv);
   const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
-  const material = { scheme: "local_encrypted_v1", iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"), ciphertext: ciphertext.toString("base64") };
-  const adapterConfig = { command: "fixture-worker", env: { TOKEN: { type: "secret_ref", secretId: ids.secret, version: "latest" } } };
+  const material = {
+    scheme: "local_encrypted_v1",
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+  };
+  const adapterConfig = {
+    command: "fixture-worker",
+    env: { TOKEN: { type: "secret_ref", secretId: ids.secret, version: "latest" } },
+  };
   await sql`INSERT INTO "user" (id, name, email, email_verified, created_at, updated_at)
     VALUES (${ids.user}, 'Migration board', ${`${ids.user}@example.test`}, true, now(), now())`;
   await sql`INSERT INTO instance_user_roles (user_id, role) VALUES (${ids.user}, 'instance_admin')`;
@@ -186,85 +280,137 @@ function upgradedRows(before: Awaited<ReturnType<typeof preservedRows>>) {
   // Preserve every historical column, while asserting the exact defaults and
   // decimal representation introduced by 0312 and 0299, lifecycle state from
   // 0320, instance-secret ownership from 0339 and creator provenance from 0343.
-  return before.map((rows, index) => rows.map(row => index === 3 || index === 4
-    ? { ...row, spend_month_utc: null, spent_monthly_cents: Number(row.spent_monthly_cents).toFixed(7),
-        ...(index === 4 ? { lifecycle_state: "ready", lifecycle_required_plugin_ids: null,
-          lifecycle_holds: [], lifecycle_version: 0, lifecycle_error: null,
-          lifecycle_operation: null, created_by_user_id: null } : {}) }
-    : index === 5 ? { ...row, ai_session_epoch: 0, owner_agent_id: null, owner_plugin_id: null } : row));
+  return before.map((rows, index) =>
+    rows.map((row) =>
+      index === 3 || index === 4
+        ? {
+            ...row,
+            spend_month_utc: null,
+            spent_monthly_cents: Number(row.spent_monthly_cents).toFixed(7),
+            ...(index === 4
+              ? {
+                  lifecycle_state: "ready",
+                  lifecycle_required_plugin_ids: null,
+                  lifecycle_holds: [],
+                  lifecycle_version: 0,
+                  lifecycle_error: null,
+                  lifecycle_operation: null,
+                  created_by_user_id: null,
+                }
+              : {}),
+          }
+        : index === 5
+          ? { ...row, ai_session_epoch: 0, owner_agent_id: null, owner_plugin_id: null }
+          : row,
+    ),
+  );
 }
 
 async function assertGuardsAndCipher(sql: TestSql, row: Awaited<ReturnType<typeof seed>>) {
-  await expect(sql`UPDATE companies SET name = 'Unauthorized edit' WHERE id = ${row.ids.company}`)
-    .rejects.toMatchObject({ code: "23514", message: "Declaratively owned field cannot be changed" });
-  await expect(sql`UPDATE agents SET name = 'Unauthorized edit' WHERE id = ${row.ids.agent}`)
-    .rejects.toMatchObject({ code: "23514", message: "Declaratively owned field cannot be changed" });
-  await expect(sql`UPDATE company_secret_versions SET material = '{}'::jsonb WHERE id = ${row.ids.version}`)
-    .rejects.toMatchObject({ code: "23514", message: "Declaratively owned secret versions cannot be changed" });
+  await expect(
+    sql`UPDATE companies SET name = 'Unauthorized edit' WHERE id = ${row.ids.company}`,
+  ).rejects.toMatchObject({ code: "23514", message: "Declaratively owned field cannot be changed" });
+  await expect(sql`UPDATE agents SET name = 'Unauthorized edit' WHERE id = ${row.ids.agent}`).rejects.toMatchObject({
+    code: "23514",
+    message: "Declaratively owned field cannot be changed",
+  });
+  await expect(
+    sql`UPDATE company_secret_versions SET material = '{}'::jsonb WHERE id = ${row.ids.version}`,
+  ).rejects.toMatchObject({ code: "23514", message: "Declaratively owned secret versions cannot be changed" });
   const [version] = await sql`SELECT material FROM company_secret_versions WHERE id = ${row.ids.version}`;
   expect(version.material).toEqual(row.material);
   const decipher = createDecipheriv("aes-256-gcm", row.key, Buffer.from(version.material.iv, "base64"));
   decipher.setAuthTag(Buffer.from(version.material.tag, "base64"));
-  expect(Buffer.concat([decipher.update(Buffer.from(version.material.ciphertext, "base64")), decipher.final()]).toString("utf8"))
-    .toBe(row.plaintext);
+  expect(
+    Buffer.concat([decipher.update(Buffer.from(version.material.ciphertext, "base64")), decipher.final()]).toString(
+      "utf8",
+    ),
+  ).toBe(row.plaintext);
 }
 
 describePostgres("deployment migration upgrade from authentic native history", () => {
-  it("backfills upstream gaps without rewriting native history, ownership or ciphertext", async () => {
-    await withEmptyDatabase(async (sql, url) => {
-      await applyOldHistory(sql, url);
-      const row = await seed(sql);
-      await sql`UPDATE "user" SET keyboard_shortcuts = false WHERE id = ${row.ids.user}`;
-      const beforeRows = await preservedRows(sql, row);
-      const beforeHistory = await readHistory(sql);
-      const beforeSchema = await readSchema(sql, guardedTables);
-      expect(beforeSchema).toMatchObject({ tables: ["deployment_resources"], keyboard: true });
-      await assertGuardsAndCipher(sql, row);
-      await expect(assertDeploymentSchemaCompatible(url)).resolves.toBeUndefined();
-      expect(await readHistory(sql)).toEqual(beforeHistory);
-      const pending = await inspectMigrations(url);
-      expect(pending).toMatchObject({ status: "needsMigrations", reason: "pending-migrations", pendingMigrations: pendingFiles });
-      expect(pending.appliedMigrations).toContain(nativeFile);
-      await applyPendingMigrations(url);
-      const afterHistory = await readHistory(sql);
-      expect(afterHistory.slice(0, beforeHistory.length)).toEqual(beforeHistory);
-      const appended = await Promise.all(pendingFiles.map(async (file, index) => ({
-        id: beforeHistory.at(-1)!.id + index + 1, hash: sha256(await readFile(migrationUrl(file))),
-        created_at: String(journal.entries.find((entry) => `${entry.tag}.sql` === file)!.when),
-      })));
-      expect(afterHistory.slice(beforeHistory.length)).toEqual(appended);
-      expect(afterHistory.filter((entry) => entry.hash === nativeHash)).toEqual(beforeHistory.filter((entry) => entry.hash === nativeHash));
-      expect(afterHistory.filter((entry) => entry.hash === nativeHash)).toHaveLength(1);
-      expect(await preservedRows(sql, row)).toEqual(upgradedRows(beforeRows));
-      expect(await readSchema(sql)).toEqual({ tables: [...browserTables, "deployment_resources"], keyboard: false, guards: expect.arrayContaining(beforeSchema.guards) });
-      await assertGuardsAndCipher(sql, row);
-      expect(await inspectMigrations(url)).toMatchObject({ status: "upToDate", journalEntryCount: beforeHistory.length + pendingFiles.length });
-      await applyPendingMigrations(url);
-      expect(await readHistory(sql)).toEqual(afterHistory);
-      expect(await preservedRows(sql, row)).toEqual(upgradedRows(beforeRows));
-    });
-  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+  it(
+    "backfills upstream gaps without rewriting native history, ownership or ciphertext",
+    async () => {
+      await withEmptyDatabase(async (sql, url) => {
+        await applyOldHistory(sql, url);
+        const row = await seed(sql);
+        await sql`UPDATE "user" SET keyboard_shortcuts = false WHERE id = ${row.ids.user}`;
+        const beforeRows = await preservedRows(sql, row);
+        const beforeHistory = await readHistory(sql);
+        const beforeSchema = await readSchema(sql, guardedTables);
+        expect(beforeSchema).toMatchObject({ tables: ["deployment_resources"], keyboard: true });
+        await assertGuardsAndCipher(sql, row);
+        await expect(assertDeploymentSchemaCompatible(url)).resolves.toBeUndefined();
+        expect(await readHistory(sql)).toEqual(beforeHistory);
+        const pending = await inspectMigrations(url);
+        expect(pending).toMatchObject({
+          status: "needsMigrations",
+          reason: "pending-migrations",
+          pendingMigrations: pendingFiles,
+        });
+        expect(pending.appliedMigrations).toContain(nativeFile);
+        await applyPendingMigrations(url);
+        const afterHistory = await readHistory(sql);
+        expect(afterHistory.slice(0, beforeHistory.length)).toEqual(beforeHistory);
+        const appended = await Promise.all(
+          pendingFiles.map(async (file, index) => ({
+            id: beforeHistory.at(-1)!.id + index + 1,
+            hash: sha256(await readFile(migrationUrl(file))),
+            created_at: String(journal.entries.find((entry) => `${entry.tag}.sql` === file)!.when),
+          })),
+        );
+        expect(afterHistory.slice(beforeHistory.length)).toEqual(appended);
+        expect(afterHistory.filter((entry) => entry.hash === nativeHash)).toEqual(
+          beforeHistory.filter((entry) => entry.hash === nativeHash),
+        );
+        expect(afterHistory.filter((entry) => entry.hash === nativeHash)).toHaveLength(1);
+        expect(await preservedRows(sql, row)).toEqual(upgradedRows(beforeRows));
+        expect(await readSchema(sql)).toEqual({
+          tables: [...browserTables, "deployment_resources"],
+          keyboard: false,
+          guards: expect.arrayContaining(beforeSchema.guards),
+        });
+        await assertGuardsAndCipher(sql, row);
+        expect(await inspectMigrations(url)).toMatchObject({
+          status: "upToDate",
+          journalEntryCount: beforeHistory.length + pendingFiles.length,
+        });
+        await applyPendingMigrations(url);
+        expect(await readHistory(sql)).toEqual(afterHistory);
+        expect(await preservedRows(sql, row)).toEqual(upgradedRows(beforeRows));
+      });
+    },
+    EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
+  );
 
-  it("bootstraps current migrations on an empty database and has nothing to reapply", async () => {
-    await withEmptyDatabase(async (sql, url) => {
-      await assertDeploymentSchemaCompatible(url);
-      const [empty] = await sql`SELECT to_regclass('drizzle.__drizzle_migrations') IS NULL AS journal_absent`;
-      expect(empty.journal_absent).toBe(true);
-      await applyPendingMigrations(url);
-      const history = await readHistory(sql);
-      expect(history).toHaveLength(journal.entries.length);
-      expect(history.filter((entry) => entry.hash === nativeHash)).toHaveLength(1);
-      expect(await readSchema(sql)).toMatchObject({ tables: [...browserTables, "deployment_resources"], keyboard: false });
-      expect(await sql`SELECT * FROM deployment_resources`).toHaveLength(0);
-      const row = await seed(sql);
-      await assertGuardsAndCipher(sql, row);
-      const beforeRows = await preservedRows(sql, row);
-      const state = await inspectMigrations(url);
-      expect(state).toMatchObject({ status: "upToDate", journalEntryCount: journal.entries.length });
-      expect("pendingMigrations" in state ? state.pendingMigrations : []).toEqual([]);
-      await applyPendingMigrations(url);
-      expect(await readHistory(sql)).toEqual(history);
-      expect(await preservedRows(sql, row)).toEqual(beforeRows);
-    });
-  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+  it(
+    "bootstraps current migrations on an empty database and has nothing to reapply",
+    async () => {
+      await withEmptyDatabase(async (sql, url) => {
+        await assertDeploymentSchemaCompatible(url);
+        const [empty] = await sql`SELECT to_regclass('drizzle.__drizzle_migrations') IS NULL AS journal_absent`;
+        expect(empty.journal_absent).toBe(true);
+        await applyPendingMigrations(url);
+        const history = await readHistory(sql);
+        expect(history).toHaveLength(journal.entries.length);
+        expect(history.filter((entry) => entry.hash === nativeHash)).toHaveLength(1);
+        expect(await readSchema(sql)).toMatchObject({
+          tables: [...browserTables, "deployment_resources"],
+          keyboard: false,
+        });
+        expect(await sql`SELECT * FROM deployment_resources`).toHaveLength(0);
+        const row = await seed(sql);
+        await assertGuardsAndCipher(sql, row);
+        const beforeRows = await preservedRows(sql, row);
+        const state = await inspectMigrations(url);
+        expect(state).toMatchObject({ status: "upToDate", journalEntryCount: journal.entries.length });
+        expect("pendingMigrations" in state ? state.pendingMigrations : []).toEqual([]);
+        await applyPendingMigrations(url);
+        expect(await readHistory(sql)).toEqual(history);
+        expect(await preservedRows(sql, row)).toEqual(beforeRows);
+      });
+    },
+    EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
+  );
 });

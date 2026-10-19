@@ -98,7 +98,10 @@ live GitHub credential recovery.
 
 GitHub publication recovery (2026-10-14): assigned-agent `submit_review`, `comment`,
 and `update_comment` calls reuse their run-, task-, endpoint-, and argument-bound
-publication on an exact retry. Fresh gateway policy and provider authority remain
+publication on an exact retry. Identity uses the complete durable request rather
+than the shortened audit preview. A changed suffix, changed nested entry, or
+missing publication cannot authorize another write. Exact retries only read the
+receipt; the worker owns pending provider retries. Fresh gateway policy and provider authority remain
 required. The durable worker resumes transient failures after restart and stops
 at its retry cap, revoked authority, or a superseded head. A pending receipt is
 not task completion. Source:

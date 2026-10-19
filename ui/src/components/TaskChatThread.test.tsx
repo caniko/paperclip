@@ -17,6 +17,7 @@ import type {
 import { heartbeatsApi } from "@/api/heartbeats";
 import { nativeRunEventsToTranscript } from "./transcript/native-run-events";
 import { pendingConnectionIntentInteraction } from "@/fixtures/issueThreadInteractionFixtures";
+import { TaskChatScrollNavigation } from "./task-chat/scroll-navigation";
 import type { HeartbeatRunEvent } from "@paperclipai/shared";
 
 const transcriptState = vi.hoisted(() => ({
@@ -312,20 +313,21 @@ it.each([true, false])("interleaves browser sessions with their requests and pre
   expect(anchors()).toEqual(expected);
 });
 
-it("coordinates first reveal while keeping the composer and visible history mounted through refresh", async () => {
-  sidebarState.isMobile = true;
+it.each([true, false])("defers hidden content until history is ready and keeps it mounted through refresh (mobile=%s)", async (mobile) => {
+  sidebarState.isMobile = mobile;
   const props = {
     issueId: "coordinated-issue",
     comments: [],
     onAdd: async () => {},
   };
   render(<TaskChatThread {...props} initialHistoryPending />);
-  const composer = container.querySelector('[data-testid="mock-editor"]');
-  expect(composer).not.toBeNull();
+  expect(container.querySelector('[data-testid="mock-editor"]')).toBeNull();
   expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
-  expect(container.querySelector('.task-chat-history-pending')).not.toBeNull();
+  expect(Boolean(container.querySelector('.task-chat-history-pending'))).toBe(mobile);
   expect(container.querySelector('[data-testid="task-chat-composer-dock"]')?.hasAttribute("inert")).toBe(true);
   render(<TaskChatThread {...props} initialHistoryPending={false} />);
+  const composer = container.querySelector('[data-testid="mock-editor"]');
+  expect(composer).not.toBeNull();
   await act(async () => {
     await new Promise((resolve) => requestAnimationFrame(resolve));
   });
@@ -339,6 +341,30 @@ it("coordinates first reveal while keeping the composer and visible history moun
   ).toBeNull();
   expect(container.querySelector('[data-testid="mock-editor"]')).toBe(composer);
   expect(container.querySelector('.task-chat-history-pending')).toBeNull();
+});
+
+it("prepares comment-link history and its composer before reveal", async () => {
+  const props = {
+    issueId: "linked-issue",
+    comments: createLongThreadComments(),
+    onAdd: async () => {},
+  };
+  const show = (pending: boolean) => render(
+    <TaskChatScrollNavigation.Provider value={{ key: "linked-entry", hash: "#comment-comment-1", restore: false }}>
+      <TaskChatThread {...props} initialHistoryPending={pending} />
+    </TaskChatScrollNavigation.Provider>,
+  );
+  show(true);
+  const composer = container.querySelector('[data-testid="mock-editor"]');
+  const row = container.querySelector('[data-thread-anchor="comment-1"]');
+  expect(composer).not.toBeNull();
+  expect(row).not.toBeNull();
+  expect(row?.closest('[inert]')).not.toBeNull();
+  show(false);
+  await act(async () => { await new Promise((resolve) => requestAnimationFrame(resolve)); });
+  expect(container.querySelector('[aria-busy="false"]')).not.toBeNull();
+  expect(container.querySelector('[data-testid="mock-editor"]')).toBe(composer);
+  expect(container.querySelector('[data-thread-anchor="comment-1"]')).toBe(row);
 });
 
 it.each([true, false])("reveals saved conversation when initial history stalls (mobile=%s)", async (mobile) => {
@@ -356,10 +382,12 @@ it.each([true, false])("reveals saved conversation when initial history stalls (
       onAdd: async () => {},
     };
     render(<TaskChatThread {...props} initialHistoryPending />);
-    const composer = container.querySelector('[data-testid="mock-editor"]');
+    expect(container.querySelector('[data-testid="mock-editor"]')).toBeNull();
     await act(async () => { await vi.advanceTimersByTimeAsync(14_999); });
     expect(container.querySelector('[data-testid="task-chat-history-loading"]')).not.toBeNull();
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    const composer = container.querySelector('[data-testid="mock-editor"]');
+    expect(composer).not.toBeNull();
     expect(container.querySelector('[data-testid="task-chat-history-loading"]')).toBeNull();
     expect(container.querySelector('[data-testid="task-chat-history-content"]')?.hasAttribute("inert")).toBe(false);
     expect(container.querySelector('[data-testid="task-chat-composer-dock"]')?.hasAttribute("inert")).toBe(false);
@@ -461,8 +489,8 @@ describe.each(["legacy", "native"] as const)("%s task history readiness", (runti
       expect(
         container.querySelector('[data-testid="task-chat-history-loading"]'),
       ).not.toBeNull();
-      expect(container.textContent).toContain("Thread message 1");
-      expect(container.querySelector('[data-thread-anchor="comment-1"]')?.closest('[inert]')).not.toBeNull();
+      expect(container.textContent).not.toContain("Thread message 1");
+      expect(container.querySelector('[data-thread-anchor="comment-1"]')).toBeNull();
       transcriptState.hydratedRunIds = new Set(["started-run"]);
       nativeTranscriptState.hydratedRunIds = new Set(["started-run"]);
       transcriptState.transcriptByRun.set("started-run", [{

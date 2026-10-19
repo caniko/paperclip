@@ -364,10 +364,19 @@ describe("openapi routes", () => {
     expect(operation.responses["404"]).toBeDefined();
   });
 
-  it("documents strict run-attributed feedback without a read endpoint", () => {
+  it("documents strict run-attributed feedback and board-only commentary reads", () => {
     const { spec } = loadSpecRoutes();
     const path = spec.paths["/api/companies/{companyId}/agent-commentary"];
-    expect(Object.keys(path)).toEqual(["post"]);
+    expect(Object.keys(path)).toEqual(["get", "post"]);
+    const detail = spec.paths["/api/companies/{companyId}/agent-commentary/{id}"].get;
+    for (const read of [path.get, detail]) {
+      expect(read.security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+      expect(read.responses["403"]).toBeDefined();
+      expect(read.responses["404"]).toBeDefined();
+    }
+    expect(path.get.parameters.map((parameter: { name: string }) => parameter.name)).toEqual(
+      expect.arrayContaining(["agentId", "kind", "q", "limit", "offset"]),
+    );
     const operation = path.post;
     expect(operation.security).toEqual([{ AgentBearerAuth: [] }]);
     expect(operation["x-paperclip-authorization"]).toEqual({ actor: "agent", heartbeatBound: true });

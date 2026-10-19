@@ -2280,6 +2280,11 @@ their existing operator recovery requirements.
 
 ## Internal agent commentary
 
+Audit → Commentary is a board-only page with agent/type filters, text search,
+50-message pages and full-message dialogs. Filters, page offsets and selected
+messages have shareable URLs. Read endpoints require company membership,
+`audit:view_agent_actions` and source-task visibility.
+
 `agent_commentary` stores company-scoped, attributed complaints and suggestions
 as free-form text in the instance database. Legacy agents use the default
 `complain` and `suggestion-box` runtime skills; native runs use dedicated tools
