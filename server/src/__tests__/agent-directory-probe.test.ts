@@ -65,17 +65,23 @@ describe("stable live agent directory observation", () => {
     expect(remote).toEqual(observed);
   });
   it.runIf(process.platform === "darwin")("accepts only the observing Darwin host's fixed system aliases", () => {
-    const alias = root.replace(/^\/private(?=\/(tmp|var|etc)\/)/, "");
-    expect(alias).not.toBe(root);
-    const observed = probeAgentDirectory(root);
-    expect(probeAgentDirectory(alias)).toEqual(observed);
-    const remote = JSON.parse(execFileSync(process.execPath, ["-e", agentDirectoryProbeProgram, alias], { encoding: "utf8", env: {}, timeout: 10_000 }));
-    expect(remote).toEqual(observed);
-    // A Linux remote cannot inherit the controller's Darwin exception.
-    expect(() => execFileSync(process.execPath, ["-e", agentDirectoryProbeProgram.replace("platform:process.platform", "platform:'linux'"), alias],
-      { encoding: "utf8", env: {}, timeout: 10_000, stdio: "pipe" })).toThrow();
-    fs.symlinkSync(root, join(root, "redirect"));
-    expect(() => probeAgentDirectory(`${alias}/redirect`)).toThrow();
+    // Hosted TMPDIR can be beneath /Users, which has no system alias. Create
+    // only this owned fixture beneath the actual fixed /tmp alias instead.
+    const systemRoot = fs.realpathSync(fs.mkdtempSync("/tmp/agent-directory-probe-alias-"));
+    try {
+      fs.cpSync(root, systemRoot, { recursive: true });
+      const alias = systemRoot.replace(/^\/private(?=\/(tmp|var|etc)\/)/, "");
+      expect(alias).not.toBe(systemRoot);
+      const observed = probeAgentDirectory(systemRoot);
+      expect(probeAgentDirectory(alias)).toEqual(observed);
+      const remote = JSON.parse(execFileSync(process.execPath, ["-e", agentDirectoryProbeProgram, alias], { encoding: "utf8", env: {}, timeout: 10_000 }));
+      expect(remote).toEqual(observed);
+      // A Linux remote cannot inherit the controller's Darwin exception.
+      expect(() => execFileSync(process.execPath, ["-e", agentDirectoryProbeProgram.replace("platform:process.platform", "platform:'linux'"), alias],
+        { encoding: "utf8", env: {}, timeout: 10_000, stdio: "pipe" })).toThrow();
+      fs.symlinkSync(systemRoot, join(systemRoot, "redirect"));
+      expect(() => probeAgentDirectory(`${alias}/redirect`)).toThrow();
+    } finally { fs.rmSync(systemRoot, { recursive: true, force: true }); }
   });
   it("observes the complete agent directory after the actual remote transfer", async () => {
     const remote = `${root}-remote`;

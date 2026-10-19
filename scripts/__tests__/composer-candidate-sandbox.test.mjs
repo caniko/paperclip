@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
-import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createInterface } from "node:readline";
 import { composerCandidateDockerArgs } from "../composer-candidate-sandbox.mjs";
+import { composerCandidateProcessAlive } from "../composer-candidate-process.mjs";
+import { startComposerCandidateRuntime } from "../composer-candidate-runtime.mjs";
 
 test("candidate boundary exposes only the candidate directory, never host tools, state or credentials", (t) => {
   const candidate = mkdtempSync(join(tmpdir(), "composer-candidate-"));
@@ -81,56 +81,51 @@ test("hostile lifecycle, Cargo build script and runtime actually execute without
 });
 
 test("trusted kernel PID observation binds the owned container and preserves the unrelated child", { timeout: 60_000 }, async (t) => {
-  // The test-only predecessor exercises the browser's existing host-PID probe.
-  // Once implemented, use the real trusted observer against this same container.
-  const { createComposerProcessProbe } = existsSync(new URL("../composer-candidate-process.mjs", import.meta.url))
-    ? await import("../composer-candidate-process.mjs")
-    : { createComposerProcessProbe: ({ pid }) => ({ alive: () => {
-      try { process.kill(pid, 0); return true; } catch { return false; }
-    } }) };
-  const candidate = mkdtempSync(join(tmpdir(), "composer-pid-"));
-  const owner = randomUUID();
-  const name = `composer-pid-${owner}`;
-  const args = composerCandidateDockerArgs({ candidate, phase: "runtime", uid: process.getuid(), gid: process.getgid(),
-    command: ["node", "-e", `const { spawn } = require('node:child_process');
-      const children = [0, 1].map(() => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']));
-      console.log(JSON.stringify(children.map(child => child.pid)));
-      setInterval(() => {}, 1000);`] });
-  args.splice(1, 0, "--detach", "--name", name, "--label", `paperclip.composer-owner=${owner}`);
-  t.after(() => {
-    const label = spawnSync("docker", ["inspect", "--format", '{{ index .Config.Labels "paperclip.composer-owner" }}', name],
-      { encoding: "utf8", timeout: 10000 });
-    if (label.status === 0 && label.stdout.trim() === owner) spawnSync("docker", ["rm", "--force", name], { encoding: "utf8", timeout: 10000 });
-    rmSync(candidate, { recursive: true, force: true });
+  const root = mkdtempSync(join(tmpdir(), "composer-pid-"));
+  const candidate = join(root, "candidate"), trusted = join(root, "trusted");
+  mkdirSync(candidate); mkdirSync(trusted);
+  mkdirSync(join(candidate, ".composer-native-target/debug"), { recursive: true });
+  writeFileSync(join(candidate, ".composer-native-target/debug/paperclip-runnerd"), "fixture runner artifact\n");
+  const provider = join(trusted, "provider");
+  writeFileSync(provider, "#!/bin/sh\ncat\n", { mode: 0o700 });
+  let runtime;
+  t.after(async () => {
+    try { await runtime?.close(); }
+    finally { rmSync(root, { recursive: true, force: true }); }
   });
-  const started = spawnSync("docker", args, { encoding: "utf8", timeout: 30000 });
-  assert.equal(started.status, 0, `actual PID fixture must start, not skip: ${started.error ?? started.stderr}`);
-  const container = started.stdout.trim();
+  runtime = await startComposerCandidateRuntime({ candidate, provider, callLog: join(trusted, "calls.log"), stateDirectory: trusted, port: 0 });
+  const env = { ...runtime.env, PAPERCLIP_STOP_REQUIRE_NATIVE: "true" };
+  const container = env.COMPOSER_STOP_CONTAINER_ID;
   assert.match(container, /^[0-9a-f]{64}$/);
-  const logs = spawn("docker", ["logs", "--follow", container], { stdio: ["ignore", "pipe", "pipe"] });
-  const lines = createInterface({ input: logs.stdout });
-  const [line] = await once(lines, "line", { signal: AbortSignal.timeout(10000) }).finally(() => {
-    lines.close(); logs.kill("SIGTERM");
-  });
-  const [parentPid, childPid] = JSON.parse(line);
-  const parent = createComposerProcessProbe({ container, owner, pid: parentPid });
-  const child = createComposerProcessProbe({ container, owner, pid: childPid });
-  assert.equal(parent.alive(), true);
-  assert.equal(child.alive(), true);
-  assert.ok(parent.identity, "the legacy host-PID probe cannot establish the candidate's kernel namespace identity");
-  assert.ok(child.identity, "both children need independently bound kernel identities");
-  assert.notEqual(parent.identity.hostPid, parentPid, "container PIDs must not be interpreted as host PIDs");
-  assert.notEqual(parent.identity.namespace, readlinkSync("/proc/self/ns/pid"));
-  assert.equal(parent.identity.namespace, child.identity.namespace);
-  for (const override of [{ owner: randomUUID() }, { container: name }, { pid: 0 }, { pid: 1 }, { pid: 2147483647 }]) {
-    assert.throws(() => createComposerProcessProbe({ container, owner, pid: parentPid, ...override }));
+  const execute = source => execFileSync("docker", ["exec", "--env", "NODE_OPTIONS=", "--env", "NODE_PATH=", container,
+    "/usr/local/bin/node", "-e", source], { encoding: "utf8", timeout: 10000 });
+  const [parentPid, childPid] = JSON.parse(execute(`const { spawn } = require('node:child_process');
+    const children = [0, 1].map(() => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' }));
+    children.forEach(child => child.unref()); console.log(JSON.stringify(children.map(child => child.pid)));`));
+  const hostPids = execFileSync("docker", ["top", container, "-eo", "pid"], { encoding: "utf8", timeout: 10000 }).trim().split(/\s+/).slice(1).map(Number);
+  // Independently corroborate namespace/host identities without inventing a
+  // second observer API; the production API retains its own start-time fence.
+  const identity = pid => {
+    const hostPid = hostPids.find(host => Number(readFileSync(`/proc/${host}/status`, "utf8").match(/^NSpid:\s+(.+)$/m)?.[1].trim().split(/\s+/).at(-1)) === pid);
+    assert.ok(hostPid, "the container child must have an independently observed host identity");
+    return { hostPid, namespace: readlinkSync(`/proc/${hostPid}/ns/pid`) };
+  };
+  const parent = identity(parentPid), child = identity(childPid);
+  assert.equal(composerCandidateProcessAlive(parentPid, env), true);
+  assert.equal(composerCandidateProcessAlive(childPid, env), true);
+  assert.notEqual(parent.hostPid, parentPid, "container PIDs must not be interpreted as host PIDs");
+  assert.notEqual(parent.namespace, readlinkSync("/proc/self/ns/pid"));
+  assert.equal(parent.namespace, child.namespace);
+  for (const override of [{ COMPOSER_STOP_CONTAINER_OWNER: randomUUID() }, { COMPOSER_STOP_CONTAINER_ID: "unowned-name" }]) {
+    assert.throws(() => composerCandidateProcessAlive(parentPid, { ...env, ...override }));
   }
-  const stop = spawnSync("docker", ["exec", container, "node", "-e", `process.kill(${parentPid}, 'SIGTERM')`],
-    { encoding: "utf8", timeout: 10000 });
-  assert.equal(stop.status, 0, stop.stderr);
+  assert.throws(() => composerCandidateProcessAlive(0, env));
+  assert.equal(composerCandidateProcessAlive(1, env), true, "PID 1 is bound to this owned runtime, not the host");
+  assert.equal(composerCandidateProcessAlive(2147483647, env), false);
+  execute(`process.kill(${parentPid}, 'SIGTERM')`);
   // Await kernel state, not a candidate-authored status or kill(pid, 0) on the host.
   const deadline = Date.now() + 3000;
-  while (parent.alive() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(parent.alive(), false);
-  assert.equal(child.alive(), true);
+  while (composerCandidateProcessAlive(parentPid, env) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(composerCandidateProcessAlive(parentPid, env), false);
+  assert.equal(composerCandidateProcessAlive(childPid, env), true);
 });
