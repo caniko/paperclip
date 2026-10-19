@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startComposerCandidateRuntime, verifyComposerCandidateRuntime } from "../composer-candidate-runtime.mjs";
+import { serveInsideComposerContainer, startComposerCandidateRuntime, verifyComposerCandidateRuntime } from "../composer-candidate-runtime.mjs";
 import { composerCandidateProcessAlive } from "../composer-candidate-process.mjs";
 
 test("mandatory process observation refuses missing or unowned container identity", () => {
@@ -63,6 +63,37 @@ test("runtime isolates candidate code and observes PIDs in the owned container, 
   assert.throws(() => execute('import { writeFileSync } from "node:fs"; writeFileSync("/etc/passwd", "forged account")'), /EROFS|EACCES/);
   assert.throws(() => execute('import { writeFileSync } from "node:fs"; writeFileSync("/composer-runner", "forged runner")'), /EROFS|EACCES/);
   execute('import { writeFileSync, readFileSync } from "node:fs"; writeFileSync("/candidate/.composer-native-target/debug/paperclip-runnerd", "replacement"); if (readFileSync("/composer-runner", "utf8") !== "fixture runner artifact\\n") process.exit(1);');
+  await t.test("bootstrap executes its provider without making temporary state executable", () => {
+    // Stub only the unrelated UI build and onboarding. Exercise the real
+    // bootstrap, loader, PATH lookup and kernel exec in the runtime boundary.
+    for (const path of ["scripts", ".composer-tools/node_modules/.bin", "cli/node_modules/tsx/dist", "packages/paperclip-runner/src/drivers/codex"]) {
+      mkdirSync(join(candidate, path), { recursive: true });
+    }
+    writeFileSync(join(candidate, "package.json"), '{"type":"module"}');
+    writeFileSync(join(candidate, "scripts/ensure-plugin-build-deps.mjs"), "");
+    writeFileSync(join(candidate, ".composer-tools/node_modules/.bin/pnpm"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    writeFileSync(join(candidate, "packages/paperclip-runner/src/drivers/codex/codex-command.js"), 'throw new Error("fixture resolver was not pinned");');
+    writeFileSync(join(candidate, "cli/node_modules/tsx/dist/cli.mjs"), `
+      import assert from "node:assert/strict";
+      import { execFileSync, spawnSync } from "node:child_process";
+      import { writeFileSync } from "node:fs";
+      import { resolveCodexCommand, resolvePinnedCodexCommand } from "file:///candidate/packages/paperclip-runner/src/drivers/codex/codex-command.js";
+      const command = resolveCodexCommand();
+      assert.equal(resolvePinnedCodexCommand(), command);
+      for (const executable of ["codex", command]) {
+        assert.match(execFileSync(executable, ["--version"], { encoding: "utf8" }), /^codex-cli 0\\.999\\.0 \\(composer fixture\\)/);
+      }
+      const request = JSON.stringify({ id: 1, method: "fixture.echo" }) + "\\n";
+      const provider = spawnSync(command, ["app-server"], { input: request, encoding: "utf8", timeout: 5000 });
+      assert.equal(provider.status, 0, provider.stderr);
+      assert.equal(provider.stdout, request);
+      assert.ok(command.startsWith("/candidate/"));
+      writeFileSync("/tmp/must-not-execute", "#!/bin/sh\\nexit 0\\n", { mode: 0o700 });
+      assert.equal(spawnSync("/tmp/must-not-execute").error?.code, "EACCES");
+      console.log("bootstrap-provider-ok");
+    `);
+    assert.match(execute(`await (${serveInsideComposerContainer.toString()})();`), /bootstrap-provider-ok/);
+  });
   execute('import { createServer } from "node:http"; import { spawn } from "node:child_process"; const child = spawn(process.execPath, ["-e", \'require("node:http").createServer((q,s)=>s.end("isolated runtime")).listen(3199,"127.0.0.1")\'], { detached: true, stdio: "ignore" }); child.unref();');
   await t.test("trusted HTTP relay reaches only the container loopback", async () => {
     const deadline = Date.now() + 10000;

@@ -18,6 +18,7 @@ test("candidate boundary exposes only the candidate directory, never host tools,
     assert.ok(args.includes(`type=bind,src=${candidate},dst=/candidate`));
     assert.ok(args.includes("--read-only"));
     assert.ok(args.includes("no-new-privileges"));
+    assert.ok(args.includes("/tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777"));
     assert.ok(args.includes("ALL"));
     assert.ok(args.includes("1001:1001"));
     // Dependency stores exceed the temporary filesystem; keep them on the

@@ -20,7 +20,7 @@ export function composerCandidateDockerArgs({ candidate, phase, command, uid, gi
     "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
     "--pids-limit", "512", "--memory", "3g", "--cpus", "2",
     "--network", phase === "runtime" ? "none" : "bridge",
-    "--tmpfs", "/tmp:rw,nosuid,nodev,size=1g,mode=1777",
+    "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777",
     "--env", "HOME=/tmp", "--env", "CARGO_HOME=/candidate/.composer-tools/cargo",
     // Keep the frozen runner below its unchanged 256 MiB custody limit.
     ...(phase === "build" ? ["--env", "CARGO_PROFILE_DEV_DEBUG=0"] : []),

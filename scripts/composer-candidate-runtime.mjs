@@ -134,24 +134,29 @@ export async function serveInsideComposerContainer() {
   const { mkdir, writeFile } = await import("node:fs/promises");
   const { spawn } = await import("node:child_process");
   const directory = "/tmp/composer-runtime";
+  // /tmp stays noexec; only the launcher belongs on the executable candidate mount.
+  const bin = "/candidate/.composer-tools/composer-bin";
   await mkdir(`${directory}/codex-home`, { recursive: true });
-  await writeFile(`${directory}/codex`, `#!/usr/local/bin/node
+  await mkdir(bin, { recursive: true });
+  await writeFile(`${bin}/codex`, `#!/usr/local/bin/node
 if (process.argv.includes("--version")) { console.log("codex-cli 0.999.0 (composer fixture)"); process.exit(0); }
 if (process.argv[2] === "login") { console.log("Logged in using an API key"); process.exit(0); }
-const socket = require("node:net").connect("/composer-provider.sock");
+import("node:net").then(({ connect }) => {
+const socket = connect("/composer-provider.sock");
 socket.on("error", error => { console.error(error.message); process.exit(1); });
 process.stdin.pipe(socket); socket.pipe(process.stdout);
 socket.on("end", () => process.exit(0));
+});
 `, { mode: 0o700 });
   await writeFile(`${directory}/preload.mjs`, `import { registerHooks } from "node:module";
 registerHooks({ load(url, context, next) {
   if (/\\/packages\\/paperclip-runner\\/(src|dist)\\/drivers\\/codex\\/codex-command\\.(js|ts)$/.test(url))
-    return { format: "module", shortCircuit: true, source: 'export const resolveCodexCommand = () => "/tmp/composer-runtime/codex"; export const resolvePinnedCodexCommand = resolveCodexCommand;' };
+    return { format: "module", shortCircuit: true, source: 'export const resolveCodexCommand = () => "${bin}/codex"; export const resolvePinnedCodexCommand = resolveCodexCommand;' };
   return next(url, context);
 } });
 `);
   const env = {
-    PATH: `${directory}:/candidate/.composer-tools/node_modules/.bin:/usr/local/bin:/usr/bin:/bin`, HOME: directory,
+    PATH: `${bin}:/candidate/.composer-tools/node_modules/.bin:/usr/local/bin:/usr/bin:/bin`, HOME: directory,
     NODE_ENV: "test", NODE_OPTIONS: `--import=${directory}/preload.mjs`, CI: "true",
     CODEX_HOME: `${directory}/codex-home`, OPENAI_API_KEY: "composer-stop-fixture-key",
     PAPERCLIP_RUNNER_BINARY: "/composer-runner",
