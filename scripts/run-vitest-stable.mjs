@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -405,14 +405,25 @@ function runVitest(args, label, testShard = null) {
   if (process.env.PAPERCLIP_TEST_REPORT_DIR && !testShard) {
     args.push("--allowOnly=false");
   }
+  const sourceProfile = process.env.PAPERCLIP_TEST_SOURCE_PROFILE === "1";
+  if (sourceProfile && !process.env.PAPERCLIP_TEST_REPORT_DIR) fail("Source qualification requires retained evidence");
+  let evidence;
   if (process.env.PAPERCLIP_TEST_REPORT_DIR) {
     const reportDir = path.resolve(process.env.PAPERCLIP_TEST_REPORT_DIR);
     mkdirSync(reportDir, { recursive: true });
-    args.push("--retry=0", "--reporter=default",
-      `--reporter=${path.join(scriptsDir, "qualification-junit-reporter.mjs")}`,
-      `--outputFile.junit=${path.join(reportDir, `${invocationIndex}.xml`)}`);
+    if (sourceProfile) {
+      evidence = path.join(reportDir, String(invocationIndex));
+      mkdirSync(evidence);
+      copyFileSync(path.join(reportDir, "../source.json"), path.join(evidence, "source.json"));
+    } else {
+      args.push("--retry=0", "--reporter=default",
+        `--reporter=${path.join(scriptsDir, "qualification-junit-reporter.mjs")}`,
+        `--outputFile.junit=${path.join(reportDir, `${invocationIndex}.xml`)}`);
+    }
   }
-  const result = spawnSync("pnpm", ["exec", "vitest", "run", ...sourceOnlyVitestArgs, ...args], {
+  const result = spawnSync(sourceProfile ? process.execPath : "pnpm", sourceProfile
+    ? [path.join(repoRoot, ".github/scripts/run-qualification-profile.mjs"), "default-hosted", evidence, ...sourceOnlyVitestArgs, ...args]
+    : ["exec", "vitest", "run", ...sourceOnlyVitestArgs, ...args], {
     cwd: repoRoot,
     env,
     stdio: "inherit",
@@ -423,6 +434,12 @@ function runVitest(args, label, testShard = null) {
   }
   if (result.status !== 0) {
     process.exit(result.status ?? 1);
+  }
+  if (sourceProfile) {
+    const verified = spawnSync("python3", [path.join(repoRoot, ".github/scripts/verify_profile_evidence.py"), evidence], {
+      cwd: repoRoot, env, stdio: "inherit",
+    });
+    if (verified.error || verified.status !== 0) fail("Source profile report verification failed");
   }
 }
 

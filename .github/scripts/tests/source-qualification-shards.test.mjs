@@ -75,6 +75,10 @@ test("all source shards retain strict reports, the two-hour deadline and their o
   for (const name of ["LANES", "HOME_MANAGER", "EXPECTED_RED", "HARNESS_IDENTITY"]) assert.ok(workflow.includes(`test "$${name}" = success`));
   const declarations = workflow.split("\n  home_manager:\n")[1].split("\n  retention:\n")[0];
   assert.match(declarations, /ulimit -v 2097152/);
+  for (const input of ["nixpkgs", "home-manager"]) {
+    assert.match(declarations, new RegExp(`nix flake archive --json [^\\n]+ > "\\$EVIDENCE/${input}-archive\\.json"`));
+  }
+  assert.match(declarations, /nix-store --add-root "\$RUNNER_TEMP\/home-manager-input-roots\/\$input" --indirect --realise "\$source"/);
   assert.match(declarations, /nix-instantiate "\$\{args\[@\]\}" --expr '[^']*builtins.attrNames/);
   assert.match(declarations, /nix-instantiate "\$\{args\[@\]\}" nix\/tests\/personal-declarations.nix -A "\$name"/);
   assert.match(declarations, /name: source-proof-home-manager-/);

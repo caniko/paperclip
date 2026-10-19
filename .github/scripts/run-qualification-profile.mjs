@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { createVitest } from "vitest/node";
+import { createVitest, parseCLI } from "vitest/node";
 import QualificationJUnitReporter from "../../scripts/qualification-junit-reporter.mjs";
 import { collectRows, sha256, specificationRows } from "./qualification-roster.mjs";
 import { profileSelection, verifyProfileResults } from "./qualification-profiles.mjs";
@@ -14,8 +14,13 @@ import { bindMockTailscale, verifyMockTailscaleExercise } from "./qualification-
 
 const args = process.argv.slice(2);
 const diagnostic = args[0] === "--diagnostic";
-assert.equal(args.length, diagnostic ? 3 : 2, "Pass a profile and new evidence directory, optionally preceded by --diagnostic");
-const [profile, directory] = args.slice(diagnostic ? 1 : 0);
+const [profile, directory, ...sourceArgs] = args.slice(diagnostic ? 1 : 0);
+assert.ok(profile && directory, "Pass a profile and new evidence directory, optionally preceded by --diagnostic");
+const sourceScope = profile === "default-hosted";
+assert.ok(sourceScope || sourceArgs.length === 0, "Only source lanes accept the stable runner's Vitest filters");
+const cli = sourceScope ? parseCLI(["vitest", ...sourceArgs]) : { filter: [], options: {} };
+assert.ok(!cli.options.testNamePattern && !cli.options.config && !cli.options.root,
+  "Source qualification preserves the configured roster without name or configuration overrides");
 const root = process.cwd();
 const completePackage = profile === "runner-package";
 const testRoot = completePackage ? path.join(root, "packages/paperclip-runner") : root;
@@ -32,7 +37,7 @@ else {
 const policyRaw = readFileSync(".github/qualification/coverage-environments.json");
 const policy = JSON.parse(policyRaw);
 const rules = [...policy.rules, ...(policy.supplemental_rules ?? [])].filter(rule => rule.environment === profile);
-assert.ok(rules.length || completePackage, "Unknown or unmapped profile");
+assert.ok(rules.length || completePackage || sourceScope, "Unknown or unmapped profile");
 let files = [...new Set(rules.map(rule => rule.file))];
 let sources;
 const serverRequire = createRequire(path.join(root, "server/package.json"));
@@ -104,9 +109,9 @@ function runnerBinding() {
 }
 if (["runnerd", "warm-transition", "runner-package"].includes(profile)) metadata.runnerd = runnerBinding();
 if (profile === "tailscale-mock") metadata.tailscaleMock = bindMockTailscale(root);
-const options = { root: testRoot, ...(completePackage ? { config: path.join(testRoot, "vitest.config.ts") } : {}),
+const options = { ...cli.options, root: testRoot, ...(completePackage ? { config: path.join(testRoot, "vitest.config.ts") } : {}),
   watch: false, includeTaskLocation: true, allowOnly: false, retry: 0,
-  maxWorkers: 1, fileParallelism: false, exclude: ["**/dist/**"] };
+  maxWorkers: 1, fileParallelism: false, exclude: [...(cli.options.exclude ?? []), "**/dist/**"] };
 let ctx;
 let selection;
 try {
@@ -116,9 +121,13 @@ try {
   // Runtime collection preserves all parameters and inactive sibling declarations.
   // https://vitest.dev/api/advanced/vitest#collecttests
   ctx = await createVitest({ ...options, reporters: [] });
-  const specs = await ctx.globTestSpecifications(files);
-  const specifications = specificationRows(specs, testRoot);
-  if (completePackage) files = [...new Set(specifications.map(spec => spec.file))];
+  const filters = sourceScope ? cli.filter : files;
+  const specs = await ctx.globTestSpecifications(filters);
+  const discovery = specificationRows(specs, testRoot);
+  // Use Vitest's own configured sequencer, just as its collection/execution pools do.
+  const selectedSpecs = ctx.config.shard ? await new ctx.config.sequence.sequencer(ctx).shard(specs) : specs;
+  const specifications = specificationRows(selectedSpecs, testRoot);
+  if (completePackage || sourceScope) files = [...new Set(specifications.map(spec => spec.file))];
   assert.ok(specifications.length, "The configured test roster must not be empty");
   assert.deepEqual([...new Set(specifications.map(spec => spec.file))].sort(), files.slice().sort());
   sources = Object.fromEntries(files.map(file => [file, readFileSync(path.join(testRoot, file), "utf8")]));
@@ -128,7 +137,7 @@ try {
   const moduleErrors = modules => modules.flatMap(module => [module, ...module.children.allSuites()].flatMap(suite => suite.errors()));
   const collectionErrors = [...collection.unhandledErrors, ...moduleErrors(collection.testModules)];
   const rows = collectRows(collection.testModules, testRoot);
-  write("profile-collection.json", { specifications, cases: rows, errors: collectionErrors });
+  write("profile-collection.json", { discovery, specifications, sourceArgs, cases: rows, errors: collectionErrors });
   assert.equal(collectionErrors.length, 0, "Profile collection contains errors");
   for (const spec of specifications) assert.ok(rows.some(row => row.file === spec.file && row.project === spec.project),
     `Configured specification collected no cases: ${spec.file}`);
@@ -141,10 +150,10 @@ try {
   rawReporter.options.outputFile = path.join(evidence, "raw-results.junit");
   ctx = await createVitest({ ...options, testNamePattern: selection.testNamePattern,
     reporters: ["default", rawReporter] });
-  const executionSpecs = await ctx.globTestSpecifications(files);
-  assert.deepEqual(specificationRows(executionSpecs, testRoot), specifications);
+  const executionSpecs = await ctx.globTestSpecifications(filters);
+  assert.deepEqual(specificationRows(executionSpecs, testRoot), discovery);
   // https://vitest.dev/api/advanced/vitest#start — run once, no retries or timeout overrides.
-  const executed = await ctx.start(files);
+  const executed = await ctx.start(filters);
   const executedRows = collectRows(executed.testModules, testRoot);
   const tasks = executed.testModules.flatMap(module => [...module.children.allTests()].map(test => test.task));
   const byId = new Map(tasks.map(task => [task.id, task]));

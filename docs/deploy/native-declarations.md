@@ -142,6 +142,14 @@ Focused adapter tests use a simulated control transport. OpenCode's core,
 authenticated API, and CLI tests exercise the protocol separately. These checks
 do not establish real-provider execution or live restart and restore acceptance.
 
+Hosted source lanes collect their native Vitest shard before execution. The
+source-bound environment policy identifies default cases and retains every
+OS, SDK, runner, and live-provider obligation. Raw reports keep those sibling
+outcomes. Strict reports require every default case to pass once. Unmapped skips,
+source drift, errors, and changed shard membership fail the lane. A source-lane
+pass still requires the separate environment evidence and complete coverage
+reconciliation before producer acceptance.
+
 ### Optional Nix integration for a Hermes gateway
 
 The flake exports `homeManagerModules.paperclip` for personal declarations,

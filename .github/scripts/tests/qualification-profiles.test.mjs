@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 import { profileSelection, verifyProfileResults } from "../qualification-profiles.mjs";
 import { sha256 } from "../qualification-roster.mjs";
@@ -81,5 +85,49 @@ test("the separately configured Runner package requires its entire collected ros
   for (const cases of [rows.slice(1), rows.map(c => ({ ...c, skipped_in_environment: true })),
     rows.map(c => ({ ...c, required: false })), [...rows, rows[0]]]) {
     assert.throws(() => profileSelection("runner-package", "linux", cases, {}, p));
+  }
+});
+
+test("default source scope requires every ordinary case and preserves source-mapped environment obligations", () => {
+  const p = { ...policy, environments: { ...policy.environments, "default-hosted": { platform: "linux" } } };
+  const ordinary = { ...row, id: "ordinary", name: "ordinary default case" };
+  const deferred = { ...row, skipped_in_environment: true };
+  const selectDefault = (rows, policyOverride = p) => profileSelection("default-hosted", "linux", rows, { [file]: source }, policyOverride);
+  const selected = selectDefault([ordinary, deferred]);
+  assert.deepEqual(selected.requiredCases.map(c => c.id), [ordinary.id]);
+  assert.deepEqual(selected.deferredCases.map(c => [c.id, c.environments]), [[deferred.id, ["sdk"]]]);
+  assert.equal(selected.testNamePattern, undefined, "Source execution must retain every raw sibling outcome");
+  const passed = { ...ordinary, outcome: "passed", retryCount: 0, repeatCount: 0 };
+  const skipped = { ...deferred, outcome: "skipped", retryCount: 0, repeatCount: 0 };
+  assert.equal(verifyProfileResults(selected, [passed, skipped], []).passed, 1);
+  assert.throws(() => verifyProfileResults(selected, [skipped], []));
+  assert.throws(() => verifyProfileResults(selected, [passed], []), /roster/);
+  assert.throws(() => selectDefault([ordinary, { ...deferred, name: "unmapped skipped case" }]), /mapping/);
+  assert.throws(() => selectDefault([ordinary, deferred], { ...p, rules: [{ ...p.rules[0], source_sha256: "stale" }] }), /drift/);
+});
+
+test("the source runner collects and executes the same native Vitest file shard", () => {
+  const root = path.resolve(import.meta.dirname, "../../..");
+  const temporary = realpathSync(mkdtempSync(path.join(os.tmpdir(), "paperclip-source-profile-")));
+  const directory = path.join(temporary, "evidence");
+  try {
+    execFileSync(process.execPath, [".github/scripts/run-qualification-profile.mjs", "--diagnostic", "default-hosted", directory,
+      "--project", "@paperclipai/server", "--shard=1/2", "server/src/deployment/runtime.test.ts", "server/src/deployment/adapter-config.test.ts"], {
+      cwd: root, timeout: 30_000,
+      env: { ...process.env, NODE_ENV: "test", PAPERCLIP_HOME: path.join(temporary, "home"), PAPERCLIP_CONFIG: path.join(temporary, "home/config.json") },
+    });
+    const collection = JSON.parse(readFileSync(path.join(directory, "profile-collection.json"), "utf8"));
+    const selection = JSON.parse(readFileSync(path.join(directory, "profile-selection.json"), "utf8"));
+    const result = JSON.parse(readFileSync(path.join(directory, "profile-result.json"), "utf8"));
+    assert.equal(collection.discovery.length, 2);
+    assert.equal(collection.specifications.length, 1);
+    assert.ok(selection.requiredCases.length > 0);
+    assert.ok(selection.collectedCases.every(row => row.file === collection.specifications[0].file));
+    assert.equal(result.rawCases, selection.collectedCases.length);
+    assert.equal(result.passed, selection.requiredCases.length);
+    assert.equal(result.diagnostic, true);
+    assert.equal(result.producerAcceptanceQualified, false);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
   }
 });

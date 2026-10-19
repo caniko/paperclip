@@ -152,6 +152,7 @@ jobs:
           case "$LANE" in
             typecheck) pnpm -r typecheck 2>&1 | tee "$EVIDENCE/typecheck.log" ;;
             tests-*)
+              export PAPERCLIP_TEST_SOURCE_PROFILE=1
               args=(--mode "$TEST_MODE")
               if [ -n "$TEST_GROUP" ]; then args+=(--group "$TEST_GROUP"); fi
               if [ -n "$SHARD_COUNT" ]; then args+=(--shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT"); fi
@@ -223,13 +224,22 @@ jobs:
           nix flake metadata --json github:nix-community/home-manager/0560d64401a6d5370732a69d08bc4a6b135962d9 > "$EVIDENCE/home-manager.json"
           jq -e '.locked.narHash == "sha256-/pAz2XfqHS//WRn2xRjoqes7Z92qZ0Q1gufZZ3PtuwA="' "$EVIDENCE/nixpkgs.json"
           jq -e '.locked.narHash == "sha256-EEQKUylD8zuRTmDFX4rbwsHQ+iZhqqOldYcFN8SLcE0="' "$EVIDENCE/home-manager.json"
-          args=(--eval --strict --json --no-allow-import-from-derivation --arg nixpkgsPath "$(jq -r .path "$EVIDENCE/nixpkgs.json")" --arg homeManagerPath "$(jq -r .path "$EVIDENCE/home-manager.json")")
+          # Metadata can name a lazy Git tree that is not yet in the store.
+          nix flake archive --json github:NixOS/nixpkgs/545c226a9af7f59fba5c3873f7c6a65e014c8f5f > "$EVIDENCE/nixpkgs-archive.json"
+          nix flake archive --json github:nix-community/home-manager/0560d64401a6d5370732a69d08bc4a6b135962d9 > "$EVIDENCE/home-manager-archive.json"
+          mkdir -p "$RUNNER_TEMP/home-manager-input-roots"
+          for input in nixpkgs home-manager; do
+            source=$(jq -r .path "$EVIDENCE/$input-archive.json")
+            test "$source" = "$(jq -r .path "$EVIDENCE/$input.json")"
+            nix-store --add-root "$RUNNER_TEMP/home-manager-input-roots/$input" --indirect --realise "$source"
+          done
+          args=(--eval --strict --json --no-allow-import-from-derivation --arg nixpkgsPath "$(jq -r .path "$EVIDENCE/nixpkgs-archive.json")" --arg homeManagerPath "$(jq -r .path "$EVIDENCE/home-manager-archive.json")")
           nix-instantiate "${args[@]}" --expr '{ nixpkgsPath, homeManagerPath }: builtins.attrNames (import ./nix/tests/personal-declarations.nix { inherit nixpkgsPath homeManagerPath; })' > "$EVIDENCE/cases.json"
           jq -e 'length > 0 and length == (unique | length)' "$EVIDENCE/cases.json"
           while IFS= read -r name; do
             nix-instantiate "${args[@]}" nix/tests/personal-declarations.nix -A "$name" > "$EVIDENCE/result-$name.json"
           done < <(jq -r '.[]' "$EVIDENCE/cases.json")
-          jq -s -e 'all(.[]; . == true)' "$EVIDENCE/"result-*.json
+          jq -s -e --argjson expected "$(jq length "$EVIDENCE/cases.json")" 'length == $expected and all(.[]; . == true)' "$EVIDENCE/"result-*.json
       - name: Seal declaration evidence
         if: always()
         env:
