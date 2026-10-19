@@ -157,7 +157,7 @@ defaults do not guarantee `bwrap`; self-hosted policy runners must already
 provide it. The contract still executes the hostile fixture and rejects writes
 to the immutable verifier, browser tools and provenance.
 
-The owned caller now pins `4fbe02dbc1ebf59f95bee0eb84cb3edd623f7210` after
+The earlier owned caller pinned `4fbe02dbc1ebf59f95bee0eb84cb3edd623f7210` after
 [independent hosted attempt 1](https://github.com/caniko/paperclip/actions/runs/37967935165)
 passed both mandatory Stop cases with zero failures, errors, skips, retries or
 flaky outcomes. Custody verified the archive digest, all five attachment hashes,
@@ -168,7 +168,21 @@ The provider archive SHA-256 is
 actual retention is `2764798` seconds. This qualifies the prepared Stop lane.
 Each new application head still requires its own attempt-1 runtime evidence.
 
-The proposed Stop harness keeps candidate installation, compilation and runtime
+The owned caller now pins `76e683f90c801370d6bb230be0284682472633da` after
+[independent hosted attempt 1](https://github.com/caniko/paperclip/actions/runs/39336767061)
+passed both mandatory cases on that exact application head. Its immutable Stop
+harness is `1e74838667c21d35dacd993e3b08decbf224bd44`. Archive `12226939826`
+has SHA-256 `95b9af67c0ef3bca38ac8732565b6e91e055fbbb7d39a739ade9d49c37686338`;
+provider readback verified more than 30 days remaining retention. The verifier
+reproduced the receipt with all five attachment hashes; the report, JUnit,
+manifest, runner, provider, unchanged effective lock and actual isolated-runtime
+receipt hashes also match. Both cases have zero failures, errors, skips, retries
+or flaky outcomes. The earlier failed run `39331992588` remains failed evidence:
+its launcher was placed on `/tmp`, which deliberately remains `noexec`. The
+qualified successor places only the launcher on the executable candidate mount.
+This promotes the Stop workflow, not full application or Atlas acceptance.
+
+The qualified Stop harness keeps candidate installation, compilation and runtime
 inside separate containers. Runtime retains `network=none`; a trusted stdio
 relay reaches only its loopback HTTP server. The immutable provider and its log
 remain outside the candidate, with only a read-only protocol socket exposed.
@@ -176,8 +190,8 @@ The built runner is captured before runtime and mounted read-only separately.
 PID checks run in the owned container and retain process-start fingerprints;
 host PID absence is never evidence that an isolated child stopped. The prepared
 workflow retains the container image, actual Node/platform/architecture, runner
-hash and mount receipt. These changes require new hosted qualification before
-promoting the immutable PR caller.
+hash and mount receipt. Every subsequent application head still requires its own
+hosted attempt-1 qualification through the immutable caller.
 The prepared lane also retains the immutable provider binary and its method-only
 log. An initial read-only adapter check exposes redacted verification failures
 before agent lifecycle reduces them to a generic error; readiness and all owned

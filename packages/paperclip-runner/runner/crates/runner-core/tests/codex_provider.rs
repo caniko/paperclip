@@ -6892,11 +6892,6 @@ fn stop_fixture_completes_only_opted_in_read_only_toolless_probes() {
         };
         let mut config = provider_config(&directory, &args);
         config.read_only = read_only;
-        config.permissions_profile = Some(if read_only {
-            "paperclip-runner-workspace-read-only".to_owned()
-        } else {
-            "paperclip-runner-workspace-write".to_owned()
-        });
         let mut provider = CodexProvider::start_with_tools(
             &config,
             if tools {

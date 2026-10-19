@@ -94,7 +94,7 @@ test("runtime isolates candidate code and observes PIDs in the owned container, 
       console.log("bootstrap-provider-ok");
     `);
     // Keep the trusted provider bridge's event loop available during the probe.
-    const { stdout } = await promisify(execFile)("docker", ["exec", "--env", "NODE_OPTIONS=", container,
+    const { stdout } = await promisify(execFile)("docker", ["exec", "--env", "NODE_OPTIONS=", runtime.env.COMPOSER_STOP_CONTAINER_ID,
       "/usr/local/bin/node", "--input-type=module", "-e", `await (${serveInsideComposerContainer.toString()})();`],
     { encoding: "utf8", timeout: 10000 });
     assert.match(stdout, /bootstrap-provider-ok/);

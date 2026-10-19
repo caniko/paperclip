@@ -325,7 +325,7 @@ test("the independent hosted Stop lane keeps the qualified prepared commands", (
   assert.match(independent, /runs-on: ubuntu-24\.04/);
   assert.match(independent, /timeout-minutes: 20/);
   assert.doesNotMatch(independent, /needs\.gate/);
-  assert.match(readFileSync(prCallerWorkflow, "utf8"), /pr-trusted\.yml@4fbe02dbc1ebf59f95bee0eb84cb3edd623f7210/);
+  assert.match(readFileSync(prCallerWorkflow, "utf8"), /pr-trusted\.yml@76e683f90c801370d6bb230be0284682472633da/);
 });
 
 test("the stacked PR scope selector runs full CI only where intended", () => {
