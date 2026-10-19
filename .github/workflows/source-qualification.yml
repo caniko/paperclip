@@ -54,6 +54,7 @@ jobs:
           - lane: typecheck
           - lane: build
           - lane: regression
+          - lane: managed-opencode
           # Keep the original complete groups and their assertion deadlines.
           # The full command exceeded the two-hour job limit while still
           # traversing serialized suites. Only split existing runner groups.
@@ -135,7 +136,7 @@ jobs:
           pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
           pnpm run preflight:workspace-links
       - name: Provision native backup clients and zsh for workspace cases
-        if: matrix.lane == 'tests-workspaces-b'
+        if: matrix.lane == 'tests-workspaces-b' || matrix.lane == 'managed-opencode'
         run: |
           set -euo pipefail
           node .github/scripts/prepare-source-native-tools.mjs "$EVIDENCE" 2>&1 | tee "$EVIDENCE/native-tools.log"
@@ -158,6 +159,10 @@ jobs:
               pnpm test:run -- "${args[@]}" 2>&1 | tee "$EVIDENCE/tests.log"
               ;;
             build) pnpm build 2>&1 | tee "$EVIDENCE/build.log" ;;
+            managed-opencode)
+              pnpm --filter @paperclipai/db check:migrations 2>&1 | tee "$EVIDENCE/migrations.log"
+              pnpm exec vitest run packages/adapters/opencode-local/src/server packages/adapter-utils/src/server-utils-env.test.ts packages/shared/src/deployment-manifest.test.ts packages/db/src/migration-snapshot-drift.test.ts server/src/deployment/adapter-config.test.ts server/src/deployment/runtime.test.ts server/src/deployment/reconcile.test.ts server/src/deployment/entry.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter=./scripts/qualification-junit-reporter.mjs --outputFile.junit="$EVIDENCE/managed-opencode.xml" 2>&1 | tee "$EVIDENCE/managed-opencode.log"
+              ;;
             regression)
               python3 -m unittest discover -s .github/scripts -p 'test_qualification_*.py' 2>&1 | tee "$EVIDENCE/receipt-tests.log"
               node --test .github/scripts/test_qualification_junit_reporter.mjs 2>&1 | tee "$EVIDENCE/reporter-contract.log"
@@ -177,7 +182,7 @@ jobs:
         run: |
           set -euo pipefail
           strict=()
-          case "$LANE" in tests-*|regression) strict+=(--strict-reports) ;; esac
+          case "$LANE" in tests-*|regression|managed-opencode) strict+=(--strict-reports) ;; esac
           python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" "$OUTCOME" "${strict[@]}"
       - name: Retain original evidence
         if: always()
@@ -188,15 +193,67 @@ jobs:
           if-no-files-found: error
           path: ${{ runner.temp }}/qualification/
 
+  home_manager:
+    name: Exact head / Home Manager declarations
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NIX_CONFIG: "experimental-features = nix-command flakes"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Bind exact source and hosted runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/home-manager"
+          mkdir -p "$EVIDENCE"
+          printf '%s\n' "EVIDENCE=$EVIDENCE" >> "$GITHUB_ENV"
+          python3 .github/scripts/qualification-evidence.py initialize "$EVIDENCE"
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Evaluate every declaration fixture in its own bounded process
+        run: |
+          set -euo pipefail
+          ulimit -v 2097152
+          nix --version > "$EVIDENCE/nix-version"
+          nix flake metadata --json github:NixOS/nixpkgs/545c226a9af7f59fba5c3873f7c6a65e014c8f5f > "$EVIDENCE/nixpkgs.json"
+          nix flake metadata --json github:nix-community/home-manager/0560d64401a6d5370732a69d08bc4a6b135962d9 > "$EVIDENCE/home-manager.json"
+          jq -e '.locked.narHash == "sha256-/pAz2XfqHS//WRn2xRjoqes7Z92qZ0Q1gufZZ3PtuwA="' "$EVIDENCE/nixpkgs.json"
+          jq -e '.locked.narHash == "sha256-EEQKUylD8zuRTmDFX4rbwsHQ+iZhqqOldYcFN8SLcE0="' "$EVIDENCE/home-manager.json"
+          args=(--eval --strict --json --no-allow-import-from-derivation --arg nixpkgsPath "$(jq -r .path "$EVIDENCE/nixpkgs.json")" --arg homeManagerPath "$(jq -r .path "$EVIDENCE/home-manager.json")")
+          nix-instantiate "${args[@]}" --expr '{ nixpkgsPath, homeManagerPath }: builtins.attrNames (import ./nix/tests/personal-declarations.nix { inherit nixpkgsPath homeManagerPath; })' > "$EVIDENCE/cases.json"
+          jq -e 'length > 0 and length == (unique | length)' "$EVIDENCE/cases.json"
+          while IFS= read -r name; do
+            nix-instantiate "${args[@]}" nix/tests/personal-declarations.nix -A "$name" > "$EVIDENCE/result-$name.json"
+          done < <(jq -r '.[]' "$EVIDENCE/cases.json")
+          jq -s -e 'all(.[]; . == true)' "$EVIDENCE/"result-*.json
+      - name: Seal declaration evidence
+        if: always()
+        env:
+          OUTCOME: ${{ job.status }}
+        run: python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" "$OUTCOME"
+      - name: Retain original declaration evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source-proof-home-manager-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          retention-days: 31
+          if-no-files-found: error
+          path: ${{ runner.temp }}/home-manager/
+
   retention:
     name: Exact head / required artifact retention
-    needs: [application, expected_red, harness_identity]
+    needs: [application, home_manager, expected_red, harness_identity]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       GH_TOKEN: ${{ github.token }}
       LANES: ${{ needs.application.result }}
+      HOME_MANAGER: ${{ needs.home_manager.result }}
       EXPECTED_RED: ${{ needs.expected_red.result }}
       HARNESS_IDENTITY: ${{ needs.harness_identity.result }}
     steps:
@@ -206,7 +263,7 @@ jobs:
           persist-credentials: false
       - name: Read actual provider expiry and digest for every required artifact
         run: |
-          python3 .github/scripts/qualification-evidence.py artifacts source-proof- 15 retention.json
+          python3 .github/scripts/qualification-evidence.py artifacts source-proof- 17 retention.json
           python3 .github/scripts/qualification-evidence.py artifacts trusted-stop-identity- 1 harness-retention.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -220,6 +277,7 @@ jobs:
       - name: Require all mandatory lanes and retained audit evidence
         run: |
           test "$LANES" = success
+          test "$HOME_MANAGER" = success
           test "$EXPECTED_RED" = success
           test "$HARNESS_IDENTITY" = success
           python3 .github/scripts/qualification-evidence.py artifacts source-retention- 1 retention-audit.json

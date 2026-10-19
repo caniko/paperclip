@@ -6,7 +6,7 @@ import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "../../..");
 const workflow = readFileSync(path.join(root, ".github/workflows/source-qualification.yml"), "utf8");
-const application = workflow.split("\n  application:\n")[1].split("\n  retention:\n")[0];
+const application = workflow.split("\n  application:\n")[1].split("\n  home_manager:\n")[0];
 const lanes = [...application.matchAll(/^          - lane: ([\w-]+)\n((?:            [\w_]+: [\w-]+\n)*)/gm)]
   .map(([, lane, fields]) => ({ lane, ...Object.fromEntries(
     [...fields.matchAll(/^            (\w+): ([\w-]+)$/gm)].map(([, key, value]) => [key, value]),
@@ -61,16 +61,21 @@ test("the exact-head matrix covers each configured workspace and each native fil
 test("all source shards retain strict reports, the two-hour deadline and their own required artifact", () => {
   assert.equal(new Set(lanes.map(lane => lane.lane)).size, lanes.length);
   assert.deepEqual(lanes.filter(lane => !lane.lane.startsWith("tests-")).map(lane => lane.lane).sort(),
-    ["build", "regression", "typecheck"]);
+    ["build", "managed-opencode", "regression", "typecheck"]);
   assert.match(application, /timeout-minutes: 120\n/);
   assert.match(application, /fail-fast: false\n/);
   assert.match(application, /max-parallel: 2\n/);
-  assert.match(application, /tests-\*\|regression\) strict\+=\(--strict-reports\)/);
+  assert.match(application, /tests-\*\|regression\|managed-opencode\) strict\+=\(--strict-reports\)/);
   assert.match(application, /pnpm test:run -- "\$\{args\[@\]\}"/);
   assert.match(application, /name: source-proof-\$\{\{ matrix.lane \}\}/);
   assert.match(application, /retention-days: 31\n/);
   const count = Number(workflow.match(/qualification-evidence\.py artifacts source-proof- (\d+) retention\.json/)[1]);
-  assert.equal(count, lanes.length + 1, "retention must require all matrix lanes and the original RED artifact");
-  assert.match(workflow, /needs: \[application, expected_red, harness_identity\]/);
-  for (const name of ["LANES", "EXPECTED_RED", "HARNESS_IDENTITY"]) assert.ok(workflow.includes(`test "$${name}" = success`));
+  assert.equal(count, lanes.length + 2, "retention must require all matrix lanes, declarations and the original RED artifact");
+  assert.match(workflow, /needs: \[application, home_manager, expected_red, harness_identity\]/);
+  for (const name of ["LANES", "HOME_MANAGER", "EXPECTED_RED", "HARNESS_IDENTITY"]) assert.ok(workflow.includes(`test "$${name}" = success`));
+  const declarations = workflow.split("\n  home_manager:\n")[1].split("\n  retention:\n")[0];
+  assert.match(declarations, /ulimit -v 2097152/);
+  assert.match(declarations, /nix-instantiate "\$\{args\[@\]\}" --expr '[^']*builtins.attrNames/);
+  assert.match(declarations, /nix-instantiate "\$\{args\[@\]\}" nix\/tests\/personal-declarations.nix -A "\$name"/);
+  assert.match(declarations, /name: source-proof-home-manager-/);
 });
