@@ -12,6 +12,19 @@ const module = tasks => ({ task: { filepath: "/checkout/fixture.test.ts", projec
 const task = (id, mode = "run") => ({ id, type: "test", name: "same display title", mode, location: { line: 10, column: 3 } });
 const policy = { all_declared_cases_required: true, rules: [], environments: { "default-hosted": {} } };
 
+test("checked-in coverage bindings match the current source before expensive collection", () => {
+  const configured = JSON.parse(readFileSync(new URL("../qualification/coverage-environments.json", import.meta.url), "utf8"));
+  const root = new URL("../../", import.meta.url);
+  assert.equal(configured.all_declared_cases_required, true);
+  for (const group of ["rules", "supplemental_rules", "static_helper_calls", "declaration_branches", "conditional_expansions"]) {
+    for (const rule of configured[group] ?? []) {
+      const source = readFileSync(new URL(rule.file, root), "utf8");
+      assert.equal(sha256(source), rule.source_sha256, `${group}: ${rule.file}`);
+      assert.ok(source.includes(rule.anchor), `${group}: ${rule.file}: missing anchor`);
+    }
+  }
+});
+
 test("concurrent discovery order cannot hide a missing, changed or duplicate file/project/pool identity", () => {
   const spec = (file, project, pool = "forks") => ({ moduleId: `/checkout/${file}`, project: { name: project }, pool });
   const first = spec("a.test.ts", "first");

@@ -75,6 +75,12 @@ node .github/scripts/prepare-source-native-tools.mjs --verify-only /path/to/fres
 Local verification grants no hosted qualification credit. The original source
 attempts, assertions, deadlines and strict zero-skip gate remain intact.
 
+Coverage-roster contract tests check every committed source hash and anchor
+before full collection. After an upstream import changes a bound file, inspect
+the affected helper or declaration before updating its policy binding. Such a
+binding is collection provenance only; it grants no execution credit and does
+not waive any case or environment.
+
 SSH profile loading uses native zsh's `.` builtin, since zsh's `command` modifier
 only searches external commands by default. POSIX shells retain `command .` for
 nonfatal profile errors. Startup/profile output and stdin remain isolated from
