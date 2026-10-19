@@ -1640,7 +1640,7 @@ jobs:
       PAPERCLIP_STOP_REQUIRE_NATIVE: "true"
       PAPERCLIP_E2E_SOURCE_ROOT: ${{ github.workspace }}
       COMPOSER_STOP_HEAD_REVISION: ${{ github.event.pull_request.head.sha }}
-      COMPOSER_STOP_TRUSTED_REVISION: 417f1e6ccf03912ed434ddeb15aaaf960e098c58
+      COMPOSER_STOP_TRUSTED_REVISION: 7ad70b3417c64581accbc271e1565d1ac24651c7
     steps:
       - name: Checkout exact PR head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1648,12 +1648,12 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
 
-      # Proposed source pin: qualify and review it before promoting the caller.
+      # Proposed source pin: qualify it before promoting the caller.
       - name: Checkout immutable Stop harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: caniko/paperclip
-          ref: 417f1e6ccf03912ed434ddeb15aaaf960e098c58
+          ref: 7ad70b3417c64581accbc271e1565d1ac24651c7
           path: .trusted-composer-stop
           persist-credentials: false
 
