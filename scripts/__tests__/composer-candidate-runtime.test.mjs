@@ -50,10 +50,17 @@ test("runtime isolates candidate code and observes PIDs in the owned container, 
   assert.equal(inspected.HostConfig.NetworkMode, "none");
   assert.equal(inspected.HostConfig.ReadonlyRootfs, true);
   assert.equal(inspected.HostConfig.Privileged, false);
-  assert.deepEqual(inspected.Mounts.map(mount => mount.Destination).sort(), ["/candidate", "/composer-provider.sock", "/composer-runner"]);
+  assert.deepEqual(inspected.Mounts.map(mount => mount.Destination).sort(), ["/candidate", "/composer-provider.sock", "/composer-runner", "/etc/passwd"]);
+  const accountMount = inspected.Mounts.find(mount => mount.Destination === "/etc/passwd");
+  assert.equal(accountMount.RW, false);
+  assert.equal(accountMount.Source, join(trusted, "account-passwd"));
   assert.throws(() => verifyComposerCandidateRuntime({ ...env, COMPOSER_STOP_CONTAINER_OWNER: "00000000-0000-4000-8000-000000000000" }), /ownership/);
   const execute = source => execFileSync("docker", ["exec", "--env", "NODE_OPTIONS=", runtime.env.COMPOSER_STOP_CONTAINER_ID,
     "/usr/local/bin/node", "--input-type=module", "-e", source], { encoding: "utf8", timeout: 10000 });
+  const account = JSON.parse(execute('import { userInfo } from "node:os"; console.log(JSON.stringify(userInfo()));'));
+  assert.deepEqual(account, { uid: process.getuid(), gid: process.getgid(), username: "paperclip", homedir: "/tmp", shell: "/usr/sbin/nologin" });
+  execute('import { writeFileSync } from "node:fs"; import { userInfo } from "node:os"; writeFileSync(userInfo().homedir + "/account-home-probe", "writable isolated home");');
+  assert.throws(() => execute('import { writeFileSync } from "node:fs"; writeFileSync("/etc/passwd", "forged account")'), /EROFS|EACCES/);
   assert.throws(() => execute('import { writeFileSync } from "node:fs"; writeFileSync("/composer-runner", "forged runner")'), /EROFS|EACCES/);
   execute('import { writeFileSync, readFileSync } from "node:fs"; writeFileSync("/candidate/.composer-native-target/debug/paperclip-runnerd", "replacement"); if (readFileSync("/composer-runner", "utf8") !== "fixture runner artifact\\n") process.exit(1);');
   execute('import { createServer } from "node:http"; import { spawn } from "node:child_process"; const child = spawn(process.execPath, ["-e", \'require("node:http").createServer((q,s)=>s.end("isolated runtime")).listen(3199,"127.0.0.1")\'], { detached: true, stdio: "ignore" }); child.unref();');

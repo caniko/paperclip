@@ -72,23 +72,31 @@ export async function startComposerCandidateRuntime({ candidate, provider, callL
     } finally { await bridge.close(); }
   })();
   try {
-    const args = composerCandidateDockerArgs({ candidate, phase: "runtime", uid: process.getuid(), gid: process.getgid(),
+    const uid = process.getuid(), gid = process.getgid();
+    const args = composerCandidateDockerArgs({ candidate, phase: "runtime", uid, gid,
       command: ["/usr/local/bin/node", "-e", "setInterval(() => {}, 1000)"] });
+    // GitHub's UID need not exist in the image. Supply only synthetic accounts,
+    // never the host passwd file or a candidate-writable identity source.
+    const passwd = join(stateDirectory, "account-passwd");
+    writeFileSync(passwd, `root:x:0:0:root:/root:/usr/sbin/nologin\npaperclip:x:${uid}:${gid}:Paperclip verification:/tmp:/usr/sbin/nologin\n`, { flag: "wx", mode: 0o444 });
     args.splice(1, 0, "--detach", "--name", name, "--label", `${ownerLabel}=${owner}`,
+      "--mount", `type=bind,src=${passwd},dst=/etc/passwd,readonly`,
       "--mount", `type=bind,src=${socketPath},dst=/composer-provider.sock,readonly`,
       "--mount", `type=bind,src=${runnerBinary},dst=/composer-runner,readonly`);
     env = { COMPOSER_STOP_CONTAINER_ID: docker(args, 90000).trim(), COMPOSER_STOP_CONTAINER_OWNER: owner, PAPERCLIP_RUNNER_BINARY: runnerBinary };
     const inspected = verifyComposerCandidateRuntime(env);
-    assert.deepEqual(inspected.Mounts.map(mount => mount.Destination).sort(), ["/candidate", "/composer-provider.sock", "/composer-runner"]);
+    assert.deepEqual(inspected.Mounts.map(mount => mount.Destination).sort(), ["/candidate", "/composer-provider.sock", "/composer-runner", "/etc/passwd"]);
     assert.equal(inspected.Mounts.find(mount => mount.Destination === "/candidate").Source, realpathSync(candidate));
-    for (const destination of ["/composer-provider.sock", "/composer-runner"]) {
+    assert.equal(inspected.Mounts.find(mount => mount.Destination === "/etc/passwd").Source, realpathSync(passwd));
+    for (const destination of ["/composer-provider.sock", "/composer-runner", "/etc/passwd"]) {
       assert.equal(inspected.Mounts.find(mount => mount.Destination === destination).RW, false);
     }
     const runtimeReceipt = join(stateDirectory, "runtime.json");
     const environment = JSON.parse(docker(["exec", inspected.Id, "/usr/local/bin/node", "-e",
-      "console.log(JSON.stringify({platform:process.platform,architecture:process.arch,nodeVersion:process.versions.node}))"]));
+      "console.log(JSON.stringify({platform:process.platform,architecture:process.arch,nodeVersion:process.versions.node,account:require('node:os').userInfo()}))"]));
     assert.equal(environment.platform, "linux");
     assert.equal(environment.architecture, "x64");
+    assert.deepEqual(environment.account, { uid, gid, username: "paperclip", homedir: "/tmp", shell: "/usr/sbin/nologin" });
     writeFileSync(runtimeReceipt, JSON.stringify({ schema: "paperclip.composer-stop-runtime.v1", containerId: inspected.Id,
       owner, image: inspected.Config.Image, imageId: inspected.Image, ...environment,
       network: inspected.HostConfig.NetworkMode, readOnlyRoot: true, uid: inspected.Config.User,
