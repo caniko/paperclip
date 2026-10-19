@@ -36,7 +36,7 @@ test.beforeAll(async ({ request }) => {
 });
 
 async function ready(page: Page) {
-  await expect(page.getByTestId("task-chat-thread").locator('[aria-busy="false"]')).toBeVisible({ timeout: 90_000 });
+  await expect(page.getByTestId("task-chat-thread").locator(':scope > [aria-busy="false"]')).toBeVisible({ timeout: 90_000 });
 }
 
 async function installMeasurements(page: Page) {
@@ -48,7 +48,7 @@ async function installMeasurements(page: Page) {
     }).observe({ type: "layout-shift", buffered: true });
     const sample = () => {
       const scroller = document.querySelector('[data-testid="task-chat-scroller"]');
-      const busy = document.querySelector('[data-testid="task-chat-thread"] [aria-busy]');
+      const busy = document.querySelector('[data-testid="task-chat-thread"] > [aria-busy]');
       if (scroller) {
         const viewport = scroller.getBoundingClientRect();
         const row = [...scroller.querySelectorAll<HTMLElement>("[data-thread-anchor]")].find((el) => el.getBoundingClientRect().bottom > viewport.top);
@@ -78,7 +78,7 @@ test("Inbox click reveals once after reordered initial responses; refresh retain
   const held = new Promise<void>((resolve) => { release = resolve; });
   await page.route("**/api/issues/*/comments?*", async (route) => { await held; await route.continue(); });
   await link.click();
-  await expect(page.getByTestId("task-chat-thread").locator('[aria-busy="true"]')).toBeVisible();
+  await expect(page.getByTestId("task-chat-thread").locator(':scope > [aria-busy="true"]')).toBeVisible();
   await expect(page.getByText("Historical message 159", { exact: true })).not.toBeVisible();
   release();
   await ready(page);

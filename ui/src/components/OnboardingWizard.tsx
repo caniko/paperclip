@@ -783,11 +783,6 @@ function OnboardingWizardInner({
   initialStepRef.current = effectiveOnboardingOptions.initialStep;
   const openingRequestRef = useRef<{ open: boolean; companyId: string | null; hasOpened: boolean } | null>(null);
 
-  // Reset the route-dismissed flag when navigating to a different path.
-  useEffect(() => {
-    setRouteDismissed(false);
-  }, [location.pathname]);
-
   /**
    * Forget everything that describes one particular company.
    *

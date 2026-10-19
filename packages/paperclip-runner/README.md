@@ -1,5 +1,12 @@
 # Paperclip Native Runner
 
+To add a harness/provider to native Runner, start with
+[create-runner-adapter](../../.agents/skills/create-runner-adapter/SKILL.md), the
+[Runner integration playbook](../../doc/RUNNER-INTEGRATION-PLAYBOOK.md), and
+[acceptance/evidence templates](../../doc/runner-integration-templates.md).
+They cover the new Runner integration path; legacy adapters are preserved as a
+compatibility boundary.
+
 This package is the standalone development boundary for Paperclip's native
 runner protocol, process supervision, durable transport, provider drivers, and
 normalized session backends. Rust owns the production runner under `runner/`;

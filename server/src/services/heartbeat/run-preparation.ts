@@ -6,6 +6,7 @@ import { CONFIGURED_ENVIRONMENT_KEYS } from "../../vendor/paperclip-runner/index
 import { ASSIGNED_MCP_SERVER_NAME } from "../mcp-tool-names.js";
 import { externalConversationStateSql } from "../slack-conversation-state.js";
 import { githubBotConnectionIdsForRun } from "../chat-github-tools.js";
+import { boundRunIssueIdSql } from "../run-task-binding.js";
 import { isBrowserUseConnection } from "../browser-use-client.js";
 import { explicitOperatorRunIdentity } from "../run-identity.js";
 import {
@@ -935,7 +936,7 @@ export async function buildPaperclipRuntimeMcpServers(input: {
   );
   const [runIdentity] = await input.db
     .select({
-      contextSnapshot: heartbeatRuns.contextSnapshot,
+      issueId: boundRunIssueIdSql(),
       responsibleUserId: heartbeatRuns.responsibleUserId,
       activeIdentityContextId: heartbeatRuns.activeIdentityContextId,
     })
@@ -998,7 +999,7 @@ export async function buildPaperclipRuntimeMcpServers(input: {
         companyId: input.agent.companyId,
         agentId: input.agent.id,
         runId: input.runId,
-        issueId: readNonEmptyString(runIdentity?.contextSnapshot?.issueId ?? runIdentity?.contextSnapshot?.taskId),
+        issueId: runIdentity?.issueId ?? null,
         identityContextId: runIdentity?.activeIdentityContextId,
       })).map(tool => tool.connectionId))
     : new Set<string>();

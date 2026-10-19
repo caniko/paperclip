@@ -87,6 +87,15 @@ remaining operations before qualifying the whole capability.
 Gaps: Normal agent replies work through server delivery. Explicit endpoint publication
 APIs are board management paths.
 
+Publication, provider-reply, and form-open 403/permission errors fail the rejected
+operation without removing unrelated assigned channel tools. Confirmed
+authentication failures still put the endpoint in attention, which blocks tool
+admission and provider sends; connection enabled intent is retained. Known
+resource denials and explicit revocation keep their narrower or installation-wide
+stops. PostgreSQL provider fixtures verify discovery after 403 and rejection after
+401, including signed installation removal after a 401; they do not establish
+live GitHub credential recovery.
+
 GitHub publication recovery (2026-10-14): assigned-agent `submit_review`, `comment`,
 and `update_comment` calls reuse their run-, task-, endpoint-, and argument-bound
 publication on an exact retry. Fresh gateway policy and provider authority remain
@@ -137,6 +146,23 @@ the current bot token without resolving unrelated webhook credentials. See the
 [real-database preparation controls](../../server/src/__tests__/slack-tool-preparation.test.ts)
 and [batch failure controls](../../server/src/services/connectors/slack-endpoint-preparation.test.ts).
 These local controls do not establish live Slack latency or provider access.
+
+Native tool gateways use the durable run task binding for discovery and policy
+checks, with legacy JSON task fields as a fallback. GitHub and Slack follow
+accepted request provenance across task continuations. GitHub can retain the
+originating conversation after a board follow-up from the same accepted user.
+An inherited origin cannot cross a task, agent, company, or requester boundary.
+Cycle checks reject invalid history without a fixed limit on valid continuations.
+Endpoint settings, linked identity, tool profiles, and invocation policy still
+apply on each call. The native tool contract rotates older provider sessions so
+an empty retained catalog is not reused. PostgreSQL fixtures cover discovery,
+review publication, Slack reads, and revocation in
+[channel integration](../../server/src/__tests__/chat-channels.integration.test.ts)
+and [provenance controls](../../server/src/services/chat-channels/run-origin.test.ts).
+The [voice gateway fixture](../../server/src/__tests__/voice-session-store.integration.test.ts)
+also verifies durable task binding for a later personal callback invocation.
+Failure replies cannot replace final answers inherited from an earlier run.
+These fixtures do not prove live provider delivery.
 
 Catalog authorization projection (2026-10-17): tool discovery uses the same live
 service-owned task, company, agent, requester, endpoint and credential checks as

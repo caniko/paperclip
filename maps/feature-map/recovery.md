@@ -110,6 +110,13 @@ provider restart. For that journey, interrupt a disposable deployment after
 workspace preparation and before its first executor claim, then confirm one
 provider turn starts on the original run through the normal admission gates.
 
+Active remote process supervision distinguishes a failed health read from a
+confirmed exit. The [executor tests](../../server/src/services/native-runtime/native-session-executor.test.ts)
+exercise timeout recovery with a real listening process, unchanged ownership,
+and rejected identity evidence. The Runner restart tests require positive exit
+evidence before replacement. This coverage does not prove recovery of a
+historical retained sandbox or behavior during a live provider outage.
+
 The same database suite pauses an original preparation while recovery claims
 the remote run. It then verifies that the old preparation yields without opening
 a provider or changing the recovery owner, for both live and expired leases.
@@ -203,6 +210,20 @@ explicit rejection. Reload to confirm the durable outcome. For a workspace
 repair, record the compared branches/revisions and preserve uncommitted work;
 confirm the repair's actual result before resuming. Check the denied and stale
 action paths. A changed card label is insufficient proof of workspace integrity.
+
+For graceful legacy shutdown, interrupt a disposable sandbox run while file
+export is in flight. Delay settlement past the first 30-second wait. Confirm
+the lease stays available, no repair hold or successor appears before export,
+and the finalizer drain waits for the same owner. After export, confirm saved
+files, successful lease cleanup, and one bounded continuation. Reload before
+checking the successor. Repeat with controller loss: the expired fence must
+retain the exact source and require repair, never claim restored files or start
+a second executor. The database-backed
+[shutdown regression](../../server/src/__tests__/heartbeat-process-recovery.test.ts)
+checks finalizer joining, release order, durable retry uniqueness, and reload.
+The [settlement regressions](../../server/src/services/heartbeat/recovery.test.ts)
+cover other-controller fencing and owner loss. Provider boundaries are controlled
+in these tests; they do not qualify a live sandbox export.
 
 For an abandoned native controller, follow the [stop-verification procedure](../../doc/native-workspace-finalization-recovery.md)
 with a disposable deployment. A new platform-bound owner recovers automatically

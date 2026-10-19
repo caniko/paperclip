@@ -92,7 +92,6 @@ function defaultExperimentalSettings(): InstanceExperimentalSettingsPayload {
     enableChatConnectors: false,
     enableGitHubReviewBots: false,
     enableMemoryConnectors: false,
-    enablePipelines: false,
     enableCases: false,
     enableAgentChat: false,
     enableCombinedInboxTasks: false,

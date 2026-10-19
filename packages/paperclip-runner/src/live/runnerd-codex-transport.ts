@@ -6899,7 +6899,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
   }
 
   async #runnerHasExited(): Promise<boolean> {
-    if (this.#handle) return this.#handle.child.exitCode !== null;
+    if (this.#handle) return this.#handle.isExitConfirmed?.() ?? this.#handle.child.exitCode !== null;
     const adoptedRunner = this.options.adoptExistingRunner;
     if (!adoptedRunner) return true;
     try {
@@ -6983,7 +6983,8 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
   #watchRunner(handle: RunnerProcessHandle): void {
     void handle.completion.then(
       (result) => {
-        this.#evidence.runnerExited = true;
+        const exitConfirmed = handle.isExitConfirmed?.() ?? true;
+        this.#evidence.runnerExited = exitConfirmed;
         this.#evidence.runnerExitCode = result.code;
         this.#evidence.runnerSignal = result.signal as NodeJS.Signals | null;
         const detail = result.stderr.trim() || result.stdout.trim();
@@ -6996,6 +6997,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         // process completion; clean terminal exit is the expected lifecycle.
         this.#pumpEventsSafely();
         const expectedPerTurnExit =
+          exitConfirmed &&
           result.code === 0 &&
           (this.options.lifecyclePolicy?.mode ?? "per_turn") === "per_turn" &&
           (this.#core?.store.state.committedEvents.some(
@@ -7003,19 +7005,20 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           ) ??
             false);
         if (expectedPerTurnExit) return;
-        const code = /provider_frame_too_large|stdout frame exceeded/i.test(
-          detail,
-        )
-          ? "provider_frame_too_large"
-          : /runner_ingress_bind_conflict/i.test(detail)
-            ? "runner_ingress_bind_conflict"
-            : /transport_reconnect_grace_exceeded/i.test(detail)
-              ? "transport_reconnect_grace_exceeded"
-              : this.#startupComplete
-                ? "native_runner_process_exited"
-                : this.#startupFailureCode;
+        const code = !exitConfirmed
+          ? "runner_process_termination_unconfirmed"
+          : /provider_frame_too_large|stdout frame exceeded/i.test(detail)
+            ? "provider_frame_too_large"
+            : /runner_ingress_bind_conflict/i.test(detail)
+              ? "runner_ingress_bind_conflict"
+              : /transport_reconnect_grace_exceeded/i.test(detail)
+                ? "transport_reconnect_grace_exceeded"
+                : this.#startupComplete
+                  ? "native_runner_process_exited"
+                  : this.#startupFailureCode;
         if (
           code === "native_runner_process_exited" &&
+          exitConfirmed &&
           this.options.runnerReconnectGraceMs !== undefined &&
           handle.restart
         ) {
@@ -7024,7 +7027,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         }
         this.#failTransport(
           new Error(
-            `${code}: runnerd exited unexpectedly${result.code === null ? "" : ` with code ${result.code}`}${detail ? `: ${detail.slice(-1_000)}` : ""}`,
+            `${code}: runnerd ${exitConfirmed ? "exited unexpectedly" : "process supervision ended"}${result.code === null ? "" : ` with code ${result.code}`}${detail ? `: ${detail.slice(-1_000)}` : ""}`,
           ),
         );
       },
@@ -7033,6 +7036,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           return;
         if (
           this.#startupComplete &&
+          handle.isExitConfirmed?.() !== false &&
           this.options.runnerReconnectGraceMs !== undefined &&
           handle.restart
         ) {
@@ -7042,9 +7046,15 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           );
           return;
         }
+        const code = handle.isExitConfirmed?.() === false
+          ? "runner_process_termination_unconfirmed"
+          : this.#startupComplete
+            ? "native_runner_process_exited"
+            : this.#startupFailureCode;
         this.#failTransport(
           new Error(
-            `${this.#startupComplete ? "native_runner_process_exited" : this.#startupFailureCode}: runnerd process failed: ${error instanceof Error ? error.message : String(error)}`,
+            `${code}: runnerd ${handle.isExitConfirmed?.() === false ? "process supervision" : "process"} failed: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
           ),
         );
       },
@@ -7108,15 +7118,20 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         this.#publish();
 
         let processSettled = false;
+        let observationError: unknown;
+        let observationDetail = "";
         const completion = recoveredHandle.completion.then(
           (result) => {
             processSettled = true;
-            lastDetail = result.stderr.trim() || result.stdout.trim();
+            observationDetail = result.stderr.trim() || result.stdout.trim();
+            lastDetail = observationDetail;
             return false;
           },
           (error) => {
             processSettled = true;
-            lastDetail = error instanceof Error ? error.message : String(error);
+            observationError = error;
+            observationDetail = error instanceof Error ? error.message : String(error);
+            lastDetail = observationDetail;
             return false;
           },
         );
@@ -7140,6 +7155,15 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         if (await Promise.race([completion, authenticated])) {
           this.#diagnostic("runner process restored its durable PRP session");
           this.#watchRunner(recoveredHandle);
+          return;
+        }
+        if (recoveredHandle.isExitConfirmed?.() === false) {
+          this.#failTransport(
+            new Error(
+              `runner_process_termination_unconfirmed: replacement runner health could not be verified${observationDetail ? `: ${observationDetail.slice(-1_000)}` : ""}`,
+              { cause: observationError },
+            ),
+          );
           return;
         }
         attempt += 1;

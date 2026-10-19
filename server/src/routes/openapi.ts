@@ -12414,12 +12414,7 @@ for (const [method, path, body] of experimentalApiPaths) {
       .replace(/\/api\//, "")
       .replaceAll("/", " ")}`,
     description:
-      "Experimental API; the corresponding instance feature must be enabled. Existing route authorization applies." +
-      (path.startsWith("/api/cases/{caseId}")
-        ? " Pipeline case resource. On overlapping /cases routes the server selects the handler by resource identity; use a pipeline case ID."
-        : path.startsWith("/api/cases/{id}")
-          ? " Cases resource (not a pipeline case). Overlapping /cases routes select their handler by resource identity."
-          : ""),
+      "Experimental API; the corresponding instance feature must be enabled. Existing route authorization applies.",
     request: {
       params: z.object(
         Object.fromEntries(

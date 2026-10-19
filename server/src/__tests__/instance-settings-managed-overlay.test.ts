@@ -12,8 +12,8 @@ const MANAGED_RAW = JSON.stringify({
   mode: "cloud",
   catalogVersion: "2026.720.0",
   // enableApps is retained only for compatibility and must be ignored;
-  // enablePipelines remains a live managed feature.
-  features: { enableApps: false, enablePipelines: true },
+  // enableStatusCards remains a live managed feature.
+  features: { enableApps: false, enableStatusCards: true },
   plugins: { autoInstall: [] },
 });
 
@@ -70,11 +70,11 @@ describe("applyManagedExperimentalOverlay", () => {
 
     expect(experimental.enableApps).toBe(true);
     // managed overlay > schema default
-    expect(experimental.enablePipelines).toBe(true);
+    expect(experimental.enableStatusCards).toBe(true);
     // unmanaged keys keep their stored/default values
     expect(experimental.enableCases).toBe(false);
     expect(managedKeys).toEqual({
-      enablePipelines: { managed: true, managedBy: "paperclip-cloud" },
+      enableStatusCards: { managed: true, managedBy: "paperclip-cloud" },
     });
     // input is not mutated
     expect(stored.enableApps).toBe(true);
@@ -129,9 +129,9 @@ describe("instanceSettingsService managed overlay", () => {
 
     const experimental = await svc.getExperimental();
     expect(experimental.enableApps).toBe(true);
-    expect(experimental.enablePipelines).toBe(true);
+    expect(experimental.enableStatusCards).toBe(true);
     expect(experimental.managedKeys).toEqual({
-      enablePipelines: { managed: true, managedBy: "paperclip-cloud" },
+      enableStatusCards: { managed: true, managedBy: "paperclip-cloud" },
     });
   });
 
@@ -169,13 +169,13 @@ describe("instanceSettingsService managed overlay", () => {
     // managed document's historical value.
     expect(persisted.enableApps).toBe(true);
     // The overlay-added value is not written.
-    expect(persisted.enablePipelines).toBe(false);
+    expect(persisted.enableStatusCards).toBe(false);
     expect(persisted.enableCases).toBe(true);
     expect(persisted).not.toHaveProperty("managedKeys");
 
     // The response still reflects the overlay.
     expect(updated.experimental.enableApps).toBe(true);
-    expect(updated.experimental.enablePipelines).toBe(true);
+    expect(updated.experimental.enableStatusCards).toBe(true);
     expect(updated.experimental.managedKeys?.enableApps).toBeUndefined();
   });
 

@@ -24,6 +24,11 @@ Agent access: `available` — REST / native call_api; CLI issue diagnostics.
 
 Policy: Task/run visibility, run ownership and source/action policy; workspace export
 retry and some operator controls require board.
+Graceful legacy shutdown retains the exact sandbox until its owned adapter
+settles, including after the first shutdown wait. A renewed settlement fence
+protects cleanup by other controllers. Loss of the owner retains the source
+for repair after expiry. This automatic protection grants no agent operation,
+execution permission, or bypass of workspace repair gates.
 The server can recover a prepared remote bootstrap only with a durable
 never-claimed executor receipt and no contradictory execution evidence. This
 automatic classification grants no new agent action or permission; normal
@@ -35,6 +40,11 @@ recovery can establish a takeover claim; no agent permission is added.
 Older unmarked preparations do not qualify for this automatic path during an
 upgrade. The fencing marker comes from fresh server-owned identity creation;
 caller profile data cannot upgrade an existing preparation.
+
+Remote process-health reads retry within a bounded budget. An unavailable probe
+cannot authorize replacement or erase the original ownership marker. This is
+internal supervision; it grants no new agent recovery action. Existing task,
+company, process-identity and workspace-recovery checks remain required.
 
 Evidence: `source-only` — [implementation](../../server/src/routes/issues.ts#L9478) at
 the reviewed commit above.

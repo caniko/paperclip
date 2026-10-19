@@ -13,7 +13,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROUTES_DIR = path.resolve(__dirname, "../routes");
 
 const apiPrefixes: Record<string, string> = {
-  "pipelines.ts": "/api",
   "cases.ts": "/api",
   "smoke-lab.ts": "/api",
   "access.ts": "/api",
@@ -310,6 +309,15 @@ function loadSpecRoutes() {
 }
 
 describe("openapi routes", () => {
+  it("removes Pipelines discovery while retaining Cases and Routines", () => {
+    const spec = buildOpenApiSpec() as any;
+    const paths = Object.keys(spec.paths);
+    expect(paths.filter((path) => /pipelines|review-cases|case-events|\{caseId\}/.test(path))).toEqual([]);
+    expect(spec.paths["/api/companies/{companyId}/cases"].post).toBeDefined();
+    expect(spec.paths["/api/cases/{id}"].get).toBeDefined();
+    expect(spec.paths["/api/routines/{id}/run"].post).toBeDefined();
+  });
+
   it("documents anonymous liveness separately from database readiness", () => {
     const spec = buildOpenApiSpec() as any;
     for (const method of ["get", "head"]) {

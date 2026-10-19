@@ -27,6 +27,7 @@ type NetworkRecord = {
   status?: number;
   responseHeaders?: Record<string, string>;
   ttfbMs?: number;
+  startedAtEpochMs: number;
   completedAtEpochMs?: number;
 };
 
@@ -155,6 +156,7 @@ async function startNetworkCapture(session: Awaited<ReturnType<typeof configureP
       method: event.request.method,
       type: event.type ?? "Other",
       encodedDataLength: 0,
+      startedAtEpochMs: event.wallTime * 1000,
     });
   });
   session.on("Network.responseReceived", (event) => {
@@ -178,20 +180,20 @@ async function startNetworkCapture(session: Awaited<ReturnType<typeof configureP
   return records;
 }
 
-async function writeTrace(tracePath: string, metrics: RunMetrics, records: Map<string, NetworkRecord>) {
+async function writeTrace(tracePath: string, metrics: RunMetrics, records: Map<string, NetworkRecord>, navigationEpochMs: number) {
   await fs.mkdir(path.dirname(tracePath), { recursive: true });
   const traceEvents = [
     { name: "issue-detail:navigate", cat: "blink.user_timing", ph: "i", ts: 0, pid: 1, tid: 1, s: "t" },
     { name: HEADER_MEASURE, cat: "blink.user_timing", ph: "X", ts: 0, dur: metrics.headerPaintMs * 1000, pid: 1, tid: 1 },
     { name: CONTENT_MEASURE, cat: "blink.user_timing", ph: "X", ts: 0, dur: metrics.contentPaintMs * 1000, pid: 1, tid: 1 },
-    ...[...records.values()].map((record, index) => ({
+    ...[...records.values()].filter((record) => record.completedAtEpochMs !== undefined).map((record) => ({
       name: record.url,
       cat: "loading",
-      ph: "i",
-      ts: index + 1,
+      ph: "X",
+      ts: (record.startedAtEpochMs - navigationEpochMs) * 1000,
+      dur: (record.completedAtEpochMs! - record.startedAtEpochMs) * 1000,
       pid: 1,
       tid: 2,
-      s: "t",
       args: { method: record.method, type: record.type, bytes: record.encodedDataLength, status: record.status },
     })),
   ];
@@ -258,7 +260,7 @@ async function runScenario(browser: Browser, baseURL: string, seedData: Seed, pr
     await page.goto(`/${seedData.prefix}/issues/${seedData.identifier}`);
   }
 
-  await expect(page.getByTestId("issue-detail-header")).toBeVisible({ timeout: PAGE_READY_TIMEOUT_MS });
+  await expect(page.getByTestId("issue-detail-header").filter({ visible: true }).first()).toBeVisible({ timeout: PAGE_READY_TIMEOUT_MS });
   const paint = await readPaintMetrics(page);
   const summary = summarizeNetwork(network, seedData, paint.contentPaintEpochMs);
   const { contentPaintEpochMs: _contentPaintEpochMs, ...reportedPaint } = paint;
@@ -266,7 +268,7 @@ async function runScenario(browser: Browser, baseURL: string, seedData: Seed, pr
     ? { ...reportedPaint, ttfbMs: null, fcpMs: null, lcpMs: null }
     : reportedPaint;
   const metrics = { scenario, profile: profile.name, run, ...scenarioPaint, ...summary };
-  if (run === 1) await writeTrace(tracePath, metrics, network);
+  if (run === 1) await writeTrace(tracePath, metrics, network, paint.contentPaintEpochMs - paint.contentPaintMs);
   if (scenario.startsWith("S2") && profile.name === "unthrottled" && run === 1) {
     await page.screenshot({ path: path.join(OUTPUT_DIR, "issue-detail-loaded.png"), fullPage: true });
   }
@@ -322,7 +324,19 @@ function buildMarkdown(results: RunMetrics[]): string {
 test("issue-detail baseline", async ({ request, baseURL }) => {
   expect(baseURL).toBeTruthy();
   await fs.mkdir(OUTPUT_DIR, { recursive: true });
-  const seedData = await seed(request);
+  const seedFile = process.env.PAPERCLIP_ISSUE_PERF_SEED_FILE;
+  const seedData: Seed = seedFile
+    ? JSON.parse(await fs.readFile(seedFile, "utf8")).seed
+    : await seed(request);
+  if (seedFile) {
+    const response = await request.get(`/api/issues/${seedData.issueId}`);
+    expect(response.ok(), await response.text()).toBe(true);
+    expect(await response.json()).toMatchObject({
+      companyId: seedData.companyId,
+      identifier: seedData.identifier,
+      title: seedData.title,
+    });
+  }
   const results: RunMetrics[] = [];
 
   for (const profile of PROFILES) {

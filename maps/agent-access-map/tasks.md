@@ -22,7 +22,10 @@ API: `present` — representative operation IDs:
 Agent access: `available` — Native create_task; REST / CLI / MCP.
 
 Policy: Company/task visibility, assignment/change policy, active-run checkout ownership
-and lifecycle rules.
+and lifecycle rules. Ordinary Board comments preserve queued/running retries;
+only a parked retry can be superseded. Explicit Stop/Interrupt retain their
+existing actor and execution authority. Agent comment tools do not acquire Board
+identity or cancellation authority through this behavior.
 
 Evidence: `source-only` — [implementation](../../server/src/routes/issues.ts) at the
 reviewed commit above.

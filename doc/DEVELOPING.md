@@ -2125,6 +2125,16 @@ Legacy CLI paths that put prompts in command-line arguments (Gemini, Grok, Kimi,
 Pi, and Hermes) still have argument-size limits. ACP turns, SDK requests, and
 CLI paths that use stdin avoid that separate limit for the wake prompt.
 
+## Adding a native Runner harness
+
+To add a harness/provider to the new native Paperclip Runner, use
+[create-runner-adapter](../.agents/skills/create-runner-adapter/SKILL.md), the
+[Runner integration playbook](RUNNER-INTEGRATION-PLAYBOOK.md) and its
+[working templates](runner-integration-templates.md). They cover requirements,
+protocol research, implementation, packaging, and real end-to-end acceptance.
+Existing direct adapters remain a compatibility boundary; their authoring and
+agent conversion are outside this playbook.
+
 ## Paperclip Runner Adapter Conversion
 
 The experimental Paperclip Runner offers native Codex, OpenCode, and **ACPX
@@ -2320,6 +2330,24 @@ hash, and final launch paths. Both preparations must settle before startup can
 return a failure. Providers without this capability, explicit harness uploads,
 and npm installs keep the serial path. See the
 [native artifact controls](../server/src/services/native-runtime/native-artifact-preparation.test.ts).
+
+Stamped app images also carry `provider-pack.archives/` and
+`provider-pack.archive.json` beside their unpacked provider pack. The cloud build
+compresses small files into one overlay and each file of at least 1 MiB into its
+own zstd layer. The v2 receipt binds file and archive hashes, sizes, and modes to
+the expected provider-pack digest. A sandbox can copy byte-identical large files
+from an older image into the new private pack directory. It hashes the copies,
+rejects symlink sources, and never shares writable hardlinks with the image.
+Only missing or mismatched layers and the overlay are uploaded. The controller
+checks those archives before upload; the sandbox checks all received hashes
+before extraction. Normal full pack admission still runs afterward.
+
+Historical v1 `provider-pack.tar.zst` receipts remain readable. Missing sidecars,
+remote zstd, compatible GNU tar/checksum tools, or the Node 18+ helper retain
+directory staging; invalid sidecars fail
+closed. Keep transport files outside the pack so they cannot include themselves.
+Matching staged/preinstalled packs remain preferred and never transfer archives.
+Daytona detects gzip/zstd headers and skips redundant transport compression.
 
 ### Remote GitHub launcher staging
 
@@ -2563,6 +2591,14 @@ with an active or unsettled run whose pins are unknown is skipped. Optional
 (default `0`). Idle versions expire after `PAPERCLIP_SKILL_VERSION_RETENTION_GRACE_MINUTES`
 (default `60`). Separate `__version_access__` records track use; existing caches
 without records receive a full observation period before expiration.
+
+Finished interrupted runs release their pins only after controller ownership,
+native finalization, and environment cleanup have settled. Older native runs
+without a pin map can supply their complete selection from the saved execution
+input. The recovery parser validates its digests, and its company, run, agent,
+and issue binding must match. Captured version IDs remain protected; unversioned
+skills use separate runtime asset bundles. Missing or invalid evidence still
+blocks cleanup. This fallback does not write pins or change recovery records.
 
 Preparation, durable run pins, audits, and eviction share a company-scoped
 PostgreSQL lock across processes. Eligible directories are atomically renamed

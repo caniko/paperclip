@@ -22,7 +22,7 @@ import {
   truncate,
   writeFile,
 } from "node:fs/promises";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { inspect } from "node:util";
 import { join } from "node:path";
@@ -779,6 +779,143 @@ describe("remote runner launch fingerprint compatibility", () => {
 });
 
 describe("remote runner process supervision", () => {
+  it("preserves a real listening process and its marker when a health RPC times out", async () => {
+    const root = await mkdtemp(join(tmpdir(), "runner-health-listener-"));
+    const marker = join(root, "identity");
+    const fixture = join(root, "listener.cjs");
+    await writeFile(fixture, 'require("node:net").createServer().listen(0,"127.0.0.1",()=>process.stdout.write("ready\\n"));');
+    let child: ReturnType<typeof spawn> | undefined;
+    let probes = 0;
+    let settled = false;
+    const ok = { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+    const execute = vi.fn(async (input: { command: string; args?: string[] }) => {
+      const label = input.args?.[2];
+      if (label === "paperclip-runner-launch") {
+        child = spawn(process.execPath, [fixture, "--runner-id", "runner-health"], { stdio: ["ignore", "pipe", "pipe"] });
+        await new Promise<void>((resolve, reject) => {
+          child!.stdout!.once("data", () => resolve());
+          child!.once("error", reject);
+          child!.once("exit", code => reject(new Error(`listener fixture exited before readiness: ${code}`)));
+        });
+        await writeFile(marker, `${input.args![4]}\n${child.pid}\n2026-10-19T00:00:00.000Z\nrunner-health\n`);
+        return ok;
+      }
+      if (label === "paperclip-runner-monitor" && ++probes === 1) return { ...ok, exitCode: null, timedOut: true };
+      return await new Promise<{ exitCode: number | null; signal: null; timedOut: boolean; stdout: string; stderr: string }>(resolve => {
+        execFile(input.command, input.args ?? [], { timeout: 2_000 }, (error, stdout, stderr) => resolve({
+          exitCode: error ? typeof error.code === "number" ? error.code : null : 0,
+          signal: null, timedOut: !!error?.killed, stdout, stderr,
+        }));
+      });
+    });
+    const handle = createRemoteRunnerProcessLauncher({
+      target: { kind: "remote", transport: "sandbox", environmentId: "environment", leaseId: "lease", remoteCwd: root },
+      runner: { execute } as never, remoteBinary: fixture, processIdentityPath: marker,
+      stateDirectory: root, diagnosticsDirectory: join(root, "diagnostics"), runnerInstanceId: "runner-health",
+    })({ command: fixture, args: [], cwd: root, environment: {} });
+    void handle.completion.then(() => { settled = true; }, () => { settled = true; });
+    try {
+      await vi.waitFor(() => expect(probes).toBeGreaterThanOrEqual(2), { timeout: 5_000 });
+      expect(settled).toBe(false);
+      expect(handle.isExitConfirmed?.()).toBe(false);
+      expect(() => process.kill(child!.pid!, 0)).not.toThrow();
+      expect((await readFile(marker, "utf8")).split("\n")[1]).toBe(String(child!.pid));
+      expect(execute.mock.calls.filter(([x]) => x.args?.[2] === "paperclip-runner-launch")).toHaveLength(1);
+      child!.kill("SIGTERM");
+      await handle.completion;
+      expect(handle.isExitConfirmed?.()).toBe(true);
+    } finally {
+      child?.kill("SIGKILL");
+      await handle.completion.catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    [41, "marker_missing"], [44, "process_identity_changed"], [47, "process_generation_changed"], [1, "probe_failed"],
+  ] as const)("does not authorize replacement from health probe exit %s", async (exitCode, reason) => {
+    let nonce = "";
+    const ok = { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+    const execute = vi.fn(async (input: { args?: string[] }) => {
+      const label = input.args?.[2];
+      if (label === "paperclip-runner-launch") { nonce = input.args![4]!; return ok; }
+      if (label === "paperclip-runner-process-identity") return { ...ok, stdout: `${nonce}\n4321\n2026-09-06T00:00:00.000Z\nrunner-remote\n` };
+      return { ...ok, exitCode };
+    });
+    const handle = createRemoteRunnerProcessLauncher({
+      target: { kind: "remote", transport: "sandbox", environmentId: "environment", leaseId: "lease", remoteCwd: "/workspace" },
+      runner: { execute } as never, remoteBinary: "/runtime/runnerd", processIdentityPath: "/runtime/identity",
+      stateDirectory: "/runtime", diagnosticsDirectory: "/runtime/diagnostics", runnerInstanceId: "runner-remote",
+    })({ command: "/controller/runnerd", args: [], cwd: "/controller", environment: {} });
+    expect(await handle.completion.catch(readRemoteRunnerRecoveryError)).toEqual({ stage: "process_verification", reason });
+    expect(handle.isExitConfirmed?.()).toBe(false);
+  });
+
+  it.each(["timeout", "transport"])("keeps the same runner through a transient %s health probe", async failure => {
+    vi.useFakeTimers();
+    let nonce = "";
+    let probes = 0;
+    let settled = false;
+    const result = { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+    const execute = vi.fn(async (input: { args?: string[] }) => {
+      const label = input.args?.[2];
+      if (label === "paperclip-runner-launch") { nonce = input.args![4]!; return result; }
+      if (label === "paperclip-runner-process-identity") return { ...result, stdout: `${nonce}\n4321\n2026-09-06T00:00:00.000Z\nrunner-remote\n` };
+      if (label === "paperclip-runner-monitor") {
+        probes++;
+        if (probes === 1) {
+          if (failure === "transport") throw new Error("sandbox request timed out");
+          return { ...result, timedOut: true, exitCode: null };
+        }
+        return { ...result, exitCode: probes === 2 ? 0 : 45 };
+      }
+      return { ...result, exitCode: 1 };
+    });
+    const launcher = createRemoteRunnerProcessLauncher({
+      target: { kind: "remote", transport: "sandbox", environmentId: "environment", leaseId: "lease", remoteCwd: "/workspace" },
+      runner: { execute } as never, remoteBinary: "/runtime/runnerd", processIdentityPath: "/runtime/identity",
+      stateDirectory: "/runtime", diagnosticsDirectory: "/runtime/diagnostics", runnerInstanceId: "runner-remote",
+    });
+    const handle = launcher({ command: "/controller/runnerd", args: [], cwd: "/controller", environment: {} });
+    void handle.completion.then(() => { settled = true; }, () => { settled = true; });
+    try {
+      await vi.advanceTimersByTimeAsync(300);
+      expect(settled).toBe(false);
+      expect(probes).toBe(2);
+      expect(execute.mock.calls.filter(([x]) => x.args?.[2] === "paperclip-runner-launch")).toHaveLength(1);
+      expect(execute.mock.calls.some(([x]) => x.args?.[2] === "paperclip-runner-diagnostics")).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(handle.completion).resolves.toMatchObject({ code: null });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("bounds failed health reads without confirming exit or replacing the marker", async () => {
+    vi.useFakeTimers();
+    let nonce = "";
+    const ok = { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+    const execute = vi.fn(async (input: { args?: string[]; timeoutMs?: number }) => {
+      const label = input.args?.[2];
+      if (label === "paperclip-runner-launch") { nonce = input.args![4]!; return ok; }
+      if (label === "paperclip-runner-process-identity") return { ...ok, stdout: `${nonce}\n4321\n2026-09-06T00:00:00.000Z\nrunner-remote\n` };
+      await new Promise(resolve => setTimeout(resolve, input.timeoutMs));
+      return { ...ok, exitCode: null, timedOut: true };
+    });
+    const handle = createRemoteRunnerProcessLauncher({
+      target: { kind: "remote", transport: "sandbox", environmentId: "environment", leaseId: "lease", remoteCwd: "/workspace" },
+      runner: { execute } as never, remoteBinary: "/runtime/runnerd", processIdentityPath: "/runtime/identity",
+      stateDirectory: "/runtime", diagnosticsDirectory: "/runtime/diagnostics", runnerInstanceId: "runner-remote",
+    })({ command: "/controller/runnerd", args: [], cwd: "/controller", environment: {} });
+    const failure = handle.completion.catch(readRemoteRunnerRecoveryError);
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await failure).toEqual({ stage: "process_verification", reason: "probe_timeout" });
+      expect(handle.isExitConfirmed?.()).toBe(false);
+      const probes = execute.mock.calls.filter(([x]) => x.args?.[2] === "paperclip-runner-monitor");
+      expect(probes.map(([x]) => x.timeoutMs)).toEqual([10_000, 10_000, 9_500]);
+      expect(execute.mock.calls.filter(([x]) => x.args?.[2] === "paperclip-runner-launch")).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
   it.each(["delivered", "sandbox_missing", "logging_failed"] as const)(
     "detaches runnerd and contains asynchronous signal failures (%s)", async (signalOutcome) => {
     let launchNonce = "";
@@ -812,7 +949,7 @@ describe("remote runner process supervision", () => {
         }
         if (label === "paperclip-runner-monitor") {
           return {
-            exitCode: 3,
+            exitCode: 45,
             signal: null,
             timedOut: false,
             stdout: "",

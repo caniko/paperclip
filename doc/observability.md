@@ -408,6 +408,17 @@ above still apply.
 
 ## Native Runner Trace Spans
 
+Provider-pack fallback staging separates `provider_pack.archive.verify`
+(controller archive identity), `provider_pack.archive.probe` (remote helper support),
+`provider_pack.archive.reuse` (copy and hash image files),
+`provider_pack.archive.verify_missing` (verify only layers needing upload),
+`provider_pack.archive.transfer` (compressed file
+transfer), and `provider_pack.archive.extract` (received hash check and extraction).
+They are children of the existing pack selection/upload path and also appear in
+the local run timing log. Their fixed names add no paths, credentials, or content
+attributes. The operator endpoint gate remains unchanged. Source installs without
+prebuilt archives retain the existing directory upload span.
+
 The native provider lifecycle emits one foldable OpenTelemetry trace, linked to
 the server attempt described above. This is
 the native-run trace schema version `3`. `task.provider_session` is the native
@@ -704,7 +715,9 @@ backend Sentry DSN and the audited SDK. Set `PAPERCLIP_SENTRY_RUN_FAILURES` to:
 
 Missing, blank, or unrecognized values keep run reporting off. Expected operator
 stops, shutdown interruptions, successful runs, and queued work do not report in
-either enabled mode. The mode does not change run status, retries, recovery,
+either enabled mode. A native run that is `failed` while it waits for a same-run
+retry (`nativePhase` `retryable_failure`) does not report either. It reports once
+if a later write ends the retry as a terminal failure. The mode does not change run status, retries, recovery,
 Telemetry, or OpenTelemetry export. It is process-wide, so an operator can enable
 it on one staging instance without enabling it on other deployments. Restart the
 server after changing deployment environment variables.

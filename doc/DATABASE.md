@@ -317,6 +317,12 @@ completed lookups and the separate liveness backfill are not replayed. Projectio
 callers that use a transaction retain single-attempt reads. The opt-in is only
 for a pooled database handle outside a transaction.
 
+The heartbeat run read check uses the same bounded retries. Routes call it with
+the pooled database handle. Its issue existence lookup and its `issue:read`
+authorization decision retry separately, so a disconnect in the decision does not
+replay the completed lookup. Both steps only read. Missing issues, denied
+decisions, and other errors keep their usual behavior.
+
 ## Tool profile reads
 
 Tool profile list, detail, and new-tool review queries select only the catalog
@@ -1079,3 +1085,12 @@ company invalidation within the mutation transaction. Agent runtime journaling
 uses ordered `FOR NO KEY UPDATE` locks, which remain compatible with foreign-key
 references while excluding runtime readers' `FOR SHARE` locks. Connector feature
 switches use the same journal; process-start overlays receive a delivery baseline.
+
+## Retired Pipelines storage
+
+The Pipelines experiment has been removed from the application, API, CLI, and
+experimental settings. Its `pipelines` and `pipeline_*` tables, schema definitions,
+and migration history remain so existing records, documents, and links are preserved
+and future schema generation does not drop them. No removal migration or data
+cleanup runs. These tables remain part of normal database backups; the separate
+Cases feature is unaffected.

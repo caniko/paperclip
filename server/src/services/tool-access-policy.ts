@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { boundRunIssueIdSql } from "./run-task-binding.js";
 import { and, asc, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -976,7 +977,7 @@ export function toolAccessPolicyService(db: Db) {
           .select({
             companyId: heartbeatRuns.companyId,
             agentId: heartbeatRuns.agentId,
-            issueId: runContextSnapshotString("issueId"),
+            issueId: boundRunIssueIdSql(),
             projectId: runContextSnapshotString("projectId"),
             routineId: runContextSnapshotString("routineId"),
           })

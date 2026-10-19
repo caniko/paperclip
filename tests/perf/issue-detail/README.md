@@ -26,6 +26,20 @@ PAPERCLIP_ISSUE_PERF_RUNS=7 PAPERCLIP_ISSUE_PERF_PORT=3210 pnpm exec playwright 
 
 Outputs include `baseline.md`, `baseline.json`, and a Chrome trace for the first run of each scenario/profile. Open `*.trace.json` in Chrome DevTools Performance to inspect the `issue-detail:*` user-timing marks.
 
+For bundle comparisons, build the UI and serve the production assets from an
+isolated local instance with `PAPERCLIP_UI_DEV_MIDDLEWARE=false`. The default
+managed server above uses development middleware, which does not reproduce
+production chunk loading. Keep the server, database, browser profile and sample
+count the same for both builds, and avoid concurrent builds or test suites while
+measuring latency.
+
+Copy the first run's output outside `test-results/issue-detail-perf`, then reuse
+its persisted task with `PAPERCLIP_ISSUE_PERF_SEED_FILE=/path/to/before/baseline.json`
+and `PAPERCLIP_ISSUE_PERF_BASE_URL` pointing to that disposable instance. The
+harness validates the task identity before measuring. Network spans in the trace
+use recorded request start/end timestamps relative to task navigation; they
+include completed requests observed during the sample, even after content paint.
+
 ## Task layout stability
 
 `layout-stability.spec.ts` exercises the real task route, including Inbox

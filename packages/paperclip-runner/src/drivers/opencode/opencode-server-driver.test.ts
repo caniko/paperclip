@@ -1994,6 +1994,9 @@ describe("OpenCodeServerDriver", () => {
         external_directory: { "*": "deny", [`${workspace}/**`]: "allow" },
       });
       expect(config.autoupdate).toBe(false);
+      expect(config.provider.openrouter.options.headers).toMatchObject({
+        "HTTP-Referer": "https://paperclip.ing", "X-Title": "Paperclip", "X-OpenRouter-Title": "Paperclip",
+      });
       expect(config.provider.openrouter.models).toHaveProperty(
         "deepseek/deepseek-v4-flash-0731",
       );
