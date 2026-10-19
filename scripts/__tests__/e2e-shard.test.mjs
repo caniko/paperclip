@@ -381,17 +381,23 @@ test("the trusted PR workflow regenerates stale stacked lockfiles", () => {
     "the policy job must resolve the complete merge tree without rewriting platform metadata",
   );
 
-  // Test lanes no longer wait on a policy-job artifact: each install step
-  // resolves a stale lockfile inline, so a manifest-changing or stacked PR
-  // still installs while the policy job validates resolution in parallel.
+  // Host lanes resolve stale locks inline. Native Stop delegates the same
+  // frozen-first fallback to its isolated candidate, never the frozen harness.
   const fallbackInstalls = workflow.match(
     /if ! (candidate )?pnpm install --frozen-lockfile; then\n[\s\S]{0,240}?\1pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile\n\s+\1pnpm install --frozen-lockfile\n\s+fi/g,
   ) ?? [];
   assert.equal(
     fallbackInstalls.length,
-    8,
-    "every downstream install job must resolve a stale lockfile inline",
+    7,
+    "every host install job must resolve a stale lockfile inline",
   );
+  const native = readWorkflowJobs(workflow).get("native_composer_stop");
+  assert.match(native, /node \.trusted-composer-stop\/scripts\/composer-candidate-stage\.mjs install "\$COMPOSER_STOP_CANDIDATE_ROOT"/);
+  assert.match(native, /composer-candidate-stage\.mjs effective-lock "\$COMPOSER_STOP_CANDIDATE_ROOT" "\$RUNNER_TEMP\/composer-stop-effective-lock\.yaml"/);
+  const candidate = readFileSync(path.join(repoRoot, "scripts/composer-candidate-stage.mjs"), "utf8");
+  assert.match(candidate, /pnpm\.cjs install --frozen-lockfile \|\|/);
+  assert.match(candidate, /pnpm\.cjs install --resolution-only --ignore-scripts --no-frozen-lockfile &&/);
+  assert.match(candidate, /pnpm\.cjs install --frozen-lockfile; \}; \}/);
   assert.doesNotMatch(
     workflow,
     /Restore regenerated PR lockfile|lockfile_regenerated|name: pr-lockfile/,
