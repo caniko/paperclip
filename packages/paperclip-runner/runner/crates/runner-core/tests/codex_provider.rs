@@ -6877,6 +6877,56 @@ fn lightweight_history_pages_metadata_only_when_state_is_active() {
 }
 
 #[test]
+fn stop_fixture_completes_only_opted_in_read_only_toolless_probes() {
+    for (opt_in, read_only, tools) in [
+        (false, true, false),
+        (true, false, false),
+        (true, true, true),
+        (true, true, false),
+    ] {
+        let directory = temporary_directory("stop-fixture-probe");
+        let args = if opt_in {
+            vec!["--hold-turn", "--complete-read-only-probes"]
+        } else {
+            vec!["--hold-turn"]
+        };
+        let mut config = provider_config(&directory, &args);
+        config.read_only = read_only;
+        config.permissions_profile = Some(if read_only {
+            "paperclip-runner-workspace-read-only".to_owned()
+        } else {
+            "paperclip-runner-workspace-write".to_owned()
+        });
+        let mut provider = CodexProvider::start_with_tools(
+            &config,
+            if tools {
+                vec![task_context_tool()]
+            } else {
+                vec![]
+            },
+            None,
+        )
+        .unwrap();
+        provider.start_turn("Say hello.", &config.cwd).unwrap();
+        let completed = opt_in && read_only && !tools;
+        assert_eq!(
+            provider.read_thread().unwrap()["thread"]["status"]["type"],
+            if completed { "idle" } else { "active" },
+            "opt_in={opt_in}, read_only={read_only}, tools={tools}"
+        );
+        if completed {
+            wait_for_notification(&mut provider, "turn/completed");
+            assert_eq!(call_count(&directory, "turn/interrupt"), 0);
+        } else {
+            provider.interrupt_turn().unwrap();
+            assert_eq!(call_count(&directory, "turn/interrupt"), 1);
+        }
+        provider.shutdown().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[test]
 fn lightweight_history_repeated_cursor_is_not_idle_evidence() {
     let directory = temporary_directory("repeated-history-cursor");
     let config = provider_config(

@@ -447,7 +447,7 @@ describe("Codex selected native account verification", () => {
     expect(execute).not.toHaveBeenCalled();
   });
   it.each([
-    { helloProbePassed: undefined }, { effectiveModel: "another-model" }, { effectiveModel: null }, { effectiveModel: "" }, { provider: "opencode" }, { providerDriver: "codex_cli" },
+    { helloProbePassed: undefined }, { effectiveModel: "another-model" }, { effectiveModel: null }, { effectiveModel: "" }, { provider: "opencode" }, { providerDriver: "codex_cli" }, { providerDriver: "codex_app_server_command_environment_v3" }, { providerDriver: "opencode_server" },
   ])("rejects installation-only, legacy, or mismatched receipts", async override => {
     nativeProbe.mockResolvedValue({ ...receipt("codex", "gpt-6.1-sol"), ...override });
     expect((await testNativeRunnerAuthentication({ companyId: "company", adapterType: "paperclip_runner", config: {} }, "codex", "gpt-6.1-sol")).status).toBe("fail");

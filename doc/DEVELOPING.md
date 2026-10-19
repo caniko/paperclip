@@ -2296,6 +2296,12 @@ Codex launch drivers. The controller's logical driver remains `codex_app_server`
 a versioned persisted driver is neither missing identity nor permission to
 downgrade its profile.
 
+Native account verification accepts that same closed launch-driver set and
+returns the canonical `codex_app_server` receipt only after the observed model,
+read-only permissions, provider response, and owned shutdown checks pass.
+The isolated Stop fixture explicitly completes only tool-less read-only probes;
+ordinary execution stays held until the owned interruption reaches the provider.
+
 ### Sandbox ACP input delivery
 
 The legacy sandbox process bridge retries recognized Daytona and Cloudflare

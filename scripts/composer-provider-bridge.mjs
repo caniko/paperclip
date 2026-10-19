@@ -16,7 +16,7 @@ export async function startComposerProviderBridge({ socketPath, provider, callLo
     // larger acceptance scenarios need explicitly reviewed bounds.
     if (clients.size >= 4) { socket.destroy(); return; }
     const child = spawn(provider, ["--state-file", join(stateDirectory, `${randomUUID()}.json`),
-      "--hold-turn", "--call-log", callLog], { stdio: ["pipe", "pipe", "ignore"] });
+      "--hold-turn", "--complete-read-only-probes", "--call-log", callLog], { stdio: ["pipe", "pipe", "ignore"] });
     const closed = new Promise(resolve => child.once("close", () => {
       clients.delete(socket);
       socket.end();

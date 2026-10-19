@@ -7355,13 +7355,16 @@ export async function probeNativeRunnerEnvironment(options: {
   let completed = false;
   let effectiveModel: string | undefined;
   let failure: unknown;
+  const expectedDriver = "codex_app_server";
   const operation = (async () => {
     session = await driver.openSession({ runId: "environment-probe", normalizedSessionId: "environment-probe",
       workingDirectory, signal: controller.signal });
     controller.signal.throwIfAborted();
     const ids = session.ids();
-    const expectedDriver = "codex_app_server";
-    if (!ids.driverSessionId || !ids.providerSessionId || bundle.evidence().providerDriver !== expectedDriver) {
+    // Launch profiles version the command environment, not the canonical driver.
+    if (!ids.driverSessionId || !ids.providerSessionId || ![
+      expectedDriver, "codex_app_server_command_environment_v1", "codex_app_server_command_environment_v2",
+    ].includes(bundle.evidence().providerDriver ?? "")) {
       throw new Error(`The native environment probe returned no matching provider identity (${bundle.evidence().providerDriver ?? "missing driver"}).`);
     }
     const events = session.events()[Symbol.asyncIterator]();
@@ -7445,7 +7448,7 @@ export async function probeNativeRunnerEnvironment(options: {
   }
   if (failure !== undefined) throw failure;
   if (!completed) throw new Error("The native provider hello probe did not complete.");
-  return Object.freeze({ provider: options.provider, providerDriver: bundle.evidence().providerDriver!, effectiveModel: effectiveModel!, helloProbePassed: true });
+  return Object.freeze({ provider: options.provider, providerDriver: expectedDriver, effectiveModel: effectiveModel!, helloProbePassed: true });
 }
 
 /** The transport provider identifies the biller, independently of model family. */

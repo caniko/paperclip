@@ -697,6 +697,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .any(|value| value == "--linger-after-turn-start");
     let hold_turn = args.iter().any(|value| value == "--hold-turn") || linger_after_turn_start;
+    let complete_read_only_probes = args
+        .iter()
+        .any(|value| value == "--complete-read-only-probes");
     let exit_after_turn_start = args.iter().any(|value| value == "--exit-after-turn-start");
     let exit_after_turn_completion = args
         .iter()
@@ -853,6 +856,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut answered_questions = 0u8;
     let mut replayed_completed_tool_calls = 0_u64;
     let mut rejected_helper_requests = 0_u8;
+    let mut read_only_probe = false;
 
     for line in io::stdin().lock().lines() {
         let message: Value = serde_json::from_str(&line?)?;
@@ -1052,6 +1056,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err("thread request omitted skills.include_instructions=true".into());
         }
         let id = message.get("id").cloned();
+        if matches!(method, "thread/start" | "thread/resume") {
+            read_only_probe = message.pointer("/params/permissions")
+                == Some(&json!("paperclip-runner-workspace-read-only"))
+                && message.pointer("/params/dynamicTools") == Some(&json!([]));
+        }
         match method {
             "initialize" => {
                 if args
@@ -1398,7 +1407,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .checked_add(1)
                         .ok_or("fake provider turn sequence exhausted")?;
                 }
-                let hold_turn = hold_turn || (hold_first_durable_turn && state.next_turn == 1);
+                // Only the explicit tool-less read-only verification may finish;
+                // ordinary Stop acceptance work must still require interruption.
+                let probe_turn = complete_read_only_probes
+                    && read_only_probe
+                    && message.pointer("/params/permissions")
+                        == Some(&json!("paperclip-runner-workspace-read-only"));
+                let hold_turn =
+                    (hold_turn && !probe_turn) || (hold_first_durable_turn && state.next_turn == 1);
                 if reject_second_turn_start && turn_start_count == 2 {
                     send(json!({
                         "method": "warning",

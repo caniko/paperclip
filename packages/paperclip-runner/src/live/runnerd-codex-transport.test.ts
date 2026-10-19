@@ -3300,7 +3300,7 @@ it("does not certify probe cleanup while owned credential preparation is unconfi
   }
 }, 15_000);
 
-it.each(["complete", "api-key", "default-model", "mismatched-model", "model-refresh-error", "model-cleanup-error", "missing-model", "missing-runtime", "missing-completion", "late-bootstrap", "remote-complete", "remote-mismatched-model", "late-remote-preparation", "late-remote-release-error"] as const)("native Codex setup requires its daemon/app-server hello (%s)", async mode => {
+it.each(["complete", "command-environment", "api-key", "default-model", "mismatched-model", "model-refresh-error", "model-cleanup-error", "missing-model", "missing-runtime", "missing-completion", "late-bootstrap", "remote-complete", "remote-mismatched-model", "late-remote-preparation", "late-remote-release-error"] as const)("native Codex setup requires its daemon/app-server hello (%s)", async mode => {
   const root = await mkdtemp(join(tmpdir(), "runnerd-native-setup-"));
   const runtimeDirectory = join(root, "native-state");
   await mkdir(runtimeDirectory, { mode: 0o700 });
@@ -3317,6 +3317,15 @@ it.each(["complete", "api-key", "default-model", "mismatched-model", "model-refr
   let refreshed = false;
   let cleanupConfirmed = false;
   try {
+    const commandWrapper = join(root, "codex");
+    if (mode === "command-environment") {
+      await writeFile(commandWrapper, `#!${process.execPath}
+const { spawn } = require("node:child_process");
+const child = spawn(${JSON.stringify(fakeCodex)}, ${JSON.stringify(fakeCodexArgs(root, "--request-log", calls, "--hold-turn", "--complete-read-only-probes"))}, { stdio: "inherit" });
+child.on("error", error => { console.error(error); process.exit(1); });
+child.on("exit", (code, signal) => signal ? process.kill(process.pid, signal) : process.exit(code ?? 1));
+`, { mode: 0o700 });
+    }
     const probe = probeNativeRunnerEnvironment({
       runtimeDirectory, provider: "codex", model: mode === "default-model" ? null : "gpt-6.1-sol", reasoningEffort: "low",
       environment: { PATH: process.env.PATH, OPENAI_API_KEY: mode === "api-key" ? "selected-account" : "", HOME: "/unrelated/home" },
@@ -3336,12 +3345,12 @@ it.each(["complete", "api-key", "default-model", "mismatched-model", "model-refr
             return { connectUrl: authority.connectUrl, release: async () => { registrationReleased = true; await authority.stop(); if (mode === "late-remote-release-error") throw new Error("PRP registration release failed"); } };
           },
         } : {}),
-        runnerBinary: mode === "missing-runtime" ? join(root, "missing-runner") : resolve("runner/target/debug/paperclip-runnerd"),
-        codexCommand: fakeCodex, codexArgs: fakeCodexArgs(root, "--request-log", calls,
+        runnerBinary: mode === "missing-runtime" ? join(root, "missing-runner") : defaultCapabilityRunnerdBinary(),
+        ...(mode === "command-environment" ? { codexCommand: commandWrapper } : { codexCommand: fakeCodex, codexArgs: fakeCodexArgs(root, "--request-log", calls,
           ...(mode === "missing-completion" ? ["--hold-turn"] : []),
           ...(mode === "mismatched-model" || mode === "remote-mismatched-model" || mode === "model-refresh-error" || mode === "model-cleanup-error" ? ["--returned-model", "another-model"] : []),
           ...(mode === "missing-model" ? ["--returned-model", ""] : []),
-          ...(mode === "late-bootstrap" ? ["--thread-start-delay-ms", "1000"] : [])),
+          ...(mode === "late-bootstrap" ? ["--thread-start-delay-ms", "1000"] : [])) }),
         sourceCodexHome: sourceHome,
       },
       onCodexCredentialRefresh: async filename => {
@@ -3362,7 +3371,7 @@ it.each(["complete", "api-key", "default-model", "mismatched-model", "model-refr
         await rm(runtimeDirectory, { recursive: true, force: true });
       },
     });
-    if (mode === "complete" || mode === "api-key" || mode === "default-model" || mode === "remote-complete") {
+    if (mode === "complete" || mode === "command-environment" || mode === "api-key" || mode === "default-model" || mode === "remote-complete") {
       const observedModel = mode === "default-model" ? "gpt-test" : "gpt-6.1-sol";
       await expect(probe).resolves.toEqual({ provider: "codex", providerDriver: "codex_app_server", effectiveModel: observedModel, helloProbePassed: true });
       expect(refreshed).toBe(true);
