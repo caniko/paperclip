@@ -142,6 +142,18 @@ Focused adapter tests use a simulated control transport. OpenCode's core,
 authenticated API, and CLI tests exercise the protocol separately. These checks
 do not establish real-provider execution or live restart and restore acceptance.
 
+The launcher fixture also starts its own persistent embedded PostgreSQL cluster.
+It checks that a controller restart and native database backup restoration retain
+resource IDs, the operator's authenticated session, and decryptable credentials.
+Run it with `pnpm exec vitest run server/src/deployment/entry.test.ts`.
+It uses a disposable instance and does not qualify an installed user service.
+
+A Paperclip database dump does not contain the managed OpenCode backend's state.
+Preserve that backend's complete database and associated files separately. Its
+durable identity, external ownership, pending inbox, execution claims, descendants,
+and jobs must survive recovery together. Session transcript export/import carries
+settled messages and is not a managed-execution backup or restore mechanism.
+
 Hosted source lanes collect their native Vitest shard before execution. The
 source-bound environment policy identifies default cases and retains every
 OS, SDK, runner, and live-provider obligation. Raw reports keep those sibling
