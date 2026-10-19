@@ -422,12 +422,12 @@ export function companyService(db: Db, budgetHooks: BudgetServiceHooks = {}, out
       if (!result) return null;
       const publishAndReconcile = async () => {
         const root = outerTransaction?.db ?? db;
-        await createAgentLifecycle(root).reconcilePolicyHolds(id);
-        publishAccountingActivities(id, budgetPublications);
-        if (data.budgetMonthlyCents !== undefined) await deliverBudgetEnforcement(root, budgetHooks, id);
         // Notify only after the owning transaction commits, before finalization
         // can throw and leave Cloud unaware of the committed archive boundary.
         if (result.archiveCascade || result.unarchived) void notifyCloudOfPrimaryCompanyLifecycleChange(id);
+        await createAgentLifecycle(root).reconcilePolicyHolds(id);
+        publishAccountingActivities(id, budgetPublications);
+        if (data.budgetMonthlyCents !== undefined) await deliverBudgetEnforcement(root, budgetHooks, id);
       };
       if (outerTransaction) outerTransaction.afterCommit.push(publishAndReconcile);
       else await publishAndReconcile();
@@ -498,14 +498,11 @@ export function companyService(db: Db, budgetHooks: BudgetServiceHooks = {}, out
         };
       });
       if (!result) return null;
-      await createAgentLifecycle(db).reconcilePolicyHolds(id);
-
       // Same doorbell rule as update(): the archive is committed, so ring
       // before finalization, which can throw without undoing it.
-      if (result.cascade) {
-        void notifyCloudOfPrimaryCompanyLifecycleChange(id);
-        await finalizeArchive(id, actor, result.cascade);
-      }
+      if (result.cascade) void notifyCloudOfPrimaryCompanyLifecycleChange(id);
+      await createAgentLifecycle(db).reconcilePolicyHolds(id);
+      if (result.cascade) await finalizeArchive(id, actor, result.cascade);
 
       return result.company;
     },

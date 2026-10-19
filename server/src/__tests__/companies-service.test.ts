@@ -34,6 +34,7 @@ vi.mock("../services/cloud-lifecycle-sync.js", () => ({
 }));
 
 import { configureAgentLifecycle } from "../services/agent-lifecycle.js";
+import * as agentLifecycle from "../services/agent-lifecycle.js";
 import { companyService } from "../services/companies.js";
 import { deriveIssuePrefixBase } from "../services/issue-prefix.js";
 import { readBuiltInAgentMarker } from "../lib/built-in-agent-metadata.js";
@@ -830,6 +831,26 @@ describeEmbeddedPostgres("companyService", () => {
       ));
     expect(archiveActivity).toHaveLength(1);
     expect(archiveActivity[0]).toMatchObject({ details: { agentsPaused: 1, runsCancelled: 0 } });
+  });
+
+  it.each(["archive", "update"] as const)("rings after the %s commit even when policy reconciliation fails", async (operation) => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Committed archive", issuePrefix: "COM" });
+    notifyCloudSpy.mockClear();
+    const original = agentLifecycle.createAgentLifecycle;
+    const lifecycle = vi.spyOn(agentLifecycle, "createAgentLifecycle").mockImplementation((...args) => ({
+      ...original(...args),
+      reconcilePolicyHolds: async () => { throw new Error("post-commit reconciliation failed"); },
+    }));
+    try {
+      const service = companyService(db);
+      await expect(operation === "archive" ? service.archive(companyId) : service.update(companyId, { status: "archived" }))
+        .rejects.toThrow("post-commit reconciliation failed");
+      expect((await db.select().from(companies).where(eq(companies.id, companyId)))[0].status).toBe("archived");
+      expect(notifyCloudSpy).toHaveBeenCalledExactlyOnceWith(companyId);
+    } finally {
+      lifecycle.mockRestore();
+    }
   });
 
   it("rings the Cloud lifecycle doorbell exactly on archived-boundary transitions", async () => {
