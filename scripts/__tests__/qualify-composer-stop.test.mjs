@@ -14,6 +14,7 @@ const provenance = {
   runnerSha256: "c".repeat(64), providerSha256: "d".repeat(64),
   junitSha256: "e".repeat(64),
   sourceLockSha256: "f".repeat(64), effectiveLockSha256: "f".repeat(64),
+  runtimeSha256: "f".repeat(64),
   trustedRevision: "1".repeat(40), harnessSha256: "2".repeat(64), verifierSha256: "3".repeat(64),
   nodeVersion: "24.20.0", pnpmVersion: "9.15.4",
 };
@@ -245,11 +246,12 @@ test("the mandatory lane executes an immutable harness and verifier outside the 
   assert.match(lane, /COMPOSER_STOP_VERIFIER_SHA256/);
   assert.match(lane, /working-directory: \.trusted-composer-stop\n\s+run: pnpm install --filter paperclip --frozen-lockfile --ignore-scripts/);
   assert.match(lane, /working-directory: \.trusted-composer-stop\/packages\/paperclip-runner\n\s+run: \|\n\s+cargo build[^\n]+--bin fake-codex-app-server/);
-  assert.match(lane, /node \.trusted-composer-stop\/node_modules\/@playwright\/test\/cli\.js/);
+  assert.match(lane, /node \.trusted-composer-stop\/scripts\/composer-candidate-runtime\.mjs run/);
+  assert.match(lane, /\.trusted-composer-stop\/node_modules\/@playwright\/test\/cli\.js/);
   assert.match(lane, /git ls-files -z -- tests\/e2e scripts\/qualify-composer-stop\.mjs/);
   assert.match(lane, /packages\/paperclip-runner package\.json pnpm-lock\.yaml/);
   assert.match(lane, /pnpm-workspace\.yaml \.npmrc \.cargo patches \| xargs -0 sha256sum/);
-  for (const helper of ["composer-candidate-stage", "composer-candidate-sandbox", "composer-provider-bridge", "grok-public-install-sandbox"]) {
+  for (const helper of ["composer-candidate-stage", "composer-candidate-sandbox", "composer-provider-bridge", "composer-candidate-runtime", "composer-candidate-process", "grok-public-install-sandbox"]) {
     assert.ok(lane.includes(`scripts/${helper}.mjs`), `missing trusted executable closure: ${helper}`);
   }
   assert.equal((lane.match(/sha256sum --check/g) ?? []).length, 2);
@@ -344,16 +346,13 @@ test("candidate dependency and compiler execution cannot rewrite trusted verifie
   for (const path of targets) assert.equal(readFileSync(path, "utf8"), "independently trusted bytes\n", `compiler changed trusted state: ${path}`);
 });
 
-test("the proposed caller refuses acceptance before host execution when isolated runtime is absent", (t) => {
-  const workflow = readFileSync(new URL("../../.github/workflows/pr-trusted.yml", import.meta.url), "utf8");
-  const step = workflow.split("      - name: Run mandatory composer Stop acceptance")[1].split("      - name:")[0];
-  const command = step.match(/        run: \|\n([\s\S]*)/)[1]
-    .split("\n").map(line => line.replace(/^ {10}/, "")).join("\n");
+test("the proposed server refuses acceptance before host execution when isolated runtime is absent", (t) => {
   const directory = mkdtempSync(join(tmpdir(), "composer-stop-runtime-refusal-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const result = spawnSync("bash", ["-c", command], { cwd: directory, encoding: "utf8",
-    env: { ...process.env, COMPOSER_STOP_CONTAINER_ID: "" }, timeout: 10000 });
+  const runtime = fileURLToPath(new URL("../composer-candidate-runtime.mjs", import.meta.url));
+  const result = spawnSync(process.execPath, [runtime, "serve"], { cwd: directory, encoding: "utf8",
+    env: { ...process.env, COMPOSER_STOP_CONTAINER_ID: "", COMPOSER_STOP_CONTAINER_OWNER: "" }, timeout: 10000 });
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /requires isolated container runtime and trusted PID integration/);
+  assert.match(result.stderr, /requires trusted container identity/);
   assert.doesNotMatch(result.stderr, /No such file or directory/);
 });

@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { composerCandidateProcessAlive } from "../../scripts/composer-candidate-process.mjs";
 import {
   test,
   expect,
@@ -122,12 +123,7 @@ async function menu(page: Page, action: string) {
     .click();
 }
 function processAlive(pid: number) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  return composerCandidateProcessAlive(pid);
 }
 
 test.setTimeout(120_000);
@@ -191,7 +187,7 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
         }),
       );
       async function agent(name: string) {
-        return json(
+        const created = await json(
           await request.post(`/api/companies/${company.id}/agents`, {
             data: {
               name,
@@ -200,7 +196,7 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
               adapterConfig:
                 adapter === "process"
                   ? {
-                      command: process.execPath,
+                      command: process.env.COMPOSER_STOP_CONTAINER_ID ? "/usr/local/bin/node" : process.execPath,
                       args: [
                         "-e",
                         "console.log('stop fixture ready'); setInterval(() => console.log('working'), 200);",
@@ -217,6 +213,11 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
             },
           }),
         );
+        await expect.poll(async () => {
+          const current = await json(await request.get(`/api/agents/${created.id}`));
+          return { status: current.status, lifecycleState: current.lifecycleState };
+        }, { timeout: 15_000 }).toEqual({ status: "idle", lifecycleState: "ready" });
+        return created;
       }
       const owner = await agent("Stop fixture parent");
       const childOwner = await agent("Stop fixture child");

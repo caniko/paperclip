@@ -25,7 +25,7 @@ jobs:
       PAPERCLIP_STOP_REQUIRE_NATIVE: "true"
       PAPERCLIP_E2E_SOURCE_ROOT: ${{ github.workspace }}
       COMPOSER_STOP_HEAD_REVISION: ${{ github.event.pull_request.head.sha }}
-      COMPOSER_STOP_TRUSTED_REVISION: 5bd0e909be7c226642645efa2c7c34ec0ebb8a21
+      COMPOSER_STOP_TRUSTED_REVISION: 417f1e6ccf03912ed434ddeb15aaaf960e098c58
     steps:
       - name: Checkout exact PR head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -38,7 +38,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: caniko/paperclip
-          ref: 5bd0e909be7c226642645efa2c7c34ec0ebb8a21
+          ref: 417f1e6ccf03912ed434ddeb15aaaf960e098c58
           path: .trusted-composer-stop
           persist-credentials: false
 
@@ -52,6 +52,9 @@ jobs:
           (
             cd .trusted-composer-stop
             git ls-files -z -- tests/e2e scripts/qualify-composer-stop.mjs \
+              scripts/composer-candidate-stage.mjs scripts/composer-candidate-sandbox.mjs \
+              scripts/composer-provider-bridge.mjs scripts/composer-candidate-runtime.mjs \
+              scripts/composer-candidate-process.mjs scripts/grok-public-install-sandbox.mjs \
               packages/paperclip-runner package.json pnpm-lock.yaml \
               pnpm-workspace.yaml .npmrc .cargo patches | xargs -0 sha256sum
           ) > "$RUNNER_TEMP/composer-stop-harness-manifest.sha256"
@@ -80,116 +83,24 @@ jobs:
         with:
           version: 9.15.4
 
-      - name: Locate pnpm store
-        id: pnpm_store
-        run: |
-          echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-          echo "arch=$(node -p 'process.arch')" >> "$GITHUB_OUTPUT"
-
-      - name: Restore pnpm store (read only)
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ steps.pnpm_store.outputs.path }}
-          key: node-cache-${{ runner.os }}-${{ steps.pnpm_store.outputs.arch }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: node-cache-${{ runner.os }}-${{ steps.pnpm_store.outputs.arch }}-pnpm-
-
-      - name: Install dependencies
-        run: |
-          set -euo pipefail
-          candidate() {
-            bwrap --die-with-parent --new-session --unshare-user --unshare-pid --unshare-ipc --unshare-uts \
-              --ro-bind / / --tmpfs /tmp --proc /proc --dev /dev \
-              --bind "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE" \
-              --ro-bind "$GITHUB_WORKSPACE/.trusted-composer-stop" "$GITHUB_WORKSPACE/.trusted-composer-stop" \
-              --ro-bind "$RUNNER_TEMP" "$RUNNER_TEMP" \
-              --chdir "$GITHUB_WORKSPACE" \
-              env -i PATH="$PATH" HOME=/tmp CI=true "$@"
-          }
-          if ! candidate pnpm install --frozen-lockfile; then
-            echo '::notice title=Lockfile::checked-in lockfile is stale; resolving it inline'
-            candidate pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
-            candidate pnpm install --frozen-lockfile
-          fi
-
-      # rust-cache hashes its absolute cache paths into the entry's version,
-      # and GitHub only serves an entry whose key and version both match. The
-      # target directory sits under the checkout, and the checkout root
-      # differs by runner: /home/runner/_work on the RunsOn fleets that write
-      # this cache against /home/runner/work on GitHub-hosted runners. Every
-      # key input agreed, yet all 25 completed pull requests on 2026-09-28
-      # logged "No cache found" (run 36424309181) and cold-compiled every
-      # crate for ~4 minutes in four lanes. Point rust-cache at the same
-      # directory through a checkout-independent path so both layouts hash
-      # the same version. Keep this block identical in both workflows: the
-      # reader and the writer must agree or the version matches nothing.
-      - name: Pin the Runner Rust workspace path
-        id: runner_rust_workspace
-        run: |
-          set -euo pipefail
-          pinned="$HOME/paperclip-runner-rust"
-          # A symlink here is removed as a link, never followed into the checkout.
-          rm -rf "$pinned"
-          ln -s "$GITHUB_WORKSPACE/packages/paperclip-runner/runner" "$pinned"
-          echo "path=$pinned" >> "$GITHUB_OUTPUT"
-
-      - name: Select the pinned Runner Rust toolchain
-        working-directory: packages/paperclip-runner
-        run: |
-          set -uo pipefail
-
-          # release-verify.yml runs on a single post-merge fleet image; the
-          # gate here can route to ubuntu-latest or the public PR fleet, so
-          # this tolerates an image without rustup instead of failing every
-          # pull request. Without the pin the cache key simply will not match.
-          if ! command -v rustup >/dev/null 2>&1; then
-            echo '::notice title=Runner Rust cache::rustup is unavailable; building with the image default toolchain'
-            exit 0
-          fi
-
-          rustup show
-          toolchain="$(rustup show active-toolchain | awk '{print $1}')"
-          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
-
-          # rust-cache hashes every installed toolchain into the cache key, not
-          # only the active one. Each runner image also ships its own stable
-          # Rust, and those disagree across images: 1.98.0 on the RunsOn fleets
-          # against 1.98.1 on ubuntu-latest. Two runners that agreed on the pin
-          # therefore still computed different keys, and every GitHub-hosted
-          # pull request missed this cache while the fleet hit it. Remove every
-          # toolchain except the pin, so the key depends on the pinned compiler
-          # and the lockfile alone rather than on what the image happens to
-          # carry. Keep this block identical in both workflows: the reader and
-          # the writer must agree or the key matches nothing.
-          extra_toolchains="$(rustup toolchain list | awk '{print $1}' | grep -vx "$toolchain" || true)"
-          if [ -n "$extra_toolchains" ]; then
-            echo "$extra_toolchains" | xargs -n1 rustup toolchain uninstall \
-              || echo '::notice title=Runner Rust cache::could not remove an extra toolchain; the cache key may not match'
-          fi
-          rustup toolchain list
-
-      - name: Restore Runner Rust dependencies (read only)
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: ${{ steps.runner_rust_workspace.outputs.path }} -> target
-          shared-key: release-runner-v2
-          cache-workspace-crates: false
-          cache-bin: false
-          save-if: false
-
       - name: Install immutable browser harness dependencies
         working-directory: .trusted-composer-stop
         run: pnpm install --filter paperclip --frozen-lockfile --ignore-scripts
 
-      - name: Build candidate runner
-        working-directory: packages/paperclip-runner
+      - name: Stage only exact committed candidate source
+        run: node .trusted-composer-stop/scripts/composer-candidate-stage.mjs stage
+
+      - name: Install dependencies
         run: |
-          cargo build --manifest-path runner/Cargo.toml --locked --bin paperclip-runnerd
-          node --input-type=module <<'JS'
-          import { appendFileSync } from "node:fs";
-          import { resolveCargoBinary, resolveCargoTargetDirectory } from "../../.trusted-composer-stop/packages/paperclip-runner/scripts/cargo-artifacts.mjs";
-          const targetDirectory = resolveCargoTargetDirectory({ packageRoot: process.cwd() });
-          appendFileSync(process.env.GITHUB_ENV, `PAPERCLIP_RUNNER_BINARY=${resolveCargoBinary({ binary: "paperclip-runnerd", targetDirectory })}\n`);
-          JS
+          node .trusted-composer-stop/scripts/composer-candidate-stage.mjs install "$COMPOSER_STOP_CANDIDATE_ROOT"
+
+      - name: Build candidate runner
+        run: |
+          node .trusted-composer-stop/scripts/composer-candidate-stage.mjs build "$COMPOSER_STOP_CANDIDATE_ROOT"
+
+      - name: Retain staged effective dependency lock before runtime
+        run: |
+          node .trusted-composer-stop/scripts/composer-candidate-stage.mjs effective-lock "$COMPOSER_STOP_CANDIDATE_ROOT" "$RUNNER_TEMP/composer-stop-effective-lock.yaml"
 
       - name: Build immutable deterministic provider
         working-directory: .trusted-composer-stop/packages/paperclip-runner
@@ -212,7 +123,8 @@ jobs:
         run: |
           set -euo pipefail
           (cd .trusted-composer-stop && sha256sum --check "$RUNNER_TEMP/composer-stop-harness-manifest.sha256")
-          node .trusted-composer-stop/node_modules/@playwright/test/cli.js test \
+          node .trusted-composer-stop/scripts/composer-candidate-runtime.mjs run \
+            .trusted-composer-stop/node_modules/@playwright/test/cli.js test \
             --config .trusted-composer-stop/tests/e2e/playwright-composer-stop.config.ts --reporter=list,json,junit
 
       - name: Qualify exact-head native composer Stop proof
@@ -239,7 +151,6 @@ jobs:
           COMPOSER_STOP_PNPM_VERSION="$(pnpm --version)"
           export COMPOSER_STOP_REVISION COMPOSER_STOP_PNPM_VERSION
           git show HEAD:pnpm-lock.yaml > "$COMPOSER_STOP_SOURCE_LOCKFILE"
-          cp pnpm-lock.yaml "$COMPOSER_STOP_EFFECTIVE_LOCKFILE"
           node .trusted-composer-stop/scripts/qualify-composer-stop.mjs "$RUNNER_TEMP/composer-stop-report.json" "$RUNNER_TEMP/composer-stop-receipt.json"
 
       - name: Retain native composer Stop evidence
@@ -259,4 +170,17 @@ jobs:
             ${{ runner.temp }}/composer-stop-effective-lock.yaml
             ${{ runner.temp }}/composer-stop-harness-manifest.sha256
             ${{ runner.temp }}/composer-stop-trusted-provenance.json
+            ${{ runner.temp }}/composer-runtime-*/runtime.json
+            ${{ runner.temp }}/composer-runtime-*/paperclip-runnerd
             .trusted-composer-stop/tests/e2e/test-results/
+
+      - name: Upload CI profile timings
+        continue-on-error: true
+        if: always() && env.PAPERCLIP_CI_PROFILE == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-profile-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index || 0 }}
+          path: .ci-profile/*.ndjson
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14

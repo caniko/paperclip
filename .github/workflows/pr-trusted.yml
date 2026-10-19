@@ -62,9 +62,19 @@ jobs:
           # Diff the PR branch against its merge base so recent base-branch commits
           # do not masquerade as changes made by the PR itself.
           changed="$(git diff --name-only "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}")"
-          if printf '%s\n' "$changed" | grep -qx 'pnpm-lock.yaml'; then
-            echo "Do not commit pnpm-lock.yaml in pull requests. CI owns lockfile updates."
-            exit 1
+          # Consume all input: grep -q can SIGPIPE printf on a large merge diff.
+          if grep -Fx 'pnpm-lock.yaml' <<< "$changed" >/dev/null; then
+            # Synchronizing this fork imports CI-owned upstream locks. Accept
+            # only exact bytes from the canonical history already in this head.
+            git fetch --no-tags https://github.com/paperclipai/paperclip.git master
+            imported="$(git merge-base '${{ github.event.pull_request.head.sha }}' FETCH_HEAD)"
+            head_lock="$(git rev-parse '${{ github.event.pull_request.head.sha }}:pnpm-lock.yaml')"
+            imported_lock="$(git rev-parse "$imported:pnpm-lock.yaml")"
+            if test "$head_lock" != "$imported_lock"; then
+              echo "Do not commit pnpm-lock.yaml in pull requests. CI owns lockfile updates."
+              exit 1
+            fi
+            echo "Lockfile matches canonical imported ancestor $imported"
           fi
 
       - name: Setup Node.js for pnpm bootstrap
@@ -125,7 +135,7 @@ jobs:
           bwrap --version
 
       - name: Test mandatory native composer Stop qualification
-        run: node --test ./scripts/__tests__/qualify-composer-stop.test.mjs
+        run: node --test ./scripts/__tests__/qualify-composer-stop.test.mjs ./scripts/__tests__/composer-candidate-runtime.test.mjs ./.github/scripts/tests/pr-lockfile-policy.test.mjs
 
       - name: Test release verify workflow wiring
         run: node "$CI_NODE_TEST" ./scripts/__tests__/release-verify-workflow.test.mjs ./scripts/cloud-source-verification.test.mjs ./scripts/standard-image-contract.test.mjs
@@ -1658,7 +1668,8 @@ jobs:
             cd .trusted-composer-stop
             git ls-files -z -- tests/e2e scripts/qualify-composer-stop.mjs \
               scripts/composer-candidate-stage.mjs scripts/composer-candidate-sandbox.mjs \
-              scripts/composer-provider-bridge.mjs scripts/grok-public-install-sandbox.mjs \
+              scripts/composer-provider-bridge.mjs scripts/composer-candidate-runtime.mjs \
+              scripts/composer-candidate-process.mjs scripts/grok-public-install-sandbox.mjs \
               packages/paperclip-runner package.json pnpm-lock.yaml \
               pnpm-workspace.yaml .npmrc .cargo patches | xargs -0 sha256sum
           ) > "$RUNNER_TEMP/composer-stop-harness-manifest.sha256"
@@ -1726,11 +1737,9 @@ jobs:
           PLAYWRIGHT_JUNIT_OUTPUT_NAME: ${{ runner.temp }}/composer-stop-junit.xml
         run: |
           set -euo pipefail
-          # Preparation isolation is not runtime acceptance. Never fall back to
-          # launching the candidate on the host while runtime/PID wiring is absent.
-          : "${COMPOSER_STOP_CONTAINER_ID:?Mandatory native composer Stop requires isolated container runtime and trusted PID integration}"
           (cd .trusted-composer-stop && sha256sum --check "$RUNNER_TEMP/composer-stop-harness-manifest.sha256")
-          node .trusted-composer-stop/node_modules/@playwright/test/cli.js test \
+          node .trusted-composer-stop/scripts/composer-candidate-runtime.mjs run \
+            .trusted-composer-stop/node_modules/@playwright/test/cli.js test \
             --config .trusted-composer-stop/tests/e2e/playwright-composer-stop.config.ts --reporter=list,json,junit
 
       - name: Qualify exact-head native composer Stop proof
@@ -1776,6 +1785,8 @@ jobs:
             ${{ runner.temp }}/composer-stop-effective-lock.yaml
             ${{ runner.temp }}/composer-stop-harness-manifest.sha256
             ${{ runner.temp }}/composer-stop-trusted-provenance.json
+            ${{ runner.temp }}/composer-runtime-*/runtime.json
+            ${{ runner.temp }}/composer-runtime-*/paperclip-runnerd
             .trusted-composer-stop/tests/e2e/test-results/
 
       - name: Upload CI profile timings

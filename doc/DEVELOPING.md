@@ -168,6 +168,17 @@ The provider archive SHA-256 is
 actual retention is `2764798` seconds. This qualifies the prepared Stop lane.
 Each new application head still requires its own attempt-1 runtime evidence.
 
+The proposed Stop harness keeps candidate installation, compilation and runtime
+inside separate containers. Runtime retains `network=none`; a trusted stdio
+relay reaches only its loopback HTTP server. The immutable provider and its log
+remain outside the candidate, with only a read-only protocol socket exposed.
+The built runner is captured before runtime and mounted read-only separately.
+PID checks run in the owned container and retain process-start fingerprints;
+host PID absence is never evidence that an isolated child stopped. The prepared
+workflow retains the container image, actual Node/platform/architecture, runner
+hash and mount receipt. These changes require new hosted qualification before
+promoting the immutable PR caller.
+
 General server shards run at most two test files at a time in separate Vitest
 forks. Each file retains its own home, config and process state, and its test
 cases run serially. An explicit `PAPERCLIP_TEST_DATABASE_URL` keeps those shards
