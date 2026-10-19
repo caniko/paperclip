@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { serveInsideComposerContainer, startComposerCandidateRuntime, verifyComposerCandidateRuntime } from "../composer-candidate-runtime.mjs";
 import { composerCandidateProcessAlive } from "../composer-candidate-process.mjs";
 
@@ -63,7 +64,7 @@ test("runtime isolates candidate code and observes PIDs in the owned container, 
   assert.throws(() => execute('import { writeFileSync } from "node:fs"; writeFileSync("/etc/passwd", "forged account")'), /EROFS|EACCES/);
   assert.throws(() => execute('import { writeFileSync } from "node:fs"; writeFileSync("/composer-runner", "forged runner")'), /EROFS|EACCES/);
   execute('import { writeFileSync, readFileSync } from "node:fs"; writeFileSync("/candidate/.composer-native-target/debug/paperclip-runnerd", "replacement"); if (readFileSync("/composer-runner", "utf8") !== "fixture runner artifact\\n") process.exit(1);');
-  await t.test("bootstrap executes its provider without making temporary state executable", () => {
+  await t.test("bootstrap executes its provider without making temporary state executable", async () => {
     // Stub only the unrelated UI build and onboarding. Exercise the real
     // bootstrap, loader, PATH lookup and kernel exec in the runtime boundary.
     for (const path of ["scripts", ".composer-tools/node_modules/.bin", "cli/node_modules/tsx/dist", "packages/paperclip-runner/src/drivers/codex"]) {
@@ -92,7 +93,11 @@ test("runtime isolates candidate code and observes PIDs in the owned container, 
       assert.equal(spawnSync("/tmp/must-not-execute").error?.code, "EACCES");
       console.log("bootstrap-provider-ok");
     `);
-    assert.match(execute(`await (${serveInsideComposerContainer.toString()})();`), /bootstrap-provider-ok/);
+    // Keep the trusted provider bridge's event loop available during the probe.
+    const { stdout } = await promisify(execFile)("docker", ["exec", "--env", "NODE_OPTIONS=", container,
+      "/usr/local/bin/node", "--input-type=module", "-e", `await (${serveInsideComposerContainer.toString()})();`],
+    { encoding: "utf8", timeout: 10000 });
+    assert.match(stdout, /bootstrap-provider-ok/);
   });
   execute('import { createServer } from "node:http"; import { spawn } from "node:child_process"; const child = spawn(process.execPath, ["-e", \'require("node:http").createServer((q,s)=>s.end("isolated runtime")).listen(3199,"127.0.0.1")\'], { detached: true, stdio: "ignore" }); child.unref();');
   await t.test("trusted HTTP relay reaches only the container loopback", async () => {
