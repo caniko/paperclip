@@ -216,11 +216,7 @@ describe("opencode remote execution", () => {
       remoteDir: `${managedRemoteWorkspace}/.paperclip-runtime/opencode/skills`,
       followSymlinks: true,
     }));
-    expect(runSshCommand).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.stringContaining(".claude/skills"),
-      expect.anything(),
-    );
+    expect(runSshCommand).not.toHaveBeenCalled();
     const runCall = runChildProcess.mock.calls.find((entry) => Array.isArray(entry[2]) && entry[2].includes("run")) as
       | [string, string, string[], { env: Record<string, string>; remoteExecution?: { remoteCwd: string } | null }]
       | undefined;
@@ -240,16 +236,15 @@ describe("opencode remote execution", () => {
       | [string, string, string[], { env: Record<string, string>; remoteExecution?: { remoteCwd: string } | null }]
       | undefined;
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_CWD).toBe(managedRemoteWorkspace);
+    const skillFiles = call?.[2].flatMap((arg, index, args) => arg === "--file" ? [args[index + 1]] : []);
+    expect(skillFiles).toContain(`${managedRemoteWorkspace}/.paperclip-runtime/opencode/skills/paperclip/SKILL.md`);
+    expect(skillFiles?.every(file => file?.startsWith(`${managedRemoteWorkspace}/.paperclip-runtime/opencode/skills/`))).toBe(true);
     if (managed) {
       const home = `${managedRemoteWorkspace}/.paperclip-runtime/opencode/managed-auth/run-1`;
       expect(call?.[3].env.HOME).toBe(home);
       expect(call?.[3].env.XDG_DATA_HOME).toBe(`${home}/data`);
       expect(modelProbeCall?.[3].env.XDG_DATA_HOME).toBe(`${home}/data`);
-      expect(runSshCommand).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.stringContaining(`${home}/.claude/skills`),
-        expect.anything(),
-      );
+      expect(call?.[2].some(arg => arg.startsWith(`${home}/.claude/skills`))).toBe(false);
     }
     expect(JSON.parse(call?.[3].env.PAPERCLIP_WORKSPACES_JSON ?? "[]")).toEqual([
       {

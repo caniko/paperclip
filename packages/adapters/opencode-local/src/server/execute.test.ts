@@ -107,7 +107,27 @@ describe("OpenCode local skill injection", () => {
     expect(prompts[1]).toContain("Connection tools:");
   });
 
-  it("injects runtime skills into the configured child HOME", async () => {
+  it.each([true, false])("starts a separate standalone session after a managed run (new identity=%s)", async (reportsSession) => {
+    const commandPath = path.join(configHome, "fake-opencode-managed-affinity");
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    runProcessMock.mockReset();
+    runProcessMock.mockResolvedValue(probeResult({ stdout: JSON.stringify({
+      type: "text", ...(reportsSession ? { sessionID: "fresh-standalone" } : {}), part: { text: "done" },
+    }) }));
+    const result = await execute({
+      runId: "standalone-after-managed",
+      agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+      runtime: { sessionId: "ses_external_owned", sessionParams: { sessionId: "ses_external_owned", cwd: configHome,
+        managedBackendID: "backend-1" }, sessionDisplayId: null, taskKey: null },
+      config: { command: commandPath, cwd: configHome, model: "openai/gpt-5", env: { OPENCODE_ALLOW_ALL_MODELS: "1" } },
+      context: {}, onLog: async () => {},
+    });
+    expect(result.sessionId).toBe(reportsSession ? "fresh-standalone" : null);
+    expect(result.clearSession).toBe(!reportsSession);
+    expect(runProcessMock.mock.calls[0]![3]).not.toContain("--session");
+  });
+
+  it("attaches runtime skills while preserving the configured child HOME", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-configured-home-"));
     const processHome = path.join(root, "process-home");
     const configuredHome = path.join(root, "configured-home");
@@ -120,14 +140,14 @@ describe("OpenCode local skill injection", () => {
 
     const previousHome = process.env.HOME;
     process.env.HOME = processHome;
+    let deliveredSkill = "";
     runProcessMock.mockReset();
-    runProcessMock.mockResolvedValueOnce(probeResult({
-      stdout: JSON.stringify({
-        type: "text",
-        sessionID: "session-configured-home",
-        part: { text: "done" },
-      }),
-    }));
+    runProcessMock.mockImplementationOnce(async (_run, _target, _command, args) => {
+      deliveredSkill = await fs.readFile(args[args.indexOf("--file") + 1]!, "utf8");
+      return probeResult({ stdout: JSON.stringify({
+        type: "text", sessionID: "session-configured-home", part: { text: "done" },
+      }) });
+    });
 
     try {
       const result = await execute({
@@ -166,9 +186,9 @@ describe("OpenCode local skill injection", () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const installedSkill = path.join(configuredHome, ".claude", "skills", "paperclip");
-      expect((await fs.lstat(installedSkill)).isSymbolicLink()).toBe(true);
-      expect(await fs.realpath(installedSkill)).toBe(await fs.realpath(skillSource));
+      expect(deliveredSkill).toBe(await fs.readFile(path.join(skillSource, "SKILL.md"), "utf8"));
+      expect(runProcessMock.mock.calls[0]![4].env.HOME).toBe(configuredHome);
+      await expect(fs.lstat(path.join(configuredHome, ".claude", "skills", "paperclip"))).rejects.toThrow();
       await expect(fs.lstat(path.join(processHome, ".claude", "skills", "paperclip"))).rejects.toThrow();
     } finally {
       if (previousHome === undefined) delete process.env.HOME;

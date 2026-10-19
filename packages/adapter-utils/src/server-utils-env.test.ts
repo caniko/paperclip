@@ -20,4 +20,10 @@ describe("sanitizeInheritedPaperclipEnv", () => {
       PAPERCLIP_API_KEY: "parent-task-token", PAPERCLIP_RUNTIME_API_URL: "parent-task-url",
     })).toEqual({ PATH: "/bin", HOME: "/state", LANG: "C.UTF-8" });
   });
+  it("preserves the user-manager XDG directories used to discover a managed backend", () => {
+    const xdg = { XDG_CONFIG_HOME: "/personal/config", XDG_DATA_HOME: "/personal/data",
+      XDG_STATE_HOME: "/personal/state", XDG_CACHE_HOME: "/personal/cache", XDG_RUNTIME_DIR: "/run/user/1000" };
+    expect(sanitizeInheritedPaperclipEnv({ PAPERCLIP_DECLARATIVE: "true", ...xdg,
+      BETTER_AUTH_SECRET: "controller-only", DATABASE_URL: "controller-only" })).toEqual(xdg);
+  });
 });

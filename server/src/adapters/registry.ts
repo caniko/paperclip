@@ -101,6 +101,7 @@ import {
 } from "@paperclipai/hermes-paperclip-adapter";
 import {
   execute as openCodeExecute,
+  reconcileExecution as reconcileOpenCodeExecution,
   listOpenCodeSkills,
   syncOpenCodeSkills,
   testEnvironment as openCodeTestEnvironment,
@@ -828,6 +829,7 @@ const openCodeLocalAdapter: ServerAdapterModule = {
   type: "opencode_local",
   runtimeToolDelivery: "environment",
   execute: openCodeExecute,
+  reconcileExecution: reconcileOpenCodeExecution,
   testEnvironment: openCodeTestEnvironment,
   listSkills: listOpenCodeSkills,
   syncSkills: syncOpenCodeSkills,
