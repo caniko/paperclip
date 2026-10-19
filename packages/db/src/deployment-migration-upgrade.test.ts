@@ -12,7 +12,7 @@ import { EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, getEmbeddedPostgresTestSupport, star
 type TestSql = ReturnType<typeof connectPostgres>;
 type JournalEntry = { idx: number; version: string; when: number; tag: string; breakpoints: boolean };
 type Journal = { version: string; dialect: string; entries: JournalEntry[] };
-const nativeFile = "0319_exotic_spiral.sql";
+const nativeFile = "0355_sweet_titanium_man.sql";
 const nativeHash = "ac20d3f6626b23aaf07e7bc7f6502bbcd728a2808d4b4adb56b2116bb30e6412";
 // Authentic entry and SQL from 843bb5b, whose upstream prefix through 0288 is unchanged.
 const oldEntry: JournalEntry = { idx: 289, version: "7", when: 1790713813737, tag: "0289_messy_vivisector", breakpoints: true };
@@ -33,7 +33,25 @@ const pendingFiles = [
   "0313_private_task_access.sql", "0314_private_task_draft_assets.sql",
   "0315_rapid_emma_frost.sql", "0316_premium_slayback.sql",
   "0317_messy_famine.sql", "0318_strong_blacklash.sql",
-  "0320_previous_richard_fisk.sql",
+  "0319_heavy_captain_midlands.sql", "0320_daily_onslaught.sql",
+  "0321_acoustic_human_fly.sql", "0322_reflective_kree.sql",
+  "0323_petite_shockwave.sql", "0324_long_franklin_storm.sql",
+  "0325_aberrant_machine_man.sql", "0326_blushing_screwball.sql",
+  "0327_sad_proteus.sql", "0328_chunky_mentallo.sql",
+  "0329_free_wolf_cub.sql", "0330_spooky_white_tiger.sql",
+  "0331_panoramic_spyke.sql", "0332_little_night_nurse.sql",
+  "0333_normal_wild_pack.sql", "0334_rare_slipstream.sql",
+  "0335_absurd_bulldozer.sql", "0336_big_crystal.sql",
+  "0337_exotic_proemial_gods.sql", "0338_absurd_vengeance.sql",
+  "0339_luxuriant_iron_monger.sql", "0340_open_warlock.sql",
+  "0341_abnormal_bucky.sql", "0342_dry_shen.sql",
+  "0343_new_mentor.sql", "0344_wide_blue_marvel.sql",
+  "0345_luxuriant_carmella_unuscione.sql", "0346_cloudy_whiplash.sql",
+  "0347_flippant_imperial_guard.sql", "0348_agent_skill_runtime_hooks.sql",
+  "0349_oval_dragon_lord.sql", "0350_friendly_rhodey.sql",
+  "0351_hard_albert_cleary.sql", "0352_special_warbound.sql",
+  "0353_skinny_gamma_corps.sql", "0354_agent_connection_assignment_hooks.sql",
+  "0356_perpetual_manta.sql",
 ];
 const browserTables = ["browser_use_browsers", "browser_use_runs", "browser_use_sessions", "browser_use_settings"];
 const guardedTables = ["agent_api_keys", "agents", "companies", "company_secret_versions", "company_secrets", "project_workspaces", "projects", "routine_triggers", "routines"];
@@ -166,10 +184,14 @@ async function preservedRows(sql: TestSql, row: Awaited<ReturnType<typeof seed>>
 
 function upgradedRows(before: Awaited<ReturnType<typeof preservedRows>>) {
   // Preserve every historical column, while asserting the exact defaults and
-  // decimal representation introduced by 0312 and 0299.
+  // decimal representation introduced by 0312 and 0299, lifecycle state from
+  // 0320, instance-secret ownership from 0339 and creator provenance from 0343.
   return before.map((rows, index) => rows.map(row => index === 3 || index === 4
-    ? { ...row, spend_month_utc: null, spent_monthly_cents: Number(row.spent_monthly_cents).toFixed(7) }
-    : index === 5 ? { ...row, ai_session_epoch: 0 } : row));
+    ? { ...row, spend_month_utc: null, spent_monthly_cents: Number(row.spent_monthly_cents).toFixed(7),
+        ...(index === 4 ? { lifecycle_state: "ready", lifecycle_required_plugin_ids: null,
+          lifecycle_holds: [], lifecycle_version: 0, lifecycle_error: null,
+          lifecycle_operation: null, created_by_user_id: null } : {}) }
+    : index === 5 ? { ...row, ai_session_epoch: 0, owner_agent_id: null, owner_plugin_id: null } : row));
 }
 
 async function assertGuardsAndCipher(sql: TestSql, row: Awaited<ReturnType<typeof seed>>) {

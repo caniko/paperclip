@@ -1,7 +1,10 @@
 name: PR
+run-name: >-
+  ${{ contains(github.event.pull_request.labels.*.name, 'profile-ci') && (github.event.action != 'labeled' || github.event.label.name == 'profile-ci') && format('CI profile · PR #{0}', github.event.pull_request.number) || '' }}
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
 
 permissions:
   actions: read
@@ -10,6 +13,7 @@ permissions:
 
 jobs:
   ci:
+    if: github.event.action != 'labeled' || github.event.label.name == 'profile-ci'
     # Prepared Native Stop qualified on attempt 1 in run 37967935165.
     # Keep the reviewed workflow source immutable for subsequent PR runs.
     uses: caniko/paperclip/.github/workflows/pr-trusted.yml@4fbe02dbc1ebf59f95bee0eb84cb3edd623f7210

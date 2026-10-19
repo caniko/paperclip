@@ -1,3 +1,5 @@
+import { subscribeDatabaseWork } from "@paperclipai/db";
+import { DELIVERY_QUEUES } from "../delivery-work-notifications.js";
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -38,6 +40,32 @@ describeEmbeddedPostgres("native task monitors", () => {
     const read = async () => (await db.select().from(issues).where(eq(issues.id, issueId)))[0]!;
     return { ...binding, binding, authority, monitor, call, read };
   }
+
+  it("notifies committed monitor changes for another owned task without replay or authorization wakeups", async () => {
+    const value = await fixture(), targetId = randomUUID();
+    await db.insert(issues).values({ id: targetId, companyId: value.companyId,
+      title: "Another owned monitor", status: "in_review", assigneeAgentId: value.agentId });
+    const events: string[] = [];
+    const unsubscribe = subscribeDatabaseWork(db, DELIVERY_QUEUES.issueMonitors, event => { events.push(event); });
+    const original = { taskId: targetId, idempotencyKey: "notify-first", monitor: value.monitor };
+    try {
+      await value.call(original);
+      expect(events).toEqual(["intent", "settled"]);
+      events.length = 0;
+      await value.call({ ...original, idempotencyKey: "notify-earlier",
+        monitor: { ...value.monitor, nextCheckAt: new Date(Date.now() + 30_000).toISOString() } });
+      expect(events).toEqual(["intent", "settled"]);
+      events.length = 0;
+      await value.call(original);
+      expect(events).toEqual([]);
+      await value.call({ taskId: targetId, idempotencyKey: "notify-clear", monitor: null });
+      expect(events).toEqual(["intent", "settled"]);
+      events.length = 0;
+      await db.update(issues).set({ assigneeAgentId: null }).where(eq(issues.id, targetId));
+      await expect(value.call({ ...original, idempotencyKey: "notify-forbidden" })).rejects.toThrow();
+      expect(events).toEqual([]);
+    } finally { unsubscribe(); }
+  });
 
   it("advertises a real binding only in standard execution", async () => {
     const value = await fixture();

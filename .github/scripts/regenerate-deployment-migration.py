@@ -12,6 +12,10 @@ MIGRATIONS = Path("packages/db/src/migrations")
 PROVISIONAL = MIGRATIONS / "0295_nostalgic_rhodey.sql"
 ORIGINAL_SHA256 = "ac20d3f6626b23aaf07e7bc7f6502bbcd728a2808d4b4adb56b2116bb30e6412"
 GUARD_MARKER = b"CREATE FUNCTION paperclip_deployment_guard()"
+JOURNALED_MIGRATIONS = {
+    "0355_sweet_titanium_man.sql": ORIGINAL_SHA256,
+    "0356_perpetual_manta.sql": "e9bfec1b4c74697c941a0791f50000550ccdf211fda8161aad82bdeaa6e75d79",
+}
 
 
 def require(condition, message):
@@ -23,6 +27,45 @@ def digest(value):
     return hashlib.sha256(value).hexdigest()
 
 
+def migration_inputs():
+    return {str(path): digest(path.read_bytes()) for path in sorted(MIGRATIONS.rglob("*"))
+            if path.is_file() and path.suffix in {".sql", ".json"}}
+
+
+def prepare_journaled(evidence, source):
+    journal = json.loads((MIGRATIONS / "meta/_journal.json").read_text())
+    tags = [entry["tag"] for entry in journal["entries"]]
+    for name, expected in JOURNALED_MIGRATIONS.items():
+        require(tags.count(Path(name).stem) == 1, f"Missing or duplicate journaled migration: {name}")
+        require(digest((MIGRATIONS / name).read_bytes()) == expected, f"Executable migration changed: {name}")
+    latest = MIGRATIONS / "meta" / f"{journal['entries'][-1]['idx']:04d}_snapshot.json"
+    tables = json.loads(latest.read_text())["tables"]
+    require({"public.deployment_resources", "public.adapter_session_affinities"} <= tables.keys(),
+            "Combined snapshot lacks deployment resources or executor affinity")
+    (evidence / "journaled-inputs.json").write_text(json.dumps(migration_inputs(), indent=2) + "\n")
+    (evidence / "generation.json").write_text(json.dumps({
+        "schema": "paperclip.deployment-generation.v1", "qualified": False,
+        "state": "journaled-migrations-awaiting-noop-generation", "source": source,
+    }, indent=2) + "\n")
+
+
+def finish_journaled(evidence, source):
+    before = json.loads((evidence / "journaled-inputs.json").read_text())
+    require(migration_inputs() == before, "Drizzle changed the combined journal, SQL or snapshots")
+    for name in before:
+        path = Path(name)
+        target = evidence / "generated" / "packages/db/src/migrations" / path.relative_to(MIGRATIONS)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(path.read_bytes())
+    (evidence / "generation.json").write_text(json.dumps({
+        "schema": "paperclip.deployment-generation.v1", "qualified": False,
+        "state": "verified-journaled-migrations", "source": source,
+        "generator": "pnpm db:generate", "generation_was_noop": True,
+        "executable_sql_sha256": JOURNALED_MIGRATIONS,
+        "member_sha256": before,
+    }, indent=2) + "\n")
+
+
 def prepare(evidence):
     require(evidence.resolve().is_relative_to(Path(os.environ["RUNNER_TEMP"]).resolve()),
             "Evidence must stay in the hosted runner temporary directory")
@@ -31,12 +74,9 @@ def prepare(evidence):
             "Generation needs exact-head source identity")
     needed = PROVISIONAL.is_file()
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-        output.write(f"needed={'true' if needed else 'false'}\n")
+        output.write("needed=true\n")
     if not needed:
-        (evidence / "generation.json").write_text(json.dumps({
-            "schema": "paperclip.deployment-generation.v1", "qualified": False,
-            "state": "provisional-migration-absent", "source": source,
-        }, indent=2) + "\n")
+        prepare_journaled(evidence, source)
         return
     original = PROVISIONAL.read_bytes()
     require(digest(original) == ORIGINAL_SHA256, "Original deployment SQL changed")
@@ -59,6 +99,9 @@ def prepare(evidence):
 
 def finish(evidence):
     source = json.loads((evidence / "source.json").read_text())
+    if (evidence / "journaled-inputs.json").is_file():
+        finish_journaled(evidence, source)
+        return
     before = json.loads((evidence / "journal-before.json").read_text())
     journal_path = MIGRATIONS / "meta/_journal.json"
     after = json.loads(journal_path.read_text())

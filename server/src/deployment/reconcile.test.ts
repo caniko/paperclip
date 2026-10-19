@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
 import { reconcileDeployment } from "./reconcile.js";
@@ -14,8 +14,9 @@ import { ensurePostgresDatabase, runDatabaseBackup, runDatabaseRestore } from "@
 import { findServerAdapter } from "../adapters/registry.js";
 import { projectWorkspaces } from "@paperclipai/db";
 import { projectService } from "../services/projects.js";
-import { budgetPolicies } from "@paperclipai/db";
+import { budgetPolicies, resourceLifecycleEvents } from "@paperclipai/db";
 import { budgetService } from "../services/budgets.js";
+import * as liveEvents from "../services/live-events.js";
 
 let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
 let db: ReturnType<typeof createDb>;
@@ -76,9 +77,13 @@ it("plans without writes, bootstraps once and preserves identities, pauses and s
   const first = await reconcile(manifest);
   expect(await db.select().from(authAccounts)).toHaveLength(1);
   const agentId = first.bindings["agent/worker"];
+  expect((await db.select().from(agents).where(eq(agents.id, agentId)))[0]).toMatchObject({
+    status: "paused", lifecycleState: "preparing", lifecycleHolds: [],
+    lifecycleOperation: { hostComplete: false, completedPluginIds: [] },
+  });
   const routineId = first.bindings["routine/daily"];
   await db.update(routines).set({ status: "paused" }).where(eq(routines.id, routineId));
-  await db.update(agents).set({ status: "paused", pauseReason: "manual", spentMonthlyCents: 123 }).where(eq(agents.id, agentId));
+  await db.update(agents).set({ status: "paused", pauseReason: "manual", lifecycleState: "paused", lifecycleHolds: ["manual"], spentMonthlyCents: 123 }).where(eq(agents.id, agentId));
   const second = await reconcile(manifest);
   expect(second.differences).toEqual([]);
   expect(second.bindings).toEqual(first.bindings);
@@ -124,7 +129,7 @@ it.each(["manual", "budget"])("reenables declarations without resuming %s pauses
   const first = await reconcile(declaration);
   const agentId = first.bindings["agent/worker"];
   const routineId = first.bindings["routine/daily"];
-  await db.update(agents).set({ status: "paused", pauseReason, spentMonthlyCents: 123 }).where(eq(agents.id, agentId));
+  await db.update(agents).set({ status: "paused", pauseReason, lifecycleState: "paused", lifecycleHolds: [pauseReason], spentMonthlyCents: 123 }).where(eq(agents.id, agentId));
   await db.update(routines).set({ status: "paused" }).where(eq(routines.id, routineId));
   const disabled = { ...declaration,
     agents: { worker: { ...declaration.agents.worker, enabled: false } },
@@ -146,6 +151,54 @@ it.each(["manual", "budget"])("reenables declarations without resuming %s pauses
   expect((await reconcile(enabled)).differences).toEqual([]);
   expect((await db.select().from(agents).where(eq(agents.id, agentId)))[0].status).toBe("idle");
   expect((await db.select().from(routines).where(eq(routines.id, routineId)))[0].status).toBe("active");
+});
+
+it("rolls back lifecycle creation and its durable events with the outer deployment", async () => {
+  const declaration = { ...structuredClone(manifest), owner: "lifecycle-rollback", routines: {}, taskBridges: {} };
+  declaration.companies.example.fields.name = "Lifecycle rollback";
+  const beforeAgents = await db.select({ id: agents.id }).from(agents).orderBy(agents.id);
+  const beforeEvents = await db.select().from(resourceLifecycleEvents).orderBy(resourceLifecycleEvents.id);
+  await db.execute(sql`ALTER TABLE deployment_resources ADD CONSTRAINT deployment_lifecycle_fixture
+    CHECK (owner <> 'lifecycle-rollback' OR kind <> 'agent') NOT VALID`);
+  const published = vi.spyOn(liveEvents, "publishLiveEvent");
+  try {
+    await expect(reconcile(declaration)).rejects.toThrow();
+    expect(await db.select().from(companies).where(eq(companies.name, "Lifecycle rollback"))).toEqual([]);
+    expect(await db.select({ id: agents.id }).from(agents).orderBy(agents.id)).toEqual(beforeAgents);
+    expect(await db.select().from(resourceLifecycleEvents).orderBy(resourceLifecycleEvents.id)).toEqual(beforeEvents);
+    expect(await db.select().from(deploymentResources).where(eq(deploymentResources.owner, declaration.owner))).toEqual([]);
+    expect(published).not.toHaveBeenCalled();
+  } finally {
+    published.mockRestore();
+    await db.execute(sql`ALTER TABLE deployment_resources DROP CONSTRAINT deployment_lifecycle_fixture`);
+  }
+});
+
+it("publishes a company rename only after the complete declaration commits", async () => {
+  const declaration = { ...structuredClone(manifest), owner: "rename-rollback", routines: {}, taskBridges: {} };
+  declaration.companies.example.fields.name = "Before atomic rename";
+  const first = await reconcile(declaration);
+  const companyId = first.bindings["company/example"];
+  const changed = structuredClone(declaration);
+  changed.companies.example.fields.name = "After atomic rename";
+  changed.agents.worker.fields.name = "Renamed atomic worker";
+  await db.execute(sql`ALTER TABLE deployment_resources ADD CONSTRAINT deployment_rename_fixture
+    CHECK (owner <> 'rename-rollback' OR kind <> 'agent') NOT VALID`);
+  const published = vi.spyOn(liveEvents, "publishLiveEvent");
+  try {
+    vi.stubEnv("PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN", "fixture-managed-instance");
+    await expect(reconcile(changed)).rejects.toThrow();
+    expect((await db.select().from(companies).where(eq(companies.id, companyId)))[0].name).toBe("Before atomic rename");
+    expect(published).not.toHaveBeenCalled();
+    await db.execute(sql`ALTER TABLE deployment_resources DROP CONSTRAINT deployment_rename_fixture`);
+    await reconcile(changed);
+    expect(published.mock.calls.some(([event]) => event.companyId === companyId && event.type === "activity.logged"
+      && event.payload?.action === "company.updated")).toBe(true);
+  } finally {
+    vi.unstubAllEnvs();
+    published.mockRestore();
+    await db.execute(sql`ALTER TABLE deployment_resources DROP CONSTRAINT IF EXISTS deployment_rename_fixture`);
+  }
 });
 
 it("allocates colliding company prefixes within one atomic deployment transaction", async () => {
@@ -182,7 +235,7 @@ it.each(["company", "agent"] as const)("preserves %s budget pause and policy on 
   if (kind === "company") {
     await db.update(companies).set({ status: "paused", pauseReason: "budget", pausedAt }).where(eq(companies.id, id));
   } else {
-    await db.update(agents).set({ status: "paused", pauseReason: "budget", pausedAt }).where(eq(agents.id, id));
+    await db.update(agents).set({ status: "paused", pauseReason: "budget", pausedAt, lifecycleState: "paused", lifecycleHolds: ["budget"] }).where(eq(agents.id, id));
   }
   const readScope = async () => kind === "company"
     ? (await db.select().from(companies).where(eq(companies.id, id)))[0]

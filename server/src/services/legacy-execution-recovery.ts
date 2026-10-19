@@ -1,5 +1,5 @@
 import { hasRequiredWorkspaceRecovery, preserveWorkspaceRestoreRecoveryMetadata, LEGACY_WORKSPACE_RECOVERY_SCHEMA } from "./workspace-restore-recovery-state.js";
-import { hasUnrestoredRemoteWorkspace, preserveLegacyWorkspaceRestoreSources } from "./legacy-workspace-restore-recovery.js";
+import { hasUnrestoredRemoteWorkspace, preserveLegacyWorkspaceRestoreSources, type LegacyWorkspaceRestoreSource } from "./legacy-workspace-restore-recovery.js";
 import { isPreDispatchReviewWaitVerified } from "./pre-dispatch-review-wait.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { normalizeMaxTurnStopReason } from "./heartbeat-stop-metadata.js";
@@ -75,11 +75,12 @@ export async function terminalizeLegacyExecution(input: {
   writeConditions?: SQL[];
   /** Adapter settlement records a copy-back failure before host finalization. */
   recordRestoreFailureOnly?: boolean;
+  workspaceRestoreSource?: LegacyWorkspaceRestoreSource;
 }) {
   const { db, run, status } = input;
   let patch = input.patch;
   const issueId =
-    run.nativeIssueId ??
+    run.nativeIssueId ?? run.issueId ??
     (typeof run.contextSnapshot?.issueId === "string"
       ? run.contextSnapshot.issueId
       : null);
@@ -100,7 +101,7 @@ export async function terminalizeLegacyExecution(input: {
     const [current] = await tx.select().from(heartbeatRuns).where(and(
       eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
     ));
-    if (!current || current.runtimeMode !== "legacy" ||
+    if (!current || (current.runtimeMode !== "legacy" && !(input.recordRestoreFailureOnly && current.runtimeMode === "native")) ||
         (!input.recordRestoreFailureOnly && !(input.fromStatuses ?? [run.status]).includes(current.status))) return null;
     if (patch?.resultJson !== undefined) patch = { ...patch,
       resultJson: preserveWorkspaceRestoreRecoveryMetadata(current.resultJson,
@@ -125,7 +126,8 @@ export async function terminalizeLegacyExecution(input: {
       )
       .returning();
     if (!updated) return null;
-    const retainedLeaseIds = await preserveLegacyWorkspaceRestoreSources(tx as unknown as Db, input.recordRestoreFailureOnly ? { ...updated, status: "failed" } : updated);
+    const retainedLeaseIds = await preserveLegacyWorkspaceRestoreSources(tx as unknown as Db,
+      input.recordRestoreFailureOnly ? { ...updated, status: "failed" } : updated, input.workspaceRestoreSource);
     if (retainedLeaseIds.length) {
       [updated] = await tx.update(heartbeatRuns).set({ resultJson: {
         ...updated.resultJson,
@@ -155,9 +157,10 @@ export async function terminalizeLegacyExecution(input: {
       // newer owner or conversation generation start before copy-back settled.
       // A resolved no-replay hold can coexist with another active incident; the
       // one-active-action index must never make us supersede either obligation.
+      const fingerprint = `${run.runtimeMode === "native" ? "native-workspace" : "legacy-execution"}:${run.id}`;
       const [existing] = await tx.select().from(issueRecoveryActions).where(and(
         eq(issueRecoveryActions.companyId, run.companyId), eq(issueRecoveryActions.sourceIssueId, task.id),
-        eq(issueRecoveryActions.fingerprint, `legacy-execution:${run.id}`),
+        eq(issueRecoveryActions.fingerprint, fingerprint),
       )).orderBy(desc(issueRecoveryActions.createdAt)).limit(1).for("update");
       const decision = existing?.evidence.executionReconciliation as Record<string, unknown> | undefined;
       if (hasRequiredWorkspaceRecovery(existing?.evidence) && decision?.runId === run.id) return updated;
@@ -180,8 +183,9 @@ export async function terminalizeLegacyExecution(input: {
       };
       if (existing) await tx.update(issueRecoveryActions).set(values).where(eq(issueRecoveryActions.id, existing.id));
       else await tx.insert(issueRecoveryActions).values({ ...values, companyId: run.companyId,
-        sourceIssueId: task.id, kind: "active_run_watchdog", cause: LEGACY_RECOVERY_CAUSE,
-        fingerprint: `legacy-execution:${run.id}`, attemptCount: 1 });
+        sourceIssueId: task.id, kind: "active_run_watchdog",
+        cause: run.runtimeMode === "native" ? "native_continuation_requires_reconciliation" : LEGACY_RECOVERY_CAUSE,
+        fingerprint, attemptCount: 1 });
       return updated;
     }
     const review = task?.status === "in_review" ? parseIssueExecutionState(task.executionState) : null;
@@ -313,9 +317,14 @@ export async function settleInterruptedNativeBootstrap(
 
 /** Capture the required-file obligation before unrelated host writes. Keeps
  * execution ownership while the adapter's host finalization is still running. */
-export async function recordLegacyWorkspaceRestoreFailure(db: Db, run: Run, evidence: Record<string, unknown>) {
+export async function recordLegacyWorkspaceRestoreFailure(db: Db, run: Run, evidence: Record<string, unknown>, source?: LegacyWorkspaceRestoreSource) {
   if (run.runtimeMode !== "legacy" || !hasWorkspaceRestoreFailure(evidence)) return;
-  await terminalizeLegacyExecution({ db, run, status: run.status,
-    recordRestoreFailureOnly: true, patch: { resultJson: evidence },
+  return recordRequiredWorkspaceRestoreFailure(db, run, evidence, source);
+}
+
+export async function recordRequiredWorkspaceRestoreFailure(db: Db, run: Run, evidence: Record<string, unknown>, source?: LegacyWorkspaceRestoreSource) {
+  if (!hasWorkspaceRestoreFailure(evidence)) return;
+  return terminalizeLegacyExecution({ db, run, status: run.status,
+    recordRestoreFailureOnly: true, patch: { resultJson: evidence }, workspaceRestoreSource: source,
   });
 }

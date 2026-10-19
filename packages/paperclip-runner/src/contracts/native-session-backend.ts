@@ -40,6 +40,7 @@ export interface OpenNativeSessionInput {
 }
 
 export interface NativeSessionRecoveryOptions {
+  normalizeReplayPayload?(payload: PrpEvent["payload"]): PrpEvent["payload"];
   /** Abort provider recovery and release any not-yet-returned provider state. */
   signal: AbortSignal;
 }
@@ -193,6 +194,8 @@ export interface NativeSession {
     /** Set by orchestration only after successful provider-session recovery. */
     continuation?: true;
     requestedCollaborationMode?: "default" | "plan";
+    /** OpenCode/OpenRouter only. Applies to this turn, never subsequent turns. */
+    reasoningMode?: "default" | "disabled";
   }): Promise<{
     turnId: string;
     effectiveCollaborationMode?: "default" | "plan";
@@ -213,6 +216,7 @@ export interface NativeSession {
     signal: AbortSignal;
   }): NativeSessionCancellation;
   resolveRuntimeRequest?(input: {
+    commandId?: string;
     requestId: string;
     turnId: string;
     resolution: HarnessRuntimeRequestResolution;

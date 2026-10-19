@@ -28,5 +28,25 @@ SQL, patch, snapshots, logs and source/member receipts. Artifact `11586146982`
 contains the retention readback. Both downloaded archives were verified against
 the provider's SHA-256 digests; their actual lifetimes are 2,678,399 seconds.
 
-This establishes source preparation. Application qualification and deployment
-acceptance require the exact signed successor that imports these bytes.
+## Upstream master integration (2026-10-18)
+
+The preserving merge of upstream `27709a99b1a2d3f1e58ab77d5a0e6b48d4626bc1`
+keeps its complete journal through `0354`. Two successive `pnpm db:generate`
+invocations regenerated the branch additions against that metadata:
+
+| Previous name | Combined name | Executable SQL SHA-256 |
+| --- | --- | --- |
+| `0319_exotic_spiral.sql` | `0355_sweet_titanium_man.sql` | `ac20d3f6626b23aaf07e7bc7f6502bbcd728a2808d4b4adb56b2116bb30e6412` |
+| `0320_previous_richard_fisk.sql` | `0356_perpetual_manta.sql` | `e9bfec1b4c74697c941a0791f50000550ccdf211fda8161aad82bdeaa6e75d79` |
+
+Both executable files remain byte-identical to their original branch versions.
+The first generated table/index prefix is unchanged; its original guard suffix
+is retained in full. Drizzle generated the snapshots and appended journal
+entries, and its normal pruning leaves snapshots `0352` through `0356`.
+Existing database rows retain their original hashes, IDs and timestamps; the
+hash-based upgrade path recognizes the renumbered SQL without reapplying it.
+
+Local regeneration establishes source preparation only. Hosted qualification of
+the exact successor, including fresh bootstrap, authentic-history upgrades and
+snapshot drift, is still required. Earlier hosted receipts above apply to their
+recorded source; they do not qualify this merge or authorize deployment.

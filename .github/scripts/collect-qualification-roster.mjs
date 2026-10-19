@@ -87,9 +87,12 @@ try {
   const errors = [...unresolvedStaticErrors, ...supplementalStaticErrors, ...unhandledErrors,
     ...supplemental.unhandledErrors, ...moduleErrors(testModules), ...moduleErrors(supplemental.testModules)]
     .map(error => ({ name: error.name, message: error.message, stack: error.stack }));
-  const sites = declarationSites(declarations, rows, sources);
+  const sites = declarationSites(declarations, rows, sources, policy, provenance);
   const missing = specifications.filter(spec => !rows.some(row => row.file === spec.file && row.project === spec.project));
-  const roster = { schema: "paperclip.complete-coverage-map.v1", head: source.head, tree: execFileSync("git", ["rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim(),
+  const roster = { schema: "paperclip.complete-coverage-map.v1", repository: source.repository, pull_request: source.pr,
+    head: source.head, base: source.base, harness_sha256: source.harness_sha256,
+    exception_policy_sha256: source.exception_policy_sha256,
+    tree: execFileSync("git", ["rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim(),
     run_id: source.run_id, run_attempt: source.run_attempt, collection_platform: process.platform,
     all_declared_cases_required: true, qualified: false, collection_is_execution_evidence: false,
     scope: { kind: "configured-workspace-vitest", config: "vitest.config.ts", generated_dist_excluded: true },
@@ -99,7 +102,9 @@ try {
     counts: { specifications: specifications.length, runtime_cases: rows.length, static_declarations: declarations.length,
       skipped_in_collection_environment: rows.filter(row => row.skipped_in_environment).length,
       unmapped_cases: mapped.cases.filter(row => !row.environments.length).length },
-     cases: mapped.cases, declaration_sites: sites, missing_specifications: missing, collection_errors: errors,
+      cases: mapped.cases, declaration_sites: sites.filter(site => !site.non_declaration),
+      static_non_declarations: sites.filter(site => site.non_declaration),
+      missing_specifications: missing, collection_errors: errors,
      import_entry_provenance: provenance, resolved_parser_gaps: resolvedParserGaps,
     stale_mapping_rules: mapped.stale_rules, conditional_expansions: mapped.conditional_expansions,
     blockers: ["Every required case still needs source-bound, attempt-1 execution evidence with zero failures, skips and retries.",

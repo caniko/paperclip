@@ -77,7 +77,7 @@ test("real Vitest collection preserves skipped cases and static-only declaration
   try {
     symlinkSync(path.join(repoRoot, "node_modules"), path.join(root, "node_modules"), "junction");
     writeFileSync(path.join(root, "fixture.test.mjs"), `import { beforeAll, describe, it } from "vitest";
-      beforeAll(() => { throw new Error("collection must not execute hooks"); });
+      beforeAll(() => { testSetupHelper("setup call"); throw new Error("collection must not execute hooks"); });
       it.each([1, 2])("same display title", () => { throw new Error("collection must not execute assertions"); });
       describe.skip("unavailable SDK", () => { it("required case", () => {}); });
       it.todo("required todo");
@@ -88,7 +88,13 @@ test("real Vitest collection preserves skipped cases and static-only declaration
         "multiline title", () => {});
       it(
         "multiline direct", () => {});
-      it("contains ordinary helper", () => { testOrdinaryHelper("ordinary call", () => {}); });`);
+      it("contains ordinary helper", () => { testOrdinaryHelper("ordinary call", () => {}); const test = { count() {} }; test.count("fixture method"); it("nested invalid", () => {}); it.each([1])("nested parameter invalid", () => {}); });
+      function fixtureDiagnostic() { testDiagnostic("probe call", {}); }
+      function registerFixture(name, fn) {
+        if (process.pid < 0) { it.skip(name, fn); return; }
+        it(name, fn);
+      }
+      registerFixture("factory case", () => {});`);
     const configFile = path.join(root, "vitest.config.mjs");
     writeFileSync(configFile, `export default { test: { name: "roster-contract", root: ${JSON.stringify(root)}, include: ["fixture.test.mjs"] } };`);
     const options = { root, config: configFile, watch: false, reporters: [], includeTaskLocation: true, allowOnly: false, maxWorkers: 1 };
@@ -103,13 +109,20 @@ test("real Vitest collection preserves skipped cases and static-only declaration
     const rows = collectRows(testModules, root);
     assert.deepEqual(unhandledErrors, []);
     assert.ok(testModules.every(module => module.errors().length === 0));
-    assert.equal(rows.length, 11);
+    assert.equal(rows.length, 12);
     assert.equal(rows.filter(row => row.name === "same display title").length, 2);
-    assert.equal(new Set(rows.map(row => row.id)).size, 11);
+    assert.equal(new Set(rows.map(row => row.id)).size, 12);
     assert.equal(rows.filter(row => row.skipped_in_environment).length, 2);
     assert.ok(!rows.some(row => row.name === "conditional declaration"));
     assert.ok(rows.every(row => row.required && row.status === "unexecuted" && row.location?.line > 0));
-    const sites = declarationSites(declarations, rows, { "fixture.test.mjs": readFileSync(path.join(root, "fixture.test.mjs"), "utf8") });
+    const fixtureSource = readFileSync(path.join(root, "fixture.test.mjs"), "utf8");
+    const staticPolicy = {
+      static_helper_calls: [{ file: "fixture.test.mjs", source_sha256: sha256(fixtureSource),
+        anchor: "function fixtureDiagnostic()", callees: ["testDiagnostic"], reason: "Fixture diagnostic helper, not test registration." }],
+      declaration_branches: [{ file: "fixture.test.mjs", source_sha256: sha256(fixtureSource),
+        anchor: "function registerFixture(", calls: ["it.skip(name, fn)", "it(name, fn)"] }],
+    };
+    const sites = declarationSites(declarations, rows, { "fixture.test.mjs": fixtureSource }, staticPolicy);
     for (const name of ["same display title", "left", "right", "enabled conditional", "multiline title", "multiline direct", "contains ordinary helper"]) {
       const site = sites.find(row => row.name === name);
       assert.deepEqual(site.runtime_case_ids_at_site, rows.filter(row => row.name === name).map(row => row.id));
@@ -120,6 +133,20 @@ test("real Vitest collection preserves skipped cases and static-only declaration
       assert.deepEqual(site.runtime_case_ids_at_site, []);
     }
     assert.equal(sites.length, declarations.length, "Every original static declaration remains retained");
+    assert.equal(sites.find(row => row.name === "ordinary call").non_declaration.kind, "runtime-test-body-call");
+    assert.equal(sites.find(row => row.name === "fixture method").non_declaration.kind, "runtime-test-body-call");
+    assert.deepEqual(sites.find(row => row.name === "ordinary call").non_declaration.enclosing_case_ids,
+      rows.filter(row => row.name === "contains ordinary helper").map(row => row.id));
+    assert.equal(sites.find(row => row.name === "setup call").non_declaration.kind, "runtime-hook-body-call");
+    assert.equal(sites.find(row => row.name === "conditional declaration").non_declaration, undefined,
+      "An uncollected real declaration remains an unresolved obligation");
+    assert.equal(sites.find(row => row.name === "nested invalid").non_declaration, undefined);
+    assert.equal(sites.find(row => row.name === "nested parameter invalid").non_declaration, undefined);
+    assert.equal(sites.find(row => row.name === "probe call").non_declaration.kind, "source-bound-helper-call");
+    for (const site of sites.filter(row => row.name === "name")) {
+      assert.deepEqual(site.runtime_case_ids_at_site, rows.filter(row => row.name === "factory case").map(row => row.id));
+    }
+    assert.throws(() => declarationSites(declarations, rows, { "fixture.test.mjs": fixtureSource + "\n// drift" }, staticPolicy), /source drift/);
     if (process.env.EVIDENCE) {
       const directory = path.join(process.env.EVIDENCE, "roster-contract");
       mkdirSync(directory, { recursive: true });
@@ -179,6 +206,16 @@ test("real Vitest reconciles an import-only entry to independently collected sou
     assert.ok(result.bindings.every(binding => binding.source_file === "source.test.ts" && binding.source_location.line > 0));
     assert.equal(result.collection_is_execution_evidence, false);
     assert.equal(collectRows(primaryModules, root).filter(row => row.skipped_in_environment).length, 1);
+    const importSources = Object.fromEntries(["entry.test.ts", "source.test.ts"]
+      .map(file => [file, readFileSync(path.join(root, file), "utf8")]));
+    const importedSites = declarationSites(declarations, collectRows(primaryModules, root), importSources, {}, [result]);
+    assert.ok(importedSites.every(site => site.runtime_case_ids_at_site.length),
+      `Every imported declaration must bind the wrapper's actual parameter identities: ${JSON.stringify({ importedSites, bindings: result.bindings })}`);
+    assert.deepEqual(new Set(importedSites.flatMap(site => site.runtime_case_ids_at_site)),
+      new Set(collectRows(primaryModules, root).map(row => row.id)));
+    assert.ok(importedSites.every(site => site.declaration_provenance.kind === "source-bound-import-entry"));
+    assert.throws(() => declarationSites(declarations, collectRows(primaryModules, root),
+      { ...importSources, "source.test.ts": importSources["source.test.ts"] + "\n// drift" }, {}, [result]), /source drift/);
     assert.equal(reconcileImportEntry(entries[0], modules, [], root).complete, false);
     assert.equal(reconcileImportEntry(entries[0], primaryModules, declarations, root).complete, false);
     const sourceRows = collectRows(supplemental.testModules, root);
@@ -232,5 +269,5 @@ test("only literal side-effect test imports establish declaration edges", () => 
 });
 
 function repoRootForEscape() {
-  return fileURLToPath(new URL("../../server/src/__tests__/heartbeat-native-runner-selection.test.ts", import.meta.url));
+  return fileURLToPath(new URL("./qualification-roster.mjs", import.meta.url));
 }

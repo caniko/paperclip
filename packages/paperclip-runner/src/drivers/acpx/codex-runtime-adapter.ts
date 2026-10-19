@@ -1,3 +1,5 @@
+import { createPiThinkingAdmission, resolvePiThinkingLevel } from "./pi-thinking.js";
+import { usesPreconfiguredHome } from "../preconfigured-home.js";
 import type { ChildProcess } from "node:child_process";
 
 import {
@@ -32,6 +34,7 @@ import { AcpxApprovalRequiredError, decideAcpxPermission } from "./permission-po
 import { ACPX_CAPABILITY_PROFILES } from "./capability-profiles.js";
 import { admitCursorInstructions, createCursorInstructionAdmission } from "./cursor-instructions.js";
 import { createAcpxModeBinding } from "./provider-mode.js";
+import { assertCopilotPromptPolicy, createCopilotProtocolGuard } from "./copilot-policy.js";
 
 const VERIFIED_COMMAND_SENTINEL = "paperclip-verified-acpx-command";
 const DEFAULT_RUNTIME_CLOSE_TIMEOUT_MS = 2_000;
@@ -185,6 +188,8 @@ export async function openQualifiedAcpxRuntime(
     );
   }
 
+  const preconfigured = usesPreconfiguredHome(options.launchEnvironment);
+  if (preconfigured && options.profile.agent === "codex") throw new Error("preconfigured ACPX Codex cannot protect Runner state; use native Codex or isolated mode");
   const createRegistry = dependencies.createRegistry ?? createAgentRegistry;
   const createStore = dependencies.createStore ?? createRuntimeStore;
   const createRuntime = dependencies.createRuntime ?? createAcpRuntime;
@@ -301,6 +306,8 @@ export async function openQualifiedAcpxRuntime(
   };
   const commandLaunches = { count: 0, refreshConsumedCommand: options.refreshConsumedCommand };
   const modeBinding = createAcpxModeBinding(options.profile.agent, options.mode);
+  const selectedPiThinkingLevel = resolvePiThinkingLevel(options.profile.agent, options.piThinkingLevel);
+  const piThinking = selectedPiThinkingLevel ? createPiThinkingAdmission(selectedPiThinkingLevel, { restoring: options.restoringSession }) : undefined;
   const cursorInstructions = options.profile.agent === "cursor"
     ? createCursorInstructionAdmission(options.systemInstructions)
     : null;
@@ -311,6 +318,7 @@ export async function openQualifiedAcpxRuntime(
       const mode = modeBinding?.createGuard();
       return (direction: "inbound" | "outbound", message: unknown) => { instructions?.(direction, message); mode?.(direction, message); };
     } } : {}),
+    ...(piThinking ? { protocolGuardFactory: () => piThinking.createGuard() } : {}),
     sessionStore,
     agentRegistry: createRegistry({
       // Preserve Claude's ACP capability identity. This is metadata only: the
@@ -327,6 +335,9 @@ export async function openQualifiedAcpxRuntime(
     elicitationModes: ["form"],
     ...(options.clientCapabilities === undefined ? {} : { clientCapabilities: structuredClone(options.clientCapabilities) }),
     extensionMethods: [...new Set([...extensionRequests, ...extensionNotifications])],
+    ...(options.profile.agent === "copilot" ? {
+      protocolGuardFactory: () => createCopilotProtocolGuard(options.profile.reportedModelId),
+    } : {}),
     onExtensionRequest: async (method, params, context) => {
       const active = extensionBoundary.active;
       if (!extensionRequests.has(method) || !active?.onRequest || !ownsExtensionTurn(active, params) || context.signal.aborted) {
@@ -346,17 +357,21 @@ export async function openQualifiedAcpxRuntime(
       if (!extensionNotifications.has(method) || !active?.onNotification || !ownsExtensionTurn(active, params)) return;
       active.onNotification(method, params.sessionId === undefined ? { ...params, sessionId: active.sessionId } : params);
     },
-    nonInteractivePermissions: "fail",
+    nonInteractivePermissions: preconfigured ? "deny" : "fail",
     permissionPolicy: {
       ...options.permissionPolicy,
-      autoApprove: options.permissionPolicy.autoApprove
+      ...(preconfigured ? { defaultAction: "deny" as const } : {}),
+      autoApprove: !preconfigured && options.permissionPolicy.autoApprove
         ? [...options.permissionPolicy.autoApprove]
         : undefined,
-      escalate: options.permissionPolicy.escalate
+      escalate: !preconfigured && options.permissionPolicy.escalate
         ? [...options.permissionPolicy.escalate]
         : undefined,
     },
-    mcpServers: options.mcpServers.map((server) => ({
+    mcpServers: options.mcpServers.map((server) => "command" in server ? {
+      name: server.name, command: server.command, args: server.args,
+      env: Object.entries(server.env).map(([name, value]) => ({ name, value })),
+    } : ({
       type: "http" as const,
       name: server.name,
       url: server.url,
@@ -365,6 +380,7 @@ export async function openQualifiedAcpxRuntime(
       ],
     })),
     onPermissionRequest: async (request, context) => {
+      if (preconfigured) return { outcome: "reject_once" };
       const rawSessionId = objectRecord(request.raw).sessionId;
       if (!extensionBoundary.sessionIds.has(request.sessionId)
         || (rawSessionId !== undefined && rawSessionId !== request.sessionId)) {
@@ -422,11 +438,15 @@ export async function openQualifiedAcpxRuntime(
       ...definedEnvironment(options.launchEnvironment),
       ...(options.profile.agent === "claude"
         ? {
-            PAPERCLIP_ACPX_ISOLATED_CONTEXT: "1",
+            ...(preconfigured ? {
+              // Advertise the requested exact ID without rewriting user settings.
+              ANTHROPIC_MODEL: options.profile.reportedModelId,
+              ANTHROPIC_CUSTOM_MODEL_OPTION: options.profile.reportedModelId,
+            } : { PAPERCLIP_ACPX_ISOLATED_CONTEXT: "1" }),
             // This URL comes from the runner-owned authenticated tool bridge,
             // never provider-supplied permission-request metadata.
             PAPERCLIP_ACPX_TASK_TOOL_BRIDGE_URL: options.mcpServers.find(
-              (server) => server.runnerOwned && server.name === "paperclip",
+              (server): server is Extract<typeof server, { url: string }> => "url" in server && server.runnerOwned && server.name === "paperclip",
             )?.url ?? "",
           }
         : {}),
@@ -466,6 +486,11 @@ export async function openQualifiedAcpxRuntime(
           // Forward the requested model unchanged; verify the provider's
           // reported selection before admitting a billable prompt.
           model: options.profile.reportedModelId,
+          ...(preconfigured && options.profile.agent === "claude" ? {
+            allowedTools: options.mcpServers
+              .filter(server => server.runnerOwned && server.name.startsWith("paperclip_runner_"))
+              .map(server => `mcp__${server.name}__*`),
+          } : {}),
           ...(options.systemInstructions
             ? { systemPrompt: { append: options.systemInstructions } }
             : {}),
@@ -507,6 +532,18 @@ export async function openQualifiedAcpxRuntime(
           await commandLaunches.refreshConsumedCommand?.();
         }
         return ensuredHandle;
+      }) : piThinking ? ensuredSession.then(async (ensuredHandle) => {
+        handle = ensuredHandle;
+        options.signal?.throwIfAborted();
+        if (!piThinking.isReady()) {
+          if (!runtime.setConfigOption) throw new Error("Pi thinking admission requires native configuration");
+          await runtime.setConfigOption({ handle: ensuredHandle, key: "thought_level", value: selectedPiThinkingLevel! });
+          piThinking.assertReady();
+          await children.verifyLifetimeOwnership();
+          options.signal?.throwIfAborted();
+          await commandLaunches.refreshConsumedCommand?.();
+        }
+        return ensuredHandle;
       }) : ensuredSession)
     .catch((error: unknown) => {
       throw classifySessionEnsureFailure(error);
@@ -522,6 +559,7 @@ export async function openQualifiedAcpxRuntime(
       : await boundedHandshake;
     cursorInstructions?.assertReady();
     modeBinding?.assertReady();
+    piThinking?.assertReady();
     // A provider can answer only after the verified sentinel is armed, but do
     // not admit the session until the owner has observed that exact handoff.
     await children.verifyLifetimeOwnership();
@@ -576,7 +614,7 @@ export async function openQualifiedAcpxRuntime(
     return runtimePort(
       runtime,
       handle,
-      { ...requireIdentity(handle), ...(modeBinding ? { mode: modeBinding.selectedMode } : {}) },
+      { ...requireIdentity(handle), ...(modeBinding ? { mode: modeBinding.selectedMode } : {}), ...(selectedPiThinkingLevel ? { piThinkingLevel: selectedPiThinkingLevel } : {}) },
       baseStore,
       children,
       runtimeCloseTimeoutMs,
@@ -584,6 +622,7 @@ export async function openQualifiedAcpxRuntime(
       commandLaunches,
       permissionBoundary,
       extensionBoundary,
+      options.profile.agent === "copilot" ? assertCopilotPromptPolicy : undefined,
     );
   } catch (error) {
     const cleanupReason = "ACPX runtime identity validation failed";
@@ -1013,6 +1052,7 @@ function runtimePort(
   commandLaunches: { count: number; refreshConsumedCommand?: () => Promise<void> },
   permissionBoundary: { active: AbortController | null; hasAdmittedTurn: boolean; handler?: AcpRuntimeOptions["onPermissionRequest"] },
   extensionBoundary: AcpxRuntimeExtensionBoundary,
+  assertPromptPolicy?: (text: string) => void,
 ): AcpxRuntimePort {
   extensionBoundary.sessionIds = new Set([identity.backendSessionId]);
   let extensionControls: Promise<void> = Promise.resolve();
@@ -1370,6 +1410,7 @@ function runtimePort(
         }
       : {}),
     startTurn(input) {
+      assertPromptPolicy?.(input.text);
       if (extensionBoundary.active) throw new Error("ACPX runtime already has an active turn");
       const approval = new AbortController();
       const controller = new AbortController();

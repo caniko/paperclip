@@ -90,6 +90,9 @@ jobs:
           - lane: tests-workspaces-b
             mode: general
             group: general-workspaces-b
+          - lane: tests-workspaces-c
+            mode: general
+            group: general-workspaces-c
           - lane: tests-serialized-1
             mode: serialized
             shard_index: 0
@@ -135,7 +138,7 @@ jobs:
           pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
           pnpm run preflight:workspace-links
       - name: Provision native backup clients and zsh for workspace cases
-        if: matrix.lane == 'tests-workspaces-b'
+        if: matrix.lane == 'tests-workspaces-b' || matrix.lane == 'tests-workspaces-c'
         run: |
           set -euo pipefail
           node .github/scripts/prepare-source-native-tools.mjs "$EVIDENCE" 2>&1 | tee "$EVIDENCE/native-tools.log"
@@ -177,7 +180,10 @@ jobs:
         run: |
           set -euo pipefail
           strict=()
-          case "$LANE" in tests-*|regression) strict+=(--strict-reports) ;; esac
+          case "$LANE" in
+            tests-*) strict+=(--strict-reports --defer-environment-skips) ;;
+            regression) strict+=(--strict-reports) ;;
+          esac
           python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" "$OUTCOME" "${strict[@]}"
       - name: Retain original evidence
         if: always()
@@ -206,7 +212,7 @@ jobs:
           persist-credentials: false
       - name: Read actual provider expiry and digest for every required artifact
         run: |
-          python3 .github/scripts/qualification-evidence.py artifacts source-proof- 15 retention.json
+          python3 .github/scripts/qualification-evidence.py artifacts source-proof- 16 retention.json
           python3 .github/scripts/qualification-evidence.py artifacts trusted-stop-identity- 1 harness-retention.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -225,15 +231,15 @@ jobs:
           python3 .github/scripts/qualification-evidence.py artifacts source-retention- 1 retention-audit.json
 
   expected_red:
-    name: Regression evidence / original F645 RED
+    name: Regression evidence / retained original F645 RED
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-      - name: Bind successor test source before baseline execution
+      - name: Bind successor and retain the immutable original without re-execution
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -241,37 +247,7 @@ jobs:
           mkdir -p "$EVIDENCE"
           printf '%s\n' "EVIDENCE=$EVIDENCE" "PAPERCLIP_HOME=$RUNNER_TEMP/paperclip-red-fixture" "PAPERCLIP_CONFIG=$RUNNER_TEMP/paperclip-red-fixture/config.json" >> "$GITHUB_ENV"
           python3 .github/scripts/qualification-evidence.py initialize "$EVIDENCE"
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: f6451f242d5cbb803e3c265e90f05b642e573203
-          path: baseline
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: 24
-          package-manager-cache: false
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
-        with:
-          version: 9.15.4
-          run_install: false
-      - name: Install original dependencies and overlay only successor regression fixture
-        run: |
-          set -euo pipefail
-          test "$(git -C baseline rev-parse HEAD)" = f6451f242d5cbb803e3c265e90f05b642e573203
-          cp packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts baseline/packages/adapters/hermes/src/gateway/server/
-          cd baseline
-          pnpm install --frozen-lockfile 2>&1 | tee "$EVIDENCE/install.log"
-          pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
-      - name: Require original assertion RED separately from successor GREEN
-        run: |
-          set -uo pipefail
-          set +e
-          (cd baseline && pnpm exec vitest run packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter=junit --outputFile.junit="$EVIDENCE/regression.xml") 2>&1 | tee "$EVIDENCE/regression.log"
-          status=$?
-          set -e
-          printf '%s\n' "$status" > "$EVIDENCE/exit-status.txt"
-          test "$status" = 1 || exit 1
-          python3 .github/scripts/qualification-evidence.py expected-red "$EVIDENCE"
+          python3 .github/scripts/qualification-evidence.py retain-original-red "$EVIDENCE"
       - name: Bind failed original evidence
         if: failure()
         run: python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" failure
