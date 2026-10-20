@@ -72,6 +72,8 @@ describe("native declaration adapter contracts", () => {
     ["opencode_local", { dangerouslySkipPermissions: false }, { "env.NODE_OPTIONS": "provider" }],
     ["opencode_local", { dangerouslySkipPermissions: false }, { "env.PAPERCLIP_API_KEY": "provider" }],
     ["opencode_local", { dangerouslySkipPermissions: false, env: { OPENAI_API_KEY: "inline" } }, { "env.OPENAI_API_KEY": "provider" }],
+    ["opencode_local", { dangerouslySkipPermissions: false, env: { OPENAI_API_KEY: "inline" } }, {}],
+    ["process", { command: "worker", env: { GITHUB_TOKEN: "inline" } }, {}],
     ["invented_remote", {}, {}],
   ] as const)("rejects unsupported, malformed, inline-secret or conflicting %s configuration", (type, config, credentials) => {
     expect(() => validateDeclaredAdapterConfig(type, config, credentials)).toThrow();

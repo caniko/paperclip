@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SECRET_PAYLOAD_KEY_RE } from "../redaction.js";
 
 // Execution contracts, deliberately independent of UI form schemas. Keep this
 // closed until an adapter's consumed fields and credential projection are audited.
@@ -11,7 +12,8 @@ const url = z.string().url().refine((value) => {
 const headers = z.record(z.string(), z.string()).refine((value) =>
   Object.keys(value).every((key) => !/^(authorization|proxy-authorization|cookie|set-cookie|x-api-key)$/i.test(key)),
 );
-const env = z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/), z.string());
+// Manifest values land in the world-readable store; credentials must arrive through bindings.
+const env = z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/).refine((key) => !SECRET_PAYLOAD_KEY_RE.test(key)), z.string());
 const schemas: Record<string, z.ZodType> = {
   process: z.object({
     command: text, args: z.array(z.string()).optional(), cwd: text.optional(),
