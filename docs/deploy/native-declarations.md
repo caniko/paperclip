@@ -18,6 +18,13 @@ migrate, or publish files. `check` exits with `0` when converged, `2` when chang
 are needed, and `1` on failure. `apply` is offline: it refuses while a managed
 controller or another apply holds the database lease.
 
+Local-only `plan` and `check` load database projections without importing the
+execution/mutation services or constructing the authentication engine. `apply`
+loads mutation services before acquiring the reconciliation transaction lock;
+operator signup loads authentication only when an account must actually be
+created. Declared remote environments still load their native configuration
+validator, including its provider dependencies.
+
 ## Descriptor and credentials
 
 The descriptor references a regular Paperclip application config and an optional

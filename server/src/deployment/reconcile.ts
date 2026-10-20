@@ -8,15 +8,9 @@ import {
   instanceSettings, projectWorkspaces, environments,
 } from "@paperclipai/db";
 import { deploymentManifestSchema, type DeploymentManifest, type Environment } from "@paperclipai/shared";
-import { companyService } from "../services/companies.js";
-import { projectService } from "../services/projects.js";
-import { agentService } from "../services/agents.js";
-import { createAgentLifecycleInTransaction, scheduleAgentLifecycle } from "../services/agent-lifecycle.js";
+import type { createAgentLifecycleInTransaction } from "../services/agent-lifecycle.js";
 import { publishAccountingActivities } from "../services/accounting-transaction.js";
-import { deliverBudgetEnforcement } from "../services/budgets.js";
 import type { ActivityPublication } from "../types/activity-publication.js";
-import { routineService } from "../services/routines.js";
-import { secretService } from "../services/secrets.js";
 import { stableJson } from "../services/managed-resource-drift.js";
 import { logActivity } from "../services/activity-log.js";
 import { validateDeclaredAdapterConfig } from "./adapter-config.js";
@@ -26,8 +20,6 @@ import { readCredential, type DeploymentDescriptor } from "./runtime.js";
 import type { Config } from "../config.js";
 import { verifyLocalEncryptedMaterials } from "../secrets/local-encrypted-provider.js";
 import { mergeProjectWorkspaceRuntimeConfig } from "../services/project-workspace-runtime-config.js";
-import { environmentService } from "../services/environments.js";
-import { collectEnvironmentSecretRefs, normalizeEnvironmentConfig } from "../services/environment-config.js";
 
 const tables = { company: companies, project: projects, workspace: projectWorkspaces, environment: environments, agent: agents, routine: routines, schedule: routineTriggers, secret: companySecrets, taskBridge: agentApiKeys };
 type Kind = keyof typeof tables;
@@ -44,6 +36,7 @@ export function changedFields(before: Fields, after: Fields): string[] {
 
 async function validateAdapters(manifest: DeploymentManifest, credentials: Record<string, string>) {
   for (const e of Object.values(manifest.environments)) {
+    const { normalizeEnvironmentConfig } = await import("../services/environment-config.js");
     normalizeEnvironmentConfig({ driver: e.fields.driver, config: e.fields.config });
     if (!credentials[e.credential]) throw new Error("Missing declared execution credential");
   }
@@ -80,6 +73,9 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
    const afterCommit: Array<() => Promise<void>> = [];
    const lifecycleAgents = new Set<string>();
    const budgetCompanies = new Set<string>();
+   // Keep execution-service imports out of read-only commands, and outside the
+   // transaction's advisory lock when apply does need them.
+   const services = options.apply ? await import("./mutation-services.js") : undefined;
    const result = await db.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
     if (!options.apply) await tx.execute(sql`set transaction read only`);
@@ -126,42 +122,44 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     for (const [key, a] of Object.entries(m.agents)) getId("agent", key, a.adopt);
     const actorId = await bootstrapOperator(tx, options.config, options.descriptor.bootstrap, false);
     if (Object.keys(m.routines).length && !actorId && !options.descriptor.bootstrap) throw new Error("Declared routines require an operator bootstrap identity");
-    stage = "resource-preflight";
-    const actor = { userId: actorId };
-    const companySvc = companyService(tx, {}, { db, afterCommit, publications }), projectSvc = projectService(tx), agentSvc = agentService(tx), routineSvc = routineService(tx), secrets = secretService(tx);
-    const agentLifecycle = createAgentLifecycleInTransaction(tx, publications);
+     stage = "resource-preflight";
+     const actor = { userId: actorId };
+     // Mutator closures run only in the apply branch guarded by services below.
+     const companySvc = services?.companyService(tx, {}, { db, afterCommit, publications }), projectSvc = services?.projectService(tx), agentSvc = services?.agentService(tx), routineSvc = services?.routineService(tx), secrets = services?.secretService(tx);
+    const agentLifecycle = services?.createAgentLifecycleInTransaction(tx, publications);
     const specs: Spec[] = [];
     const add = (spec: Omit<Spec, "id">) => specs.push({ ...spec, id: getId(spec.kind, spec.key, spec.adopt) });
     for (const [key, c] of Object.entries(m.companies).sort()) {
       add({ kind: "company", key, adopt: c.adopt, companyId: null, enabled: true, fields: () => c.fields,
-        create: async (f) => (await companySvc.create({ ...c.fields, ...f, id: getId("company", key), defaultResponsibleUserId: actor.userId }, { provisionBundledAgents: false })).id,
-        update: (f) => companySvc.update(getId("company", key), f) });
+        create: async (f) => (await companySvc!.create({ ...c.fields, ...f, id: getId("company", key), defaultResponsibleUserId: actor.userId }, { provisionBundledAgents: false })).id,
+        update: (f) => companySvc!.update(getId("company", key), f) });
     }
     for (const [key, p] of Object.entries(m.projects).sort()) {
       const companyId = getId("company", p.company);
       add({ kind: "project", key, adopt: p.adopt, companyId, enabled: true, fields: () => ({ ...p.fields, companyId }),
-        create: async () => (await projectSvc.create(companyId, { ...p.fields, id: getId("project", key) })).id,
-        update: (f) => projectSvc.update(getId("project", key), f) });
+        create: async () => (await projectSvc!.create(companyId, { ...p.fields, id: getId("project", key) })).id,
+        update: (f) => projectSvc!.update(getId("project", key), f) });
     }
     for (const [key, e] of Object.entries(m.environments).sort()) {
+      const { collectEnvironmentSecretRefs, normalizeEnvironmentConfig } = await import("../services/environment-config.js");
       const companyId = getId("company", e.company), secretKey = `environment-${key}.privateKey`;
       const value = credentials[e.credential], digest = createHash("sha256").update(value).digest("hex");
       add({ kind: "secret", key: secretKey, companyId, enabled: true, fields: () => ({ digest }),
-        create: async () => (await secrets.create(companyId, { name: `deployment.${m.owner}.${secretKey}`, provider: "local_encrypted", value })).id,
-        update: () => secrets.rotate(getId("secret", secretKey), { value }) });
+        create: async () => (await secrets!.create(companyId, { name: `deployment.${m.owner}.${secretKey}`, provider: "local_encrypted", value })).id,
+        update: () => secrets!.rotate(getId("secret", secretKey), { value }) });
       const fields = () => ({ ...e.fields, status: "active" as const, envVars: {}, config: normalizeEnvironmentConfig({ driver: "ssh", config: {
         ...e.fields.config, privateKeySecretRef: { type: "secret_ref", secretId: getId("secret", secretKey), version: "latest" },
       } }) });
       const syncRefs = async (environment: Environment) => {
-        await secrets.replaceSecretRefsForInstanceTarget({ targetType: "environment", targetId: environment.id },
+        await secrets!.replaceSecretRefsForInstanceTarget({ targetType: "environment", targetId: environment.id },
           await collectEnvironmentSecretRefs({ db: tx, environment }));
         return environment.id;
       };
-      const svc = environmentService(tx);
+      const svc = services?.environmentService(tx);
       add({ kind: "environment", key, adopt: e.adopt, companyId, enabled: true, fields,
-        create: async () => syncRefs(await svc.create(fields())),
+        create: async () => syncRefs(await svc!.create(fields())),
         update: async () => {
-          const updated = await svc.update(getId("environment", key), fields());
+          const updated = await svc!.update(getId("environment", key), fields());
           if (!updated) throw new Error("Managed environment is missing; explicit recovery is required");
           await syncRefs(updated);
         } });
@@ -182,12 +180,12 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       };
       add({ kind: "workspace", key, adopt: w.adopt, companyId, enabled: true, fields: () => fields,
         create: async () => {
-          const created = await projectSvc.createWorkspace(projectId, fields);
+          const created = await projectSvc!.createWorkspace(projectId, fields);
           if (!created) throw new Error("Declared workspace could not be created");
           return created.id;
         },
         update: async () => {
-          if (!await projectSvc.updateWorkspace(projectId, getId("workspace", key), fields)) throw new Error("Declared workspace could not be updated");
+          if (!await projectSvc!.updateWorkspace(projectId, getId("workspace", key), fields)) throw new Error("Declared workspace could not be updated");
         } });
     }
     const agentKeys: string[] = [];
@@ -202,8 +200,8 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         // Runtime sources are expected to contain high-entropy worker keys.
         const digest = createHash("sha256").update(value).digest("hex");
         add({ kind: "secret", key: secretKey, companyId, enabled: true, fields: () => ({ digest }),
-          create: async () => (await secrets.create(companyId, { name: `deployment.${m.owner}.${secretKey}`, provider: "local_encrypted", value })).id,
-          update: () => secrets.rotate(getId("secret", secretKey), { value }) });
+          create: async () => (await secrets!.create(companyId, { name: `deployment.${m.owner}.${secretKey}`, provider: "local_encrypted", value })).id,
+          update: () => secrets!.rotate(getId("secret", secretKey), { value }) });
       }
       const fields = () => {
         const adapterConfig = { ...a.fields.adapterConfig };
@@ -216,10 +214,10 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
           ...(a.environment !== undefined ? { defaultEnvironmentId: a.environment ? getId("environment", a.environment) : null } : {}) };
       };
       add({ kind: "agent", key, adopt: a.adopt, companyId, enabled: a.enabled, fields,
-        create: async (f) => (await agentLifecycle.requestHire(companyId, { ...a.fields, ...f, id: getId("agent", key), status: a.enabled ? "idle" : "paused", ...(a.enabled ? {} : { pauseReason: "deployment" }) }, { runnerResolved: true, responsibleUserId: actor.userId, createdByUserId: actor.userId })).id,
+        create: async (f) => (await agentLifecycle!.requestHire(companyId, { ...a.fields, ...f, id: getId("agent", key), status: a.enabled ? "idle" : "paused", ...(a.enabled ? {} : { pauseReason: "deployment" }) }, { runnerResolved: true, responsibleUserId: actor.userId, createdByUserId: actor.userId })).id,
         update: (f) => {
           const { companyId: _companyId, ...configuration } = f;
-          return agentLifecycle.updateConfiguration(getId("agent", key), configuration);
+          return agentLifecycle!.updateConfiguration(getId("agent", key), configuration);
         } });
     }
     for (const [key, r] of Object.entries(m.routines).sort()) {
@@ -227,11 +225,11 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       const { adopt: scheduleAdopt, ...schedule } = r.schedule;
       const fields = () => ({ ...r.fields, projectId: getId("project", r.project), assigneeAgentId: getId("agent", r.agent), companyId });
       add({ kind: "routine", key, adopt: r.adopt, companyId, enabled: r.enabled, fields,
-        create: async () => (await routineSvc.create(companyId, { ...r.fields, projectId: getId("project", r.project), assigneeAgentId: getId("agent", r.agent), status: r.enabled ? "active" : "paused", variables: [] }, actor)).id,
-        update: (f) => routineSvc.update(getId("routine", key), f, actor) });
+        create: async () => (await routineSvc!.create(companyId, { ...r.fields, projectId: getId("project", r.project), assigneeAgentId: getId("agent", r.agent), status: r.enabled ? "active" : "paused", variables: [] }, actor)).id,
+        update: (f) => routineSvc!.update(getId("routine", key), f, actor) });
       add({ kind: "schedule", key, adopt: scheduleAdopt, companyId, enabled: true, fields: () => ({ ...schedule, routineId: getId("routine", key) }),
-        create: async () => (await routineSvc.createTrigger(getId("routine", key), { ...schedule, enabled: true }, actor)).trigger.id,
-        update: () => routineSvc.updateTrigger(getId("schedule", key), schedule, actor) });
+        create: async () => (await routineSvc!.createTrigger(getId("routine", key), { ...schedule, enabled: true }, actor)).trigger.id,
+        update: () => routineSvc!.updateTrigger(getId("schedule", key), schedule, actor) });
     }
     for (const [key, b] of Object.entries(m.taskBridges).sort()) {
       const companyId = getId("company", m.agents[b.agent].company);
@@ -239,7 +237,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       const scope = { kind: "task_bridge" as const, projectId: getId("project", b.project), allowedAssigneeAgentIds: b.allowedAssignees.map((a) => getId("agent", a)).sort() };
       add({ kind: "taskBridge", key, companyId, enabled: true,
         fields: () => ({ agentId: getId("agent", b.agent), scopeConfig: scope, keyHash: createHash("sha256").update(token).digest("hex") }),
-        create: async () => (await agentSvc.createApiKey(getId("agent", b.agent), `deployment.${m.owner}.${key}`, scope, { responsibleUserId: actor.userId, token })).id,
+        create: async () => (await agentSvc!.createApiKey(getId("agent", b.agent), `deployment.${m.owner}.${key}`, scope, { responsibleUserId: actor.userId, token })).id,
         update: async () => { throw new Error("Task bridge rotation requires a new declaration key and removal of the old key"); } });
     }
     const differences: DeploymentDifference[] = [];
@@ -339,7 +337,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     if (removed.some((b) => b.kind === "workspace")) throw new Error("Workspace removal requires an explicit ownership handoff; retain the declaration to preserve execution references");
     for (const b of removed) differences.push({ kind: b.kind, key: b.key, action: "disable", fields: [] });
     if (options.descriptor.bootstrap && !actorId) differences.unshift({ kind: "operator", key: "bootstrap", action: "create", fields: [] });
-    if (options.apply) {
+    if (services) {
       stage = "operator-apply";
       if (!identity) await tx.insert(instanceSettings).values({ singletonKey: "deployment", general: {
         instance: options.descriptor.instance, ...(options.singleOwner ? { owner: m.owner } : {}),
@@ -372,7 +370,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
           if ((binding || spec.adopt) && spec.companyId && "budgetMonthlyCents" in fields &&
               actions.get(spec)!.fields.includes("budgetMonthlyCents")) budgetCompanies.add(spec.companyId);
         }
-        if (!spec.enabled) await disableResource(tx, spec.kind, spec.id, agentLifecycle);
+        if (!spec.enabled) await disableResource(tx, spec.kind, spec.id, agentLifecycle!);
         const next = { owner: m.owner, kind: spec.kind, key: spec.key, resourceId: spec.id, companyId: spec.companyId, fields: spec.fields(), enabled: spec.enabled };
         await tx.insert(deploymentResources).values(next).onConflictDoUpdate({ target: [deploymentResources.owner, deploymentResources.kind, deploymentResources.key], set: next });
         const companyId = spec.companyId ?? spec.id;
@@ -383,7 +381,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       }
       for (const binding of removed) {
         if (binding.kind === "agent") lifecycleAgents.add(binding.resourceId);
-        await disableResource(tx, binding.kind as Kind, binding.resourceId, agentLifecycle);
+        await disableResource(tx, binding.kind as Kind, binding.resourceId, agentLifecycle!);
         await tx.update(deploymentResources).set({ enabled: false }).where(and(eq(deploymentResources.owner, m.owner), eq(deploymentResources.kind, binding.kind), eq(deploymentResources.key, binding.key)));
         await logActivity(tx, { companyId: binding.companyId ?? binding.resourceId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.disabled", entityType: binding.kind, entityId: binding.resourceId, details: { key: binding.key } }, publications);
       }
@@ -393,11 +391,11 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       bindings: Object.fromEntries(specs.filter((s) => options.apply || bindings.has(`${s.kind}/${s.key}`)).map((s) => [`${s.kind}/${s.key}`, s.id])),
     };
    });
-   for (const id of lifecycleAgents) scheduleAgentLifecycle(db, id);
+   for (const id of lifecycleAgents) services!.scheduleAgentLifecycle(db, id);
    for (const publication of publications) publishAccountingActivities(publication.companyId, [publication]);
    for (const effect of afterCommit) await effect();
    for (const companyId of budgetCompanies) {
-     await deliverBudgetEnforcement(db, {}, companyId);
+     await services!.deliverBudgetEnforcement(db, {}, companyId);
    }
    return result;
   } catch (error) {

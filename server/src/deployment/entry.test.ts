@@ -38,6 +38,8 @@ const launch = (command: string) =>
       fileURLToPath(new URL("../../node_modules/tsx/dist/loader.mjs", import.meta.url)),
       "--import",
       `data:text/javascript,${encodeURIComponent('import { channel } from "node:diagnostics_channel"; channel("paperclip.deployment.startup").subscribe(({ phase }) => console.error(`[deployment startup] ${phase} at ${Math.round(performance.now())}ms`));')}`,
+      "--import",
+      fileURLToPath(new URL("./fixtures/read-only-import-guard.mjs", import.meta.url)),
       fileURLToPath(new URL("../deployment-entry.ts", import.meta.url)),
       descriptorFile,
       command,
