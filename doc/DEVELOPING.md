@@ -141,9 +141,12 @@ original missing-dependency failure remains evidence, not a passing retry.
 Use the existing source-bound Node JUnit reporter so equal titles from different
 files remain distinct while repeated cases from the same file still fail sealing.
 
-The current caller pins `1d887ee236e14a2c683edaf76b8eb3d5dd6e7fcf`, whose
-independent hosted attempt 1 qualified 503 source-bound policy cases. The exact-pin
-regression follows this promotion; the qualified native Stop workflow bytes and
+The caller previously pinned `1d887ee236e14a2c683edaf76b8eb3d5dd6e7fcf`, whose
+independent hosted attempt 1 qualified 503 source-bound policy cases. The current
+caller pins `1c37302206955723ca010ddf22b073f306c83f86`, which skips an unavailable lockfile import
+source after upstream deleted its `chore/refresh-lockfile` branch;
+[policy run 39474414257](https://github.com/caniko/paperclip/actions/runs/39474414257)
+attempt 1 passed all 511 cases. The exact-pin regression follows this promotion; the qualified native Stop workflow bytes and
 same-file duplicate-case rejection remain unchanged. This policy result is not
 overall producer or Atlas acceptance.
 
