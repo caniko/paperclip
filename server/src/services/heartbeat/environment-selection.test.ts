@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { agents, companies, createDb, environments, heartbeatRuns, issues, projects, projectWorkspaces, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, type Db } from "@paperclipai/db";
+import { agents, companies, createDb, environmentLeases, environments, heartbeatRuns, issues, projects, projectWorkspaces, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, type Db } from "@paperclipai/db";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
@@ -203,5 +203,40 @@ describe.skipIf(!support.supported)("heartbeat environment selection boundary", 
       expect(result.nativeChatWorkspaceScope?.projectId).toBe(project.id);
       expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0].executionWorkspaceId).toBeNull();
     }
+  });
+
+  describe("agent environment overflow", () => {
+    async function overflowFixture() {
+      const { input, issue } = await fixture();
+      const local = await environmentService(db).ensureLocalEnvironment(input.agent.companyId);
+      await db.update(environments).set({ config: { capacity: { maxConcurrentRuns: 1 } } }).where(eq(environments.id, local.id));
+      const [remote] = await db.insert(environments).values({ name: `Overflow host ${randomUUID()}`, driver: "ssh", status: "active",
+        config: { host: "overflow.invalid", port: 22, username: "agent", remoteWorkspacePath: "/srv/work" } }).returning();
+      input.agent.defaultEnvironmentId = local.id;
+      input.agent.runtimeConfig = { fallbackEnvironmentIds: [remote.id] };
+      const lease = (environmentId: string, values: Partial<typeof environmentLeases.$inferInsert> = {}) =>
+        db.insert(environmentLeases).values({ companyId: input.agent.companyId, environmentId, status: "active", ...values });
+      return { input, issue, local, remote, lease };
+    }
+
+    it("overflows only while the agent default is full", async () => {
+      const { input, local, remote, lease } = await overflowFixture();
+      expect((await selectHeartbeatEnvironment(db, input)).selectedEnvironmentId).toBe(local.id);
+      await lease(local.id);
+      expect((await selectHeartbeatEnvironment(db, input)).selectedEnvironmentId).toBe(remote.id);
+    });
+
+    it("does not overflow placements that do not come from the agent default", async () => {
+      const { input, local, lease } = await overflowFixture();
+      await lease(local.id);
+      input.agent.defaultEnvironmentId = null;
+      expect((await selectHeartbeatEnvironment(db, input)).selectedEnvironmentId).toBe(local.id);
+    });
+
+    it("returns an issue session to the host that last ran it", async () => {
+      const { input, issue, remote, lease } = await overflowFixture();
+      await lease(remote.id, { status: "released", issueId: issue.id, metadata: { agentId: input.agent.id } });
+      expect((await selectHeartbeatEnvironment(db, input)).selectedEnvironmentId).toBe(remote.id);
+    });
   });
 });
