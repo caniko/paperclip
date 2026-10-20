@@ -65,14 +65,22 @@ jobs:
           # Consume all input: grep -q can SIGPIPE printf on a large merge diff.
           if grep -Fx 'pnpm-lock.yaml' <<< "$changed" >/dev/null; then
             # Synchronizing this fork imports CI-owned upstream locks. Accept
-            # only exact bytes from the canonical history already in this head.
+            # only exact bytes from approved CI-owned history in this head.
             head_lock="$(git rev-parse '${{ github.event.pull_request.head.sha }}:pnpm-lock.yaml')"
-            for ref in master refs/heads/chore/refresh-lockfile; do
-              git fetch --no-tags https://github.com/paperclipai/paperclip.git "$ref"
+            for source in \
+              'https://github.com/paperclipai/paperclip.git master' \
+              'https://github.com/paperclipai/paperclip.git refs/heads/chore/refresh-lockfile' \
+              'https://github.com/caniko/paperclip.git refs/heads/chore/refresh-lockfile'; do
+              read -r repository ref <<< "$source"
+              if test "$repository" = https://github.com/caniko/paperclip.git &&
+                test "${GITHUB_REPOSITORY:-}" != caniko/paperclip; then
+                continue
+              fi
+              git fetch --no-tags "$repository" "$ref"
               imported="$(git merge-base '${{ github.event.pull_request.head.sha }}' FETCH_HEAD)"
               imported_lock="$(git rev-parse "$imported:pnpm-lock.yaml")"
               if test "$head_lock" = "$imported_lock"; then
-                echo "Lockfile matches canonical imported ancestor $imported from $ref"
+                echo "Lockfile matches CI-owned imported ancestor $imported from $repository $ref"
                 exit 0
               fi
             done

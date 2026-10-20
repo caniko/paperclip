@@ -101,8 +101,20 @@ GitHub Actions owns `pnpm-lock.yaml`.
 The owned fork may preserve an unchanged CI-owned lock when importing canonical
 upstream history. Its prepared policy fetches only upstream `master` and
 `chore/refresh-lockfile` directly from `paperclipai/paperclip`, then compares the
-head's lock blob to a common ancestor. Candidate branches, local refs and manual
-lock edits grant no exception. Fetch and object-resolution failures fail closed.
+head's lock blob to a common ancestor. Only when running in `caniko/paperclip`,
+the same policy also accepts that repository's fixed `chore/refresh-lockfile`
+ref. Candidate branches, local refs and manual lock edits grant no exception.
+Fetch and object-resolution failures fail closed.
+
+For dependency preparation in the owned fork, dispatch `refresh-lockfile.yml`
+on the feature branch. Its existing bot produces the root lock on the hosted
+runner and retains the bytes for 32 days. Feature dispatch pushes the bot branch
+non-force and never creates or auto-merges another PR. Preserve that commit's
+author and import its exact lock bytes; inspect the source, run, artifact digest
+and retention before use. A diverged existing bot branch refuses the push rather
+than replacing history. This is preparation only: the new policy and application
+head still need independent hosted qualification before caller promotion or
+deployment.
 
 ## Trusted PR Workflow
 
