@@ -84,6 +84,7 @@ export type {
   EnvironmentProbeResult,
   FakeSandboxEnvironmentConfig,
   LocalEnvironmentConfig,
+  EnvironmentCapacity,
   PluginSandboxEnvironmentConfig,
   PluginEnvironmentConfig,
   SandboxEnvironmentConfig,
