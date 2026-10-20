@@ -16,7 +16,7 @@ test("lock policy consumes large diffs and accepts only unchanged approved CI im
 import { readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 if (args[0] === "diff" && args[1] === "--name-only") console.log((process.env.LOCK_CHANGED === "true" ? "pnpm-lock.yaml\\n" : "") + Array.from({length:50000},(_,i)=>"changed/"+i).join("\\n"));
-else if (args[0] === "fetch") { writeFileSync(process.env.FETCH_STATE, args.slice(-2).join(" ")); process.exit(process.env.FETCH_FAILED === "true" || (process.env.REFRESH_FETCH_FAILED === "true" && args.at(-1) !== "master") || (process.env.FORK_FETCH_FAILED === "true" && args.at(-2) === "https://github.com/caniko/paperclip.git") ? 1 : 0); }
+else if (args[0] === "fetch") { writeFileSync(process.env.FETCH_STATE, args.slice(-2).join(" ")); process.exit(process.env.FETCH_FAILED === "true" || (process.env.REFRESH_FETCH_FAILED === "true" && args.at(-1) !== "master") || (process.env.FORK_FETCH_FAILED === "true" && args.at(-2) === "https://github.com/caniko/paperclip.git") || (process.env.UPSTREAM_REFRESH_MISSING === "true" && args.at(-2) === "https://github.com/paperclipai/paperclip.git" && args.at(-1) !== "master") ? 1 : 0); }
 else if (args[0] === "merge-base") console.log("a".repeat(40));
 else if (args[0] === "rev-parse") { if (process.env.RESOLVE_FAILED === "true") process.exit(1); const fetched = args[1].startsWith("head:") ? "" : readFileSync(process.env.FETCH_STATE, "utf8"); console.log(args[1].startsWith("head:") ? (process.env.MANUAL_LOCK === "true" ? "c" : "b").repeat(40) : ((process.env.REFRESH_LOCK === "true" && fetched.endsWith(" master")) || (process.env.FORK_REFRESH === "true" && !fetched.startsWith("https://github.com/caniko/paperclip.git ")) ? "d" : "b").repeat(40)); }
 else process.exit(2);
@@ -33,14 +33,16 @@ else process.exit(2);
     { fork: true, succeeds: true },
     { fork: true, manual: true },
     { fork: true, forkFetchFailed: true },
+    { fork: true, upstreamRefreshMissing: true, succeeds: true },
+    { refresh: true, upstreamRefreshMissing: true, manual: true },
     { fork: true, repository: "untrusted/paperclip" },
   ];
   for (const scenario of scenarios) {
     const { changed = true, manual = false, fetchFailed = false, resolveFailed = false,
-      refresh = false, refreshFetchFailed = false, fork = false, forkFetchFailed = false,
+      refresh = false, refreshFetchFailed = false, fork = false, forkFetchFailed = false, upstreamRefreshMissing = false,
       repository = "caniko/paperclip", succeeds = false } = scenario;
     const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", script], { encoding: "utf8", timeout: 10000,
-      env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, FETCH_STATE: join(directory, "fetched-ref"), LOCK_CHANGED: String(changed), MANUAL_LOCK: String(manual), FETCH_FAILED: String(fetchFailed), RESOLVE_FAILED: String(resolveFailed), REFRESH_LOCK: String(refresh), REFRESH_FETCH_FAILED: String(refreshFetchFailed), FORK_REFRESH: String(fork), FORK_FETCH_FAILED: String(forkFetchFailed), GITHUB_REPOSITORY: repository } });
+      env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, FETCH_STATE: join(directory, "fetched-ref"), LOCK_CHANGED: String(changed), MANUAL_LOCK: String(manual), FETCH_FAILED: String(fetchFailed), RESOLVE_FAILED: String(resolveFailed), REFRESH_LOCK: String(refresh), REFRESH_FETCH_FAILED: String(refreshFetchFailed), FORK_REFRESH: String(fork), FORK_FETCH_FAILED: String(forkFetchFailed), UPSTREAM_REFRESH_MISSING: String(upstreamRefreshMissing), GITHUB_REPOSITORY: repository } });
     assert.equal(result.status === 0, succeeds, `${JSON.stringify(scenario)}: ${result.stdout} ${result.stderr}`);
     assert.doesNotMatch(result.stderr, /Broken pipe/);
     if (manual) assert.match(result.stdout, /Do not commit pnpm-lock.yaml/);

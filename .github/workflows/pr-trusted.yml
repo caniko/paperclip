@@ -76,7 +76,8 @@ jobs:
                 test "${GITHUB_REPOSITORY:-}" != caniko/paperclip; then
                 continue
               fi
-              git fetch --no-tags "$repository" "$ref"
+              # An unavailable source (e.g. a deleted refresh branch) is skipped, never accepted.
+              git fetch --no-tags "$repository" "$ref" || continue
               imported="$(git merge-base '${{ github.event.pull_request.head.sha }}' FETCH_HEAD)"
               imported_lock="$(git rev-parse "$imported:pnpm-lock.yaml")"
               if test "$head_lock" = "$imported_lock"; then
