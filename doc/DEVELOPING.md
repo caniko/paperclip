@@ -985,8 +985,10 @@ SDKs use separate committed npm locks under `.github/qualification/sdks/`, with
 direct versions matching `server/package.json`. `npm ci --ignore-scripts` installs
 them outside the workspace. Their complete transitive integrity pins, installed
 file hashes and resolver paths are retained. Preparation preserves an existing
-byte-identical OpenTelemetry API dependency and releases only its own links;
-SDK-present and SDK-absent profiles run in separate disposable environments.
+byte-identical OpenTelemetry API and resource utilities and releases only its own
+links; SDK-present and SDK-absent profiles run in separate disposable environments.
+The absence profile keeps those ordinary workspace dependencies but still requires
+the optional providers, instrumentation, exporters and trace-base SDK to be absent.
 Linux containment uses the existing disposable-hosted Bubblewrap preparation,
 the actual `/usr/bin/bwrap` identity and the unchanged confined-build, network,
 descendant and authority-loss assertions.

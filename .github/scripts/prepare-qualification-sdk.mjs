@@ -51,8 +51,8 @@ const serverRequire = createRequire(path.join(root, "server/package.json"));
 // Validate all destinations before linking any package into the disposable checkout.
 for (const name of names) {
   const link = path.join(root, "server/node_modules", name);
-  if (name === "@opentelemetry/api" && existsSync(link)) {
-    // The API is already a workspace dependency. Borrow only byte-identical
+  if (["@opentelemetry/api", "@opentelemetry/resources"].includes(name) && existsSync(link)) {
+    // API and resource utilities are workspace dependencies. Borrow only byte-identical
     // files from the separately locked SDK version.
     const actual = realpathSync(link);
     const target = path.join(sdk, "node_modules", name);
@@ -60,7 +60,7 @@ for (const name of names) {
     const sdkRequire = createRequire(path.join(sdk, "package.json"));
     assert.equal(sha256(readFileSync(serverRequire.resolve(name))), sha256(readFileSync(sdkRequire.resolve(name))));
     const borrowedFiles = inventory(actual);
-    assert.deepEqual(borrowedFiles, inventory(target), "Existing API files differ from the locked SDK");
+    assert.deepEqual(borrowedFiles, inventory(target), `Existing ${name} files differ from the locked SDK`);
     borrowedPackages.push({ name, link, target: readlinkSync(link), resolvedPackage: actual,
       packageSha256: sha256(readFileSync(path.join(actual, "package.json"))), fileSha256: borrowedFiles });
     continue;

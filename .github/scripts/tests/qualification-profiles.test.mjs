@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -124,6 +125,30 @@ test("the source runner collects and executes the same native Vitest file shard"
     assert.ok(selection.requiredCases.length > 0);
     assert.ok(selection.collectedCases.every(row => row.file === collection.specifications[0].file));
     assert.equal(result.rawCases, selection.collectedCases.length);
+    assert.equal(result.passed, selection.requiredCases.length);
+    assert.equal(result.diagnostic, true);
+    assert.equal(result.producerAcceptanceQualified, false);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("the absence profile retains the declared resource utility while requiring missing tracing providers", () => {
+  const root = path.resolve(import.meta.dirname, "../../..");
+  const serverRequire = createRequire(path.join(root, "server/package.json"));
+  const manifest = serverRequire("./package.json");
+  assert.equal(manifest.dependencies["@opentelemetry/resources"], manifest.peerDependencies["@opentelemetry/resources"]);
+  assert.ok(serverRequire.resolve("@opentelemetry/resources"));
+  const temporary = realpathSync(mkdtempSync(path.join(os.tmpdir(), "paperclip-otel-absence-")));
+  const directory = path.join(temporary, "evidence");
+  try {
+    execFileSync(process.execPath, [".github/scripts/run-qualification-profile.mjs", "--diagnostic", "otel-absent", directory], {
+      cwd: root, timeout: 30_000,
+      env: { ...process.env, NODE_ENV: "test", PAPERCLIP_HOME: path.join(temporary, "home"), PAPERCLIP_CONFIG: path.join(temporary, "home/config.json") },
+    });
+    const selection = JSON.parse(readFileSync(path.join(directory, "profile-selection.json")));
+    const result = JSON.parse(readFileSync(path.join(directory, "profile-result.json")));
+    assert.ok(selection.requiredCases.length > 0);
     assert.equal(result.passed, selection.requiredCases.length);
     assert.equal(result.diagnostic, true);
     assert.equal(result.producerAcceptanceQualified, false);

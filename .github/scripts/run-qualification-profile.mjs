@@ -42,9 +42,11 @@ let files = [...new Set(rules.map(rule => rule.file))];
 let sources;
 const serverRequire = createRequire(path.join(root, "server/package.json"));
 if (profile === "otel-absent") {
-  const peers = Object.keys(serverRequire("./package.json").peerDependencies).filter(name => name.startsWith("@opentelemetry/"));
-  // The API can already be a transitive workspace dependency. The SDK peers
-  // and trace provider must be absent for these unchanged failure-mode tests.
+  const manifest = serverRequire("./package.json");
+  assert.equal(manifest.dependencies["@opentelemetry/resources"], manifest.peerDependencies["@opentelemetry/resources"]);
+  const peers = Object.keys(manifest.peerDependencies).filter(name => name.startsWith("@opentelemetry/") && name !== "@opentelemetry/resources");
+  // API and resource utilities are workspace dependencies. Optional providers,
+  // instrumentation and exporters must still be absent for these unchanged tests.
   for (const name of [...peers, "@opentelemetry/sdk-trace-base"]) {
     assert.throws(() => serverRequire.resolve(name), { code: "MODULE_NOT_FOUND" }, `Absence profile resolved ${name}`);
   }

@@ -8,7 +8,7 @@ const receipt = JSON.parse(readFileSync(path.join(evidence, "sdk.json")));
 assert.ok(["otel-sdk", "sentry-sdk"].includes(receipt.profile));
 const manifest = JSON.parse(readFileSync(path.join(process.cwd(), ".github/qualification/sdks", receipt.profile, "package.json")));
 const names = [...Object.keys(manifest.dependencies), ...(receipt.profile === "otel-sdk" ? ["@opentelemetry/api", "@opentelemetry/sdk-trace-base"] : [])];
-assert.ok(receipt.borrowedPackages.every(row => row.name === "@opentelemetry/api"));
+assert.ok(receipt.borrowedPackages.every(row => ["@opentelemetry/api", "@opentelemetry/resources"].includes(row.name)));
 assert.deepEqual(receipt.links.map(link => link.name), names.filter(name => !receipt.borrowedPackages.some(row => row.name === name)));
 for (const row of receipt.borrowedPackages) {
   assert.equal(row.link, path.join(process.cwd(), "server/node_modules", row.name));
