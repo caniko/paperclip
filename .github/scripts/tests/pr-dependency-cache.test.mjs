@@ -41,6 +41,9 @@ test("PR workflows restore dependency stores without creating branch copies", ()
   }
   const policy = jobs.find(([, name]) => name === "policy")[2];
   assert.doesNotMatch(policy, /uses: actions\/cache|cache: pnpm/);
+  const dependencies = policy.indexOf("uses: ./.github/actions/setup-ci-dependencies");
+  const tests = policy.indexOf("      - name: Test PR quality-gate scripts");
+  assert.ok(dependencies >= 0 && dependencies < tests, "The full policy roster requires installed esbuild and Vitest");
 });
 
 test("native composer: immutable frozen tools and candidate installation do not share a host cache", () => {

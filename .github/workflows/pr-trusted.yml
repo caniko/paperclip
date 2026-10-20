@@ -128,6 +128,9 @@ jobs:
       - name: Test feature module boundary check
         run: node "$CI_NODE_TEST" ./scripts/check-module-boundaries.test.mjs
 
+      - name: Install policy test dependencies
+        uses: ./.github/actions/setup-ci-dependencies
+
       - name: Test PR quality-gate scripts
         run: node "$CI_NODE_TEST" '.github/scripts/tests/*.test.mjs'
 

@@ -132,6 +132,13 @@ source/runtime/runner-bound receipt and retention readback until 2026-11-21.
 The Stop job remains byte-identical to the previously qualified caller. This
 promotion does not grant application, patched-consumer or Atlas acceptance.
 
+The dependency-backed qualification tests also belong to the full policy roster.
+The prepared successor uses the existing CI dependency action before that roster,
+and the independent gate runs every `.github/scripts/tests/*.test.mjs` case with
+the installed pnpm, esbuild and Vitest versions and hashes retained. Keep the
+caller on its qualified pin until this expanded gate passes on attempt 1; the
+original missing-dependency failure remains evidence, not a passing retry.
+
 ## Trusted PR Workflow
 
 The PR caller uses `paperclipai/paperclip/.github/workflows/pr-trusted.yml@master`.

@@ -39,13 +39,25 @@ jobs:
           cp /etc/os-release "$EVIDENCE/os-release"
           node --input-type=module -e 'console.log(JSON.stringify({platform:process.platform,arch:process.arch,versions:process.versions}))' > "$EVIDENCE/runtime.json"
           sha256sum "$(command -v node)" > "$EVIDENCE/runtime.sha256"
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          version: 9.15.4
+          run_install: false
+      - name: Install policy test dependencies
+        uses: ./.github/actions/setup-ci-dependencies
+      - name: Bind installed policy test SDKs
+        run: |
+          set -euo pipefail
+          pnpm --version > "$EVIDENCE/pnpm-version"
+          pnpm exec esbuild --version > "$EVIDENCE/esbuild-version"
+          pnpm exec vitest --version > "$EVIDENCE/vitest-version"
+          sha256sum "$(command -v pnpm)" node_modules/esbuild/bin/esbuild >> "$EVIDENCE/runtime.sha256"
+          node --input-type=module -e 'import {fileURLToPath} from "node:url"; for (const name of ["esbuild", "vitest/node"]) console.log(fileURLToPath(import.meta.resolve(name)))' | xargs -d '\n' sha256sum >> "$EVIDENCE/runtime.sha256"
       - name: Execute prepared policy and cache contracts once
         run: |
           set -euo pipefail
           node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="$EVIDENCE/policy.xml" \
-            .github/scripts/tests/pr-lockfile-policy.test.mjs \
-            .github/scripts/tests/pr-dependency-cache.test.mjs \
-            .github/scripts/tests/pr-runner-rust-cache.test.mjs 2>&1 | tee "$EVIDENCE/policy.log"
+            '.github/scripts/tests/*.test.mjs' 2>&1 | tee "$EVIDENCE/policy.log"
       - name: Seal original policy evidence only
         if: always()
         run: python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" '${{ job.status }}' --strict-reports

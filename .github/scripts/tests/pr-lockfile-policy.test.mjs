@@ -78,9 +78,11 @@ test("prepared lock policy has an independent exact-head attempt-1 hosted gate b
   assert.match(workflow, /persist-credentials: false/);
   assert.match(workflow, /qualification-evidence\.py initialize "\$EVIDENCE"/);
   assert.match(workflow, /node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="\$EVIDENCE\/policy\.xml"/);
-  for (const name of ["pr-lockfile-policy", "pr-dependency-cache", "pr-runner-rust-cache"]) {
-    assert.ok(workflow.includes(`.github/scripts/tests/${name}.test.mjs`), name);
-  }
+  assert.ok(workflow.includes("'.github/scripts/tests/*.test.mjs'"), "Prepare every policy test, including dependency-backed profiles");
+  const dependencies = workflow.indexOf("uses: ./.github/actions/setup-ci-dependencies");
+  const tests = workflow.indexOf("      - name: Execute prepared policy and cache contracts once");
+  assert.ok(dependencies >= 0 && dependencies < tests);
+  assert.match(workflow, /version: 9\.15\.4\n\s+run_install: false/);
   assert.match(workflow, /qualification-evidence\.py seal "\$EVIDENCE" '\$\{\{ job\.status \}\}' --strict-reports/);
   assert.match(workflow, /qualification-evidence\.py artifacts prepared-lock-policy- 1 /);
   assert.equal(workflow.match(/retention-days: 32/g)?.length, 2);
