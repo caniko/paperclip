@@ -103,6 +103,9 @@ const pendingFiles = [
   "0357_deployment_environments.sql",
   "0358_agent_tool_definition_hooks.sql",
   "0359_agent_connector_access_hooks.sql",
+  "0360_sticky_wendell_vaughn.sql",
+  "0361_issue_assignment_status_version.sql",
+  "0362_commentary_view_human_defaults.sql",
 ];
 const browserTables = ["browser_use_browsers", "browser_use_runs", "browser_use_sessions", "browser_use_settings"];
 const guardedTables = [
