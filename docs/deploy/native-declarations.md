@@ -116,9 +116,11 @@ State defaults to `$XDG_DATA_HOME/paperclip`, with mode `0700`. Provision four
 protected runtime files under its `credentials/` directory before startup:
 `auth`, `encryption`, `database`, and `bootstrap`. The last file supplies the
 initial operator password. Existing administrator accounts are preserved.
-Credential options accept other runtime paths; their contents never enter Nix
-evaluation. Keep these files, instance storage, and database backups together in
-the recovery set. The database backup runs hourly with 30-day retention; this
+Map each credential alias the manifest binds (for example an agent's
+`credentials.apiKey = "gateway"`) to a protected runtime file with
+`credentialFiles.<alias>`. Credential options accept other runtime paths; their
+contents never enter Nix evaluation. Keep these files, instance storage, and
+database backups together in the recovery set. The database backup runs hourly with 30-day retention; this
 schedule alone does not back up credentials or stored assets.
 
 The unit is `paperclip-operations.service` for this example. It binds only to

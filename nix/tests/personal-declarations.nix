@@ -109,6 +109,7 @@
         instance = "work";
         operator.email = "operator@example.test";
         afterUnits = ["opencode.service"];
+        credentialFiles.gateway = "/run/user/1000/paperclip/gateway";
       };
     }).config;
   integrated = (machine {}).config;
@@ -178,6 +179,7 @@
       && builtins.elem "opencode.service" controller.systemd.user.services.paperclip-work.Unit.After
       && builtins.elem "XDG_CONFIG_HOME=/home/operator/.config" controller.systemd.user.services.paperclip-work.Service.Environment
       && controller.services.paperclip.manifest == manifest
+      && controller.services.paperclip.credentialFiles == {gateway = "/run/user/1000/paperclip/gateway";}
       && controller.services.paperclip.authSecretFile == "/home/operator/.local/share/paperclip/credentials/auth";
     storeControllerCredentialRejected =
       !(evaluates
@@ -187,6 +189,16 @@
             enable = true;
             operator.email = "operator@example.test";
             authSecretFile = "${builtins.storeDir}/public-auth";
+          };
+        }).activationPackage.drvPath);
+    storeControllerCredentialFileRejected =
+      !(evaluates
+        (home {
+          programs.paperclip.package = clientPackages.supported;
+          services.paperclip = {
+            enable = true;
+            operator.email = "operator@example.test";
+            credentialFiles.gateway = "${builtins.storeDir}/public-gateway";
           };
         }).activationPackage.drvPath);
     invalidKeyRejected =

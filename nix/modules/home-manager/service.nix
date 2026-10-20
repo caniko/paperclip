@@ -60,6 +60,7 @@
     executionProfile = "trusted-local";
     configFile = application;
     manifestFile = json.generate "paperclip-${cfg.instance}-manifest.json" cfg.manifest;
+    inherit (cfg) credentialFiles;
     serverCredentials = {
       auth = cfg.authSecretFile;
       encryption = cfg.encryptionKeyFile;
@@ -119,6 +120,12 @@ in {
         };
       description = "Native resource declarations reconciled before the listener opens.";
     };
+    credentialFiles = lib.mkOption {
+      type = lib.types.attrsOf runtimePath;
+      default = {};
+      example = {gateway = "/run/user/1000/paperclip/gateway";};
+      description = "Protected runtime files for credential aliases bound by the manifest's agents, environments, and task bridges.";
+    };
     authSecretFile = lib.mkOption {
       type = runtimePath;
       default = "${credentials}/auth";
@@ -175,7 +182,7 @@ in {
         message = "Paperclip persistent state must be outside the Nix store.";
       }
       {
-        assertion = lib.all (file: !lib.hasPrefix "/nix/store/" file) [cfg.authSecretFile cfg.encryptionKeyFile cfg.databasePasswordFile cfg.operator.passwordFile];
+        assertion = lib.all (file: !lib.hasPrefix "/nix/store/" file) ([cfg.authSecretFile cfg.encryptionKeyFile cfg.databasePasswordFile cfg.operator.passwordFile] ++ lib.attrValues cfg.credentialFiles);
         message = "Paperclip credentials must be runtime files outside the Nix store.";
       }
       {
