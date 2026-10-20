@@ -1,12 +1,85 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { packageInventory } from "../qualification-sdk-inventory.mjs";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
+
+function sharedPackageFixture() {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "qualification-sdk-layout-"));
+  const actual = path.join(directory, "pnpm/resources/node_modules/@fixture/resources");
+  const core = path.join(directory, "pnpm/core/node_modules/@fixture/core");
+  const expected = path.join(directory, "npm/node_modules/@fixture/resources");
+  const nestedCore = path.join(expected, "node_modules/@fixture/core");
+  for (const [name, locations, dependencies] of [
+    ["@fixture/resources", [actual, expected], { "@fixture/core": "1.0.0" }],
+    ["@fixture/core", [core, nestedCore], { "@fixture/resources": "1.0.0" }],
+  ]) {
+    for (const location of locations) {
+      mkdirSync(location, { recursive: true });
+      writeFileSync(path.join(location, "package.json"), JSON.stringify({ name, version: "1.0.0", dependencies }));
+      writeFileSync(path.join(location, "index.js"), "module.exports = {};\n");
+      writeFileSync(path.join(location, "LICENSE"), "identical non-entrypoint bytes\n");
+    }
+  }
+  symlinkSync(core, path.join(path.dirname(actual), "core"), "dir");
+  symlinkSync(actual, path.join(path.dirname(core), "resources"), "dir");
+  return { directory, actual, expected, core };
+}
+
+test("shared SDK inventories include cyclic resolved dependencies independently of npm nesting or pnpm links", () => {
+  const fixture = sharedPackageFixture();
+  try {
+    const inventory = packageInventory(fixture.actual);
+    assert.deepEqual(inventory, packageInventory(fixture.expected));
+    assert.deepEqual(Object.keys(inventory.packages).sort(), ["@fixture/core@1.0.0", "@fixture/resources@1.0.0"]);
+    assert.ok(inventory.packages["@fixture/core@1.0.0"].fileSha256.LICENSE);
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+for (const mutation of [
+  "changed dependency bytes",
+  "missing dependency file",
+  "extra dependency file",
+  "missing dependency",
+  "undeclared nested package",
+]) {
+  test(`shared SDK inventories reject ${mutation}`, () => {
+    const fixture = sharedPackageFixture();
+    try {
+      if (mutation === "changed dependency bytes") writeFileSync(path.join(fixture.core, "LICENSE"), "changed\n");
+      if (mutation === "missing dependency file") rmSync(path.join(fixture.core, "LICENSE"));
+      if (mutation === "extra dependency file")
+        writeFileSync(path.join(fixture.core, "extra.js"), "module.exports = 1;\n");
+      if (mutation === "missing dependency") rmSync(path.join(path.dirname(fixture.actual), "core"));
+      if (mutation === "undeclared nested package") {
+        const foreign = path.join(fixture.actual, "node_modules/foreign");
+        mkdirSync(foreign, { recursive: true });
+        writeFileSync(path.join(foreign, "index.js"), "module.exports = 1;\n");
+      }
+      assert.throws(() => assert.deepEqual(packageInventory(fixture.actual), packageInventory(fixture.expected)));
+    } finally {
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+}
 
 test("SDK provisioning rejects a foreign runner or retry before creating any installation", () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "qualification-sdk-guard-"));

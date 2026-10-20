@@ -2,10 +2,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { sha256 } from "./qualification-roster.mjs";
+import { inventory, packageInventory } from "./qualification-sdk-inventory.mjs";
 
 const args = process.argv.slice(2);
 const diagnostic = args[0] === "--diagnostic";
@@ -59,10 +60,17 @@ for (const name of names) {
     assert.equal(sha256(readFileSync(path.join(actual, "package.json"))), sha256(readFileSync(path.join(target, "package.json"))));
     const sdkRequire = createRequire(path.join(sdk, "package.json"));
     assert.equal(sha256(readFileSync(serverRequire.resolve(name))), sha256(readFileSync(sdkRequire.resolve(name))));
-    const borrowedFiles = inventory(actual);
-    assert.deepEqual(borrowedFiles, inventory(target), `Existing ${name} files differ from the locked SDK`);
-    borrowedPackages.push({ name, link, target: readlinkSync(link), resolvedPackage: actual,
-      packageSha256: sha256(readFileSync(path.join(actual, "package.json"))), fileSha256: borrowedFiles });
+    const resolvedInventory = packageInventory(actual);
+    assert.deepEqual(resolvedInventory, packageInventory(target), `Existing ${name} files differ from the locked SDK`);
+    borrowedPackages.push({
+      name,
+      link,
+      target: readlinkSync(link),
+      resolvedPackage: actual,
+      packageSha256: sha256(readFileSync(path.join(actual, "package.json"))),
+      fileSha256: resolvedInventory.packages[resolvedInventory.root].fileSha256,
+      resolvedInventory,
+    });
     continue;
   }
   assert.ok(!existsSync(link), `Preserve an existing SDK entry: ${name}`);
@@ -80,14 +88,6 @@ for (const name of names) {
   const require = createRequire(path.join(root, "server/package.json"));
   assert.ok(realpathSync(require.resolve(name)).startsWith(realpathSync(target) + path.sep), "Test resolver bypassed the declared SDK");
   links.push({ name, link, target, version: installed.version, packageSha256: sha256(readFileSync(path.join(target, "package.json"))) });
-}
-function inventory(directory, base = directory, files = {}) {
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const file = path.join(directory, entry.name);
-    if (entry.isDirectory()) inventory(file, base, files);
-    else if (entry.isFile()) files[path.relative(base, file).split(path.sep).join("/")] = sha256(readFileSync(file));
-  }
-  return files;
 }
 const files = inventory(path.join(sdk, "node_modules"), sdk);
 const receipt = { schema: "paperclip.qualification-sdk.v1", profile, diagnostic, producerAcceptanceQualified: false,
