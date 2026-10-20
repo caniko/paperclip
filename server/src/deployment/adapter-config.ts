@@ -13,7 +13,17 @@ const headers = z.record(z.string(), z.string()).refine((value) =>
   Object.keys(value).every((key) => !/^(authorization|proxy-authorization|cookie|set-cookie|x-api-key)$/i.test(key)),
 );
 // Manifest values land in the world-readable store; credentials must arrive through bindings.
-const env = z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/).refine((key) => !SECRET_PAYLOAD_KEY_RE.test(key)), z.string());
+// JSON-valued settings such as PAPERCLIP_OPENCODE_PROVIDERS may only reference them as {env:NAME}.
+const envReference = /^(?:[A-Za-z]+ )?\{env:[A-Za-z_][A-Za-z0-9_]*\}$/;
+const embedsSecret = (value: unknown, key = ""): boolean => typeof value === "string"
+  ? SECRET_PAYLOAD_KEY_RE.test(key) && !envReference.test(value)
+  : typeof value === "object" && value !== null
+    && Object.entries(value).some(([field, nested]) => embedsSecret(nested, Array.isArray(value) ? key : field));
+const jsonEmbedsSecret = (value: string) => { try { return embedsSecret(JSON.parse(value)); } catch { return false; } };
+const env = z.record(
+  z.string().regex(/^[A-Z_][A-Z0-9_]*$/).refine((key) => !SECRET_PAYLOAD_KEY_RE.test(key)),
+  z.string().refine((value) => !jsonEmbedsSecret(value)),
+);
 const schemas: Record<string, z.ZodType> = {
   process: z.object({
     command: text, args: z.array(z.string()).optional(), cwd: text.optional(),

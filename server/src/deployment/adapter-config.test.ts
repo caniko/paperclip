@@ -12,7 +12,12 @@ describe("native declaration adapter contracts", () => {
     expect(() => validateDeclaredAdapterConfig("opencode_local", {
       command: "opencode", model: "openai/gpt-5.4", cwd: "/workspace",
       dangerouslySkipPermissions: false, timeoutSec: 900, graceSec: 20,
-      extraArgs: [], env: { MODE: "test" },
+      extraArgs: [], env: {
+        MODE: "test",
+        PAPERCLIP_OPENCODE_PROVIDERS: JSON.stringify({
+          gateway: { options: { baseURL: "https://gateway.example.test/v1", apiKey: "{env:OPENAI_API_KEY}" } },
+        }),
+      },
     }, { "env.OPENAI_API_KEY": "provider" })).not.toThrow();
   });
 
@@ -74,6 +79,12 @@ describe("native declaration adapter contracts", () => {
     ["opencode_local", { dangerouslySkipPermissions: false, env: { OPENAI_API_KEY: "inline" } }, { "env.OPENAI_API_KEY": "provider" }],
     ["opencode_local", { dangerouslySkipPermissions: false, env: { OPENAI_API_KEY: "inline" } }, {}],
     ["process", { command: "worker", env: { GITHUB_TOKEN: "inline" } }, {}],
+    ["opencode_local", { dangerouslySkipPermissions: false, env: {
+      PAPERCLIP_OPENCODE_PROVIDERS: JSON.stringify({ gateway: { options: { apiKey: "sk-inline" } } }),
+    } }, {}],
+    ["opencode_local", { dangerouslySkipPermissions: false, env: {
+      PAPERCLIP_OPENCODE_PROVIDERS: JSON.stringify({ gateway: { options: { headers: { Authorization: "Bearer sk-inline" } } } }),
+    } }, {}],
     ["invented_remote", {}, {}],
   ] as const)("rejects unsupported, malformed, inline-secret or conflicting %s configuration", (type, config, credentials) => {
     expect(() => validateDeclaredAdapterConfig(type, config, credentials)).toThrow();
