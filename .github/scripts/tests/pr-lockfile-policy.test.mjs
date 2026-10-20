@@ -70,3 +70,20 @@ if (args.includes("--force")) process.exit(22);
   assert.deepEqual(commands.filter(args => args[0] === "push"), [["push", "origin", "chore/refresh-lockfile"]]);
   assert.equal(readFileSync(join(directory, "output"), "utf8"), "pr_url=\n");
 });
+
+test("prepared lock policy has an independent exact-head attempt-1 hosted gate before caller promotion", () => {
+  const workflow = readFileSync(new URL("../../workflows/qualification-lock-policy.yml", import.meta.url), "utf8");
+  assert.match(workflow, /runs-on: ubuntu-24\.04/);
+  assert.match(workflow, /ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
+  assert.match(workflow, /persist-credentials: false/);
+  assert.match(workflow, /qualification-evidence\.py initialize "\$EVIDENCE"/);
+  assert.match(workflow, /node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="\$EVIDENCE\/policy\.xml"/);
+  for (const name of ["pr-lockfile-policy", "pr-dependency-cache", "pr-runner-rust-cache"]) {
+    assert.ok(workflow.includes(`.github/scripts/tests/${name}.test.mjs`), name);
+  }
+  assert.match(workflow, /qualification-evidence\.py seal "\$EVIDENCE" '\$\{\{ job\.status \}\}' --strict-reports/);
+  assert.match(workflow, /qualification-evidence\.py artifacts prepared-lock-policy- 1 /);
+  assert.equal(workflow.match(/retention-days: 32/g)?.length, 2);
+  assert.match(workflow, /sha256sum "\$\(command -v node\)"/);
+  assert.doesNotMatch(workflow, /continue-on-error|workflow_dispatch|workflow_call|\bneeds:|cancel-in-progress: true/);
+});

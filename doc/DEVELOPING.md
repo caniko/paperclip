@@ -116,6 +116,14 @@ than replacing history. This is preparation only: the new policy and application
 head still need independent hosted qualification before caller promotion or
 deployment.
 
+The owned fork's `qualification-lock-policy.yml` runs those prepared policy and
+cache contracts independently of the older immutable PR caller. It binds the
+exact head, actual hosted Linux runner and Node runtime, keeps the original
+JUnit and log with zero skipped cases, and checks provider retention after the
+32-day upload. A passing policy artifact is not application acceptance. Inspect
+its attempt-1 receipt, hashes and retention before advancing `pr.yml`; preserve
+the earlier caller's failed lock-policy result and the immutable Stop harness.
+
 ## Trusted PR Workflow
 
 The PR caller uses `paperclipai/paperclip/.github/workflows/pr-trusted.yml@master`.

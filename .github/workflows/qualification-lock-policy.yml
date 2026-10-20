@@ -1,0 +1,70 @@
+name: Independent prepared lock policy
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: prepared-lock-policy-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Bind exact source, hosted runner and runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNNER_IDENTITY: ${{ toJSON(runner) }}
+        run: |
+          set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/lock-policy"
+          mkdir -p "$EVIDENCE"
+          printf '%s\n' "EVIDENCE=$EVIDENCE" >> "$GITHUB_ENV"
+          python3 .github/scripts/qualification-evidence.py initialize "$EVIDENCE"
+          printf '%s\n' "$RUNNER_IDENTITY" > "$EVIDENCE/runner.json"
+          cp /etc/os-release "$EVIDENCE/os-release"
+          node --input-type=module -e 'console.log(JSON.stringify({platform:process.platform,arch:process.arch,versions:process.versions}))' > "$EVIDENCE/runtime.json"
+          sha256sum "$(command -v node)" > "$EVIDENCE/runtime.sha256"
+      - name: Execute prepared policy and cache contracts once
+        run: |
+          set -euo pipefail
+          node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="$EVIDENCE/policy.xml" \
+            .github/scripts/tests/pr-lockfile-policy.test.mjs \
+            .github/scripts/tests/pr-dependency-cache.test.mjs \
+            .github/scripts/tests/pr-runner-rust-cache.test.mjs 2>&1 | tee "$EVIDENCE/policy.log"
+      - name: Seal original policy evidence only
+        if: always()
+        run: python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" '${{ job.status }}' --strict-reports
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: prepared-lock-policy-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lock-policy/
+          retention-days: 32
+          if-no-files-found: error
+      - name: Verify actual provider retention
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/qualification-evidence.py artifacts prepared-lock-policy- 1 "$RUNNER_TEMP/lock-policy-retention.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: prepared-lock-policy-retention-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lock-policy-retention.json
+          retention-days: 32
+          if-no-files-found: error
