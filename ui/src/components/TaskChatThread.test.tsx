@@ -4164,7 +4164,7 @@ describe("TaskChatThread live transcript", () => {
     expect(tail!.textContent).toContain("Syncing workspace to environment");
     expect(tail!.textContent).not.toContain("Waiting for transcript...");
 
-    // Without a runtime status, the generic wait message still shows.
+    // Without a runtime status, the working indicator remains the only visible activity.
     renderThread({
       comments: [],
       onAdd: async () => {},
@@ -4174,7 +4174,8 @@ describe("TaskChatThread live transcript", () => {
     const tail2 = container.querySelector(
       '[data-testid="task-chat-live-transcript"]',
     );
-    expect(tail2!.textContent).toContain("Waiting for transcript...");
+    expect(tail2!.textContent).toContain("Working");
+    expect(tail2!.textContent).not.toContain("Waiting for transcript...");
   });
 
   it("does not send a workspace bootstrap failure to connection settings", () => {

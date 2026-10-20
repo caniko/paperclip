@@ -22,11 +22,11 @@ Agent access: [companion](../agent-access-map/skills.md).
 
 ### `library-sources`
 
-Open `/skills`, Discover, or `/skills/sources`; project import is available through the library’s import flow.
+Open `/skills`, Discover, or `/skills/sources`; project import is available through the library’s import flow. In Streamlined UI, Installed, Discover and My Skills are route links styled as tabs beneath the toolbar, with no secondary navigation rail. Sources stays separate under New → Manage sources. Legacy UI retains the Skills sidebar.
 
 ### `studio`
 
-Use New skill or `/skills/studio/:skillId`; writable copies and source-backed originals differ.
+Use New skill or `/skills/studio/:skillId`; writable copies and source-backed originals differ. In Streamlined UI, `/skills/studio` uses the shared Skills toolbar and card collection with My Skills active and Recently updated sorting; opening a card enters Studio.
 Direct authoring starts at `/skills/studio/new`: fill **Name** and **Slug**, then
 **Create skill**. Authoring/save/reload requires no model credential; running a
 Studio test is separate.
