@@ -7,7 +7,7 @@ import {
   pluginManagedResources, builtInManagedResources,
   instanceSettings, projectWorkspaces, environments,
 } from "@paperclipai/db";
-import { deploymentManifestSchema, type DeploymentManifest, type Environment } from "@paperclipai/shared";
+import { LOCAL_ENVIRONMENT_ADOPT, deploymentManifestSchema, type DeploymentManifest, type Environment } from "@paperclipai/shared";
 import type { createAgentLifecycleInTransaction } from "../services/agent-lifecycle.js";
 import { publishAccountingActivities } from "../services/accounting-transaction.js";
 import type { ActivityPublication } from "../types/activity-publication.js";
@@ -125,12 +125,12 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     for (const [key, c] of Object.entries(m.companies)) getId("company", key, c.adopt);
     for (const [key, p] of Object.entries(m.projects)) getId("project", key, p.adopt);
     for (const [key, w] of Object.entries(m.projectWorkspaces)) getId("workspace", key, w.adopt);
-    // A local declaration binds the singleton managed local environment when it already exists.
-    const [localEnvironment] = Object.values(m.environments).some((e) => e.fields.driver === "local")
+    // The explicit sentinel adopts the singleton local environment once it exists.
+    const [localEnvironment] = Object.values(m.environments).some((e) => e.adopt === LOCAL_ENVIRONMENT_ADOPT)
       ? await tx.select({ id: environments.id }).from(environments).where(eq(environments.driver, "local")).limit(1)
       : [];
     const environmentAdopt = (e: DeploymentManifest["environments"][string]) =>
-      e.adopt ?? (e.fields.driver === "local" ? localEnvironment?.id : undefined);
+      e.adopt === LOCAL_ENVIRONMENT_ADOPT ? localEnvironment?.id : e.adopt;
     for (const [key, e] of Object.entries(m.environments)) getId("environment", key, environmentAdopt(e));
     for (const [key, a] of Object.entries(m.agents)) getId("agent", key, a.adopt);
     const actorId = await bootstrapOperator(tx, options.config, options.descriptor.bootstrap, false);

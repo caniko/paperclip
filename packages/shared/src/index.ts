@@ -2788,7 +2788,7 @@ export type { AgentInstructionCandidate } from "./types/agent.js";
 export { resolveAgentInstructionCandidateSchema, type ResolveAgentInstructionCandidate } from "./validators/agent.js";
 
 export { isHeartbeatRunVisibleInMine } from "./heartbeat-inbox.js";
-export { deploymentManifestSchema, type DeploymentManifest } from "./deployment-manifest.js";
+export { LOCAL_ENVIRONMENT_ADOPT, deploymentManifestSchema, type DeploymentManifest } from "./deployment-manifest.js";
 export * from "./browser-use.js";
 
 export * from "./types/skill-source.js";

@@ -6,6 +6,8 @@ import { createRoutineSchema, createRoutineTriggerSchema } from "./validators/ro
 import { environmentCapacitySchema, filesystemOwnershipSchema } from "./validators/environment.js";
 
 const key = z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/);
+/** Explicitly adopts the instance's singleton local environment. */
+export const LOCAL_ENVIRONMENT_ADOPT = "instance-local";
 const identity = z.object({ adopt: z.string().uuid().optional() });
 const company = identity.extend({
   fields: createCompanySchema.pick({ name: true, description: true, budgetMonthlyCents: true }).strict(),
@@ -48,7 +50,9 @@ export const deploymentManifestSchema = z.object({
   owner: key,
   companies: z.record(key, company),
   projects: z.record(key, project).default({}),
-  environments: z.record(key, identity.extend({
+  environments: z.record(key, z.object({
+    // The singleton local environment has no UUID before the first apply; adopt it by name.
+    adopt: z.union([z.string().uuid(), z.literal(LOCAL_ENVIRONMENT_ADOPT)]).optional(),
     company: key,
     // SSH declarations name their private key; local declarations take none.
     credential: key.optional(),
@@ -74,7 +78,9 @@ export const deploymentManifestSchema = z.object({
       }).strict(),
     ]),
   }).strict().refine((e) => (e.fields.driver === "ssh") === (e.credential !== undefined),
-    { message: "SSH environments require a credential; local environments take none", path: ["credential"] })).default({}),
+    { message: "SSH environments require a credential; local environments take none", path: ["credential"] })
+    .refine((e) => (e.fields.driver === "local") === (e.adopt === LOCAL_ENVIRONMENT_ADOPT),
+      { message: `Local environments require adopt: "${LOCAL_ENVIRONMENT_ADOPT}"; other drivers cannot use it`, path: ["adopt"] })).default({}),
   projectWorkspaces: z.record(key, identity.extend({
     project: key,
     fields: createProjectWorkspaceSchema.strict(),

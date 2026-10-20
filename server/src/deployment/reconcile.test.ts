@@ -587,7 +587,7 @@ it("binds the managed local environment and owns only the agent overflow list", 
   const overflowDescriptor = { ...descriptor, credentialFiles: { ...descriptor.credentialFiles, executor: join(root, "overflow-executor") } };
   const declaration = { version: 1, owner: "overflow-execution", companies: { example: { fields: { name: "Overflow execution" } } },
     environments: {
-      primary: { company: "example", fields: { driver: "local", config: { capacity: { maxConcurrentRuns: 1 } } } },
+      primary: { adopt: "instance-local", company: "example", fields: { driver: "local", config: { capacity: { maxConcurrentRuns: 1 } } } },
       nomad: { company: "example", credential: "executor", fields: { name: "SSH Overflow", driver: "ssh",
         config: { host: "nomad", port: 22, username: "exec", remoteWorkspacePath: "/work", knownHosts: "nomad ssh-ed25519 AAAA", strictHostKeyChecking: true,
           capacity: { maxConcurrentRuns: 1, admissionCommand: ["probe"] } } } },

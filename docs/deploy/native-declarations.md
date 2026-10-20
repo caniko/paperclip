@@ -275,8 +275,11 @@ they cannot silently retarget retained runs or sessions. Declaring an environmen
 does not establish reachability or qualify execution, Stop, or recovery.
 
 SSH configs may add `capacity` (`maxConcurrentRuns`, `admissionCommand`). A
-`driver: "local"` declaration takes no credential and only `config.capacity`;
-it binds the instance's single managed local environment and owns its config.
+`driver: "local"` declaration takes no credential and only `config.capacity`.
+It must set `adopt: "instance-local"`. Paperclip creates the single local
+environment itself, so it has no UUID before the first apply; the sentinel is
+the explicit adoption of that environment. The declaration then owns its config.
+Other drivers cannot use the sentinel.
 Set `agents.<key>.overflowEnvironments` to ordered environment keys in the same
 company. Reconciliation writes their IDs to the agent's
 `runtimeConfig.fallbackEnvironmentIds` and preserves the other application-owned
