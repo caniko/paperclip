@@ -138,6 +138,8 @@ and the independent gate runs every `.github/scripts/tests/*.test.mjs` case with
 the installed pnpm, esbuild and Vitest versions and hashes retained. Keep the
 caller on its qualified pin until this expanded gate passes on attempt 1; the
 original missing-dependency failure remains evidence, not a passing retry.
+Use the existing source-bound Node JUnit reporter so equal titles from different
+files remain distinct while repeated cases from the same file still fail sealing.
 
 ## Trusted PR Workflow
 

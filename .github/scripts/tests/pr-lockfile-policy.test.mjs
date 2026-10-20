@@ -77,7 +77,7 @@ test("prepared lock policy has an independent exact-head attempt-1 hosted gate b
   assert.match(workflow, /ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
   assert.match(workflow, /persist-credentials: false/);
   assert.match(workflow, /qualification-evidence\.py initialize "\$EVIDENCE"/);
-  assert.match(workflow, /node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="\$EVIDENCE\/policy\.xml"/);
+  assert.match(workflow, /node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=\.\/scripts\/qualification-node-junit-reporter\.mjs --test-reporter-destination="\$EVIDENCE\/policy\.xml"/);
   assert.ok(workflow.includes("'.github/scripts/tests/*.test.mjs'"), "Prepare every policy test, including dependency-backed profiles");
   const dependencies = workflow.indexOf("uses: ./.github/actions/setup-ci-dependencies");
   const tests = workflow.indexOf("      - name: Execute prepared policy and cache contracts once");
