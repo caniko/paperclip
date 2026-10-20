@@ -57,9 +57,12 @@ describeEmbeddedPostgres("bounded issue summaries", () => {
     } finally { spy.mockRestore(); }
   });
 
+  // Collection and execution must retain the same parameterized case identities.
+  const queryId = "00000000-0000-4000-8000-000000000001";
+  const otherQueryId = "00000000-0000-4000-8000-000000000002";
   it.each(["", "?ids=", "?ids=nope", "?ids=,", "?ids[]=nope", "?ids[x]=nope",
-    `?ids=${randomUUID()}&ids[]=nope`, `?ids=${randomUUID()}&ids[x]=nope`,
-    `?ids=${randomUUID()}&ids=${randomUUID()}`, `?ids=${Array(6).fill(randomUUID()).join(",")}`,
+    `?ids=${queryId}&ids[]=nope`, `?ids=${queryId}&ids[x]=nope`,
+    `?ids=${queryId}&ids=${otherQueryId}`, `?ids=${Array(6).fill(queryId).join(",")}`,
   ])("rejects invalid query %s", async (query) => {
     const f = await fixture();
     await request(app(f.actor)).get(url(f.companyId) + query).expect(400);
