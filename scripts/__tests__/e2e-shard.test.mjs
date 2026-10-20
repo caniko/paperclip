@@ -326,7 +326,7 @@ test("the independent hosted Stop lane keeps the qualified prepared commands", (
   assert.match(independent, /runs-on: ubuntu-24\.04/);
   assert.match(independent, /timeout-minutes: 20/);
   assert.doesNotMatch(independent, /needs\.gate/);
-  assert.match(readFileSync(prCallerWorkflow, "utf8"), /pr-trusted\.yml@983f7aec49d94eab2bfd44073abe766da7a1cb7c/);
+  assert.match(readFileSync(prCallerWorkflow, "utf8"), /pr-trusted\.yml@1d887ee236e14a2c683edaf76b8eb3d5dd6e7fcf/);
   // SHA-256 of the qualified 76e683f90 workflow; hosted checkouts can be shallow.
   assert.equal(createHash("sha256").update(qualification).digest("hex"),
     "de703c93259d13602c8d82a7c1945cdf454953cb680c5c0fbaf2d53e1e399654",

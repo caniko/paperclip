@@ -10,6 +10,9 @@ import { fileURLToPath } from 'node:url';
 const catalogFile = 'registry-packages.json';
 const packageName = /^(?:@[a-z0-9_.-]+\/)?[a-z0-9_.-]+$/;
 
+// A numeric Git prefix with a leading zero is not a valid SemVer prerelease identifier.
+export const publicInstallVersion = (provider, revision) => `0.0.0-${provider}-verify.g${revision.slice(0, 12)}`;
+
 export async function writePackedRegistryCatalog(directory) {
   const entries = [];
   for (const file of readdirSync(directory).filter(file => file.endsWith('.tgz')).sort()) {

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { startPackedRegistry, writePackedRegistryCatalog } from '../public-install-registry.mjs';
+import { publicInstallVersion, startPackedRegistry, writePackedRegistryCatalog } from '../public-install-registry.mjs';
 
 const script = fileURLToPath(new URL('../public-install-registry.mjs', import.meta.url));
 const scratch = async body => {
@@ -22,13 +22,13 @@ const run = (command, args, cwd) => new Promise((resolve, reject) => {
   child.once('error', reject);
   child.once('exit', (code, signal) => code === 0 ? resolve(output) : reject(new Error(`${command} exited ${signal ?? code}: ${output}`)));
 });
-const fixture = (root, { publicDependency = false } = {}) => {
+const fixture = (root, { publicDependency = false, version = '1.0.0' } = {}) => {
   const assets = join(root, 'assets'); mkdirSync(assets);
   const packs = [
-    { name: '@ci/leaf', version: '1.0.0', main: 'index.js' },
-    { name: '@ci/optional', version: '1.0.0' },
-    { name: '@ci/root', version: '1.0.0', dependencies: { '@ci/leaf': '1.0.0', 'bundled-leaf': '1.0.0', ...(publicDependency ? { 'is-number': '7.0.0' } : {}) },
-      optionalDependencies: { '@ci/optional': '1.0.0' }, bundleDependencies: ['bundled-leaf'], bin: { 'ci-root': 'index.js' },
+    { name: '@ci/leaf', version, main: 'index.js' },
+    { name: '@ci/optional', version },
+    { name: '@ci/root', version, dependencies: { '@ci/leaf': version, 'bundled-leaf': '1.0.0', ...(publicDependency ? { 'is-number': '7.0.0' } : {}) },
+      optionalDependencies: { '@ci/optional': version }, bundleDependencies: ['bundled-leaf'], bin: { 'ci-root': 'index.js' },
       scripts: { postinstall: "node -e \"require('node:fs').writeFileSync('lifecycle-ran', 'ok')\"" } },
   ];
   for (const [index, manifest] of packs.entries()) {
@@ -99,6 +99,22 @@ test('the registry exposes only known tarballs, redirects other packages to npm 
   } finally { await registry.close(); }
   await assert.rejects(fetch(`${registry.url}/@ci%2fpkg`));
 }));
+
+test('real npm installs revision-qualified prereleases when the SHA prefix is numeric with a leading zero', { timeout: 90_000 }, async () => {
+  for (const provider of ['grok', 'cursor']) await scratch(async root => {
+    const version = publicInstallVersion(provider, '01727121681784c36a5ca477ab576102f46739f2');
+    assert.equal(version, `0.0.0-${provider}-verify.g017271216817`);
+    const assets = fixture(root, { version });
+    await writePackedRegistryCatalog(assets);
+    const consumer = join(root, 'consumer'); mkdirSync(consumer);
+    writeFileSync(join(consumer, 'package.json'), '{"private":true}');
+    await run(process.execPath, [script, assets], consumer);
+    for (const name of ['@ci/root', '@ci/leaf', '@ci/optional']) {
+      assert.equal(JSON.parse(readFileSync(join(consumer, 'node_modules', name, 'package.json'))).version, version);
+    }
+    assert.equal(existsSync(join(consumer, 'node_modules/@ci/root/lifecycle-ran')), false);
+  });
+});
 
 test('npm rejects changed tarball bytes against the catalog integrity and the CLI reports failure', { timeout: 90_000 }, async () => scratch(async root => {
   const assets = fixture(root), catalog = await writePackedRegistryCatalog(assets);

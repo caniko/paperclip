@@ -124,7 +124,7 @@ JUnit and log with zero skipped cases, and checks provider retention after the
 its attempt-1 receipt, hashes and retention before advancing `pr.yml`; preserve
 the earlier caller's failed lock-policy result and the immutable Stop harness.
 
-The fork caller now pins `983f7aec49d94eab2bfd44073abe766da7a1cb7c` after
+The fork caller previously pinned `983f7aec49d94eab2bfd44073abe766da7a1cb7c` after
 [policy run 39353729273](https://github.com/caniko/paperclip/actions/runs/39353729273),
 attempt 1, passed all 22 cases without failures, errors, skips or retries.
 Provider-SHA-256-verified artifacts `12234905696` and `12235010088` retain the
@@ -140,6 +140,17 @@ caller on its qualified pin until this expanded gate passes on attempt 1; the
 original missing-dependency failure remains evidence, not a passing retry.
 Use the existing source-bound Node JUnit reporter so equal titles from different
 files remain distinct while repeated cases from the same file still fail sealing.
+
+The current caller pins `1d887ee236e14a2c683edaf76b8eb3d5dd6e7fcf`, whose
+independent hosted attempt 1 qualified 503 source-bound policy cases. The exact-pin
+regression follows this promotion; the qualified native Stop workflow bytes and
+same-file duplicate-case rejection remain unchanged. This policy result is not
+overall producer or Atlas acceptance.
+
+Disposable public-install verifiers prefix the Git revision identifier with `g`
+in their prerelease versions. This keeps all-numeric SHA prefixes with leading
+zeros valid under SemVer; a real loopback-registry npm-install regression covers
+both Grok and Cursor version generation without publishing packages.
 
 ## Trusted PR Workflow
 
