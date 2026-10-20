@@ -36,6 +36,8 @@ const launch = (command: string) =>
     [
       "--import",
       fileURLToPath(new URL("../../node_modules/tsx/dist/loader.mjs", import.meta.url)),
+      "--import",
+      `data:text/javascript,${encodeURIComponent('import { channel } from "node:diagnostics_channel"; channel("paperclip.deployment.startup").subscribe(({ phase }) => console.error(`[deployment startup] ${phase} at ${Math.round(performance.now())}ms`));')}`,
       fileURLToPath(new URL("../deployment-entry.ts", import.meta.url)),
       descriptorFile,
       command,
@@ -55,6 +57,9 @@ async function command(name: string) {
     stderr += chunk;
   });
   const [code] = await once(process, "exit");
+  for (const line of stderr.split("\n")) {
+    if (line.startsWith("[deployment startup] ")) console.info(`[deployment fixture] ${name}: ${line}`);
+  }
   console.info(`[deployment fixture] ${name} exited ${code} after ${Math.round(performance.now() - started)}ms`);
   return { code, stdout, stderr };
 }
