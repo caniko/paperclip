@@ -208,6 +208,41 @@ it("retains ownership when Stop cannot prove settlement after a live cancellatio
   expect(f.stopped).not.toHaveBeenCalled();
 });
 
+it("keeps a success settled after the deadline and a reported zero cost", async () => {
+  const f = await fixture();
+  f.ctx.config = { ...f.ctx.config, timeoutSec: 0.001 };
+  const implementation = control.getMockImplementation()!;
+  control.mockImplementation(async (...args) => {
+    const result = await implementation(...args);
+    if (args[3].at(-1) !== "admit") return result;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const receipt = JSON.parse(result.stdout);
+    return { ...result, stdout: JSON.stringify({ ...receipt, settled: true, result: { ...receipt.result, costUsd: 0 } }) };
+  });
+  const result = await execute(f.ctx);
+  expect(f.operations).not.toContain("stop");
+  expect(result).toMatchObject({ exitCode: 0, timedOut: false, costUsd: 0, costStatus: "estimated" });
+});
+
+it("rejects token counts that accounting cannot persist", async () => {
+  for (const tokens of [
+    { input: 1.5, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    { input: 2_147_483_647, output: 0, reasoning: 0, cache: { read: 0, write: 1 } },
+  ]) {
+    const f = await fixture();
+    const implementation = control.getMockImplementation()!;
+    control.mockImplementation(async (...args) => {
+      const result = await implementation(...args);
+      if (args[3].at(-1) !== "admit") return result;
+      const receipt = JSON.parse(result.stdout);
+      return { ...result, stdout: JSON.stringify({ ...receipt, result: { ...receipt.result, tokens } }) };
+    });
+    const result = await execute(f.ctx);
+    expect(result).toMatchObject({ exitCode: 1, errorCode: "opencode_managed_cancelled" });
+    expect(f.operations.at(-1)).toBe("stop");
+  }
+});
+
 it("requires durable lifecycle hooks and preserves personal permission configuration", async () => {
   const f = await fixture();
   await expect(execute({ ...f.ctx, onExecutionCheckpoint: undefined })).rejects.toThrow(/checkpoint/i);

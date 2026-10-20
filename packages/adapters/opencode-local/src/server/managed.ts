@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { setTimeout } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import { asString, parseObject } from "@paperclipai/adapter-utils/server-utils";
 import {
@@ -90,7 +91,7 @@ export async function executeManaged(
     location: { directory: adapterExecutionTargetRemoteCwd(target, input.cwd) },
     model: { provider: model.slice(0, slash), model: model.slice(slash + 1) },
     environment: input.environment,
-    prompt: { text: input.prompt, files: input.files.map((file) => ({ uri: `file://${file}` })) },
+    prompt: { text: input.prompt, files: input.files.map((file) => ({ uri: pathToFileURL(file).href })) },
   });
   const admission: Admission = {
     ...base,
@@ -128,6 +129,7 @@ export async function executeManaged(
     // An uncertain admission is fenced by Stop using the original bytes; never replay admit or select another backend.
     failure = true;
   }
+  const timedOut = !failure && !ctx.signal?.aborted && !latest?.settled && Date.now() >= deadline;
   if (!latest?.settled || ctx.signal?.aborted || failure) {
     latest = await control(admission, "stop")
       .then((value) => readReceipt(value, admission))
@@ -149,7 +151,7 @@ export async function executeManaged(
   return {
     exitCode: succeeded ? 0 : 1,
     signal: stopped ? "SIGTERM" : null,
-    timedOut: Date.now() >= deadline,
+    timedOut,
     ...(!succeeded
       ? {
           errorCode: stopped ? "opencode_managed_cancelled" : "opencode_managed_failed",
@@ -173,7 +175,7 @@ export async function executeManaged(
           },
         }
       : {}),
-    ...(latest.result?.costUsd
+    ...(latest.result
       ? { costUsd: latest.result.costUsd, costStatus: "estimated" as const }
       : { costStatus: "unpriced" as const }),
     sessionId: admission.sessionID,
@@ -305,9 +307,16 @@ function readReceipt(raw: unknown, admission: Admission): Receipt {
       cache = parseObject(tokens.cache);
     if (
       typeof result.summary !== "string" ||
-      ![result.costUsd, tokens.input, tokens.output, tokens.reasoning, cache.read, cache.write].every(
-        (value) => typeof value === "number" && Number.isFinite(value) && value >= 0,
-      )
+      !(typeof result.costUsd === "number" && Number.isFinite(result.costUsd) && result.costUsd >= 0) ||
+      // Accounting persists each recorded usage total as a nonnegative 32-bit integer.
+      ![tokens.input, tokens.output, tokens.reasoning, cache.read, cache.write].every(
+        (value) => Number.isInteger(value) && (value as number) >= 0,
+      ) ||
+      [
+        (tokens.input as number) + (cache.write as number),
+        (tokens.output as number) + (tokens.reasoning as number),
+        cache.read as number,
+      ].some((value) => value > 2_147_483_647)
     )
       throw new Error("Invalid managed OpenCode accounting receipt");
   }
