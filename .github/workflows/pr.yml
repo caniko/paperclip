@@ -14,6 +14,6 @@ permissions:
 jobs:
   ci:
     if: github.event.action != 'labeled' || github.event.label.name == 'profile-ci'
-    # Prepared Native Stop qualified on attempt 1 in run 39336767061.
-    # Keep that workflow and its independently pinned Stop harness immutable.
-    uses: caniko/paperclip/.github/workflows/pr-trusted.yml@76e683f90c801370d6bb230be0284682472633da
+    # Lock policy qualified on attempt 1 in run 39353729273 (22 cases).
+    # Preserve the Stop commands qualified in run 39336767061 and their pinned harness.
+    uses: caniko/paperclip/.github/workflows/pr-trusted.yml@983f7aec49d94eab2bfd44073abe766da7a1cb7c

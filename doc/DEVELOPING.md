@@ -124,6 +124,14 @@ JUnit and log with zero skipped cases, and checks provider retention after the
 its attempt-1 receipt, hashes and retention before advancing `pr.yml`; preserve
 the earlier caller's failed lock-policy result and the immutable Stop harness.
 
+The fork caller now pins `983f7aec49d94eab2bfd44073abe766da7a1cb7c` after
+[policy run 39353729273](https://github.com/caniko/paperclip/actions/runs/39353729273),
+attempt 1, passed all 22 cases without failures, errors, skips or retries.
+Provider-SHA-256-verified artifacts `12234905696` and `12235010088` retain the
+source/runtime/runner-bound receipt and retention readback until 2026-11-21.
+The Stop job remains byte-identical to the previously qualified caller. This
+promotion does not grant application, patched-consumer or Atlas acceptance.
+
 ## Trusted PR Workflow
 
 The PR caller uses `paperclipai/paperclip/.github/workflows/pr-trusted.yml@master`.

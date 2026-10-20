@@ -325,7 +325,13 @@ test("the independent hosted Stop lane keeps the qualified prepared commands", (
   assert.match(independent, /runs-on: ubuntu-24\.04/);
   assert.match(independent, /timeout-minutes: 20/);
   assert.doesNotMatch(independent, /needs\.gate/);
-  assert.match(readFileSync(prCallerWorkflow, "utf8"), /pr-trusted\.yml@76e683f90c801370d6bb230be0284682472633da/);
+  assert.match(readFileSync(prCallerWorkflow, "utf8"), /pr-trusted\.yml@983f7aec49d94eab2bfd44073abe766da7a1cb7c/);
+  const qualified = spawnSync("git", ["show", "76e683f90c801370d6bb230be0284682472633da:" + trustedPrWorkflowPath], {
+    cwd: repoRoot, encoding: "utf8",
+  });
+  assert.equal(qualified.status, 0, qualified.stderr);
+  assert.equal(original, readWorkflowJobs(qualified.stdout).get("native_composer_stop"),
+    "policy promotion must preserve the independently qualified Stop job byte-for-byte");
 });
 
 test("the stacked PR scope selector runs full CI only where intended", () => {
