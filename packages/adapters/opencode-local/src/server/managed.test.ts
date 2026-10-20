@@ -224,6 +224,24 @@ it("keeps a success settled after the deadline and a reported zero cost", async 
   expect(result).toMatchObject({ exitCode: 0, timedOut: false, costUsd: 0, costStatus: "estimated" });
 });
 
+it("keeps a verified settlement when progress persistence fails", async () => {
+  const f = await fixture();
+  f.ctx.onExecutionProgress = async () => {
+    throw new Error("controller lease write failed");
+  };
+  const implementation = control.getMockImplementation()!;
+  control.mockImplementation(async (...args) => {
+    const result = await implementation(...args);
+    return args[3].at(-1) === "resume"
+      ? { ...result, stdout: JSON.stringify({ ...JSON.parse(result.stdout), settled: true }) }
+      : result;
+  });
+  const result = await execute(f.ctx);
+  expect(f.operations).not.toContain("stop");
+  expect(result).toMatchObject({ exitCode: 0, timedOut: false });
+  expect(f.stopped).toHaveBeenCalledOnce();
+});
+
 it("rejects token counts that accounting cannot persist", async () => {
   for (const tokens of [
     { input: 1.5, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },

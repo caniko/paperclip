@@ -117,8 +117,9 @@ export async function executeManaged(
     while (!ctx.signal?.aborted && Date.now() < deadline && latest && !latest.settled) {
       if (!latest.stopRequested)
         latest = readReceipt(await control(admission, "resume", latest.backendGeneration), admission);
-      await ctx.onExecutionProgress?.({ version: 1, backendID: admission.backendID, receipt: latest });
+      // A verified settlement wins; only unsettled work is fenced when its observation cannot be recorded.
       if (latest.settled) break;
+      await ctx.onExecutionProgress?.({ version: 1, backendID: admission.backendID, receipt: latest });
       latest = readReceipt(await control(admission, "status"), admission);
       if (!latest.settled)
         await setTimeout(250, undefined, { signal: ctx.signal }).catch((error) => {
@@ -140,7 +141,8 @@ export async function executeManaged(
         { code: "opencode_managed_stop_pending" },
       );
   }
-  await ctx.onExecutionProgress?.({ version: 1, backendID: admission.backendID, receipt: latest });
+  // Progress is mutable observation; the settled receipt, not its persistence, decides the outcome.
+  await ctx.onExecutionProgress?.({ version: 1, backendID: admission.backendID, receipt: latest }).catch(() => undefined);
   input.onSettled();
   const stopped = latest.stopRequested;
   const succeeded =
