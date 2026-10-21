@@ -1,0 +1,23 @@
+{
+  "schema": "paperclip.rollout-exceptions.v1",
+  "repository": "caniko/paperclip",
+  "pull_request": 5,
+  "authorization": "Operator approved proceeding with these evidenced external/resource exceptions in session ses_ee568f4ecffeehXfc94ARVvQBR on 2026-10-19.",
+  "execution_credit": false,
+  "original_inventory": {
+    "artifact_id": 12148407792,
+    "run_id": 39157504292,
+    "head": "9192d66579850b36cf10abd651b41804cfa75447",
+    "archive_sha256": "55e49e11aa44e31101780d987ad23382640ef1ce5460be5eb9ebd14be67368e1",
+    "member": "coverage-map.json",
+    "member_sha256": "641c43fb4a9f2c8502b1d36ad98f01abf840c5a0841f2383e18ad278e67dd67a",
+    "execution_credit": false
+  },
+  "exceptions": [
+    { "environment": "cloud", "max_cases": 1, "reason": "Required sibling Cloud source is inaccessible; paperclipai/cloud returned HTTP 404." },
+    { "environment": "live-daytona", "max_cases": 2, "reason": "Authorized disposable Daytona credentials and provider resources are unavailable." },
+    { "environment": "live-daytona-duplex", "max_cases": 6, "reason": "Authorized disposable Daytona credentials and provider resources are unavailable." },
+    { "environment": "live-tailscale", "max_cases": 1, "reason": "Disposable hosted Tailscale node and service credentials are unavailable. Production authenticated journeys remain required." },
+    { "environment": "hermes-hosted-64gib", "max_cases": 0, "reason": "Eligible GitHub-hosted memory capacity is unavailable; additional spending is not authorized. This resource exception has no workspace-case execution credit." }
+  ]
+}

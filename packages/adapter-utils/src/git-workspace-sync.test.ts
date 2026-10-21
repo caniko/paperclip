@@ -698,8 +698,7 @@ describe("git workspace sync", () => {
       cleanupDirs.push(repo);
       await git(repo, ["init"]);
       await git(repo, ["checkout", "-b", "host"]);
-      await git(repo, ["config", "user.name", "Paperclip Test"]);
-      await git(repo, ["config", "user.email", "test@paperclip.dev"]);
+      configureFixtureGitIdentity(repo);
       await writeFile(path.join(repo, "tracked.txt"), "base\n");
       await git(repo, ["add", "."]);
       await git(repo, ["commit", "-m", "base"]);
@@ -920,8 +919,7 @@ exit 0
     const repo = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-conflict-diagnostic-"));
     cleanupDirs.push(repo);
     await git(repo, ["init", "-b", "host"]);
-    await git(repo, ["config", "user.name", "Test"]);
-    await git(repo, ["config", "user.email", "test@paperclip.dev"]);
+    configureFixtureGitIdentity(repo);
     await writeFile(path.join(repo, "private-filename.txt"), "base\n");
     await git(repo, ["add", "."]);
     await git(repo, ["commit", "-m", "base"]);
@@ -954,8 +952,7 @@ exit 0
     const repo = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-transaction-diagnostic-"));
     cleanupDirs.push(repo);
     await git(repo, ["init", "-b", "private-branch"]);
-    await git(repo, ["config", "user.name", "Test"]);
-    await git(repo, ["config", "user.email", "test@paperclip.dev"]);
+    configureFixtureGitIdentity(repo);
     await git(repo, ["commit", "--allow-empty", "-m", "base"]);
     const base = await git(repo, ["rev-parse", "HEAD"]);
     await git(repo, ["commit", "--allow-empty", "-m", "advance"]);
@@ -981,8 +978,7 @@ exit 0
     const repo = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-ref-diagnostic-"));
     cleanupDirs.push(repo);
     await git(repo, ["init", "-b", "private-branch"]);
-    await git(repo, ["config", "user.name", "Test"]);
-    await git(repo, ["config", "user.email", "test@paperclip.dev"]);
+    configureFixtureGitIdentity(repo);
     await git(repo, ["commit", "--allow-empty", "-m", "base"]);
     const base = await git(repo, ["rev-parse", "HEAD"]);
     await git(repo, ["commit", "--allow-empty", "-m", "advance"]);
@@ -1002,9 +998,10 @@ exit 0
     const repo = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-reset-diagnostic-"));
     cleanupDirs.push(repo);
     await git(repo, ["init"]);
+    configureFixtureGitIdentity(repo);
     await writeFile(path.join(repo, "tracked.txt"), "base\n", "utf8");
     await git(repo, ["add", "tracked.txt"]);
-    await git(repo, ["-c", "user.name=Setup", "-c", "user.email=setup@paperclip.dev", "commit", "-m", "base"]);
+    await git(repo, ["commit", "-m", "base"]);
     await writeFile(path.join(repo, ".git", "index.lock"), "fixture lock\n", "utf8");
     const error = await withWorkspaceRestoreDiagnostics("workspace", () => withWorkspaceRestoreStep("index_reset", () =>
       resetLocalGitIndexToHead({ localDir: repo }))).catch((error: unknown) => error);

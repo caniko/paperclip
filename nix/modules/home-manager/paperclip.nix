@@ -3,26 +3,25 @@
   lib,
   pkgs,
   ...
-}:
-let
+}: let
   cfg = config.programs.paperclip;
-  client = pkgs.runCommand "paperclip-client" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
+  client = pkgs.runCommand "paperclip-client" {nativeBuildInputs = [pkgs.makeWrapper];} ''
     mkdir -p "$out/bin"
     makeWrapper ${cfg.package}/bin/paperclip "$out/bin/paperclip" \
       ${
-        lib.optionalString (cfg.apiUrl != null) "--set PAPERCLIP_API_URL ${lib.escapeShellArg cfg.apiUrl}"
-      } \
+      lib.optionalString (cfg.apiUrl != null) "--set PAPERCLIP_API_URL ${lib.escapeShellArg cfg.apiUrl}"
+    } \
       ${
-        lib.optionalString (
-          cfg.companyId != null
-        ) "--set PAPERCLIP_COMPANY_ID ${lib.escapeShellArg cfg.companyId}"
-      } \
+      lib.optionalString (
+        cfg.companyId != null
+      ) "--set PAPERCLIP_COMPANY_ID ${lib.escapeShellArg cfg.companyId}"
+    } \
       ${lib.optionalString (
-        cfg.apiKeyFile != null
-      ) "--set PAPERCLIP_API_KEY_FILE ${lib.escapeShellArg cfg.apiKeyFile}"}
+      cfg.apiKeyFile != null
+    ) "--set PAPERCLIP_API_KEY_FILE ${lib.escapeShellArg cfg.apiKeyFile}"}
   '';
-in
-{
+in {
+  imports = [./service.nix];
   options.programs.paperclip = {
     enable = lib.mkEnableOption "Paperclip CLI client";
     package = lib.mkOption {
@@ -58,8 +57,8 @@ in
       '';
     };
     deployments = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.attrsOf (pkgs.formats.json { }).type);
-      default = { };
+      type = lib.types.attrsOf (lib.types.attrsOf (pkgs.formats.json {}).type);
+      default = {};
       description = ''
         Nonsecret native deployment manifests, keyed by a native resource key.
         Home Manager writes these declarations under XDG configuration. The
@@ -84,7 +83,8 @@ in
       }
       {
         assertion =
-          cfg.apiKeyFile == null
+          cfg.apiKeyFile
+          == null
           || !(cfg.apiKeyFile == builtins.storeDir || lib.hasPrefix "${builtins.storeDir}/" cfg.apiKeyFile);
         message = "Paperclip CLI credentials must be runtime files outside the Nix store.";
       }
@@ -96,11 +96,13 @@ in
       }
     ];
     home.packages = lib.optional cfg.enable client;
-    xdg.configFile = lib.mapAttrs' (
-      name: manifest:
-      lib.nameValuePair "paperclip/deployments/${name}.json" {
-        text = builtins.toJSON manifest;
-      }
-    ) cfg.deployments;
+    xdg.configFile =
+      lib.mapAttrs' (
+        name: manifest:
+          lib.nameValuePair "paperclip/deployments/${name}.json" {
+            text = builtins.toJSON manifest;
+          }
+      )
+      cfg.deployments;
   };
 }

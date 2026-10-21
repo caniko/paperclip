@@ -109,7 +109,7 @@ export function embeddedDeploymentIdentity() {
 
 export function deploymentEnvironment(d: DeploymentDescriptor, inherited: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const key of ["PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR", "XDG_RUNTIME_DIR", "LD_LIBRARY_PATH", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"]) {
+  for (const key of ["PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "LD_LIBRARY_PATH", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"]) {
     if (inherited[key] !== undefined) env[key] = inherited[key];
   }
   Object.assign(env, {

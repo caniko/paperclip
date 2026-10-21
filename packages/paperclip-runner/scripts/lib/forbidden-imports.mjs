@@ -2,12 +2,12 @@ import { readFile, readdir } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EVAL_KERNEL_IMPORTER, EVAL_KERNEL_PACKAGE, readModuleReferences } from "./package-boundaries.mjs";
+import { API } from "typescript/unstable/sync";
+import { createVirtualFileSystem } from "typescript/unstable/fs";
+import { SyntaxKind } from "typescript/unstable/ast";
 
-const SOURCE_EXTENSIONS = new Set([".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".rs", ".ts", ".tsx"]);
-const IMPORT_PATTERNS = [
-  /\b(?:import|export)\s+(?:type\s+)?(?:[^"'`;]{0,500}?\s+from\s+)?["']([^"']+)["']/g,
-  /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
-  /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g,
+const SOURCE_EXTENSIONS = new Set([".cjs", ".js", ".jsx", ".mjs", ".mts", ".cts", ".rs", ".ts", ".tsx"]);
+const RUST_IMPORT_PATTERNS = [
   /\b(?:include|include_str|include_bytes)!\s*\(\s*["']([^"']+)["']\s*\)/g,
   /#\[path\s*=\s*["']([^"']+)["']\]/g,
 ];
@@ -45,15 +45,98 @@ async function collectSourceFiles(target) {
   return files;
 }
 
-export function findSpecifiers(source) {
-  const found = [];
-  for (const pattern of IMPORT_PATTERNS) {
-    pattern.lastIndex = 0;
-    for (let match = pattern.exec(source); match !== null; match = pattern.exec(source)) {
-      found.push({ specifier: match[1], offset: match.index });
+/** Parse a whole scan in one compiler session; never execute scanned source. */
+export function findSpecifiersInFiles(files) {
+  const results = new Map(files.map(({ file }) => [file, []]));
+  const javascript = files.filter(({ file }) => extension(file) !== ".rs");
+  for (const { file, source } of files.filter(({ file }) => extension(file) === ".rs")) {
+    for (const pattern of RUST_IMPORT_PATTERNS) {
+      pattern.lastIndex = 0;
+      for (const match of source.matchAll(pattern)) {
+        results.get(file).push({ specifier: match[1], offset: match.index });
+      }
     }
   }
-  return found;
+  if (javascript.length === 0) return results;
+  const root = "/__paperclip_import_check__";
+  const names = javascript.map(({ file }, index) => `input-${index}${extension(file) || ".ts"}`);
+  const virtualFiles = Object.fromEntries(javascript.map(({ source }, index) => [`${root}/${names[index]}`, source]));
+  virtualFiles[`${root}/tsconfig.json`] = JSON.stringify({
+    compilerOptions: { noLib: true, noResolve: true, allowJs: true }, files: names,
+  });
+  const api = new API({ fs: createVirtualFileSystem(virtualFiles) });
+  try {
+    const snapshot = api.updateSnapshot({ openProjects: [`${root}/tsconfig.json`] });
+    const program = snapshot.getProject(`${root}/tsconfig.json`).program;
+    for (const [index, { file }] of javascript.entries()) {
+      const sourceFile = program.getSourceFile(`${root}/${names[index]}`);
+      if (!sourceFile) throw new Error(`Import scanner could not parse ${file}`);
+      const found = results.get(file);
+      function add(literal) {
+        if (literal?.kind === SyntaxKind.StringLiteral || literal?.kind === SyntaxKind.NoSubstitutionTemplateLiteral) {
+          found.push({ specifier: literal.text, offset: literal.getStart(sourceFile) });
+        }
+      }
+      function visit(node) {
+        if (node.kind === SyntaxKind.ImportDeclaration || node.kind === SyntaxKind.ExportDeclaration) add(node.moduleSpecifier);
+        else if (node.kind === SyntaxKind.ImportEqualsDeclaration && node.moduleReference.kind === SyntaxKind.ExternalModuleReference) add(node.moduleReference.expression);
+        else if (node.kind === SyntaxKind.ImportType && node.argument.kind === SyntaxKind.LiteralType) add(node.argument.literal);
+        else if (node.kind === SyntaxKind.CallExpression && (
+          node.expression.kind === SyntaxKind.ImportKeyword ||
+          (node.expression.kind === SyntaxKind.Identifier && node.expression.text === "require")
+        )) add(node.arguments[0]);
+        node.forEachChild(visit);
+      }
+      visit(sourceFile);
+    }
+  } finally {
+    api.close();
+  }
+  return results;
+}
+
+export function findSpecifiers(source, file = "source.ts") {
+  return findSpecifiersInFiles([{ file, source }]).get(file);
+}
+
+function declaredPublicImports(manifest) {
+  return new Set(Object.entries(manifest.exports ?? {})
+    .filter(([key, target]) => key.startsWith("./") && !key.includes("*") && target !== null)
+    .map(([key]) => `@paperclipai/paperclip-runner/${key.slice(2)}`));
+}
+
+function publicSourceGraph(packageRoot, manifest, specifiers) {
+  const known = new Set(specifiers.keys());
+  const sourceCandidates = (path) => {
+    const source = path.replace(/\/dist\//, "/src/");
+    const stem = source.replace(/(?:\.d)?\.(?:[cm]?js|jsx|[cm]?ts|tsx)$/, "");
+    // Follow every matching source candidate conservatively, including barrels
+    // and extensionless imports. A public graph must never hide the dev harness.
+    return [source, ...[".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", "/index.ts", "/index.tsx", "/index.js"]
+      .map((suffix) => `${stem}${suffix}`)].filter((candidate) => known.has(candidate));
+  };
+  const targets = (value) => typeof value === "string" ? [value] : value && typeof value === "object" ? Object.values(value).flatMap(targets) : [];
+  const exportSources = (value) => targets(value).flatMap((target) => {
+    // Wildcard exports can expose the development harness. Until this gate
+    // resolves their full mapping, conservatively treat all sources as public.
+    if (target.includes("*")) return [...known];
+    return sourceCandidates(resolve(packageRoot, target));
+  });
+  const queue = exportSources(manifest.exports);
+  const reachable = new Set();
+  while (queue.length > 0) {
+    const file = queue.pop();
+    if (reachable.has(file)) continue;
+    reachable.add(file);
+    for (const { specifier } of specifiers.get(file) ?? []) {
+      if (specifier === null) continue;
+      if (specifier.startsWith(".")) queue.push(...sourceCandidates(resolve(dirname(file), specifier)));
+      else if (specifier.startsWith("@paperclipai/paperclip-runner/")) {
+        queue.push(...exportSources(manifest.exports?.[`./${specifier.slice("@paperclipai/paperclip-runner/".length)}`]));
+      }
+    }
+  }
+  return reachable;
 }
 
 // The Live console component decision record adapts shadcn/ui and AI Elements
@@ -80,20 +163,9 @@ function isForbiddenBrowserPackage(specifier) {
   );
 }
 
-function violationReason({ file, packageRoot, specifier, runnerExports }) {
+function violationReason({ file, packageRoot, specifier, publicRunnerImports, reviewedEvalHarness }) {
   const relativeFile = relative(packageRoot, file).split(/[\\/]/).join("/");
   const isExampleConsumer = relativeFile.startsWith("examples/");
-  const publicRunnerImports = new Set([
-    "@paperclipai/paperclip-runner/browser",
-    "@paperclipai/paperclip-runner/react",
-    "@paperclipai/paperclip-runner/standalone",
-    "@paperclipai/paperclip-runner/testing",
-    "@paperclipai/paperclip-runner/evals",
-    "@paperclipai/paperclip-runner/styles.css",
-  ].filter((specifier) => Object.hasOwn(
-    runnerExports,
-    `./${specifier.slice("@paperclipai/paperclip-runner/".length)}`,
-  )));
   if (
     specifier.startsWith("@paperclipai/paperclip-runner/") &&
     !publicRunnerImports.has(specifier)
@@ -103,14 +175,11 @@ function violationReason({ file, packageRoot, specifier, runnerExports }) {
   if (isExampleConsumer && specifier === "@paperclipai/paperclip-runner") {
     return "runner consumers may import only declared public subpaths";
   }
-  // ADR 0001 permits this exact private development import, never a runtime port.
-  if (specifier === EVAL_KERNEL_PACKAGE && relativeFile === EVAL_KERNEL_IMPORTER) {
-    return null;
-  }
   if (
     specifier.startsWith("@paperclipai/") &&
     specifier !== "@paperclipai/paperclip-runner" &&
-    !publicRunnerImports.has(specifier)
+    !publicRunnerImports.has(specifier) &&
+    !(specifier === EVAL_KERNEL_PACKAGE && reviewedEvalHarness && relativeFile === EVAL_KERNEL_IMPORTER)
   ) {
     return "Paperclip workspace packages are outside the standalone boundary";
   }
@@ -228,32 +297,28 @@ export async function checkForbiddenImports({
 } = {}) {
   const violations = [];
   const files = [];
-  const runnerExports = JSON.parse(await readFile(resolve(packageRoot, "package.json"), "utf8")).exports ?? {};
   for (const root of scanRoots) {
     files.push(...(await collectSourceFiles(resolve(packageRoot, root))));
   }
 
   const graph = await readModuleReferences(files.filter((file) => extension(file) !== ".rs"), packageRoot);
-  for (const file of files.sort()) {
-    const source = await readFile(file, "utf8");
-    const module = graph.get(file);
-    if (module !== undefined) violations.push(...module.diagnostics);
-    // Retain the Rust include/path checks. JS/TS uses syntax, not import-looking
-    // text inside fixture strings; nonliteral private script loaders are checked
-    // when reachable from a public export/bin by check:package-boundaries.
-    const references = module?.references ?? findSpecifiers(source);
-    for (const { specifier, offset } of references) {
+  const manifest = JSON.parse(await readFile(resolve(packageRoot, "package.json"), "utf8"));
+  const sources = await Promise.all(files.sort().map(async (file) => ({ file, source: await readFile(file, "utf8") })));
+  const specifiers = new Map(sources.map(({ file, source }) => [file, graph.get(file)?.references ?? findSpecifiers(source, file)]));
+  const publicRunnerImports = declaredPublicImports(manifest);
+  const publicSources = publicSourceGraph(packageRoot, manifest, specifiers);
+  // ADR0001 permits only this private development harness to use the kernel.
+  // A public export reaching it revokes the exception, including through barrels.
+  const reviewedEvalHarness = manifest.devDependencies?.[EVAL_KERNEL_PACKAGE] === "workspace:*"
+    && !publicSources.has(resolve(packageRoot, EVAL_KERNEL_IMPORTER));
+  for (const { file, source } of sources) {
+    violations.push(...(graph.get(file)?.diagnostics ?? []));
+    for (const { specifier, offset } of specifiers.get(file)) {
+      // Nonliteral loaders on public paths are checked by check:package-boundaries.
       if (specifier === null) continue;
-      const reason = violationReason({ file, packageRoot, specifier, runnerExports });
-      if (reason === null) {
-        continue;
-      }
-      violations.push({
-        file,
-        line: source.slice(0, offset).split("\n").length,
-        specifier,
-        reason,
-      });
+      const reason = violationReason({ file, packageRoot, specifier, publicRunnerImports, reviewedEvalHarness });
+      if (reason === null) continue;
+      violations.push({ file, line: source.slice(0, offset).split("\n").length, specifier, reason });
     }
   }
 

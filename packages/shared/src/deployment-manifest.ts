@@ -3,6 +3,7 @@ import { createCompanySchema } from "./validators/company.js";
 import { createAgentSchema } from "./validators/agent.js";
 import { createProjectSchema, createProjectWorkspaceSchema } from "./validators/project.js";
 import { createRoutineSchema, createRoutineTriggerSchema } from "./validators/routine.js";
+import { filesystemOwnershipSchema } from "./validators/environment.js";
 
 const key = z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/);
 const identity = z.object({ adopt: z.string().uuid().optional() });
@@ -15,6 +16,7 @@ const project = identity.extend({
 }).strict();
 const agent = identity.extend({
   company: key,
+  environment: key.nullable().optional(),
   enabled: z.boolean().default(true),
   reportsTo: key.nullable().default(null),
   fields: createAgentSchema.pick({
@@ -44,6 +46,23 @@ export const deploymentManifestSchema = z.object({
   owner: key,
   companies: z.record(key, company),
   projects: z.record(key, project).default({}),
+  environments: z.record(key, identity.extend({
+    company: key,
+    credential: key,
+    fields: z.object({
+      name: z.string().trim().min(1),
+      description: z.string().nullable().optional(),
+      driver: z.literal("ssh"),
+      config: z.object({
+        host: z.string().trim().min(1), port: z.number().int().min(1).max(65535).default(22),
+        username: z.string().trim().min(1),
+        remoteWorkspacePath: z.string().refine(p => p.startsWith("/") && !p.includes("\0")),
+        knownHosts: z.string().trim().min(1), strictHostKeyChecking: z.literal(true),
+        workspaceRealizationMode: z.enum(["copy", "in_place"]).optional(),
+        filesystemOwnership: filesystemOwnershipSchema.optional(),
+      }).strict().refine(c => !c.filesystemOwnership || c.workspaceRealizationMode === "in_place"),
+    }).strict(),
+  }).strict()).default({}),
   projectWorkspaces: z.record(key, identity.extend({
     project: key,
     fields: createProjectWorkspaceSchema.strict(),
@@ -71,12 +90,15 @@ export const deploymentManifestSchema = z.object({
       }
     }
   }
-  for (const kind of ["projects", "agents", "routines"] as const) {
+  for (const kind of ["projects", "environments", "agents", "routines"] as const) {
     for (const [name, resource] of Object.entries(m[kind])) {
       if (!m.companies[resource.company]) issue([kind, name, "company"], "Unknown company key");
     }
   }
   for (const [name, a] of Object.entries(m.agents)) {
+    if (a.environment && m.environments[a.environment]?.company !== a.company) {
+      issue(["agents", name, "environment"], "Environment must be declared in the same company");
+    }
     const seen = new Set([name]);
     let manager = a.reportsTo;
     while (manager) {

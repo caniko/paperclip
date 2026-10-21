@@ -6,6 +6,7 @@ export { companyOnboardingSeeds } from "./company_onboarding_seeds.js";
 export { authUsers, authSessions, authAccounts, authVerifications } from "./auth.js";
 export { instanceSettings } from "./instance_settings.js";
 export { instanceUserRoles } from "./instance_user_roles.js";
+export { chatVoiceCallbacks } from "./chat_voice_callbacks.js";
 export { userSidebarPreferences } from "./user_sidebar_preferences.js";
 export { agents } from "./agents.js";
 export { builtInManagedResources } from "./built_in_managed_resources.js";
@@ -24,6 +25,7 @@ export { agentConfigRevisions } from "./agent_config_revisions.js";
 export { agentApiKeys } from "./agent_api_keys.js";
 export { agentRuntimeState } from "./agent_runtime_state.js";
 export { agentTaskSessions, agentSessionGoalActions } from "./agent_task_sessions.js";
+export { adapterSessionAffinities } from "./adapter_session_affinities.js";
 export { agentWakeupRequests } from "./agent_wakeup_requests.js";
 export { projects } from "./projects.js";
 export { projectMemberships } from "./project_memberships.js";
@@ -184,7 +186,7 @@ export {
 } from "./tool_access.js";
 export {
   companySkills,
-  companySkillVersions,
+  companySkillVersions, companySkillRepositorySnapshots,
   companySkillStars,
   companySkillComments,
   companySkillTestInputs,
@@ -210,6 +212,7 @@ export { toolActionDeliveries } from "./tool_action_deliveries.js";
 export { chatTeamsFileTransfers } from "./chat_teams_file_transfers.js";
 export { chatDiscordCommandOwners } from "./chat_discord_command_owners.js";
 export { chatTelegramDraftIds } from "./chat_telegram_draft_ids.js";
+export { chatVoiceSessions, chatVoiceToolCalls, chatVoiceReplies } from "./chat_voice_sessions.js";
 export { chatGitHubConfigurations, chatGitHubRegistrations, chatGitHubReviews } from "./chat_github.js";
 
 export { aiConnectionDefaults } from "./ai_connection_defaults.js";
@@ -226,6 +229,7 @@ export { browserUseSettings, browserUseSessions, browserUseRuns, browserUseBrows
 export * from "./company_skill_sources.js";
 export * from "./public_mcp.js";
 export * from "./dot_runner.js";
+export * from "./grok_bot.js";
 
 
 export * from "./accounting.js";
@@ -236,5 +240,19 @@ export { agentCommentary } from "./agent_commentary.js";
 
 
 export { agentIdentityKeys } from "./agent_identity_keys.js";
+
+export { chatVoiceReports } from "./chat_voice_reports.js";
+
+export { chatVoicePhoneLines, chatVoiceInboundCalls } from "./chat_voice_inbound.js";
 export * from "./decision_models.js";
 export { userCompanyPreferences } from "./user_company_preferences.js";
+
+export { chatSlackManagerGrants } from "./chat_slack_manager_grants.js";
+export { aiSubscriptions, aiSubscriptionPrices, aiSubscriptionConnections } from "./ai_subscriptions.js";
+export * from "./muse_runner.js";
+
+export { executionWorkspaceRepositories } from "./execution_workspace_repositories.js";
+export { executionWorkspaceRepositoryRoots } from "./execution_workspace_repository_roots.js";
+export { executionWorkspaceRepositoryAccess } from "./execution_workspace_repository_access.js";
+export * from "./fast_responses.js";
+export { companyObservability } from "./company_observability.js";

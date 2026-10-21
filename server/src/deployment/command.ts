@@ -1,3 +1,4 @@
+import { channel } from "node:diagnostics_channel";
 import {
   acquireDeploymentLease, applyPendingMigrations, assertDeploymentSchemaCompatible,
   createDb, closeRegisteredClients, inspectMigrations, resolveMigrationConnection,
@@ -7,8 +8,11 @@ import { embeddedDeploymentIdentity, readJson, type DeploymentDescriptor } from 
 import { reconcileDeployment } from "./reconcile.js";
 import { publishDeploymentBindings } from "./startup.js";
 
+const startup = channel("paperclip.deployment.startup");
+
 /** Plans/checks never initialize a cluster, migrate, bootstrap or publish files. */
 export async function deploymentCommand(command: "plan" | "apply" | "check", descriptor: DeploymentDescriptor) {
+  startup.publish({ phase: "database-preflight" });
   const config = loadConfig();
   const apply = command === "apply";
   let stop: (() => Promise<void>) | undefined;
@@ -44,12 +48,15 @@ export async function deploymentCommand(command: "plan" | "apply" | "check", des
     db = createDb(url);
     const manifest = descriptor.manifestFile ? readJson(descriptor.manifestFile)
       : { version: 1, owner: descriptor.instance, companies: {} };
+    startup.publish({ phase: "reconciliation" });
     const result = await reconcileDeployment(db, manifest, { apply, descriptor, config, singleOwner: true });
     if (apply) await publishDeploymentBindings(descriptor, result);
     return { result, exitCode: command === "check" && result.differences.length ? 2 : 0 };
   } finally {
+    startup.publish({ phase: "cleanup" });
     if (db && connectionUrl) await closeRegisteredClients(connectionUrl);
     await release?.();
     await stop?.();
+    startup.publish({ phase: "cleanup-complete" });
   }
 }

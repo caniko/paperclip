@@ -21,10 +21,15 @@ function invalid(message: string): never {
   throw Object.assign(new Error(message), { code: "hermes_gateway_execution_context_invalid" });
 }
 
+export function requiresWorkspaceBinding(ctx: Pick<AdapterExecutionContext, "executionTarget" | "config" | "workspaceOwnership">): boolean {
+  return !!ctx.workspaceOwnership || ctx.config.bindWorkspace === true || ctx.config.waitForJobs === true
+    || ctx.executionTarget?.kind === "remote" || ctx.executionTarget?.workspaceRealization?.mode === "in_place";
+}
+
 export function resolveWorkspaceBinding(ctx: Pick<AdapterExecutionContext, "executionTarget" | "config" | "context" | "executionTransport" | "workspaceOwnership">, endpoint: string): WorkspaceBinding | null {
   const target = ctx.executionTarget;
   const realization = target?.workspaceRealization;
-  const required = !!ctx.workspaceOwnership || ctx.config.bindWorkspace === true || ctx.config.waitForJobs === true || target?.kind === "remote" || realization?.mode === "in_place";
+  const required = requiresWorkspaceBinding(ctx);
   const template = parseObject(ctx.config.payloadTemplate);
   if (!required) {
     if ("execution_context" in template) invalid("Use bindWorkspace and a selected execution target instead of payloadTemplate.execution_context.");

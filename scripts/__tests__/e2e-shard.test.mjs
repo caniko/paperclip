@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -8,6 +9,7 @@ import test from "node:test";
 
 import { defaultSuiteWeight, loadShardDurations } from "../general-server-shard.mjs";
 import { IGNORED_SPECS, listE2eSpecs, selectE2eShard } from "../e2e-shard.mjs";
+import { renderStopQualification } from "../generate-composer-stop-qualification.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const script = path.join(repoRoot, "scripts", "e2e-shard.mjs");
@@ -16,6 +18,7 @@ const playwrightConfig = path.join(repoRoot, "tests", "e2e", "playwright.config.
 const prCallerWorkflow = path.join(repoRoot, ".github", "workflows", "pr.yml");
 const trustedPrWorkflowPath = ".github/workflows/pr-trusted.yml";
 const trustedPrWorkflow = path.join(repoRoot, trustedPrWorkflowPath);
+const routingWorkflow = path.join(repoRoot, ".github", "workflows", "ci-routing.yml");
 
 const SHARD_COUNT = 8;
 
@@ -54,11 +57,11 @@ function readWorkflowJobs(workflow) {
 }
 
 function runStackScope(stack, prBaseRef) {
-  const workflow = readFileSync(trustedPrWorkflow, "utf8");
+  const workflow = readFileSync(routingWorkflow, "utf8");
   const match = workflow.match(
-    /      - name: Select stacked PR CI scope[\s\S]*?        run: \|\n([\s\S]*?)\n\n  policy:/,
+    /      - name: Select PR CI scope[\s\S]*?        run: \|\n([\s\S]*?)\s*$/,
   );
-  assert.ok(match, "trusted workflow must define the stacked PR scope script");
+  assert.ok(match, "routing workflow must define the PR CI scope script");
   const script = match[1]
     .split("\n")
     .map((line) => line.replace(/^ {10}/, ""))
@@ -207,10 +210,22 @@ test("the trusted PR workflow keeps a stable aggregate check named e2e over the 
   }
 });
 
+test("runner selection has reserved AWS capacity and executes metadata checks only", () => {
+  const workflow = readFileSync(routingWorkflow, "utf8");
+  const jobs = readWorkflowJobs(workflow.split(/^jobs:\n/m)[1]);
+  assert.deepEqual([...jobs.keys()], ["gate"]);
+  assert.match(jobs.get("gate"), /^ {4}runs-on: \$\{\{ vars\.AWS_CI_ENABLED[\s\S]*paperclip-ci-routing-x64/m);
+  assert.doesNotMatch(jobs.get("gate"), /uses:|actions\/checkout|secrets\./);
+  assert.match(workflow, /^ {6}runner:\n {8}value: \$\{\{ jobs\.gate\.outputs\.runner \}\}$/m);
+  assert.match(workflow, /^ {6}full_ci:\n {8}value: \$\{\{ jobs\.gate\.outputs\.full_ci \}\}$/m);
+  assert.doesNotMatch(workflow, /^ {2}(?:actions|contents|pull-requests): write$/m);
+});
+
 test("the trusted PR workflow limits full CI to merge-relevant stack layers", () => {
   const workflow = readFileSync(trustedPrWorkflow, "utf8");
   const jobs = readWorkflowJobs(workflow);
-  const gate = jobs.get("gate");
+  assert.match(jobs.get("gate"), /uses: paperclipai\/paperclip\/\.github\/workflows\/ci-routing\.yml@master/);
+  const gate = readWorkflowJobs(readFileSync(routingWorkflow, "utf8")).get("gate");
 
   assert.match(gate, /^ {6}full_ci: \$\{\{ steps\.scope\.outputs\.full_ci \}\}$/m);
   assert.match(gate, /STACK_JSON: \$\{\{ toJSON\(github\.event\.pull_request\.stack\) \}\}/);
@@ -291,6 +306,33 @@ test("the e2e aggregate refuses failed or missing native Stop qualification", ()
   }
 });
 
+test("the prepared Stop workflow selects the absolute candidate root and retains browser evidence for 32 days", () => {
+  // Check the prepared source before its immutable caller pin is advanced.
+  const jobs = readWorkflowJobs(readFileSync(trustedPrWorkflow, "utf8"));
+  assert.match(jobs.get("native_composer_stop"), /PAPERCLIP_E2E_SOURCE_ROOT: \$\{\{ github\.workspace \}\}/);
+  const evidence = jobs.get("native_composer_stop").split("- name: Retain native composer Stop evidence")[1];
+  assert.match(evidence, /\$\{\{ runner\.temp \}\}\/composer-stop-provider\.log/);
+  assert.match(evidence, /\$\{\{ env\.PAPERCLIP_STOP_FAKE_CODEX \}\}/);
+  assert.match(jobs.get("e2e_shards"), /retention-days: 32/);
+});
+
+test("the independent hosted Stop lane keeps the qualified prepared commands", () => {
+  const prepared = readFileSync(trustedPrWorkflow, "utf8");
+  const qualification = readFileSync(path.join(repoRoot, ".github/workflows/qualification-native-stop.yml"), "utf8");
+  assert.equal(qualification, renderStopQualification(prepared));
+  const original = readWorkflowJobs(prepared).get("native_composer_stop");
+  const independent = readWorkflowJobs(qualification).get("native_composer_stop");
+  assert.equal(independent.slice(independent.indexOf("    env:\n")).trimEnd(), original.slice(original.indexOf("    env:\n")).trimEnd());
+  assert.match(independent, /runs-on: ubuntu-24\.04/);
+  assert.match(independent, /timeout-minutes: 20/);
+  assert.doesNotMatch(independent, /needs\.gate/);
+  assert.match(readFileSync(prCallerWorkflow, "utf8"), /pr-trusted\.yml@1c37302206955723ca010ddf22b073f306c83f86/);
+  // SHA-256 of the qualified 76e683f90 workflow; hosted checkouts can be shallow.
+  assert.equal(createHash("sha256").update(qualification).digest("hex"),
+    "de703c93259d13602c8d82a7c1945cdf454953cb680c5c0fbaf2d53e1e399654",
+    "policy promotion must preserve the independently qualified Stop workflow byte-for-byte");
+});
+
 test("the stacked PR scope selector runs full CI only where intended", () => {
   assert.equal(runStackScope(null, "master").full_ci, "true");
   assert.equal(
@@ -347,17 +389,23 @@ test("the trusted PR workflow regenerates stale stacked lockfiles", () => {
     "the policy job must resolve the complete merge tree without rewriting platform metadata",
   );
 
-  // Test lanes no longer wait on a policy-job artifact: each install step
-  // resolves a stale lockfile inline, so a manifest-changing or stacked PR
-  // still installs while the policy job validates resolution in parallel.
+  // Host lanes resolve stale locks inline. Native Stop delegates the same
+  // frozen-first fallback to its isolated candidate, never the frozen harness.
   const fallbackInstalls = workflow.match(
-    /if ! pnpm install --frozen-lockfile; then\n[\s\S]{0,240}?pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile\n\s+pnpm install --frozen-lockfile\n\s+fi/g,
+    /if ! (candidate )?pnpm install --frozen-lockfile; then\n[\s\S]{0,240}?\1pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile\n\s+\1pnpm install --frozen-lockfile\n\s+fi/g,
   ) ?? [];
   assert.equal(
     fallbackInstalls.length,
-    8,
-    "every downstream install job must resolve a stale lockfile inline",
+    7,
+    "every host install job must resolve a stale lockfile inline",
   );
+  const native = readWorkflowJobs(workflow).get("native_composer_stop");
+  assert.match(native, /node \.trusted-composer-stop\/scripts\/composer-candidate-stage\.mjs install "\$COMPOSER_STOP_CANDIDATE_ROOT"/);
+  assert.match(native, /composer-candidate-stage\.mjs effective-lock "\$COMPOSER_STOP_CANDIDATE_ROOT" "\$RUNNER_TEMP\/composer-stop-effective-lock\.yaml"/);
+  const candidate = readFileSync(path.join(repoRoot, "scripts/composer-candidate-stage.mjs"), "utf8");
+  assert.match(candidate, /pnpm\.cjs install --frozen-lockfile \|\|/);
+  assert.match(candidate, /pnpm\.cjs install --resolution-only --ignore-scripts --no-frozen-lockfile &&/);
+  assert.match(candidate, /pnpm\.cjs install --frozen-lockfile; \}; \}/);
   assert.doesNotMatch(
     workflow,
     /Restore regenerated PR lockfile|lockfile_regenerated|name: pr-lockfile/,

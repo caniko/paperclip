@@ -124,7 +124,12 @@ nix eval --json --impure --expr '
 
 The expression checks standalone and integrated Home Manager, lossless manifest
 forwarding, disabled-controller behavior, runtime credential references, missing
-selections, and conflicting system definitions. Synthetic package fixtures check
+selections, and conflicting system definitions. It also checks the optional
+user controller's supervision, environment, declaration selection, and rejection
+of store-backed credentials. Pass `selection = [ "userController"
+"storeControllerCredentialRejected" ];` to evaluate just that group in a bounded
+process. Omitting `selection` retains the complete assertion set.
+Synthetic package fixtures check
 the enabled credential-file capability matrix (true, false, absent, string-valued,
 and plain package path), enabled clients without a credential file, and disabled
 clients with a runtime credential path. Rejections are checked through the

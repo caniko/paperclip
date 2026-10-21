@@ -1,3 +1,5 @@
+import { pluginAgentRuntimeState } from "./plugin-agent-runtime-state.js";
+import { createAgentLifecycle } from "./agent-lifecycle.js";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -719,6 +721,7 @@ export function buildHostServices(
   const secretsHandler = createPluginSecretsHandler({ db, pluginId });
   const companies = companyService(db);
   const agents = agentService(db);
+  const agentsLifecycle = createAgentLifecycle(db);
   const managedAgents = pluginManagedAgentService(db, {
     pluginId,
     pluginKey,
@@ -1696,7 +1699,7 @@ export function buildHostServices(
 
     events: {
       async listLifecycle(params) {
-        return lifecycleInbox.list(ensureCompanyId(params.companyId), params.limit, params.afterId);
+        return lifecycleInbox.list(ensureCompanyId(params.companyId), params.limit, params.afterId, options.manifest?.resourceLifecycle?.includes("agent_runtime") ? ["agent", "project", "agent_runtime"] : ["agent", "project"]);
       },
       async acknowledgeLifecycle(params) {
         await lifecycleInbox.acknowledge(ensureCompanyId(params.companyId), params.eventId);
@@ -2993,6 +2996,11 @@ export function buildHostServices(
     },
 
     agents: {
+      async getRuntime(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return pluginAgentRuntimeState(db, pluginId, companyId, params.agentId);
+      },
       async list(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
@@ -3013,14 +3021,14 @@ export function buildHostServices(
         await ensurePluginAvailableForCompany(companyId);
         const agent = await agents.getById(params.agentId);
         requireInCompany("Agent", agent, companyId);
-        return (await agents.pause(params.agentId)) as Agent;
+        return (await agentsLifecycle.pauseAgent(params.agentId)) as Agent;
       },
       async resume(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         const agent = await agents.getById(params.agentId);
         requireInCompany("Agent", agent, companyId);
-        return (await agents.resume(params.agentId)) as Agent;
+        return (await agentsLifecycle.resumeAgent(params.agentId)) as Agent;
       },
       async invoke(params) {
         const companyId = ensureCompanyId(params.companyId);

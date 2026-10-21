@@ -99,7 +99,7 @@ describe("durable inbound queue notice", () => {
     { companyId: randomUUID() },
     { agentId: randomUUID() },
     { payload: { issueId: randomUUID() } },
-  ])("rejects absent admission or mismatched receipt %j", (patch) => {
+  ])("rejects absent admission or mismatched receipt (case %#)", (patch) => {
     const { action, receipt } = fixture();
     const changed = { ...receipt, ...patch };
     expect(resolveInboundWakeReceipt(action, changed, changed)).toBeNull();

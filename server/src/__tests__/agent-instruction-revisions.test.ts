@@ -25,7 +25,8 @@ describe("canonical instruction revisions", () => {
   const entryFile = "policy/INSTRUCTIONS.txt";
   const initial = "\uFEFF# Original\r\n☃\0\n";
   beforeAll(async () => {
-    home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "instruction-revisions-")));
+    // macOS's /tmp alias is part of this fixture, even when CI overrides TMPDIR.
+    home = await fs.realpath(await fs.mkdtemp(path.join(process.platform === "darwin" ? "/tmp" : os.tmpdir(), "instruction-revisions-")));
     process.env.PAPERCLIP_HOME = home;
     database = await startEmbeddedPostgresTestDatabase("instruction-revisions-db-");
     db = createDb(database.connectionString);

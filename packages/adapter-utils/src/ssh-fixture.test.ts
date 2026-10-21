@@ -596,7 +596,10 @@ describe("ssh env-lab fixture", () => {
         // Route the wrapper's `sh -c` through dash, as on a Debian/Ubuntu host.
         await symlink(dashPath!, path.join(binDir, "sh"));
         await writeFile(
-          path.join(homeDir, ".bash_profile"),
+          // A dash login reads .profile. Explicitly sourcing the Bash-only
+          // fragment here tests failure containment without requiring sh to
+          // automatically load another shell's profile.
+          path.join(homeDir, ".profile"),
           'if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi\n',
         );
         await writeFile(
@@ -1007,18 +1010,17 @@ describe("ssh env-lab fixture", () => {
     await mkdir(localRepo, { recursive: true });
     await git(localRepo, ["init"]);
     await git(localRepo, ["checkout", "-b", "main"]);
-    await git(localRepo, ["config", "user.name", "Paperclip Test"]);
-    await git(localRepo, ["config", "user.email", "test@paperclip.dev"]);
+    const gitIdentity = await configureFixtureGitIdentity(localRepo);
     await writeFile(path.join(localRepo, "backend.txt"), "backend base\n", "utf8");
     await git(localRepo, ["add", "backend.txt"]);
     await git(localRepo, ["commit", "-m", "backend initial"]);
+    await mkdir(path.join(localRepo, ".git", "info"), { recursive: true });
     await writeFile(path.join(localRepo, ".git", "info", "exclude"), "\n/.paperclip-repositories/\n", { flag: "a" });
 
     await mkdir(nestedRepo, { recursive: true });
     await git(nestedRepo, ["init"]);
     await git(nestedRepo, ["checkout", "-b", "main"]);
-    await git(nestedRepo, ["config", "user.name", "Paperclip Test"]);
-    await git(nestedRepo, ["config", "user.email", "test@paperclip.dev"]);
+    await configureFixtureGitIdentity(nestedRepo);
     await writeFile(path.join(nestedRepo, "frontend.txt"), "frontend base\n", "utf8");
     await writeFile(path.join(nestedRepo, "obsolete.txt"), "tracked\n", "utf8");
     await git(nestedRepo, ["add", "frontend.txt", "obsolete.txt"]);
@@ -1059,14 +1061,14 @@ describe("ssh env-lab fixture", () => {
       config,
       [
         `cd ${JSON.stringify(remoteNested)}`,
-        `git config user.name "Paperclip SSH"`,
-        `git config user.email "ssh@paperclip.dev"`,
+        `git config --local user.name ${shellQuote(gitIdentity.name)}`,
+        `git config --local user.email ${shellQuote(gitIdentity.email)}`,
         `git add frontend.txt`,
         `git commit -m "remote frontend update" >/dev/null`,
         `printf "frontend remote dirty\\n" > frontend.txt`,
         `cd ${JSON.stringify(first.workspaceRemoteDir)}`,
-        `git config user.name "Paperclip SSH"`,
-        `git config user.email "ssh@paperclip.dev"`,
+        `git config --local user.name ${shellQuote(gitIdentity.name)}`,
+        `git config --local user.email ${shellQuote(gitIdentity.email)}`,
         `printf "backend remote\\n" > backend.txt`,
         `git add backend.txt`,
         `git commit -m "remote backend update" >/dev/null`,
@@ -1109,13 +1111,17 @@ describe("ssh env-lab fixture", () => {
       await mkdir(repo, { recursive: true });
       await git(repo, ["init"]);
       await git(repo, ["checkout", "-b", "main"]);
-      await git(repo, ["config", "user.name", "Paperclip Test"]);
-      await git(repo, ["config", "user.email", "test@paperclip.dev"]);
+      await configureFixtureGitIdentity(repo);
       await writeFile(path.join(repo, "tracked.txt"), "base\n", "utf8");
       await git(repo, ["add", "tracked.txt"]);
       await git(repo, ["commit", "-m", "initial"]);
     }
+    await mkdir(path.join(localRepo, ".git", "info"), { recursive: true });
     await writeFile(path.join(localRepo, ".git", "info", "exclude"), "\n/.paperclip-repositories/\n", { flag: "a" });
+    const gitIdentity = {
+      name: await git(localRepo, ["config", "user.name"]),
+      email: await git(localRepo, ["config", "user.email"]),
+    };
 
     const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH direct restore with project repositories test");
     if (!started) return;
@@ -1136,8 +1142,8 @@ describe("ssh env-lab fixture", () => {
       config,
       [
         `cd ${JSON.stringify(path.posix.join(started.workspaceDir, nestedRelative))}`,
-        `git config user.name "Paperclip SSH"`,
-        `git config user.email "ssh@paperclip.dev"`,
+        `git config --local user.name ${shellQuote(gitIdentity.name)}`,
+        `git config --local user.email ${shellQuote(gitIdentity.email)}`,
         `printf "remote\\n" > tracked.txt`,
         `git commit -am "remote nested update" >/dev/null`,
       ].join(" && "),
@@ -1163,8 +1169,7 @@ describe("ssh env-lab fixture", () => {
     await mkdir(path.join(localRepo, ".paperclip-repositories", "not-a-repo"), { recursive: true });
     await git(localRepo, ["init"]);
     await git(localRepo, ["checkout", "-b", "main"]);
-    await git(localRepo, ["config", "user.name", "Paperclip Test"]);
-    await git(localRepo, ["config", "user.email", "test@paperclip.dev"]);
+    await configureFixtureGitIdentity(localRepo);
     await writeFile(path.join(localRepo, "tracked.txt"), "base\n", "utf8");
     await git(localRepo, ["add", "tracked.txt"]);
     await git(localRepo, ["commit", "-m", "initial"]);

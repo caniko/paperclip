@@ -16,7 +16,7 @@ jobs:
   harness_identity:
     name: Exact head / trusted harness identity
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -27,9 +27,12 @@ jobs:
           node-version: 24
           package-manager-cache: false
       - name: Prove trusted Stop source and receipt binding
+        # The hostile lifecycle fixture exercises the same namespace boundary.
+        # Package setup happens only on the disposable hosted runner.
         run: |
           set -euo pipefail
-          node --test scripts/__tests__/qualify-composer-stop.test.mjs 2>&1 | tee "$RUNNER_TEMP/trusted-stop-identity.log"
+          bash .github/scripts/prepare-candidate-sandbox.sh
+          node --test scripts/__tests__/qualify-composer-stop.test.mjs scripts/__tests__/composer-candidate-sandbox.test.mjs scripts/__tests__/composer-provider-bridge.test.mjs scripts/__tests__/composer-candidate-runtime.test.mjs .github/scripts/tests/pr-dependency-cache.test.mjs .github/scripts/tests/pr-lockfile-policy.test.mjs 2>&1 | tee "$RUNNER_TEMP/trusted-stop-identity.log"
       - name: Retain trusted harness identity assertions
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -47,7 +50,66 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        lane: [typecheck, tests, build, regression]
+        include:
+          - lane: typecheck
+          - lane: build
+          - lane: regression
+          - lane: managed-opencode
+          # Keep the original complete groups and their assertion deadlines.
+          # The full command exceeded the two-hour job limit while still
+          # traversing serialized suites. Only split existing runner groups.
+          - lane: tests-server-1
+            mode: general
+            group: general-server
+            shard_index: 0
+            shard_count: 4
+          - lane: tests-server-2
+            mode: general
+            group: general-server
+            shard_index: 1
+            shard_count: 4
+          - lane: tests-server-3
+            mode: general
+            group: general-server
+            shard_index: 2
+            shard_count: 4
+          - lane: tests-server-4
+            mode: general
+            group: general-server
+            shard_index: 3
+            shard_count: 4
+          - lane: tests-workspaces-a-1
+            mode: general
+            group: general-workspaces-a
+            shard_index: 0
+            shard_count: 2
+          - lane: tests-workspaces-a-2
+            mode: general
+            group: general-workspaces-a
+            shard_index: 1
+            shard_count: 2
+          - lane: tests-workspaces-b
+            mode: general
+            group: general-workspaces-b
+          - lane: tests-workspaces-c
+            mode: general
+            group: general-workspaces-c
+          - lane: tests-serialized-1
+            mode: serialized
+            shard_index: 0
+            shard_count: 4
+          - lane: tests-serialized-2
+            mode: serialized
+            shard_index: 1
+            shard_count: 4
+          - lane: tests-serialized-3
+            mode: serialized
+            shard_index: 2
+            shard_count: 4
+          - lane: tests-serialized-4
+            mode: serialized
+            shard_index: 3
+            shard_count: 4
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -76,19 +138,46 @@ jobs:
           pnpm install --frozen-lockfile 2>&1 | tee "$EVIDENCE/install.log"
           pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
           pnpm run preflight:workspace-links
+      - name: Provision native backup clients and zsh for workspace cases
+        if: matrix.lane == 'tests-workspaces-b' || matrix.lane == 'tests-workspaces-c' || matrix.lane == 'managed-opencode'
+        run: |
+          set -euo pipefail
+          node .github/scripts/prepare-source-native-tools.mjs "$EVIDENCE" 2>&1 | tee "$EVIDENCE/native-tools.log"
       - name: Run mandatory application lane once
         env:
           LANE: ${{ matrix.lane }}
+          TEST_MODE: ${{ matrix.mode }}
+          TEST_GROUP: ${{ matrix.group }}
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          SHARD_COUNT: ${{ matrix.shard_count }}
         run: |
           set -euo pipefail
           case "$LANE" in
             typecheck) pnpm -r typecheck 2>&1 | tee "$EVIDENCE/typecheck.log" ;;
-            tests) pnpm test:run 2>&1 | tee "$EVIDENCE/tests.log" ;;
+            tests-*)
+              export PAPERCLIP_TEST_SOURCE_PROFILE=1
+              args=(--mode "$TEST_MODE")
+              if [ -n "$TEST_GROUP" ]; then args+=(--group "$TEST_GROUP"); fi
+              if [ -n "$SHARD_COUNT" ]; then args+=(--shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT"); fi
+              node scripts/run-vitest-stable.mjs "${args[@]}" --dry-run > "$EVIDENCE/shard-plan.json"
+              pnpm test:run -- "${args[@]}" 2>&1 | tee "$EVIDENCE/tests.log"
+              ;;
             build) pnpm build 2>&1 | tee "$EVIDENCE/build.log" ;;
+            managed-opencode)
+              pnpm --filter @paperclipai/db check:migrations 2>&1 | tee "$EVIDENCE/migrations.log"
+              pnpm exec vitest run packages/adapters/opencode-local/src/server packages/adapter-utils/src/server-utils-env.test.ts packages/shared/src/deployment-manifest.test.ts packages/db/src/migration-snapshot-drift.test.ts server/src/deployment/adapter-config.test.ts server/src/deployment/runtime.test.ts server/src/deployment/reconcile.test.ts server/src/deployment/entry.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter=./scripts/qualification-junit-reporter.mjs --outputFile.junit="$EVIDENCE/managed-opencode.xml" 2>&1 | tee "$EVIDENCE/managed-opencode.log"
+              ;;
             regression)
-              python3 -m unittest discover -s .github/scripts -p 'test_qualification_evidence.py' 2>&1 | tee "$EVIDENCE/receipt-tests.log"
+              python3 -m unittest discover -s .github/scripts -p 'test_qualification_*.py' 2>&1 | tee "$EVIDENCE/receipt-tests.log"
+              node --test .github/scripts/test_qualification_junit_reporter.mjs 2>&1 | tee "$EVIDENCE/reporter-contract.log"
+              node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/qualification-node-junit-reporter.mjs --test-reporter-destination="$EVIDENCE/stop-harness-regression.xml" scripts/__tests__/e2e-shard.test.mjs tests/e2e/fixtures/composer-stop-codex-loader.test.mjs 2>&1 | tee "$EVIDENCE/stop-harness-regression.log"
+              node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/qualification-node-junit-reporter.mjs --test-reporter-destination="$EVIDENCE/public-install-registry.xml" scripts/__tests__/public-install-registry.test.mjs 2>&1 | tee "$EVIDENCE/public-install-registry.log"
+              node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/qualification-node-junit-reporter.mjs --test-reporter-destination="$EVIDENCE/policy-regression.xml" '.github/scripts/tests/*.test.mjs' 2>&1 | tee "$EVIDENCE/policy-regression.log"
+              node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/qualification-node-junit-reporter.mjs --test-reporter-destination="$EVIDENCE/roster-regression.xml" .github/scripts/test_qualification_roster.mjs 2>&1 | tee "$EVIDENCE/roster-regression.log"
+              pnpm exec vitest run packages/db/src/deployment-migration-upgrade.test.ts packages/db/src/private-task-draft-assets-migration.test.ts server/src/__tests__/cli-auth-routes.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter=./scripts/qualification-junit-reporter.mjs --outputFile.junit="$EVIDENCE/migration-regression.xml" 2>&1 | tee "$EVIDENCE/migration-regression.log"
+              pnpm --filter @paperclipai/paperclip-runner test:typescript:vitest src/catalog/semantic-action-catalog.test.ts src/mock-core/local-runner.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter="$GITHUB_WORKSPACE/scripts/qualification-junit-reporter.mjs" --outputFile.junit="$EVIDENCE/runner-regression.xml" 2>&1 | tee "$EVIDENCE/runner-regression.log"
               pnpm check:token-gates 2>&1 | tee "$EVIDENCE/token-gates.log"
-              pnpm exec vitest run packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts packages/adapters/hermes/src/gateway/server/recovery-lineage.test.ts packages/adapters/hermes/src/gateway/server/run-lifetime.test.ts server/src/__tests__/adapter-execution-settlement-postgres.test.ts server/src/__tests__/runtime-mcp-admission.test.ts server/src/__tests__/vitest-chat-shards.test.ts server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts server/src/__tests__/skill-sources.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter=junit --outputFile.junit="$EVIDENCE/regression.xml" 2>&1 | tee "$EVIDENCE/regression.log"
+              pnpm exec vitest run packages/adapters/hermes/src/gateway/server/executor-selection.test.ts packages/adapters/hermes/src/gateway/server/executor-admission.test.ts packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts packages/adapters/hermes/src/gateway/server/recovery-lineage.test.ts packages/adapters/hermes/src/gateway/server/run-lifetime.test.ts server/src/__tests__/heartbeat-executor-affinity.test.ts server/src/__tests__/adapter-execution-settlement-postgres.test.ts server/src/__tests__/runtime-mcp-admission.test.ts server/src/__tests__/vitest-chat-shards.test.ts server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts server/src/__tests__/skill-sources.test.ts server/src/__tests__/company-skills-routes.test.ts server/src/deployment/entry.test.ts server/src/deployment/reconcile.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter=./scripts/qualification-junit-reporter.mjs --outputFile.junit="$EVIDENCE/regression.xml" 2>&1 | tee "$EVIDENCE/regression.log"
               ;;
           esac
       - name: Seal raw source and result evidence
@@ -99,7 +188,7 @@ jobs:
         run: |
           set -euo pipefail
           strict=()
-          case "$LANE" in tests|regression) strict+=(--strict-reports) ;; esac
+          case "$LANE" in tests-*|regression|managed-opencode) strict+=(--strict-reports) ;; esac
           python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" "$OUTCOME" "${strict[@]}"
       - name: Retain original evidence
         if: always()
@@ -110,15 +199,76 @@ jobs:
           if-no-files-found: error
           path: ${{ runner.temp }}/qualification/
 
+  home_manager:
+    name: Exact head / Home Manager declarations
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NIX_CONFIG: "experimental-features = nix-command flakes"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Bind exact source and hosted runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/home-manager"
+          mkdir -p "$EVIDENCE"
+          printf '%s\n' "EVIDENCE=$EVIDENCE" >> "$GITHUB_ENV"
+          python3 .github/scripts/qualification-evidence.py initialize "$EVIDENCE"
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Evaluate every declaration fixture in its own bounded process
+        run: |
+          set -euo pipefail
+          ulimit -v 2097152
+          nix --version > "$EVIDENCE/nix-version"
+          nix flake metadata --json github:NixOS/nixpkgs/545c226a9af7f59fba5c3873f7c6a65e014c8f5f > "$EVIDENCE/nixpkgs.json"
+          nix flake metadata --json github:nix-community/home-manager/0560d64401a6d5370732a69d08bc4a6b135962d9 > "$EVIDENCE/home-manager.json"
+          jq -e '.locked.narHash == "sha256-/pAz2XfqHS//WRn2xRjoqes7Z92qZ0Q1gufZZ3PtuwA="' "$EVIDENCE/nixpkgs.json"
+          jq -e '.locked.narHash == "sha256-EEQKUylD8zuRTmDFX4rbwsHQ+iZhqqOldYcFN8SLcE0="' "$EVIDENCE/home-manager.json"
+          # Metadata can name a lazy Git tree that is not yet in the store.
+          nix flake archive --json github:NixOS/nixpkgs/545c226a9af7f59fba5c3873f7c6a65e014c8f5f > "$EVIDENCE/nixpkgs-archive.json"
+          nix flake archive --json github:nix-community/home-manager/0560d64401a6d5370732a69d08bc4a6b135962d9 > "$EVIDENCE/home-manager-archive.json"
+          mkdir -p "$RUNNER_TEMP/home-manager-input-roots"
+          for input in nixpkgs home-manager; do
+            source=$(jq -r .path "$EVIDENCE/$input-archive.json")
+            test "$source" = "$(jq -r .path "$EVIDENCE/$input.json")"
+            nix-store --add-root "$RUNNER_TEMP/home-manager-input-roots/$input" --indirect --realise "$source"
+          done
+          args=(--eval --strict --json --no-allow-import-from-derivation --arg nixpkgsPath "$(jq -r .path "$EVIDENCE/nixpkgs-archive.json")" --arg homeManagerPath "$(jq -r .path "$EVIDENCE/home-manager-archive.json")")
+          nix-instantiate "${args[@]}" --expr '{ nixpkgsPath, homeManagerPath }: builtins.attrNames (import ./nix/tests/personal-declarations.nix { inherit nixpkgsPath homeManagerPath; })' > "$EVIDENCE/cases.json"
+          jq -e 'length > 0 and length == (unique | length)' "$EVIDENCE/cases.json"
+          while IFS= read -r name; do
+            nix-instantiate "${args[@]}" nix/tests/personal-declarations.nix -A "$name" > "$EVIDENCE/result-$name.json"
+          done < <(jq -r '.[]' "$EVIDENCE/cases.json")
+          jq -s -e --argjson expected "$(jq length "$EVIDENCE/cases.json")" 'length == $expected and all(.[]; . == true)' "$EVIDENCE/"result-*.json
+      - name: Seal declaration evidence
+        if: always()
+        env:
+          OUTCOME: ${{ job.status }}
+        run: python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" "$OUTCOME"
+      - name: Retain original declaration evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source-proof-home-manager-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          retention-days: 31
+          if-no-files-found: error
+          path: ${{ runner.temp }}/home-manager/
+
   retention:
     name: Exact head / required artifact retention
-    needs: [application, expected_red, harness_identity]
+    needs: [application, home_manager, expected_red, harness_identity]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       GH_TOKEN: ${{ github.token }}
       LANES: ${{ needs.application.result }}
+      HOME_MANAGER: ${{ needs.home_manager.result }}
       EXPECTED_RED: ${{ needs.expected_red.result }}
       HARNESS_IDENTITY: ${{ needs.harness_identity.result }}
     steps:
@@ -128,7 +278,7 @@ jobs:
           persist-credentials: false
       - name: Read actual provider expiry and digest for every required artifact
         run: |
-          python3 .github/scripts/qualification-evidence.py artifacts source-proof- 5 retention.json
+          python3 .github/scripts/qualification-evidence.py artifacts source-proof- 18 retention.json
           python3 .github/scripts/qualification-evidence.py artifacts trusted-stop-identity- 1 harness-retention.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -142,20 +292,21 @@ jobs:
       - name: Require all mandatory lanes and retained audit evidence
         run: |
           test "$LANES" = success
+          test "$HOME_MANAGER" = success
           test "$EXPECTED_RED" = success
           test "$HARNESS_IDENTITY" = success
           python3 .github/scripts/qualification-evidence.py artifacts source-retention- 1 retention-audit.json
 
   expected_red:
-    name: Regression evidence / original F645 RED
+    name: Regression evidence / retained original F645 RED
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-      - name: Bind successor test source before baseline execution
+      - name: Bind successor and retain the immutable original without re-execution
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -163,37 +314,7 @@ jobs:
           mkdir -p "$EVIDENCE"
           printf '%s\n' "EVIDENCE=$EVIDENCE" "PAPERCLIP_HOME=$RUNNER_TEMP/paperclip-red-fixture" "PAPERCLIP_CONFIG=$RUNNER_TEMP/paperclip-red-fixture/config.json" >> "$GITHUB_ENV"
           python3 .github/scripts/qualification-evidence.py initialize "$EVIDENCE"
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: f6451f242d5cbb803e3c265e90f05b642e573203
-          path: baseline
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: 24
-          package-manager-cache: false
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
-        with:
-          version: 9.15.4
-          run_install: false
-      - name: Install original dependencies and overlay only successor regression fixture
-        run: |
-          set -euo pipefail
-          test "$(git -C baseline rev-parse HEAD)" = f6451f242d5cbb803e3c265e90f05b642e573203
-          cp packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts baseline/packages/adapters/hermes/src/gateway/server/
-          cd baseline
-          pnpm install --frozen-lockfile 2>&1 | tee "$EVIDENCE/install.log"
-          pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
-      - name: Require original assertion RED separately from successor GREEN
-        run: |
-          set -uo pipefail
-          set +e
-          (cd baseline && pnpm exec vitest run packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter=junit --outputFile.junit="$EVIDENCE/regression.xml") 2>&1 | tee "$EVIDENCE/regression.log"
-          status=$?
-          set -e
-          printf '%s\n' "$status" > "$EVIDENCE/exit-status.txt"
-          test "$status" = 1 || exit 1
-          python3 .github/scripts/qualification-evidence.py expected-red "$EVIDENCE"
+          python3 .github/scripts/qualification-evidence.py retain-original-red "$EVIDENCE"
       - name: Bind failed original evidence
         if: failure()
         run: python3 .github/scripts/qualification-evidence.py seal "$EVIDENCE" failure

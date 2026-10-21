@@ -572,7 +572,7 @@ describe("retained native cleanup discovery", () => {
       { kind: "native_cleanup_runner_epoch", phase: "spawned", epoch: 1, pid: 88736 },
     ] } },
   ])(
-    "excludes ineligible or previously attempted cleanup: %j",
+    "excludes ineligible or previously attempted cleanup (case %#)",
     async (options) => {
       await candidate(options);
       const cleanup = vi.fn();

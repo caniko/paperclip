@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,9 +6,22 @@ import { createServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { authUsers, companies, companyMemberships, createDb, startEmbeddedPostgresTestDatabase } from "@paperclipai/db";
-import { sql } from "drizzle-orm";
+import {
+  agents,
+  authUsers,
+  companies,
+  companyMemberships,
+  companySecretVersions,
+  createDb,
+  closeRegisteredClients,
+  ensurePostgresDatabase,
+  runDatabaseBackup,
+  runDatabaseRestore,
+  startEmbeddedPostgresTestDatabase,
+} from "@paperclipai/db";
+import { eq, sql } from "drizzle-orm";
 import { paperclipConfigSchema } from "@paperclipai/shared";
+import { secretService } from "../services/secrets.js";
 
 const root = mkdtempSync(join(tmpdir(), "paperclip-deployment-entry-"));
 const descriptorFile = join(root, "deployment.json");
@@ -17,28 +30,59 @@ let adoptedCompanyId: string;
 let port: number;
 let child: ChildProcess | undefined;
 let output = "";
-const launch = (command: string) => spawn(process.execPath, [
-  "--import", fileURLToPath(new URL("../../node_modules/tsx/dist/loader.mjs", import.meta.url)),
-  fileURLToPath(new URL("../deployment-entry.ts", import.meta.url)), descriptorFile, command,
-], { env: { ...process.env, UNRELATED_TEST_SECRET: "must-not-reach-server" }, stdio: ["ignore", "pipe", "pipe"] });
+const launch = (command: string) =>
+  spawn(
+    process.execPath,
+    [
+      "--import",
+      fileURLToPath(new URL("../../node_modules/tsx/dist/loader.mjs", import.meta.url)),
+      "--import",
+      `data:text/javascript,${encodeURIComponent('import { channel } from "node:diagnostics_channel"; channel("paperclip.deployment.startup").subscribe(({ phase }) => console.error(`[deployment startup] ${phase} at ${Math.round(performance.now())}ms`));')}`,
+      "--import",
+      fileURLToPath(new URL("./fixtures/read-only-import-guard.mjs", import.meta.url)),
+      fileURLToPath(new URL("../deployment-entry.ts", import.meta.url)),
+      descriptorFile,
+      command,
+    ],
+    { env: { ...process.env, UNRELATED_TEST_SECRET: "must-not-reach-server" }, stdio: ["ignore", "pipe", "pipe"] },
+  );
 async function command(name: string) {
-  const process = launch(name); let stdout = "", stderr = "";
-  process.stdout!.on("data", (chunk) => { stdout += chunk; });
-  process.stderr!.on("data", (chunk) => { stderr += chunk; });
+  const started = performance.now();
+  console.info(`[deployment fixture] ${name} started`);
+  const process = launch(name);
+  let stdout = "",
+    stderr = "";
+  process.stdout!.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  process.stderr!.on("data", (chunk) => {
+    stderr += chunk;
+  });
   const [code] = await once(process, "exit");
+  for (const line of stderr.split("\n")) {
+    if (line.startsWith("[deployment startup] ")) console.info(`[deployment fixture] ${name}: ${line}`);
+  }
+  console.info(`[deployment fixture] ${name} exited ${code} after ${Math.round(performance.now() - started)}ms`);
   return { code, stdout, stderr };
 }
 async function stop() {
   if (child && child.exitCode === null) {
+    const exited = once(child, "exit");
     child.kill("SIGTERM");
-    await once(child, "exit");
+    const [code, signal] = await exited;
+    child = undefined;
+    expect({ code, signal }).toEqual({ code: 0, signal: null });
   }
   child = undefined;
 }
 beforeAll(async () => {
-  const socket = createServer(); socket.listen(0, "127.0.0.1"); await once(socket, "listening");
-  const address = socket.address(); if (!address || typeof address === "string") throw new Error("Missing port");
-  port = address.port; await new Promise<void>((resolve) => socket.close(() => resolve()));
+  const socket = createServer();
+  socket.listen(0, "127.0.0.1");
+  await once(socket, "listening");
+  const address = socket.address();
+  if (!address || typeof address === "string") throw new Error("Missing port");
+  port = address.port;
+  await new Promise<void>((resolve) => socket.close(() => resolve()));
   database = await startEmbeddedPostgresTestDatabase("paperclip-deployment-entry-db-");
   const db = createDb(database.connectionString);
   const [adopted] = await db.insert(companies).values({ name: "Existing company", issuePrefix: "EXIST" }).returning();
@@ -52,63 +96,155 @@ beforeAll(async () => {
     telemetry: { enabled: false },
   });
   writeFileSync(join(root, "config.json"), JSON.stringify(config));
-  writeFileSync(join(root, "manifest.json"), JSON.stringify({ version: 1, owner: "entry-owner",
-    companies: { example: { fields: { name: "Entry test" } }, other: { fields: { name: "Other company" } },
-      adopted: { adopt: adoptedCompanyId, fields: { name: "Existing company" } } },
-    projects: { main: { company: "example", fields: { name: "Main" } }, outside: { company: "example", fields: { name: "Outside bridge" } } },
-    agents: { worker: { company: "example", fields: { name: "Bridge worker", adapterType: "hermes_gateway", adapterConfig: { apiBaseUrl: "http://127.0.0.1:1" } }, credentials: { apiKey: "gateway" } } },
-    taskBridges: { ingress: { agent: "worker", project: "main", allowedAssignees: ["worker"], credential: "bridge" } },
-  }));
+  writeFileSync(
+    join(root, "manifest.json"),
+    JSON.stringify({
+      version: 1,
+      owner: "entry-owner",
+      companies: {
+        example: { fields: { name: "Entry test" } },
+        other: { fields: { name: "Other company" } },
+        adopted: { adopt: adoptedCompanyId, fields: { name: "Existing company" } },
+      },
+      projects: {
+        main: { company: "example", fields: { name: "Main" } },
+        outside: { company: "example", fields: { name: "Outside bridge" } },
+      },
+      agents: {
+        worker: {
+          company: "example",
+          fields: {
+            name: "Bridge worker",
+            adapterType: "process",
+            adapterConfig: { command: process.execPath, args: ["-e", "process.exit(0)"] },
+          },
+          credentials: { "env.FIXTURE_KEY": "gateway" },
+        },
+      },
+      taskBridges: {
+        ingress: { agent: "worker", project: "main", allowedAssignees: ["worker"], credential: "bridge" },
+      },
+    }),
+  );
   writeFileSync(join(root, "database"), database.connectionString, { mode: 0o600 });
   writeFileSync(join(root, "auth"), "entry-test-signing-secret-at-least-32-characters", { mode: 0o600 });
   writeFileSync(join(root, "password"), "entry-test-operator-password", { mode: 0o600 });
   writeFileSync(join(root, "bridge"), "entry-test-bridge-token-at-least-32-characters", { mode: 0o600 });
   writeFileSync(join(root, "gateway"), "fixture-gateway-token", { mode: 0o600 });
-  writeFileSync(descriptorFile, JSON.stringify({ version: 1, home: root, instance: "entry", configFile: join(root, "config.json"),
-    manifestFile: join(root, "manifest.json"), serverCredentials: { auth: join(root, "auth"), database: join(root, "database") },
-    credentialFiles: { bridge: join(root, "bridge"), gateway: join(root, "gateway") },
-    bootstrap: { email: "operator@example.test", name: "Entry operator", passwordFile: join(root, "password") } }));
+  writeFileSync(
+    descriptorFile,
+    JSON.stringify({
+      version: 1,
+      home: root,
+      instance: "entry",
+      configFile: join(root, "config.json"),
+      manifestFile: join(root, "manifest.json"),
+      serverCredentials: { auth: join(root, "auth"), database: join(root, "database") },
+      credentialFiles: { bridge: join(root, "bridge"), gateway: join(root, "gateway") },
+      bootstrap: { email: "operator@example.test", name: "Entry operator", passwordFile: join(root, "password") },
+    }),
+  );
 }, 90000);
-afterAll(async () => { await stop(); await database?.cleanup(); rmSync(root, { recursive: true, force: true }); });
+afterAll(async () => {
+  await stop();
+  await database?.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
 
 it("runs the real launcher, authenticates, plans read-only and fences online apply", async () => {
   const db = createDb(database.connectionString);
   const initialPlan = await command("plan");
   expect(initialPlan.code, initialPlan.stderr).toBe(0);
-  expect(JSON.parse(initialPlan.stdout).differences).toContainEqual(expect.objectContaining({
-    kind: "company", key: "adopted", action: "adopt",
-  }));
+  expect(JSON.parse(initialPlan.stdout).differences).toContainEqual(
+    expect.objectContaining({
+      kind: "company",
+      key: "adopted",
+      action: "adopt",
+    }),
+  );
   expect(await db.select().from(authUsers)).toHaveLength(0);
   expect(await db.select().from(companyMemberships)).toHaveLength(0);
   child = launch("serve");
-  child.stdout!.on("data", (chunk) => { output += chunk; });
-  child.stderr!.on("data", (chunk) => { output += chunk; });
-  await expect.poll(async () => {
-    if (child?.exitCode !== null) throw new Error(`Launcher exited: ${output}`);
-    try { return (await fetch(`http://127.0.0.1:${port}/api/health`)).status; } catch { return 0; }
-  }, { timeout: 45000, interval: 500 }).toBe(200);
+  child.stdout!.on("data", (chunk) => {
+    output += chunk;
+  });
+  child.stderr!.on("data", (chunk) => {
+    output += chunk;
+  });
+  await expect
+    .poll(
+      async () => {
+        if (child?.exitCode !== null) throw new Error(`Launcher exited: ${output}`);
+        try {
+          const response = await fetch(`http://127.0.0.1:${port}/api/health`);
+          return response.ok ? (await response.json()).status : "unhealthy";
+        } catch {
+          return 0;
+        }
+      },
+      { timeout: 45000, interval: 500 },
+    )
+    .toBe("ok");
   const response = await fetch(`http://localhost:${port}/api/auth/sign-in/email`, {
-    method: "POST", headers: { "content-type": "application/json", origin: `http://localhost:${port}` },
+    method: "POST",
+    headers: { "content-type": "application/json", origin: `http://localhost:${port}` },
     body: JSON.stringify({ email: "operator@example.test", password: "entry-test-operator-password" }),
   });
   expect(response.status, await response.text()).toBe(200);
-  const bindings = JSON.parse(readFileSync(join(root, "instances/entry/deployment-bindings.json"), "utf8")).bindings as Record<string, string>;
+  const bindings = JSON.parse(readFileSync(join(root, "instances/entry/deployment-bindings.json"), "utf8"))
+    .bindings as Record<string, string>;
   expect(bindings["company/adopted"]).toBe(adoptedCompanyId);
-  const cookie = response.headers.getSetCookie().map((value) => value.split(";")[0]).join("; ");
+  const cookie = response.headers
+    .getSetCookie()
+    .map((value) => value.split(";")[0])
+    .join("; ");
   const listed = await fetch(`http://localhost:${port}/api/companies?scope=accessible`, { headers: { cookie } });
   expect(listed.status).toBe(200);
-  expect((await listed.json() as { id: string }[]).map((company) => company.id).sort()).toEqual([
-    bindings["company/example"], bindings["company/other"], adoptedCompanyId,
-  ].sort());
-  expect((await fetch(`http://localhost:${port}/api/companies/${adoptedCompanyId}`, { headers: { cookie } })).status).toBe(200);
-  const createIssue = (company: string, project: string) => fetch(`http://localhost:${port}/api/companies/${company}/issues`, {
-    method: "POST", headers: { "content-type": "application/json", authorization: "Bearer entry-test-bridge-token-at-least-32-characters" },
-    body: JSON.stringify({ title: "Bridge request", status: "backlog", projectId: project, assigneeAgentId: bindings["agent/worker"] }),
-  });
+  expect(((await listed.json()) as { id: string }[]).map((company) => company.id).sort()).toEqual(
+    [bindings["company/example"], bindings["company/other"], adoptedCompanyId].sort(),
+  );
+  expect(
+    (await fetch(`http://localhost:${port}/api/companies/${adoptedCompanyId}`, { headers: { cookie } })).status,
+  ).toBe(200);
+  // Server health does not imply that asynchronous agent setup has completed.
+  await expect
+    .poll(
+      async () =>
+        (
+          await db
+            .select({ status: agents.status, lifecycleState: agents.lifecycleState })
+            .from(agents)
+            .where(eq(agents.id, bindings["agent/worker"]))
+        )[0],
+      { timeout: 30000, interval: 100 },
+    )
+    .toEqual({ status: "idle", lifecycleState: "ready" });
+  const createIssue = (company: string, project: string) =>
+    fetch(`http://localhost:${port}/api/companies/${company}/issues`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer entry-test-bridge-token-at-least-32-characters",
+      },
+      body: JSON.stringify({
+        title: "Bridge request",
+        status: "backlog",
+        projectId: project,
+        assigneeAgentId: bindings["agent/worker"],
+      }),
+    });
   const allowed = await createIssue(bindings["company/example"], bindings["project/main"]);
   expect(allowed.status, await allowed.text()).toBe(201);
   expect((await createIssue(bindings["company/example"], bindings["project/outside"])).status).toBe(403);
   expect((await createIssue(bindings["company/other"], bindings["project/main"])).status).toBe(403);
+  // Task ingress remains scoped; creating work does not grant project API access.
+  expect(
+    (
+      await fetch(`http://localhost:${port}/api/projects/${bindings["project/main"]}`, {
+        headers: { authorization: "Bearer entry-test-bridge-token-at-least-32-characters" },
+      })
+    ).status,
+  ).toBe(404);
   const plan = await command("plan");
   expect(plan.code, plan.stderr).toBe(0);
   expect(JSON.parse(plan.stdout).differences).toEqual([]);
@@ -125,9 +261,14 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
 
 it("refuses HTTP port collisions instead of silently moving the instance", async () => {
   await stop();
-  const occupied = createServer(); occupied.listen(port, "127.0.0.1"); await once(occupied, "listening");
-  try { expect((await command("serve")).code).toBe(1); }
-  finally { await new Promise<void>((resolve) => occupied.close(() => resolve())); }
+  const occupied = createServer();
+  occupied.listen(port, "127.0.0.1");
+  await once(occupied, "listening");
+  try {
+    expect((await command("serve")).code).toBe(1);
+  } finally {
+    await new Promise<void>((resolve) => occupied.close(() => resolve()));
+  }
 }, 30000);
 
 it("rejects manifest owner changes and omissions without leaving the old fleet unmanaged", async () => {
@@ -135,7 +276,10 @@ it("rejects manifest owner changes and omissions without leaving the old fleet u
   const originalManifest = readFileSync(join(root, "manifest.json"), "utf8");
   const originalDescriptor = readFileSync(descriptorFile, "utf8");
   try {
-    writeFileSync(join(root, "manifest.json"), JSON.stringify({ ...JSON.parse(originalManifest), owner: "another-owner" }));
+    writeFileSync(
+      join(root, "manifest.json"),
+      JSON.stringify({ ...JSON.parse(originalManifest), owner: "another-owner" }),
+    );
     for (const name of ["plan", "check", "apply"]) expect((await command(name)).code).toBe(1);
     writeFileSync(join(root, "manifest.json"), originalManifest);
     writeFileSync(descriptorFile, JSON.stringify({ ...JSON.parse(originalDescriptor), manifestFile: undefined }));
@@ -151,7 +295,10 @@ it("rejects manifest owner changes and omissions without leaving the old fleet u
   const legacyPlan = await command("plan");
   expect(legacyPlan.code).toBe(0);
   expect(JSON.parse(legacyPlan.stdout).differences).toContainEqual({
-    kind: "instance", key: "entry", action: "update", fields: ["owner"],
+    kind: "instance",
+    key: "entry",
+    action: "update",
+    fields: ["owner"],
   });
   expect((await command("check")).code).toBe(2);
   expect((await command("apply")).code).toBe(0);
@@ -167,8 +314,12 @@ it("stops offline apply when its database lease is lost while reconciliation is 
   writeFileSync(join(root, "manifest.json"), JSON.stringify(changed));
   let signalLocked!: () => void;
   let releaseLock!: () => void;
-  const locked = new Promise<void>((resolve) => { signalLocked = resolve; });
-  const unlock = new Promise<void>((resolve) => { releaseLock = resolve; });
+  const locked = new Promise<void>((resolve) => {
+    signalLocked = resolve;
+  });
+  const unlock = new Promise<void>((resolve) => {
+    releaseLock = resolve;
+  });
   const blocker = db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(1735289201)`);
     signalLocked();
@@ -176,14 +327,21 @@ it("stops offline apply when its database lease is lost while reconciliation is 
   });
   const applying = launch("apply");
   let stderr = "";
-  applying.stderr!.on("data", (chunk) => { stderr += chunk; });
+  applying.stderr!.on("data", (chunk) => {
+    stderr += chunk;
+  });
   try {
     await locked;
-    await expect.poll(async () => {
-      const [row] = await db.execute(sql`select count(*)::int as count from pg_locks
+    await expect
+      .poll(
+        async () => {
+          const [row] = await db.execute(sql`select count(*)::int as count from pg_locks
         where locktype = 'advisory' and objid = 1735289202 and granted`);
-      return Number(row?.count ?? 0);
-    }, { timeout: 30000, interval: 100 }).toBe(1);
+          return Number(row?.count ?? 0);
+        },
+        { timeout: 30000, interval: 100 },
+      )
+      .toBe(1);
     const exited = once(applying, "exit");
     await db.execute(sql`select pg_terminate_backend(pid) from pg_locks
       where locktype = 'advisory' and objid = 1735289202 and granted`);
@@ -215,42 +373,67 @@ it("fails closed for the unqualified remote-only profile before publishing readi
       expect(failed.stdout).toBe("");
     }
     await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
-  } finally { writeFileSync(descriptorFile, original); }
+  } finally {
+    writeFileSync(descriptorFile, original);
+  }
 }, 30000);
 
 it("refuses missing credentials and failed binding publication without readiness", async () => {
   await stop();
   for (const name of ["auth", "gateway"]) {
-    const file = join(root, name), held = `${file}.held`;
+    const file = join(root, name),
+      held = `${file}.held`;
     renameSync(file, held);
     try {
       expect((await command("serve")).code).toBe(1);
       await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
-    } finally { renameSync(held, file); }
+    } finally {
+      renameSync(held, file);
+    }
   }
-  const bindings = join(root, "instances/entry/deployment-bindings.json"), held = `${bindings}.held`;
+  const bindings = join(root, "instances/entry/deployment-bindings.json"),
+    held = `${bindings}.held`;
   renameSync(bindings, held);
   mkdirSync(bindings);
   writeFileSync(join(bindings, "barrier"), "publication barrier");
   try {
     expect((await command("serve")).code).toBe(1);
     await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
-  } finally { rmSync(bindings, { recursive: true }); renameSync(held, bindings); }
+  } finally {
+    rmSync(bindings, { recursive: true });
+    renameSync(held, bindings);
+  }
   expect((await command("check")).code).toBe(0);
 }, 60000);
 
 it("exits the real server when its database lease is lost", async () => {
   child = launch("serve");
   let logs = "";
-  child.stdout!.on("data", (chunk) => { logs += chunk; });
-  child.stderr!.on("data", (chunk) => { logs += chunk; });
-  await expect.poll(async () => {
-    if (child?.exitCode !== null) throw new Error(`Launcher exited: ${logs}`);
-    try { return (await fetch(`http://127.0.0.1:${port}/api/health`)).status; } catch { return 0; }
-  }, { timeout: 45000, interval: 500 }).toBe(200);
+  child.stdout!.on("data", (chunk) => {
+    logs += chunk;
+  });
+  child.stderr!.on("data", (chunk) => {
+    logs += chunk;
+  });
+  await expect
+    .poll(
+      async () => {
+        if (child?.exitCode !== null) throw new Error(`Launcher exited: ${logs}`);
+        try {
+          const response = await fetch(`http://127.0.0.1:${port}/api/health`);
+          return response.ok ? (await response.json()).status : "unhealthy";
+        } catch {
+          return 0;
+        }
+      },
+      { timeout: 45000, interval: 500 },
+    )
+    .toBe("ok");
   const exited = once(child, "exit");
   const db = createDb(database.connectionString);
-  await db.execute(sql`select pg_terminate_backend(pid) from pg_locks where locktype = 'advisory' and objid = 1735289202 and database = (select oid from pg_database where datname = current_database())`);
+  await db.execute(
+    sql`select pg_terminate_backend(pid) from pg_locks where locktype = 'advisory' and objid = 1735289202 and database = (select oid from pg_database where datname = current_database())`,
+  );
   const [code] = await exited;
   expect(code).toBe(1);
   child = undefined;
@@ -266,3 +449,164 @@ it("refuses invalid provisioning before opening a listener", async () => {
   expect(failed.stderr).toContain("declarative startup failed");
   await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
 }, 30000);
+
+it("preserves embedded controller identity, login and encrypted credentials across restart and backup restoration", async () => {
+  await stop();
+  const files = [descriptorFile, join(root, "config.json"), join(root, "manifest.json")];
+  const original = files.map((file) => readFileSync(file));
+  const previousKey = process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE;
+  const key = join(root, "encryption");
+  // Same 32-byte raw-key format as the consumer's strong-passphrase generator.
+  writeFileSync(key, "Aa0@".repeat(8), { mode: 0o400 });
+  writeFileSync(join(root, "embedded-password"), "disposable-embedded-database-password", { mode: 0o400 });
+  process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = key;
+  const socket = createServer();
+  socket.listen(0, "127.0.0.1");
+  await once(socket, "listening");
+  const address = socket.address();
+  if (!address || typeof address === "string") throw new Error("Missing database port");
+  const databasePort = address.port;
+  await new Promise<void>((resolve) => socket.close(() => resolve()));
+  const connectionString = `postgresql://paperclip:disposable-embedded-database-password@127.0.0.1:${databasePort}/paperclip`;
+  const restoredUrl = new URL(connectionString);
+  restoredUrl.pathname = "/paperclip_restored";
+  const cluster = join(root, "embedded-db");
+  const descriptor = {
+    version: 1,
+    home: root,
+    instance: "embedded",
+    configFile: files[1],
+    manifestFile: files[2],
+    executionProfile: "trusted-local",
+    serverCredentials: { auth: join(root, "auth"), encryption: key },
+    credentialFiles: { fixture: join(root, "gateway") },
+    embedded: { user: "paperclip", database: "paperclip", passwordFile: join(root, "embedded-password") },
+    bootstrap: { email: "operator@example.test", name: "Embedded operator", passwordFile: join(root, "password") },
+  };
+  const start = async () => {
+    let logs = "";
+    child = launch("serve");
+    child.stdout!.on("data", (chunk) => {
+      logs += chunk;
+    });
+    child.stderr!.on("data", (chunk) => {
+      logs += chunk;
+    });
+    await expect
+      .poll(
+        async () => {
+          if (child?.exitCode !== null) throw new Error(`Launcher exited: ${logs}`);
+          try {
+            const response = await fetch(`http://127.0.0.1:${port}/api/health`);
+            // HTTP 200 is liveness during recovery, not startup readiness.
+            return response.ok ? (await response.json()).status : "unhealthy";
+          } catch {
+            return 0;
+          }
+        },
+        { timeout: 45000, interval: 500 },
+      )
+      .toBe("ok");
+    return logs;
+  };
+  try {
+    writeFileSync(
+      files[1],
+      JSON.stringify(
+        paperclipConfigSchema.parse({
+          ...JSON.parse(original[1].toString()),
+          database: {
+            mode: "embedded-postgres",
+            embeddedPostgresDataDir: cluster,
+            embeddedPostgresPort: databasePort,
+            backup: { enabled: false },
+          },
+          secrets: { provider: "local_encrypted", localEncrypted: { keyFilePath: key } },
+        }),
+      ),
+    );
+    writeFileSync(
+      files[2],
+      JSON.stringify({
+        version: 1,
+        owner: "embedded-owner",
+        companies: { example: { fields: { name: "Embedded company" } } },
+        agents: {
+          worker: {
+            company: "example",
+            fields: { name: "Embedded worker", adapterType: "process", adapterConfig: { command: "false" } },
+            credentials: { "env.FIXTURE_KEY": "fixture" },
+          },
+        },
+      }),
+    );
+    writeFileSync(descriptorFile, JSON.stringify(descriptor));
+    const logs = await start();
+    expect(logs).not.toContain("disposable-embedded-database-password");
+    expect(logs).not.toContain("Aa0@".repeat(8));
+    const response = await fetch(`http://localhost:${port}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: `http://localhost:${port}` },
+      body: JSON.stringify({ email: "operator@example.test", password: "entry-test-operator-password" }),
+    });
+    expect(response.status, await response.text()).toBe(200);
+    const cookie = response.headers
+      .getSetCookie()
+      .map((value) => value.split(";")[0])
+      .join("; ");
+    const bindingsFile = join(root, "instances/embedded/deployment-bindings.json");
+    const bindings = JSON.parse(readFileSync(bindingsFile, "utf8")).bindings;
+    const db = createDb(connectionString);
+    const users = await db.select().from(authUsers);
+    const secrets = await db.select().from(companySecretVersions);
+    expect(users).toHaveLength(1);
+    expect(secrets).toHaveLength(1);
+    const backup = await runDatabaseBackup({
+      connectionString,
+      backupDir: join(root, "backups"),
+      backupEngine: "javascript",
+      retention: { dailyDays: 30, weeklyWeeks: 0, monthlyMonths: 0 },
+    });
+    expect(backup.sizeBytes).toBeGreaterThan(0);
+    await closeRegisteredClients(connectionString);
+    await stop();
+    expect(existsSync(join(cluster, "PG_VERSION"))).toBe(true);
+    expect(existsSync(join(cluster, "postmaster.pid"))).toBe(false);
+    for (const url of [connectionString, restoredUrl.toString()]) {
+      await start();
+      expect(JSON.parse(readFileSync(bindingsFile, "utf8")).bindings).toEqual(bindings);
+      const listed = await fetch(`http://localhost:${port}/api/companies?scope=accessible`, { headers: { cookie } });
+      expect(listed.status).toBe(200);
+      expect(((await listed.json()) as { id: string }[]).map((company) => company.id)).toEqual([
+        bindings["company/example"],
+      ]);
+      const current = createDb(url);
+      expect((await current.select().from(authUsers)).map((user) => user.id)).toEqual(users.map((user) => user.id));
+      expect(await current.select().from(companySecretVersions)).toEqual(secrets);
+      const [agent] = await current.select().from(agents);
+      const resolved = await secretService(current).resolveAdapterConfigForRuntime(
+        agent.companyId,
+        agent.adapterConfig,
+        { consumerType: "agent", consumerId: agent.id },
+        { adapterType: "process" },
+      );
+      expect(resolved.config.env).toEqual({ FIXTURE_KEY: "fixture-gateway-token" });
+      if (url === connectionString) {
+        await ensurePostgresDatabase(connectionString, "paperclip_restored");
+        await runDatabaseRestore({ connectionString: restoredUrl.toString(), backupFile: backup.backupFile });
+        descriptor.embedded.database = "paperclip_restored";
+        writeFileSync(descriptorFile, JSON.stringify(descriptor));
+      }
+      await closeRegisteredClients(url);
+      await stop();
+      expect(existsSync(join(cluster, "postmaster.pid"))).toBe(false);
+    }
+  } finally {
+    await closeRegisteredClients(connectionString);
+    await closeRegisteredClients(restoredUrl.toString());
+    await stop();
+    files.forEach((file, index) => writeFileSync(file, original[index]));
+    if (previousKey === undefined) delete process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE;
+    else process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = previousKey;
+  }
+}, 120000);

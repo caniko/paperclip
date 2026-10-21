@@ -3,11 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import { defineConfig } from "@playwright/test";
 import base from "./playwright.config";
+import { verifyComposerCandidateRuntime } from "../../scripts/composer-candidate-runtime.mjs";
 
 // Opt-in native coverage uses real runnerd with the repo's deterministic Codex
 // protocol fixture. Never let this suite fall through to a logged-in real Codex.
 const fixture = process.env.PAPERCLIP_STOP_FAKE_CODEX;
 if (process.env.PAPERCLIP_STOP_REQUIRE_NATIVE === "true") {
+  verifyComposerCandidateRuntime();
   const sourceRoot = process.env.PAPERCLIP_E2E_SOURCE_ROOT;
   if (!sourceRoot || !path.isAbsolute(sourceRoot) || !fs.statSync(sourceRoot).isDirectory())
     throw new Error("Mandatory native composer Stop requires an absolute candidate source root");
@@ -29,6 +31,7 @@ if (fixture) {
     throw new Error(
       "PAPERCLIP_STOP_FAKE_CODEX must name the built fake-codex-app-server binary",
     );
+  fs.mkdirSync(path.join(fixtureDir, "codex-home"));
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   fs.writeFileSync(
     path.join(fixtureDir, "codex"),
@@ -52,10 +55,22 @@ export default defineConfig({
   timeout: 90_000,
   webServer: {
     ...server,
+    ...(process.env.PAPERCLIP_STOP_REQUIRE_NATIVE === "true" ? {
+      cwd: path.resolve(import.meta.dirname, "../.."),
+      command: `node ${JSON.stringify(path.resolve(import.meta.dirname, "../../scripts/composer-candidate-runtime.mjs"))} serve`,
+    } : {}),
     env: {
       ...server?.env,
       HEARTBEAT_SCHEDULER_INTERVAL_MS: "10000",
       PATH: `${fixtureDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      ...(fixture && process.env.PAPERCLIP_STOP_REQUIRE_NATIVE !== "true" ? {
+        // Provider selection prefers the installed dependency over PATH.
+        // Scope this override and its empty credential home to the test server.
+        PAPERCLIP_STOP_CODEX_COMMAND: path.join(fixtureDir, "codex"),
+        CODEX_HOME: path.join(fixtureDir, "codex-home"),
+        OPENAI_API_KEY: "composer-stop-fixture-key",
+        NODE_OPTIONS: `${server?.env?.NODE_OPTIONS ?? ""} --import=${path.resolve(import.meta.dirname, "fixtures/composer-stop-codex-loader.mjs")}`,
+      } : {}),
     },
   },
 });

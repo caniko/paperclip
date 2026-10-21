@@ -15,7 +15,7 @@ import { resolveQualifiedAcpxProfile } from "../drivers/acpx/qualified-profiles.
 import { createOpenCodeNativeSessionBackend } from "./opencode-native-backend.js";
 import { nativeSystemInstructions, nativeTaskConstraints } from "./runtime-context.js";
 import { createRunnerdNativeSessionBackend } from "./codex-native-backend.js";
-import { inspectNativeCompletionSourceMetadata } from "../../../../tests/runner-e2e/native-completion-git-source.mjs";
+import { inspectNativeCompletionSourceMetadata } from "../../scripts/lib/native-completion-git-source.mjs";
 
 // This captures Paperclip's real runnerd RPC boundary with a scripted transport.
 // It measures complete Paperclip-supplied instruction/tool/message projections,
@@ -190,11 +190,10 @@ describe("direct OpenCode HTTP instruction boundary", () => {
         const request = requests.at(-1)!;
         expect(request.providerID).toBe("openrouter"); expect(request.modelID).toBe("deepseek/deepseek-v4-flash-0731");
         const text = request.parts[0].text as string;
+        expect(request.system).toBe(nativeSystemInstructions(value));
         if (schema === "v4" && phase === "start") {
-          expect(request.system).toBe(nativeSystemInstructions(input));
           expect(JSON.parse(text).task.constraints).toEqual(nativeTaskConstraints(input));
         } else {
-          expect(request.system).toBeUndefined();
           expect(JSON.parse(text)).toEqual(envelope);
         }
         directOpenCodeReceipts.push({ provider: "opencode", schema, phase, request: measure(request),

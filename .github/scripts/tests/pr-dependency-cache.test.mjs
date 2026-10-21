@@ -4,10 +4,34 @@ import { readFileSync } from "node:fs";
 
 const workflow = readFileSync(new URL("../../workflows/pr-trusted.yml", import.meta.url), "utf8");
 const jobs = [...workflow.matchAll(/^  ([a-z_][a-z_0-9]*):\n([\s\S]*?)(?=^  [a-z_][a-z_0-9]*:\n|$(?![\s\S]))/gm)];
-const installers = jobs.filter(([, , body]) => body.includes("pnpm install --frozen-lockfile"));
+const installers = jobs.filter(([, , body]) => /\bpnpm install [^\r\n]*--frozen-lockfile\b/.test(body));
+const cachedInstallers = installers.filter(([, job]) => job !== "native_composer_stop");
+
+test("generated Nix concurrency isolates forks but coalesces the same source branch", () => {
+  const nix = readFileSync(new URL("../../workflows/nix-builds.yaml", import.meta.url), "utf8");
+  const group = nix.match(/^  group: (.+)$/m)?.[1];
+  assert.ok(group);
+  assert.match(nix, /^  cancel-in-progress: true$/m);
+  const key = (repository, ref, pullRequest = false) => group.replace(/\$\{\{ (.*?) \}\}/g, (_, expression) => {
+    const context = {
+      "github.workflow": "Nix installable builds",
+      "github.repository": pullRequest ? "caniko/paperclip" : repository,
+      "github.ref_name": pullRequest ? "4/merge" : ref,
+      "github.event.pull_request.head.repo.full_name": pullRequest ? repository : "",
+      "github.event.pull_request.head.ref": pullRequest ? ref : "",
+    };
+    const operands = expression.split(" || ");
+    for (const operand of operands) assert.ok(Object.hasOwn(context, operand), operand);
+    return operands.map((operand) => context[operand]).find(Boolean);
+  });
+  assert.notEqual(key("alice/paperclip", "fix", true), key("bob/paperclip", "fix", true));
+  assert.notEqual(key("alice/paperclip", "fix", true), key("alice/paperclip", "other", true));
+  assert.equal(key("alice/paperclip", "fix", true), key("alice/paperclip", "fix"));
+});
 
 test("PR workflows restore dependency stores without creating branch copies", () => {
   assert.equal(installers.length, 8);
+  assert.equal(cachedInstallers.length, 7);
   assert.doesNotMatch(workflow, /^ +cache: pnpm$/m);
   assert.doesNotMatch(workflow, /uses: actions\/cache(?:@|\/save@)/);
   for (const [, job, body] of jobs) {
@@ -17,9 +41,27 @@ test("PR workflows restore dependency stores without creating branch copies", ()
   }
   const policy = jobs.find(([, name]) => name === "policy")[2];
   assert.doesNotMatch(policy, /uses: actions\/cache|cache: pnpm/);
+  const dependencies = policy.indexOf("uses: ./.github/actions/setup-ci-dependencies");
+  const tests = policy.indexOf("      - name: Test PR quality-gate scripts");
+  assert.ok(dependencies >= 0 && dependencies < tests, "The full policy roster requires installed esbuild and Vitest");
 });
 
-for (const [, job, body] of installers) {
+test("native composer: immutable frozen tools and candidate installation do not share a host cache", () => {
+  const native = installers.find(([, job]) => job === "native_composer_stop");
+  assert.ok(native, "the filtered immutable-harness install is an installer too");
+  const body = native[2];
+  const harness = body.split("      - name: Install immutable browser harness dependencies")[1]?.split("      - name:")[0];
+  assert.ok(harness);
+  assert.match(harness, /working-directory: \.trusted-composer-stop/);
+  assert.match(harness, /run: pnpm install --filter paperclip --frozen-lockfile --ignore-scripts/);
+  assert.doesNotMatch(body, /uses: actions\/cache|cache: pnpm/);
+  const candidate = body.split("      - name: Install dependencies")[1]?.split("      - name:")[0];
+  assert.ok(candidate);
+  assert.match(candidate, /node \.trusted-composer-stop\/scripts\/composer-candidate-stage\.mjs install "\$COMPOSER_STOP_CANDIDATE_ROOT"/);
+  assert.doesNotMatch(candidate, /\bpnpm install\b/);
+});
+
+for (const [, job, body] of cachedInstallers) {
   test(`${job}: reuse master keys before installing with an inline stale-lockfile fallback`, () => {
     const locate = body.indexOf("      - name: Locate pnpm store");
     const restore = body.indexOf("      - name: Restore pnpm store (read only)");
@@ -34,8 +76,20 @@ for (const [, job, body] of installers) {
     // Lanes must not wait on the policy job for a regenerated lockfile; each
     // install resolves a stale one inline and then re-validates frozen.
     const installStep = body.slice(install).split("      - name:")[1] ?? body.slice(install);
-    assert.match(installStep, /if ! pnpm install --frozen-lockfile; then/);
-    assert.match(installStep, /pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile/);
+    if (job === "native_composer_stop") {
+      assert.match(installStep, /candidate\(\) \{/);
+      assert.match(installStep, /bwrap --die-with-parent --new-session --unshare-user --unshare-pid --unshare-ipc --unshare-uts/);
+      assert.match(installStep, /--ro-bind "\$GITHUB_WORKSPACE\/\.trusted-composer-stop" "\$GITHUB_WORKSPACE\/\.trusted-composer-stop"/);
+      assert.match(installStep, /--ro-bind "\$RUNNER_TEMP" "\$RUNNER_TEMP"/);
+      assert.match(installStep, /env -i PATH="\$PATH" HOME=\/tmp CI=true "\$@"/);
+      assert.match(installStep, /if ! candidate pnpm install --frozen-lockfile; then/);
+      assert.match(installStep, /candidate pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile/);
+      assert.match(installStep, /\n\s+candidate pnpm install --frozen-lockfile\n/);
+      assert.doesNotMatch(installStep, /(?:^|\n)\s*(?:if ! )?pnpm install/);
+    } else {
+      assert.match(installStep, /if ! pnpm install --frozen-lockfile; then/);
+      assert.match(installStep, /pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile/);
+    }
     assert.doesNotMatch(installStep, /needs\.policy/);
   });
 }

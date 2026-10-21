@@ -15,6 +15,8 @@ describe("declarative startup credentials", () => {
     expect(readCredential(file)).toBe(value);
     const env = deploymentEnvironment({ version: 1, home: d, instance: "one", configFile: "/config.json", credentialFiles: {}, serverCredentials: { auth: file } }, {
       PATH: "/bin", DATABASE_URL: "bad", HOST: "0.0.0.0", PAPERCLIP_CONFIG: "/wrong", BETTER_AUTH_SECRET: "bad", UNRELATED_KEY: "bad",
+      XDG_CONFIG_HOME: "/home/operator/.config", XDG_DATA_HOME: "/home/operator/.local/share",
+      XDG_STATE_HOME: "/home/operator/.local/state", XDG_CACHE_HOME: "/home/operator/.cache", XDG_RUNTIME_DIR: "/run/user/1000",
     });
     expect(env.BETTER_AUTH_SECRET).toBeUndefined();
     expect(JSON.stringify(env)).not.toContain(value.trimEnd());
@@ -22,6 +24,8 @@ describe("declarative startup credentials", () => {
     expect(env.DATABASE_URL).toBeUndefined();
     expect(env.HOST).toBeUndefined();
     expect(env.UNRELATED_KEY).toBeUndefined();
+    expect(env).toMatchObject({ XDG_CONFIG_HOME: "/home/operator/.config", XDG_DATA_HOME: "/home/operator/.local/share",
+      XDG_STATE_HOME: "/home/operator/.local/state", XDG_CACHE_HOME: "/home/operator/.cache", XDG_RUNTIME_DIR: "/run/user/1000" });
   });
   it("refuses public credentials with redacted errors", () => {
     const d = mkdtempSync(join(tmpdir(), "paperclip-credential-")); dirs.push(d);

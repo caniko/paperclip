@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import type { WorkspaceOwnershipContext, WorkspaceOwnershipIntent } from "@paperclipai/adapter-utils";
 import { parseObject } from "@paperclipai/adapter-utils/server-utils";
-import { buildHeaders, normalizeBaseUrl, parseHeaders } from "./execute.js";
+import { buildHeaders, normalizeBaseUrl, parseHeaders } from "./http-config.js";
 import { requireWorkspaceCapability, resolveWorkspaceBinding } from "./execution-context.js";
 import { allowsInsecureRemoteHttp, isRemotePlainHttp } from "./transport-security.js";
+import { selectExecutor } from "./executor-selection.js";
 
 class FilesystemOwnershipRejectedError extends Error {}
 
@@ -33,6 +34,9 @@ export async function reconcileWorkspaceOwnership(checkpoint: Record<string, unk
 }
 
 export async function prepareWorkspaceOwnership(ctx: WorkspaceOwnershipContext): Promise<WorkspaceOwnershipIntent> {
+  // Pool policy cannot move an enrolled target. Validate and probe the primary
+  // before persisting an ownership intent or touching its filesystem authority.
+  await selectExecutor({ ...ctx, config: { ...ctx.config, bindWorkspace: true }, runtime: {} });
   const baseUrl = normalizeBaseUrl(String(ctx.config.apiBaseUrl ?? ctx.config.url ?? ""));
   const apiKey = String(ctx.config.apiKey ?? ctx.config.token ?? "").trim();
   if (!baseUrl || !apiKey || (isRemotePlainHttp(baseUrl) && !allowsInsecureRemoteHttp(ctx.config))) {

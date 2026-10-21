@@ -1,0 +1,11 @@
+{
+  "schema": "paperclip.live-characterization-provider.v1",
+  "name": "@anthropic-ai/claude-code-linux-x64",
+  "version": "2.1.295",
+  "platform": "linux",
+  "architecture": "x86_64",
+  "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.295.tgz",
+  "integrity": "sha512-nC9RZ6ZArEavyAiFdEtGK6/XPhjfE79tP2tCh+PjmRUxSO/6W3IuXv/rmo8c6u2UzHyvgKodRj1z6UcBGlbnyA==",
+  "binary_member": "package/claude",
+  "authentication": "prompt-only; no browser code or provider credential"
+}

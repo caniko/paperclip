@@ -70,7 +70,21 @@ describe("semantic action catalog", () => {
       (action) => action.operationId,
     );
 
-    expect(operationIds).toHaveLength(37);
+    // The skill-update binding and four workspace actions extend the original 37.
+    expect(operationIds).toHaveLength(42);
+    expect(operationIds).toEqual([
+      "create_skill", "update_skill", "search_api", "call_api",
+      "get_task_context", "get_task_history", "list_documents", "read_document",
+      "list_document_revisions", "set_task_title", "report_progress", "answer_status_question",
+      "write_document", "request_human_input", "register_deliverable", "finish_task",
+      "block_task", "request_review", "list_agents", "hire_agent", "get_agent",
+      "search_tasks", "list_approvals", "get_approval", "get_approval_context",
+      "get_workspace_runtime", "control_workspace_service", "reassign_task",
+      "set_dependencies", "get_workspace", "list_workspaces", "select_workspace", "prepare_repository",
+      "list_projects", "list_project_repositories", "create_project",
+      "create_task", "request_approval", "decide_approval", "comment_on_approval",
+      "set_task_monitor", "schedule_wake",
+    ]);
     expect(operationIds).toContain("set_task_monitor");
     expect(new Set(operationIds).size).toBe(operationIds.length);
     expect(operationIds).not.toContain("generic_api_request");

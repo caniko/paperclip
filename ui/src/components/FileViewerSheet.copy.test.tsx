@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { flushSync } from "react-dom";
+import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedWorkspaceResource, WorkspaceFileContent } from "@paperclipai/shared";
@@ -97,15 +97,15 @@ describe("FileViewerSheet copy actions", () => {
     window.history.pushState({}, "", "/PAP/issues/PAP-10629?file=videos%2F90-days-paperclip%2Ftweet.md");
   });
 
-  afterEach(() => {
-    flushSync(() => root.unmount());
+  afterEach(async () => {
+    await act(async () => root.unmount());
     container.remove();
     document.body.innerHTML = "";
     vi.clearAllMocks();
   });
 
-  function renderSheet() {
-    flushSync(() => {
+  async function renderSheet() {
+    await act(async () => {
       root.render(
         <FileViewerSheet
           issueId="issue-1"
@@ -126,15 +126,13 @@ describe("FileViewerSheet copy actions", () => {
   async function click(label: string) {
     const button = document.body.querySelector(`button[aria-label="${label}"]`) as HTMLButtonElement | null;
     expect(button).not.toBeNull();
-    flushSync(() => {
+    await act(async () => {
       button!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
-    await Promise.resolve();
-    await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
   it("copies file contents and shows confirmation", async () => {
-    renderSheet();
+    await renderSheet();
 
     await click("Copy file contents");
 
@@ -143,7 +141,7 @@ describe("FileViewerSheet copy actions", () => {
   });
 
   it("copies the current file view link and shows confirmation", async () => {
-    renderSheet();
+    await renderSheet();
 
     await click("Copy link to this file view");
 
@@ -151,15 +149,15 @@ describe("FileViewerSheet copy actions", () => {
     expect(document.body.textContent).toContain("Copied link");
   });
 
-  it("renders a keyboard-addressable file tree resize separator", () => {
-    renderSheet();
+  it("renders a keyboard-addressable file tree resize separator", async () => {
+    await renderSheet();
     const separator = document.body.querySelector('[role="separator"][aria-label="Resize file tree"]');
     expect(separator).not.toBeNull();
     expect(separator?.getAttribute("aria-valuenow")).toBe("288");
   });
 
-  it("keeps split panes unframed so file selection does not shift the browser", () => {
-    renderSheet();
+  it("keeps split panes unframed so file selection does not shift the browser", async () => {
+    await renderSheet();
     const separator = document.body.querySelector('[role="separator"][aria-label="Resize file tree"]');
     const browserPane = separator?.previousElementSibling;
     const previewPane = separator?.nextElementSibling;
@@ -192,7 +190,7 @@ describe("FileViewerSheet copy actions", () => {
         contentType: "text/markdown; charset=utf-8",
       });
     });
-    renderSheet();
+    await renderSheet();
 
     expect(document.body.querySelector('[aria-label="launch.md rendered Markdown"]')).not.toBeNull();
     expect(document.body.querySelector('[aria-label="launch.md source"]')).toBeNull();
@@ -209,7 +207,7 @@ describe("FileViewerSheet copy actions", () => {
 
 
 describe("source line navigation", () => {
-  it("scrolls plain source to its selected line when the toolbar requests rendered mode", () => {
+  it("scrolls plain source to its selected line when the toolbar requests rendered mode", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -217,14 +215,14 @@ describe("source line navigation", () => {
     const original = HTMLElement.prototype.scrollIntoView;
     HTMLElement.prototype.scrollIntoView = scrollIntoView;
     try {
-      flushSync(() => root.render(<FileContentViewer content={{
+      await act(async () => root.render(<FileContentViewer content={{
         resource: { ...resolvedResource, title: "util.ts", displayPath: "src/util.ts", contentType: "text/plain" },
         content: { encoding: "utf8", data: "first\nsecond\nthird" },
       }} highlightedLine={2} previewMode="rendered" />));
       expect(scrollIntoView).toHaveBeenCalledWith({ block: "center", behavior: "auto" });
       expect(container.textContent).toContain("second");
     } finally {
-      flushSync(() => root.unmount());
+      await act(async () => root.unmount());
       container.remove();
       HTMLElement.prototype.scrollIntoView = original;
     }

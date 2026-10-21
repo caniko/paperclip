@@ -15,6 +15,13 @@ skipped; their coverage still needs an independent disposition. The real nested
 chat-shard fixture keeps its reports in its own temporary directory so its
 expected assertion failure cannot overwrite mandatory outer-suite evidence.
 
+The separately configured `runner-package` environment runs the complete Runner
+Vitest roster without a name filter, including all three final-output benchmarks
+once. It first builds the locked Rust workspace binaries and materializes the
+hash-pinned Pi distribution for the existing real-snapshot test. The preparation
+log, distribution manifest and native-closure inventory are retained with that
+job's original evidence; workspace tests do not supply Runner-package credit.
+
 A separate lane overlays the exact successor regression fixture on F645. It
 requires completed assertion failures for endpoint identity, stale SSE, lineage
 membership, and replay settlement. Import failures and skipped cases cannot prove

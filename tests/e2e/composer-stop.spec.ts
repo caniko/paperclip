@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { composerCandidateProcessAlive } from "../../scripts/composer-candidate-process.mjs";
 import {
   test,
   expect,
@@ -122,12 +123,7 @@ async function menu(page: Page, action: string) {
     .click();
 }
 function processAlive(pid: number) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  return composerCandidateProcessAlive(pid);
 }
 
 test.setTimeout(120_000);
@@ -190,8 +186,17 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
           data: { enableClassicTaskInterface: false, enableNativeRunner: true },
         }),
       );
+      if (adapter === "paperclip_runner") {
+        // Retain the redacted adapter checks before lifecycle maps them to a
+        // generic failure code. This is additional read-only verification,
+        // not a substitute for agent readiness or the owned Stop assertions.
+        const verification = await json(await request.post(`/api/companies/${company.id}/adapters/paperclip_runner/test-environment`, {
+          data: { adapterConfig: { provider: "codex", model: "gpt-5.1-codex-mini" } },
+        }));
+        expect(verification.status, JSON.stringify(verification)).toBe("pass");
+      }
       async function agent(name: string) {
-        return json(
+        const created = await json(
           await request.post(`/api/companies/${company.id}/agents`, {
             data: {
               name,
@@ -200,11 +205,14 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
               adapterConfig:
                 adapter === "process"
                   ? {
-                      command: process.execPath,
+                      command: process.env.COMPOSER_STOP_CONTAINER_ID ? "/usr/local/bin/node" : process.execPath,
                       args: [
                         "-e",
                         "console.log('stop fixture ready'); setInterval(() => console.log('working'), 200);",
                       ],
+                      // The child only runs this script; server-only fixture
+                      // loaders must not follow NODE_OPTIONS into the adapter.
+                      env: { NODE_OPTIONS: "" },
                       graceSec: 1,
                     }
                   : { provider: "codex", model: "gpt-5.1-codex-mini" },
@@ -214,6 +222,11 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
             },
           }),
         );
+        await expect.poll(async () => {
+          const current = await json(await request.get(`/api/agents/${created.id}`));
+          return { status: current.status, lifecycleState: current.lifecycleState };
+        }, { timeout: 15_000 }).toEqual({ status: "idle", lifecycleState: "ready" });
+        return created;
       }
       const owner = await agent("Stop fixture parent");
       const childOwner = await agent("Stop fixture child");
@@ -235,6 +248,10 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
         title: "Unrelated work",
         assigneeAgentId: otherOwner.id,
       });
+      // Setup probes are not evidence that these three owned runs started.
+      const priorTurnStarts = adapter === "paperclip_runner"
+        ? (await readFile(process.env.PAPERCLIP_STOP_CODEX_LOG!, "utf8")).split("turn/start").length - 1
+        : 0;
       for (const issue of [parent, child, other])
         await json(
           await request.patch(`/api/issues/${issue.id}`, {
@@ -258,7 +275,7 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
             },
             { timeout: 30_000 },
           )
-          .toBeGreaterThanOrEqual(3);
+          .toBeGreaterThanOrEqual(priorTurnStarts + 3);
       }
       expect(parentRun.runtimeMode).toBe(
         adapter === "process" ? "legacy" : "native",
@@ -276,7 +293,9 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
       );
       expect(JSON.stringify(comments)).toContain("Please check mobile too.");
       await expect.poll(async () => {
-        const queue = await json(await request.get(`/api/issues/${parent.id}/queued-comments`));
+        const queue = await json(
+          await request.get(`/api/issues/${parent.id}/queued-comments`),
+        );
         return JSON.stringify(queue.entries);
       }, { timeout: 15_000 }).toContain("Please check mobile too.");
 

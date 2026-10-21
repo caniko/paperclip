@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ensurePersistedExecutionWorkspaceAvailable, inspectManagedGitWorktreeBranch } from "../services/workspace-runtime.js";
+import { configureFixtureGitIdentity } from "./helpers/git-fixture.js";
 
 const exec = promisify(execFile);
 const roots: string[] = [];
@@ -20,7 +21,8 @@ async function fixture() {
   const worktree = path.join(root, "worktree");
   await fs.mkdir(repo);
   await exec("git", ["init", repo]);
-  await exec("git", ["-C", repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "initial"]);
+  configureFixtureGitIdentity(repo);
+  await exec("git", ["-C", repo, "commit", "--allow-empty", "-m", "initial"]);
   await exec("git", ["-C", repo, "worktree", "add", "-b", "work", worktree]);
   await fs.writeFile(path.join(worktree, "retained.txt"), "retained work\n");
   return { root, repo, worktree };

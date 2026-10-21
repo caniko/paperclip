@@ -1,0 +1,188 @@
+# Generated from the prepared native_composer_stop job.
+# Regenerate: node scripts/generate-composer-stop-qualification.mjs
+name: Independent prepared native composer Stop
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+concurrency:
+  group: prepared-native-stop-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  native_composer_stop:
+    name: Native composer Stop
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PAPERCLIP_E2E_SKIP_LLM: "true"
+      PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"
+      PAPERCLIP_STOP_REQUIRE_NATIVE: "true"
+      PAPERCLIP_E2E_SOURCE_ROOT: ${{ github.workspace }}
+      COMPOSER_STOP_HEAD_REVISION: ${{ github.event.pull_request.head.sha }}
+      COMPOSER_STOP_TRUSTED_REVISION: 1e74838667c21d35dacd993e3b08decbf224bd44
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      # Proposed source pin: qualify it before promoting the caller.
+      - name: Checkout immutable Stop harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: caniko/paperclip
+          ref: 1e74838667c21d35dacd993e3b08decbf224bd44
+          path: .trusted-composer-stop
+          persist-credentials: false
+
+      - name: Install candidate dependency sandbox
+        run: bash .github/scripts/prepare-candidate-sandbox.sh
+
+      - name: Bind independent harness and verifier source
+        run: |
+          set -euo pipefail
+          test "$(git -C .trusted-composer-stop rev-parse HEAD)" = "$COMPOSER_STOP_TRUSTED_REVISION"
+          (
+            cd .trusted-composer-stop
+            git ls-files -z -- tests/e2e scripts/qualify-composer-stop.mjs \
+              scripts/composer-candidate-stage.mjs scripts/composer-candidate-sandbox.mjs \
+              scripts/composer-provider-bridge.mjs scripts/composer-candidate-runtime.mjs \
+              scripts/composer-candidate-process.mjs scripts/grok-public-install-sandbox.mjs \
+              packages/paperclip-runner package.json pnpm-lock.yaml \
+              pnpm-workspace.yaml .npmrc .cargo patches | xargs -0 sha256sum
+          ) > "$RUNNER_TEMP/composer-stop-harness-manifest.sha256"
+          COMPOSER_STOP_HARNESS_SHA256="$(sha256sum "$RUNNER_TEMP/composer-stop-harness-manifest.sha256" | cut -d' ' -f1)"
+          COMPOSER_STOP_VERIFIER_SHA256="$(sha256sum .trusted-composer-stop/scripts/qualify-composer-stop.mjs | cut -d' ' -f1)"
+          echo "COMPOSER_STOP_HARNESS_SHA256=$COMPOSER_STOP_HARNESS_SHA256" >> "$GITHUB_ENV"
+          echo "COMPOSER_STOP_VERIFIER_SHA256=$COMPOSER_STOP_VERIFIER_SHA256" >> "$GITHUB_ENV"
+          jq -n --arg revision "$COMPOSER_STOP_TRUSTED_REVISION" \
+            --arg harnessSha256 "$COMPOSER_STOP_HARNESS_SHA256" \
+            --arg verifierSha256 "$COMPOSER_STOP_VERIFIER_SHA256" \
+            '{trustedRevision: $revision, harnessSha256: $harnessSha256, verifierSha256: $verifierSha256}' \
+            > "$RUNNER_TEMP/composer-stop-trusted-provenance.json"
+
+      - name: Setup Node.js for pnpm bootstrap
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        env:
+          NPM_CONFIG_AUDIT: "false"
+          NPM_CONFIG_FUND: "false"
+          NPM_CONFIG_UPDATE_NOTIFIER: "false"
+        with:
+          version: 9.15.4
+
+      - name: Install immutable browser harness dependencies
+        working-directory: .trusted-composer-stop
+        run: pnpm install --filter paperclip --frozen-lockfile --ignore-scripts
+
+      - name: Stage only exact committed candidate source
+        run: node .trusted-composer-stop/scripts/composer-candidate-stage.mjs stage
+
+      - name: Install dependencies
+        run: |
+          node .trusted-composer-stop/scripts/composer-candidate-stage.mjs install "$COMPOSER_STOP_CANDIDATE_ROOT"
+
+      - name: Build candidate runner
+        run: |
+          node .trusted-composer-stop/scripts/composer-candidate-stage.mjs build "$COMPOSER_STOP_CANDIDATE_ROOT"
+
+      - name: Retain staged effective dependency lock before runtime
+        run: |
+          node .trusted-composer-stop/scripts/composer-candidate-stage.mjs effective-lock "$COMPOSER_STOP_CANDIDATE_ROOT" "$RUNNER_TEMP/composer-stop-effective-lock.yaml"
+
+      - name: Build immutable deterministic provider
+        working-directory: .trusted-composer-stop/packages/paperclip-runner
+        run: |
+          cargo build --manifest-path runner/Cargo.toml --locked --bin fake-codex-app-server
+          node --input-type=module <<'JS'
+          import { appendFileSync } from "node:fs";
+          import { resolveCargoBinary } from "./scripts/cargo-artifacts.mjs";
+          appendFileSync(process.env.GITHUB_ENV, `PAPERCLIP_STOP_FAKE_CODEX=${resolveCargoBinary({ binary: "fake-codex-app-server" })}\n`);
+          JS
+
+      - name: Verify runner Chrome
+        run: google-chrome --version
+
+      - name: Run mandatory composer Stop acceptance
+        env:
+          PAPERCLIP_STOP_CODEX_LOG: ${{ runner.temp }}/composer-stop-provider.log
+          PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ runner.temp }}/composer-stop-report.json
+          PLAYWRIGHT_JUNIT_OUTPUT_NAME: ${{ runner.temp }}/composer-stop-junit.xml
+        run: |
+          set -euo pipefail
+          (cd .trusted-composer-stop && sha256sum --check "$RUNNER_TEMP/composer-stop-harness-manifest.sha256")
+          node .trusted-composer-stop/scripts/composer-candidate-runtime.mjs run \
+            .trusted-composer-stop/node_modules/@playwright/test/cli.js test \
+            --config .trusted-composer-stop/tests/e2e/playwright-composer-stop.config.ts --reporter=list,json,junit
+
+      - name: Qualify exact-head native composer Stop proof
+        env:
+          PLAYWRIGHT_JUNIT_OUTPUT_NAME: ${{ runner.temp }}/composer-stop-junit.xml
+          COMPOSER_STOP_SOURCE_LOCKFILE: ${{ runner.temp }}/composer-stop-source-lock.yaml
+          COMPOSER_STOP_EFFECTIVE_LOCKFILE: ${{ runner.temp }}/composer-stop-effective-lock.yaml
+        run: |
+          set -euo pipefail
+          (cd .trusted-composer-stop && sha256sum --check "$RUNNER_TEMP/composer-stop-harness-manifest.sha256")
+          test "$(sha256sum .trusted-composer-stop/scripts/qualify-composer-stop.mjs | cut -d' ' -f1)" = "$COMPOSER_STOP_VERIFIER_SHA256"
+          python3 - "$PLAYWRIGHT_JUNIT_OUTPUT_NAME" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          cases = root.findall('.//testcase')
+          required = {f'{adapter}: queue, composer Stop, subtree pause/cancel, and resume'
+                      for adapter in ('process', 'paperclip_runner')}
+          if (len(cases) != 2 or {case.get('name') for case in cases} != required
+              or any(root.findall(f'.//{tag}') for tag in ('failure', 'error', 'skipped'))):
+              raise SystemExit('Incomplete composer Stop JUnit proof')
+          PY
+          COMPOSER_STOP_REVISION="$(git rev-parse HEAD)"
+          COMPOSER_STOP_PNPM_VERSION="$(pnpm --version)"
+          export COMPOSER_STOP_REVISION COMPOSER_STOP_PNPM_VERSION
+          git show HEAD:pnpm-lock.yaml > "$COMPOSER_STOP_SOURCE_LOCKFILE"
+          node .trusted-composer-stop/scripts/qualify-composer-stop.mjs "$RUNNER_TEMP/composer-stop-report.json" "$RUNNER_TEMP/composer-stop-receipt.json"
+
+      - name: Retain native composer Stop evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-composer-stop-${{ github.event.pull_request.head.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Leave headroom for GitHub's independently rounded artifact timestamps.
+          # Independent qualification still requires at least 30 full days.
+          retention-days: 32
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/composer-stop-report.json
+            ${{ runner.temp }}/composer-stop-junit.xml
+            ${{ runner.temp }}/composer-stop-receipt.json
+            ${{ runner.temp }}/composer-stop-source-lock.yaml
+            ${{ runner.temp }}/composer-stop-effective-lock.yaml
+            ${{ runner.temp }}/composer-stop-harness-manifest.sha256
+            ${{ runner.temp }}/composer-stop-trusted-provenance.json
+            ${{ runner.temp }}/composer-stop-provider.log
+            ${{ env.PAPERCLIP_STOP_FAKE_CODEX }}
+            ${{ runner.temp }}/composer-runtime-*/runtime.json
+            ${{ runner.temp }}/composer-runtime-*/paperclip-runnerd
+            .trusted-composer-stop/tests/e2e/test-results/
+
+      - name: Upload CI profile timings
+        continue-on-error: true
+        if: always() && env.PAPERCLIP_CI_PROFILE == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-profile-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index || 0 }}
+          path: .ci-profile/*.ndjson
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14

@@ -658,7 +658,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let durable_tool_ids = args.iter().any(|value| value == "--durable-tool-ids");
     let expected_canonical_task_context_file =
         argument(&args, "--expected-canonical-task-context-file");
+    let expected_native_task_context_file = argument(&args, "--expected-native-task-context-file");
     let emit_tool_call = args.iter().any(|value| value == "--emit-tool-call");
+    let completion_result_file = argument(&args, "--completion-result-file");
     let replay_completed_tool_call = args
         .iter()
         .any(|value| value == "--replay-completed-tool-call");
@@ -682,6 +684,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .any(|value| value == "--finish-turn-with-pending-tool");
     let require_dynamic_tool = args.iter().any(|value| value == "--require-dynamic-tool");
+    let repair_assigned_discovery = args
+        .iter()
+        .any(|value| value == "--repair-assigned-discovery");
     let require_completion_contract = args
         .iter()
         .any(|value| value == "--require-completion-contract");
@@ -695,6 +700,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .any(|value| value == "--linger-after-turn-start");
     let hold_turn = args.iter().any(|value| value == "--hold-turn") || linger_after_turn_start;
+    let complete_read_only_probes = args
+        .iter()
+        .any(|value| value == "--complete-read-only-probes");
     let exit_after_turn_start = args.iter().any(|value| value == "--exit-after-turn-start");
     let exit_after_turn_completion = args
         .iter()
@@ -851,6 +859,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut answered_questions = 0u8;
     let mut replayed_completed_tool_calls = 0_u64;
     let mut rejected_helper_requests = 0_u8;
+    let mut read_only_probe = false;
 
     for line in io::stdin().lock().lines() {
         let message: Value = serde_json::from_str(&line?)?;
@@ -934,6 +943,55 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             continue;
         }
+        if message.get("method").is_none()
+            && message.get("id") == Some(&json!("completion-request"))
+        {
+            if message.pointer("/result/success") != Some(&json!(true)) {
+                return Err("reserved completion was not accepted".into());
+            }
+            log_call(call_log.as_deref(), "completion-response:accepted")?;
+            finish_turn(&state_path, &mut state, "completed")?;
+            continue;
+        }
+        if repair_assigned_discovery
+            && message.get("method").is_none()
+            && message.get("id") == Some(&json!("discovery-request"))
+        {
+            let text = message
+                .pointer("/result/contentItems/0/text")
+                .and_then(Value::as_str)
+                .ok_or("discovery response omitted content")?;
+            let result: Value = serde_json::from_str(text)?;
+            if message.pointer("/result/success") == Some(&json!(false)) {
+                let hint = result
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .ok_or("discovery rejection omitted guidance")?;
+                if !hint.contains("Correct the arguments and retry")
+                    || !hint.contains("/properties/query/type")
+                    || hint.contains("PRIVATE_QUERY")
+                {
+                    return Err("discovery rejection lacks safe repair guidance".into());
+                }
+                log_call(call_log.as_deref(), "discovery:repair-guidance")?;
+                send(
+                    json!({"id":"discovery-request", "method":"item/tool/call", "params":{
+                        "threadId":state.thread_id, "turnId":state.active_turn_id,
+                        "callId":"assigned-discovery", "tool":"paperclip_search_assigned_tools",
+                        "arguments":{"query":"github"}
+                    }}),
+                )?;
+            } else {
+                if message.pointer("/result/success") != Some(&json!(true))
+                    || result != json!({"tools":[{"name":"app_github_read_pull_request"}]})
+                {
+                    return Err("corrected discovery did not return assigned tools".into());
+                }
+                log_call(call_log.as_deref(), "discovery:success")?;
+                finish_turn(&state_path, &mut state, "completed")?;
+            }
+            continue;
+        }
         if message.get("method").is_none() && message.get("id") == Some(&json!("tool-request-1")) {
             if message.pointer("/result/success") == Some(&json!(false)) {
                 log_call(call_log.as_deref(), "tool-response:failure")?;
@@ -957,12 +1015,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 None
             };
-            if !matches_task_context_result(
-                &result,
-                expected_from_file
-                    .as_ref()
-                    .or(expected_canonical_task_context.as_ref()),
-            ) {
+            let native_binding_matches = if let Some(path) = &expected_native_task_context_file {
+                let expected: Value = serde_json::from_slice(&fs::read(path)?)?;
+                [
+                    ("/company/id", "/companyId"),
+                    ("/actor/id", "/actorId"),
+                    ("/activeTask/id", "/taskId"),
+                    ("/run/id", "/runId"),
+                    ("/activeTask/executionRunId", "/runId"),
+                ]
+                .into_iter()
+                .all(|(actual, binding)| {
+                    let actual = result.pointer(actual).and_then(Value::as_str);
+                    actual.is_some_and(|value| !value.is_empty())
+                        && actual == expected.pointer(binding).and_then(Value::as_str)
+                })
+            } else {
+                matches_task_context_result(
+                    &result,
+                    expected_from_file
+                        .as_ref()
+                        .or(expected_canonical_task_context.as_ref()),
+                )
+            };
+            if !native_binding_matches {
                 return Err("semantic tool response changed the operation result".into());
             }
             log_call(call_log.as_deref(), &format!("tool-response:{text}"))?;
@@ -992,6 +1068,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "arguments": {}
                     }
                 }))?;
+            } else if let Some(path) = &completion_result_file {
+                let result: Value = serde_json::from_slice(&fs::read(path)?)?;
+                send(json!({
+                    "id": "completion-request",
+                    "method": "item/tool/call",
+                    "params": {
+                        "threadId": state.thread_id,
+                        "turnId": state.active_turn_id,
+                        "callId": "completion-call",
+                        "tool": "paperclip_finish",
+                        "arguments": result
+                    }
+                }))?;
             } else if !hold_turn {
                 finish_turn(&state_path, &mut state, "completed")?;
             }
@@ -1009,6 +1098,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err("thread request omitted skills.include_instructions=true".into());
         }
         let id = message.get("id").cloned();
+        if matches!(method, "thread/start" | "thread/resume") {
+            read_only_probe = message.pointer("/params/permissions")
+                == Some(&json!("paperclip-runner-workspace-read-only"))
+                && message.pointer("/params/dynamicTools") == Some(&json!([]));
+        }
         match method {
             "initialize" => {
                 if args
@@ -1034,6 +1128,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "initialized" => {}
             "thread/start" => {
+                if let Some(delay) = argument(&args, "--thread-start-delay-ms") {
+                    thread::sleep(Duration::from_millis(delay.parse()?));
+                }
                 if require_external_sandbox
                     && (message.pointer("/params/sandbox") != Some(&json!("danger-full-access"))
                         || message.pointer("/params/permissions").is_some())
@@ -1076,7 +1173,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 send(json!({
                     "id": id,
-                    "result": {"thread": {"id": state.thread_id, "sessionId": "codex-account-session"}}
+                    "result": {"thread": {"id": state.thread_id, "sessionId": "codex-account-session"},
+                        "model": argument(&args, "--returned-model").map(Value::String).unwrap_or_else(|| message.pointer("/params/model").filter(|model| model.is_string()).cloned().unwrap_or(json!("gpt-test")))}
                 }))?;
                 if agent_created_goal {
                     send(json!({
@@ -1351,7 +1449,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .checked_add(1)
                         .ok_or("fake provider turn sequence exhausted")?;
                 }
-                let hold_turn = hold_turn || (hold_first_durable_turn && state.next_turn == 1);
+                // Only the explicit tool-less read-only verification may finish;
+                // ordinary Stop acceptance work must still require interruption.
+                let probe_turn = complete_read_only_probes
+                    && read_only_probe
+                    && message.pointer("/params/permissions")
+                        == Some(&json!("paperclip-runner-workspace-read-only"));
+                let hold_turn =
+                    (hold_turn && !probe_turn) || (hold_first_durable_turn && state.next_turn == 1);
                 if reject_second_turn_start && turn_start_count == 2 {
                     send(json!({
                         "method": "warning",
@@ -1652,6 +1757,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }))?;
                 } else if exit_after_turn_start {
                     return Ok(());
+                } else if repair_assigned_discovery {
+                    send(
+                        json!({"id":"discovery-request", "method":"item/tool/call", "params":{
+                            "threadId":state.thread_id, "turnId":provider_turn_id,
+                            "callId":"assigned-discovery", "tool":"paperclip_search_assigned_tools",
+                            "arguments":{"query":{"PRIVATE_QUERY":"private search"}}
+                        }}),
+                    )?;
                 } else if emit_tool_call {
                     send(json!({
                         "id": "tool-request-1",

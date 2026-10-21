@@ -18,6 +18,7 @@ import { executionBlockerPredicate, getExecutionBlocker } from "./execution-bloc
 import { buildExecutionContinuation } from "./execution-continuation.js";
 import { adapterExecutionControls } from "./adapter-execution-control.js";
 import { persistActivity } from "./activity-log.js";
+import { activeIssueInteractionCondition } from "./issue-question-context.js";
 
 import { historicalAdapterType, isConversationAdapter } from "./conversation-continuation.js";
 import { queuedCommentIdsFromWakePayload } from "./issue-queued-comment-queue.js";
@@ -143,9 +144,13 @@ export async function admitExplicitNativeContinuation(input: {
   if (!actions.length) return null;
   const blocker = await getExecutionBlocker(db, companyId, issueId);
   if (blocker && blocker.recoveryActionId === null) return null;
+  if (blocker?.workspaceRepairRequired && ["native_workspace_sync_out_unrecoverable", "native_workspace_sync_out_retry_exhausted"].includes(blocker.cause)) {
+    return blocked("workspace_reconstruction_required", "Recover the saved files or record reconstruction before continuing. Your message is saved.");
+  }
   const [pendingInteraction] = await db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
     eq(issueThreadInteractions.companyId, companyId), eq(issueThreadInteractions.issueId, issueId),
     eq(issueThreadInteractions.status, "pending"),
+    activeIssueInteractionCondition({ responsibleUserId: actorId }),
   )).limit(1);
   const [pendingApproval] = await db.select({ id: approvals.id }).from(issueApprovals).innerJoin(approvals, and(
     eq(approvals.id, issueApprovals.approvalId), eq(approvals.companyId, companyId),
@@ -208,8 +213,11 @@ export async function admitExplicitNativeContinuation(input: {
           (run.status !== "cancelled" || authorizedAt > run.finishedAt!)) &&
         !(queuedRequest && cancelledStartup && authorizedAt > run.finishedAt!) &&
         !(queuedInterrupt && response?.source.requiresFreshSession && run.runtimeMode === "native")) return null;
+    // A saved native message sent after Stop is a new user direction. Older
+    // input cannot restart a cancelled run merely because it is still queued.
     if (queuedRequest && !queuedInterrupt && run.status === "cancelled" && !unusedAdmission &&
-        !canContinueCancelledRun(run) && !(cancelledStartup && authorizedAt > run.finishedAt!)) return null;
+        !canContinueCancelledRun(run) && !(run.runtimeMode === "native" && authorizedAt > run.finishedAt!) &&
+        !(cancelledStartup && authorizedAt > run.finishedAt!)) return null;
     if (retry && run.status === "cancelled" && !canContinueCancelledRun(run) && !cancelledStartup)
       return blocked("cancelled_by_operator", "Inspect the stopped run and send a new message to continue.");
     if (cancelledStartup) cancelledStartupIds.add(run.id);

@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { materializePublishManifest, prepareBundledPackage } from './prepare-bundled-package.mjs';
 import { GROK_PUBLIC_INSTALL_LIFECYCLE, GROK_PUBLIC_INSTALL_IMAGE } from './grok-public-install-sandbox.mjs';
 import { cursorConsumerDockerArgs, prepareCursorInstallAccount } from './cursor-public-install-sandbox.mjs';
+import { publicInstallVersion } from './public-install-registry.mjs';
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const root = mkdtempSync(join(tmpdir(), 'paperclip-cursor-public-install-'));
 console.log(`Verification evidence: ${root}`);
@@ -26,7 +27,7 @@ run('git', ['merge-base', '--is-ancestor', releaseBinaries.sourceRevision, sourc
 run('git', ['diff', '--quiet', releaseBinaries.sourceRevision, sourceRevision, '--', 'packages/paperclip-runner/runner', 'packages/paperclip-runner/protocol'], repo);
 assert.deepEqual(Object.keys(releaseBinaries.platforms).sort(), ['darwin-arm64', 'darwin-x64', 'linux-x64']);
 assert.equal(releaseBinaries.remoteProviderPack?.target, 'linux-x64', 'Release assembly must include the expected ordinary Daytona image pack');
-const releaseVersion = `0.0.0-cursor-verify.${sourceRevision.slice(0, 12)}`;
+const releaseVersion = publicInstallVersion('cursor', sourceRevision);
 const listing = run(process.execPath, [join(repo, 'scripts/release-package-map.mjs'), 'list'], repo).toString().trim().split('\n').map(line => line.split('\t'));
 const packages = new Map(listing.map(([dir, name]) => [name, {dir, manifest: JSON.parse(readFileSync(join(repo, dir, 'package.json')))}]));
 const cliManifestPath = join(repo, 'cli/package.json'); const original = readFileSync(cliManifestPath);

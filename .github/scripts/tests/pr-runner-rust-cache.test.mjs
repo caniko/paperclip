@@ -30,6 +30,12 @@ const READER_JOBS = ["typecheck_release_registry", "verify_paperclip_runner", "b
 const readers = READER_JOBS.map((name) => [name, job(prWorkflow, name)]);
 const release = job(releaseWorkflow, "verify_paperclip_runner");
 
+test("the isolated Stop candidate never receives the host Rust cache", () => {
+  const isolated = job(prWorkflow, "native_composer_stop");
+  assert.doesNotMatch(isolated, /uses: Swatinem\/rust-cache@|runner_rust_workspace|CARGO_TARGET_DIR/);
+  assert.match(isolated, /composer-candidate-stage\.mjs build "\$COMPOSER_STOP_CANDIDATE_ROOT"/);
+});
+
 test("every rust-cache restore in the PR workflow belongs to a guarded reader job", () => {
   const total = prWorkflow.match(/uses: Swatinem\/rust-cache@/g)?.length ?? 0;
   const guarded = readers.filter(([, body]) => /uses: Swatinem\/rust-cache@/.test(body)).length;

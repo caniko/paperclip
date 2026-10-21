@@ -2,11 +2,12 @@
   nixpkgsPath,
   homeManagerPath,
   system ? builtins.currentSystem,
-}:
-let
-  pkgs = import nixpkgsPath { inherit system; };
+  # Bound each evaluator independently on resource-constrained development hosts.
+  selection ? null,
+}: let
+  pkgs = import nixpkgsPath {inherit system;};
   inherit (pkgs) lib;
-  hm = import (homeManagerPath + "/lib") { inherit lib; };
+  hm = import (homeManagerPath + "/lib") {inherit lib;};
   manifest = {
     version = 1;
     owner = "personal";
@@ -24,8 +25,7 @@ let
       credentials.apiKey = "gateway";
     };
   };
-  home =
-    extra:
+  home = extra:
     hm.homeManagerConfiguration {
       inherit pkgs;
       modules = [
@@ -39,13 +39,28 @@ let
         extra
       ];
     };
-  machine =
-    extra:
+  machine = extra:
     import (nixpkgsPath + "/nixos/lib/eval-config.nix") {
       inherit system;
       modules = [
         (homeManagerPath + "/nixos")
         ../modules/nixos/home-manager.nix
+        # Model the consumer-owned system service schema; this fixture checks
+        # declaration selection, not the external service's runtime behavior.
+        {
+          options.services.paperclip.instances = lib.mkOption {
+            default = {};
+            type = lib.types.attrsOf (lib.types.submodule {
+              options = {
+                enable = lib.mkEnableOption "fixture controller";
+                manifest = lib.mkOption {
+                  type = lib.types.attrs;
+                  default = {};
+                };
+              };
+            });
+          };
+        }
         {
           system.stateVersion = "26.05";
           boot.isContainer = true;
@@ -65,18 +80,17 @@ let
   assertionsPass = c: lib.all (a: a.assertion) c.assertions;
   evaluates = value: (builtins.tryEval (builtins.deepSeq value true)).success;
   # Synthetic packages exercise metadata only; none proves CLI runtime support.
-  clientPackage = pkgs.runCommand "paperclip-client-evaluation-fixture" { } ''
+  clientPackage = pkgs.runCommand "paperclip-client-evaluation-fixture" {} ''
     mkdir -p "$out"
   '';
   clientPackages = {
-    supported = clientPackage // { supportsPaperclipApiKeyFile = true; };
-    unsupported = clientPackage // { supportsPaperclipApiKeyFile = false; };
+    supported = clientPackage // {supportsPaperclipApiKeyFile = true;};
+    unsupported = clientPackage // {supportsPaperclipApiKeyFile = false;};
     absent = clientPackage;
-    stringMarker = clientPackage // { supportsPaperclipApiKeyFile = "true"; };
+    stringMarker = clientPackage // {supportsPaperclipApiKeyFile = "true";};
     pathString = builtins.toString clientPackage;
   };
-  credentialClient =
-    package:
+  credentialClient = package:
     home {
       programs.paperclip = {
         enable = true;
@@ -86,8 +100,19 @@ let
         apiKeyFile = "/run/credentials/paperclip/api-key";
       };
     };
-  personal = (home { }).config;
-  integrated = (machine { }).config;
+  personal = (home {}).config;
+  controller =
+    (home {
+      programs.paperclip.package = clientPackages.supported;
+      services.paperclip = {
+        enable = true;
+        instance = "work";
+        operator.email = "operator@example.test";
+        afterUnits = ["opencode.service"];
+        credentialFiles.gateway = "/run/user/1000/paperclip/gateway";
+      };
+    }).config;
+  integrated = (machine {}).config;
   composed =
     (machine {
       home-manager.users.operator.programs.paperclip.deployments.work.companies.extra.fields.name = "Other";
@@ -98,7 +123,7 @@ let
     }).config;
   overridden =
     (machine {
-      services.paperclip.instances.work.manifest = lib.mkForce (manifest // { owner = "other"; });
+      services.paperclip.instances.work.manifest = lib.mkForce (manifest // {owner = "other";});
     }).config;
   missing =
     (machine {
@@ -110,12 +135,12 @@ let
     }).config;
   independent =
     (machine {
-      services.paperclip.homeManager.deployments = lib.mkForce { };
+      services.paperclip.homeManager.deployments = lib.mkForce {};
       services.paperclip.instances.system.manifest = manifest;
     }).config;
   results = {
     standaloneHome = assertionsPass personal;
-    standaloneActivation = evaluates (home { }).activationPackage.drvPath;
+    standaloneActivation = evaluates (home {}).activationPackage.drvPath;
     enabledClient =
       evaluates (credentialClient clientPackages.supported).activationPackage.drvPath;
     unsupportedClientRejected =
@@ -128,47 +153,79 @@ let
       !(evaluates (credentialClient clientPackages.pathString).activationPackage.drvPath);
     enabledWithoutCredentialAccepted =
       evaluates
-        (home {
-          programs.paperclip = {
-            enable = true;
-            package = clientPackages.absent;
-          };
-        }).activationPackage.drvPath;
+      (home {
+        programs.paperclip = {
+          enable = true;
+          package = clientPackages.absent;
+        };
+      }).activationPackage.drvPath;
     disabledWithCredentialAccepted =
       evaluates
-        (home {
-          programs.paperclip = {
-            enable = false;
-            package = clientPackages.absent;
-            apiKeyFile = "/run/credentials/paperclip/api-key";
-          };
-        }).activationPackage.drvPath;
+      (home {
+        programs.paperclip = {
+          enable = false;
+          package = clientPackages.absent;
+          apiKeyFile = "/run/credentials/paperclip/api-key";
+        };
+      }).activationPackage.drvPath;
     manifestRoundTrip =
       builtins.fromJSON personal.xdg.configFile."paperclip/deployments/work.json".text == manifest;
     noPersonalService = !(personal.systemd.user.services ? paperclip-work);
-    invalidKeyRejected =
+    userController =
+      assertionsPass controller
+      && lib.any (lib.hasInfix "/bin/paperclip-deployment ") (lib.toList controller.systemd.user.services.paperclip-work.Service.ExecStart)
+      && controller.systemd.user.services.paperclip-work.Service.UMask == "0077"
+      && controller.systemd.user.services.paperclip-work.Service.KillMode == "mixed"
+      && builtins.elem "opencode.service" controller.systemd.user.services.paperclip-work.Unit.After
+      && builtins.elem "XDG_CONFIG_HOME=/home/operator/.config" controller.systemd.user.services.paperclip-work.Service.Environment
+      && controller.services.paperclip.manifest == manifest
+      && controller.services.paperclip.credentialFiles == {gateway = "/run/user/1000/paperclip/gateway";}
+      && controller.services.paperclip.authSecretFile == "/home/operator/.local/share/paperclip/credentials/auth";
+    storeControllerCredentialRejected =
       !(evaluates
+        (home {
+          programs.paperclip.package = clientPackages.supported;
+          services.paperclip = {
+            enable = true;
+            operator.email = "operator@example.test";
+            authSecretFile = "${builtins.storeDir}/public-auth";
+          };
+        }).activationPackage.drvPath);
+    storeControllerCredentialFileRejected =
+      !(evaluates
+        (home {
+          programs.paperclip.package = clientPackages.supported;
+          services.paperclip = {
+            enable = true;
+            operator.email = "operator@example.test";
+            credentialFiles.gateway = "${builtins.storeDir}/public-gateway";
+          };
+        }).activationPackage.drvPath);
+    invalidKeyRejected =
+      !(
+        evaluates
         (home {
           programs.paperclip.deployments."../escape" = manifest;
         }).activationPackage.drvPath
       );
     storeCredentialRejected =
-      !(evaluates
+      !(
+        evaluates
         (home {
           programs.paperclip.apiKeyFile = "${builtins.storeDir}/not-a-runtime-key";
         }).activationPackage.drvPath
       );
     runtimeCredentialAccepted =
       assertionsPass
-        (home {
-          programs.paperclip.apiKeyFile = "/run/credentials/paperclip/api-key";
-        }).config;
+      (home {
+        programs.paperclip.apiKeyFile = "/run/credentials/paperclip/api-key";
+      }).config;
     integratedHome = assertionsPass integrated;
     exactSelection = integrated.services.paperclip.instances.work.manifest == manifest;
     composedSelection =
       assertionsPass composed
       && composed.services.paperclip.instances.work.manifest
-      == (manifest // { companies = manifest.companies // { extra.fields.name = "Other"; }; });
+      == (manifest // {companies = manifest.companies // {extra.fields.name = "Other";};});
     controllerRemainsDisabled = !integrated.services.paperclip.instances.work.enable;
     extensionRejected = !(assertionsPass extended);
     overrideRejected = !(assertionsPass overridden);
@@ -177,6 +234,13 @@ let
     directSystemDeclaration =
       assertionsPass independent && independent.services.paperclip.instances.system.manifest == manifest;
   };
+  selected =
+    if selection == null
+    then results
+    else lib.getAttrs selection results;
 in
-assert lib.assertMsg (lib.all (v: v) (builtins.attrValues results)) (builtins.toJSON results);
-results
+  builtins.mapAttrs (
+    name: value:
+      assert lib.assertMsg value "Paperclip personal declaration fixture failed: ${name}"; value
+  )
+  selected

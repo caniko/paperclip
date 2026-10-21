@@ -62,17 +62,15 @@ export function createSshCommandManagedRuntimeRunner(input: {
       const cwd = commandInput.cwd || defaultCwd;
       const envEntries = Object.entries(commandInput.env ?? {})
         .filter((entry): entry is [string, string] => typeof entry[1] === "string");
+      for (const [key] of envEntries) {
+        if (!isValidShellEnvKey(key)) {
+          throw new Error(`Invalid SSH environment variable key: ${key}`);
+        }
+      }
       const envPrefix = envEntries.length > 0
-        ? `env ${envEntries.map(([key, value]) => `${key}=${shellQuote(value)}`).join(" ")} `
+        ? `env ${envEntries.map(([key, value]) => shellQuote(`${key}=${value}`)).join(" ")} `
         : "";
-      const exportPrefix = envEntries.length > 0
-        ? envEntries.map(([key, value]) => `export ${key}=${shellQuote(value)};`).join(" ") + " "
-        : "";
-      const commandScript = command === "sh" || command === "bash"
-        ? (args[0] === "-c" || args[0] === "-lc") && typeof args[1] === "string"
-          ? `${exportPrefix}${args[1]}`
-          : `${envPrefix}exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`
-        : `${envPrefix}exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`;
+      const commandScript = `exec ${envPrefix}${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`;
       const remoteCommand = `cd ${shellQuote(cwd)} && ${commandScript}`;
 
       try {
@@ -1172,7 +1170,7 @@ async function isLocalGitRepositoryRoot(localDir: string): Promise<boolean> {
   }
 }
 
-async function listLocalProjectRepositories(localDir: string): Promise<string[]> {
+export async function listLocalProjectRepositories(localDir: string): Promise<string[]> {
   const root = path.join(localDir, PROJECT_REPOSITORIES_DIR);
   const rootStat = await fs.lstat(root).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return null;
@@ -1367,10 +1365,15 @@ function buildRemoteShellCommand(commandLines: string[]): string {
   // `command .` removes the POSIX special-builtin behavior of `.`: under dash,
   // a bash-only profile line such as `export -a` otherwise exits the whole
   // shell before `|| true` runs. Keep exports made before that failing line.
+  // Native zsh's `command` searches only external commands. Select its `.`
+  // builtin explicitly without enabling POSIX_BUILTINS for the host's profile.
+  // https://zsh.sourceforge.io/Doc/Release/Shell-Grammar.html#Precommand-Modifiers
+  const sourceProfile = (file: string) =>
+    `case "\${0##*/}" in zsh) builtin . ${file} || true ;; *) command . ${file} || true ;; esac`;
   const profiles = [
-    'if [ -f /etc/profile ]; then command . /etc/profile || true; fi',
-    'if [ -f "$HOME/.profile" ]; then command . "$HOME/.profile" || true; fi',
-    'case "${0##*/}" in bash) if [ -f "$HOME/.bash_profile" ]; then command . "$HOME/.bash_profile" || true; elif [ -f "$HOME/.bashrc" ]; then command . "$HOME/.bashrc" || true; fi ;; zsh) if [ -f "$HOME/.zprofile" ]; then command . "$HOME/.zprofile" || true; fi ;; esac',
+    `if [ -f /etc/profile ]; then ${sourceProfile("/etc/profile")}; fi`,
+    `if [ -f "$HOME/.profile" ]; then ${sourceProfile('"$HOME/.profile"')}; fi`,
+    'case "${0##*/}" in bash) if [ -f "$HOME/.bash_profile" ]; then command . "$HOME/.bash_profile" || true; elif [ -f "$HOME/.bashrc" ]; then command . "$HOME/.bashrc" || true; fi ;; zsh) if [ -f "$HOME/.zprofile" ]; then builtin . "$HOME/.zprofile" || true; fi ;; esac',
   ].join(" && ");
   const script = [
     `{ ${profiles}; } </dev/null >/dev/null 2>&1`,

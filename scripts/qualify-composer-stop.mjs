@@ -31,7 +31,7 @@ function verifyCancellationEvidence(bytes) {
 }
 
 export function qualifyComposerStop(raw, provenance) {
-  for (const field of ["revision", "headRevision", "trustedRevision", "harnessSha256", "verifierSha256", "runnerSha256", "providerSha256", "junitSha256", "sourceLockSha256", "effectiveLockSha256"]) {
+  for (const field of ["revision", "headRevision", "trustedRevision", "harnessSha256", "verifierSha256", "runnerSha256", "providerSha256", "junitSha256", "sourceLockSha256", "effectiveLockSha256", "runtimeSha256"]) {
     const pattern = field.endsWith("Sha256") ? /^[0-9a-f]{64}$/ : /^[0-9a-f]{40}$/;
     if (!pattern.test(provenance[field] ?? "")) throw new Error(`Invalid composer Stop provenance: ${field}`);
   }
@@ -93,6 +93,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       junitSha256: sha256(readFileSync(process.env.PLAYWRIGHT_JUNIT_OUTPUT_NAME)),
       sourceLockSha256: sha256(readFileSync(process.env.COMPOSER_STOP_SOURCE_LOCKFILE)),
       effectiveLockSha256: sha256(readFileSync(process.env.COMPOSER_STOP_EFFECTIVE_LOCKFILE)),
+      runtimeSha256: sha256(readFileSync(process.env.COMPOSER_STOP_RUNTIME_RECEIPT)),
       nodeVersion: process.versions.node,
       pnpmVersion: process.env.COMPOSER_STOP_PNPM_VERSION,
     });

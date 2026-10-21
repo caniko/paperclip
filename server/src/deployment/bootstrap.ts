@@ -1,6 +1,5 @@
 import { eq, sql } from "drizzle-orm";
 import { authUsers, instanceUserRoles, type Db } from "@paperclipai/db";
-import { createBetterAuthInstance } from "../auth/better-auth.js";
 import { claimFirstInstanceAdmin } from "../first-admin-claim.js";
 import type { Config } from "../config.js";
 import { readDeploymentCredential } from "./credentials.js";
@@ -33,6 +32,7 @@ export async function bootstrapOperator(db: Db, config: Config, input?: Bootstra
     if (!apply) return null;
     // These APIs only use Drizzle query/transaction methods, not the pool client.
     const transactionDb = tx as unknown as Db;
+    const { createBetterAuthInstance } = await import("../auth/better-auth.js");
     const auth = createBetterAuthInstance(transactionDb, { ...config, authDisableSignUp: false }, [], { autoSignIn: false });
     const base = config.authPublicBaseUrl ?? "http://localhost:3100";
     const response = await auth.handler(new Request(new URL("/api/auth/sign-up/email", base), {

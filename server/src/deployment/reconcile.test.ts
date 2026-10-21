@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
 import { reconcileDeployment } from "./reconcile.js";
@@ -12,8 +12,13 @@ import { secretService } from "../services/secrets.js";
 import type { DeploymentDescriptor } from "./runtime.js";
 import { ensurePostgresDatabase, runDatabaseBackup, runDatabaseRestore } from "@paperclipai/db";
 import { findServerAdapter } from "../adapters/registry.js";
-import { projectWorkspaces } from "@paperclipai/db";
+import { projectWorkspaces, environments } from "@paperclipai/db";
+import { resolveEnvironmentDriverConfigForRuntime } from "../services/environment-config.js";
+import { environmentService } from "../services/environments.js";
 import { projectService } from "../services/projects.js";
+import { budgetPolicies, resourceLifecycleEvents } from "@paperclipai/db";
+import { budgetService } from "../services/budgets.js";
+import * as liveEvents from "../services/live-events.js";
 
 let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
 let db: ReturnType<typeof createDb>;
@@ -74,9 +79,13 @@ it("plans without writes, bootstraps once and preserves identities, pauses and s
   const first = await reconcile(manifest);
   expect(await db.select().from(authAccounts)).toHaveLength(1);
   const agentId = first.bindings["agent/worker"];
+  expect((await db.select().from(agents).where(eq(agents.id, agentId)))[0]).toMatchObject({
+    status: "paused", lifecycleState: "preparing", lifecycleHolds: [],
+    lifecycleOperation: { hostComplete: false, completedPluginIds: [] },
+  });
   const routineId = first.bindings["routine/daily"];
   await db.update(routines).set({ status: "paused" }).where(eq(routines.id, routineId));
-  await db.update(agents).set({ status: "paused", pauseReason: "manual", spentMonthlyCents: 123 }).where(eq(agents.id, agentId));
+  await db.update(agents).set({ status: "paused", pauseReason: "manual", lifecycleState: "paused", lifecycleHolds: ["manual"], spentMonthlyCents: 123 }).where(eq(agents.id, agentId));
   const second = await reconcile(manifest);
   expect(second.differences).toEqual([]);
   expect(second.bindings).toEqual(first.bindings);
@@ -122,7 +131,7 @@ it.each(["manual", "budget"])("reenables declarations without resuming %s pauses
   const first = await reconcile(declaration);
   const agentId = first.bindings["agent/worker"];
   const routineId = first.bindings["routine/daily"];
-  await db.update(agents).set({ status: "paused", pauseReason, spentMonthlyCents: 123 }).where(eq(agents.id, agentId));
+  await db.update(agents).set({ status: "paused", pauseReason, lifecycleState: "paused", lifecycleHolds: [pauseReason], spentMonthlyCents: 123 }).where(eq(agents.id, agentId));
   await db.update(routines).set({ status: "paused" }).where(eq(routines.id, routineId));
   const disabled = { ...declaration,
     agents: { worker: { ...declaration.agents.worker, enabled: false } },
@@ -144,6 +153,112 @@ it.each(["manual", "budget"])("reenables declarations without resuming %s pauses
   expect((await reconcile(enabled)).differences).toEqual([]);
   expect((await db.select().from(agents).where(eq(agents.id, agentId)))[0].status).toBe("idle");
   expect((await db.select().from(routines).where(eq(routines.id, routineId)))[0].status).toBe("active");
+});
+
+it("rolls back lifecycle creation and its durable events with the outer deployment", async () => {
+  const declaration = { ...structuredClone(manifest), owner: "lifecycle-rollback", routines: {}, taskBridges: {} };
+  declaration.companies.example.fields.name = "Lifecycle rollback";
+  const beforeAgents = await db.select({ id: agents.id }).from(agents).orderBy(agents.id);
+  const beforeEvents = await db.select().from(resourceLifecycleEvents).orderBy(resourceLifecycleEvents.id);
+  await db.execute(sql`ALTER TABLE deployment_resources ADD CONSTRAINT deployment_lifecycle_fixture
+    CHECK (owner <> 'lifecycle-rollback' OR kind <> 'agent') NOT VALID`);
+  const published = vi.spyOn(liveEvents, "publishLiveEvent");
+  try {
+    await expect(reconcile(declaration)).rejects.toThrow();
+    expect(await db.select().from(companies).where(eq(companies.name, "Lifecycle rollback"))).toEqual([]);
+    expect(await db.select({ id: agents.id }).from(agents).orderBy(agents.id)).toEqual(beforeAgents);
+    expect(await db.select().from(resourceLifecycleEvents).orderBy(resourceLifecycleEvents.id)).toEqual(beforeEvents);
+    expect(await db.select().from(deploymentResources).where(eq(deploymentResources.owner, declaration.owner))).toEqual([]);
+    expect(published).not.toHaveBeenCalled();
+  } finally {
+    published.mockRestore();
+    await db.execute(sql`ALTER TABLE deployment_resources DROP CONSTRAINT deployment_lifecycle_fixture`);
+  }
+});
+
+it("publishes a company rename only after the complete declaration commits", async () => {
+  const declaration = { ...structuredClone(manifest), owner: "rename-rollback", routines: {}, taskBridges: {} };
+  declaration.companies.example.fields.name = "Before atomic rename";
+  const first = await reconcile(declaration);
+  const companyId = first.bindings["company/example"];
+  const changed = structuredClone(declaration);
+  changed.companies.example.fields.name = "After atomic rename";
+  changed.agents.worker.fields.name = "Renamed atomic worker";
+  await db.execute(sql`ALTER TABLE deployment_resources ADD CONSTRAINT deployment_rename_fixture
+    CHECK (owner <> 'rename-rollback' OR kind <> 'agent') NOT VALID`);
+  const published = vi.spyOn(liveEvents, "publishLiveEvent");
+  try {
+    vi.stubEnv("PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN", "fixture-managed-instance");
+    await expect(reconcile(changed)).rejects.toThrow();
+    expect((await db.select().from(companies).where(eq(companies.id, companyId)))[0].name).toBe("Before atomic rename");
+    expect(published).not.toHaveBeenCalled();
+    await db.execute(sql`ALTER TABLE deployment_resources DROP CONSTRAINT deployment_rename_fixture`);
+    await reconcile(changed);
+    expect(published.mock.calls.some(([event]) => event.companyId === companyId && event.type === "activity.logged"
+      && event.payload?.action === "company.updated")).toBe(true);
+  } finally {
+    vi.unstubAllEnvs();
+    published.mockRestore();
+    await db.execute(sql`ALTER TABLE deployment_resources DROP CONSTRAINT IF EXISTS deployment_rename_fixture`);
+  }
+});
+
+it("allocates colliding company prefixes within one atomic deployment transaction", async () => {
+  const declaration = { version: 1, owner: "prefix-collision",
+    companies: {
+      first: { fields: { name: "Colliding transaction first" } },
+      second: { fields: { name: "Colliding transaction second" } },
+    },
+    projects: { main: { company: "second", fields: { name: "Collision project" } } },
+  };
+  const first = await reconcile(declaration);
+  const [one] = await db.select().from(companies).where(eq(companies.id, first.bindings["company/first"]));
+  const [two] = await db.select().from(companies).where(eq(companies.id, first.bindings["company/second"]));
+  expect(one.issuePrefix).toMatch(/^COLA*$/);
+  expect(two.issuePrefix).toMatch(/^COLA*$/);
+  expect(two.issuePrefix).not.toBe(one.issuePrefix);
+  expect((await db.select().from(projects).where(eq(projects.id, first.bindings["project/main"])))[0].companyId).toBe(two.id);
+  expect((await reconcile(declaration)).bindings).toEqual(first.bindings);
+  expect((await reconcile(declaration, false)).differences).toEqual([]);
+});
+
+it.each(["company", "agent"] as const)("preserves %s budget pause and policy on an unrelated declared edit", async (kind) => {
+  const declaration = { ...structuredClone(manifest), owner: `budget-fields-${kind}`, projects: {}, routines: {}, taskBridges: {} };
+  declaration.companies.example.fields.name = `Budget fields ${kind}`;
+  const first = await reconcile(declaration);
+  const id = first.bindings[`${kind}/${kind === "company" ? "example" : "worker"}`];
+  const target = kind === "company" ? declaration.companies.example : declaration.agents.worker;
+  // Native creation stores the legacy limit. Install a real policy before
+  // testing that an unrelated declaration edit preserves its existing state.
+  await budgetService(db).upsertPolicy(first.bindings["company/example"], {
+    scopeType: kind, scopeId: id, amount: target.fields.budgetMonthlyCents, windowKind: "calendar_month_utc",
+  }, null);
+  const pausedAt = new Date("2020-01-01T00:00:00Z");
+  if (kind === "company") {
+    await db.update(companies).set({ status: "paused", pauseReason: "budget", pausedAt }).where(eq(companies.id, id));
+  } else {
+    await db.update(agents).set({ status: "paused", pauseReason: "budget", pausedAt, lifecycleState: "paused", lifecycleHolds: ["budget"] }).where(eq(agents.id, id));
+  }
+  const readScope = async () => kind === "company"
+    ? (await db.select().from(companies).where(eq(companies.id, id)))[0]
+    : (await db.select().from(agents).where(eq(agents.id, id)))[0];
+  const readPolicy = async () => (await db.select().from(budgetPolicies).where(and(
+    eq(budgetPolicies.scopeId, id), eq(budgetPolicies.scopeType, kind),
+    eq(budgetPolicies.windowKind, "calendar_month_utc"), eq(budgetPolicies.metric, "billed_cents"),
+  )))[0];
+  const policy = await readPolicy();
+  expect(policy).toBeDefined();
+  target.fields.name = `Renamed budget fields ${kind}`;
+  expect((await reconcile(declaration)).bindings).toEqual(first.bindings);
+  expect(await readScope()).toMatchObject({ name: target.fields.name, status: "paused", pauseReason: "budget", pausedAt });
+  expect(await readPolicy()).toEqual(policy);
+
+  // A real declared limit change still goes through the native budget policy.
+  target.fields.budgetMonthlyCents += 100;
+  expect((await reconcile(declaration)).bindings).toEqual(first.bindings);
+  expect(await readScope()).toMatchObject({ budgetMonthlyCents: target.fields.budgetMonthlyCents });
+  expect(await readPolicy()).toMatchObject({ amount: target.fields.budgetMonthlyCents, isActive: true });
+  expect((await reconcile(declaration)).differences).toEqual([]);
 });
 
 it("preserves existing and later operator membership decisions for adopted companies", async () => {
@@ -427,3 +542,42 @@ it("restores ownership, stable IDs, encrypted credentials and schema guards from
   expect(resolved.config.apiKey).toBe("fixture-only-gateway-key");
   await expect(restored.update(agents).set({ name: "bypass after restore" }).where(eq(agents.id, agent.id))).rejects.toThrow();
 }, 90000);
+
+it("reconciles protected SSH environments and agent references with stable IDs and secret rotation", async () => {
+  writeFileSync(join(root, "executor"), "fixture-only-ssh-private-key", { mode: 0o600 });
+  const sshDescriptor = { ...descriptor, credentialFiles: { ...descriptor.credentialFiles, executor: join(root, "executor") } };
+  const declaration = { version: 1, owner: "ssh-execution", companies: { example: { fields: { name: "SSH execution" } } },
+    environments: { atlas: { company: "example", credential: "executor", fields: { name: "SSH Atlas", driver: "ssh",
+      config: { host: "atlas", port: 1337, username: "can", remoteWorkspacePath: "/work", knownHosts: "atlas ssh-ed25519 AAAA", strictHostKeyChecking: true } } } },
+    agents: { worker: { company: "example", environment: "atlas", fields: { name: "SSH worker", adapterType: "opencode_local",
+      adapterConfig: { dangerouslySkipPermissions: false } } } },
+  };
+  const run = (raw: unknown, apply = true) => reconcileDeployment(db, raw, { descriptor: sshDescriptor, config, apply, singleOwner: false });
+  const plan = await run(declaration, false);
+  expect(plan.differences.some(d => d.kind === "environment")).toBe(true);
+  expect(await db.select().from(environments).where(eq(environments.name, "SSH Atlas"))).toEqual([]);
+  const first = await run(declaration);
+  const environmentId = first.bindings["environment/atlas"];
+  const companyId = first.bindings["company/example"];
+  const [agent] = await db.select().from(agents).where(eq(agents.id, first.bindings["agent/worker"]));
+  expect(agent.defaultEnvironmentId).toBe(environmentId);
+  const environment = await environmentService(db).getById(environmentId);
+  if (!environment) throw new Error("Missing declared environment");
+  expect(await resolveEnvironmentDriverConfigForRuntime(db, companyId, environment))
+    .toMatchObject({ driver: "ssh", config: { privateKey: "fixture-only-ssh-private-key" } });
+  expect(await environmentService(db).listBoundCompanyIds(environmentId)).toEqual([companyId]);
+  expect(JSON.stringify(first)).not.toContain("fixture-only-ssh-private-key");
+  expect(JSON.stringify(environment)).not.toContain("fixture-only-ssh-private-key");
+  expect((await run(declaration)).differences).toEqual([]);
+  writeFileSync(join(root, "executor"), "rotated-fixture-only-ssh-key", { mode: 0o600 });
+  const rotated = await run(declaration);
+  expect(rotated.bindings).toEqual(first.bindings);
+  expect(await resolveEnvironmentDriverConfigForRuntime(db, companyId, environment))
+    .toMatchObject({ driver: "ssh", config: { privateKey: "rotated-fixture-only-ssh-key" } });
+  await expect(db.update(environments).set({ config: {} }).where(eq(environments.id, environmentId))).rejects.toThrow();
+  await expect(db.update(agents).set({ defaultEnvironmentId: null }).where(eq(agents.id, agent.id))).rejects.toThrow();
+  const moved = structuredClone(declaration); moved.environments.atlas.fields.config.host = "nomad";
+  await expect(run(moved)).rejects.toThrow("Environment placement changes require an explicit ownership handoff");
+  await expect(run({ ...declaration, environments: {}, agents: {} })).rejects.toThrow("Environment removal requires an explicit ownership handoff");
+  expect((await run(declaration, false)).differences).toEqual([]);
+});

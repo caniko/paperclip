@@ -4,6 +4,20 @@ import { deploymentManifestSchema } from "./deployment-manifest.js";
 const company = { fields: { name: "Example" } };
 const agent = { company: "example", fields: { name: "Worker", adapterType: "process" } };
 describe("deployment manifest", () => {
+  it("resolves company-owned SSH environments by declaration key without database IDs or key material", () => {
+    const ssh = { company: "example", credential: "executor", fields: { name: "Atlas", driver: "ssh",
+      config: { host: "atlas", port: 1337, username: "can", remoteWorkspacePath: "/work", knownHosts: "atlas ssh-ed25519 AAAA", strictHostKeyChecking: true } } };
+    const manifest = { version: 1, owner: "deployment", companies: { example: company },
+      environments: { atlas: ssh }, agents: { worker: { ...agent, environment: "atlas" } } };
+    expect(deploymentManifestSchema.parse(manifest).agents.worker.environment).toBe("atlas");
+    for (const invalid of [
+      { ...manifest, agents: { worker: { ...agent, environment: "missing" } } },
+      { ...manifest, environments: { atlas: { ...ssh, company: "missing" } } },
+      { ...manifest, environments: { atlas: { ...ssh, fields: { ...ssh.fields, config: { ...ssh.fields.config, privateKey: "PRIVATE" } } } } },
+      { ...manifest, environments: { atlas: { ...ssh, fields: { ...ssh.fields, config: { ...ssh.fields.config, strictHostKeyChecking: false } } } } },
+      { ...manifest, environments: { atlas: { ...ssh, company: "other" } }, companies: { example: company, other: company } },
+    ]) expect(deploymentManifestSchema.safeParse(invalid).success).toBe(false);
+  });
   it("requires one explicit primary and a valid source for each declared project workspace", () => {
     const manifest = {
       version: 1, owner: "deployment", companies: { example: company },

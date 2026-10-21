@@ -6,9 +6,9 @@ import { applyPendingMigrations } from "./client.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./test-embedded-postgres.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
-const itEmbeddedPostgres = embeddedPostgresSupport.supported ? it : it.skip;
+const testEmbeddedPostgres = embeddedPostgresSupport.supported ? it : it.skip;
 
-itEmbeddedPostgres("backfills owned draft images without attaching another uploader's images", async () => {
+testEmbeddedPostgres("backfills owned draft images without attaching another uploader's images", async () => {
   const database = await startEmbeddedPostgresTestDatabase("paperclip-draft-privacy-");
   const sql = postgres(database.connectionString, { max: 1, onnotice: () => {} });
   try {
