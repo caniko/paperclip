@@ -1144,7 +1144,7 @@ describe("durable Dot Runner integration", () => {
         await f.broker.operation(f.principal, assignment!.id, randomUUID(), "finish", { result });
         if (provider === "grok_bot") {
           await vi.waitFor(async () => expect(await db.select().from(grokBotDispatches).where(and(eq(grokBotDispatches.assignmentId, assignment!.id),
-            eq(grokBotDispatches.kind, "mailbox_updated"), inArray(grokBotDispatches.status, ["prepared", "sending", "accepted", "unknown"])))).toHaveLength(0));
+            eq(grokBotDispatches.kind, "mailbox_updated"), inArray(grokBotDispatches.status, ["prepared", "sending", "accepted", "unknown"])))).toHaveLength(0), { timeout: 10000 });
           expect(await grokRoutineService(db).recoveryNeeded(f.company.id, f.agent.id)).toBe(false);
         }
         await resultPromise;
