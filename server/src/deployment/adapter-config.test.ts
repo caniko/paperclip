@@ -42,6 +42,9 @@ describe("native declaration adapter contracts", () => {
       dangerouslySkipPermissions: false, extraArgs: ["--allowedTools", "mcp__open-pencil"],
       timeoutSec: 900, graceSec: 20, maxTurnsPerRun: 40,
     }, {})).not.toThrow();
+    expect(() => validateDeclaredAdapterConfig("claude_local", {
+      engine: "cli", dangerouslySkipPermissions: false,
+    }, { "env.CLAUDE_CODE_OAUTH_TOKEN": "claude-oauth" })).not.toThrow();
   });
 
   it("accepts structured HTTP and Hermes payloads without using form field types", () => {
@@ -101,7 +104,9 @@ describe("native declaration adapter contracts", () => {
     ["claude_local", { engine: "cli", dangerouslySkipPermissions: false, filesystemScope: "workspace" }, {}],
     ["claude_local", { engine: "cli", dangerouslySkipPermissions: false, maxTurnsPerRun: 1.5 }, {}],
     ["claude_local", { engine: "cli", dangerouslySkipPermissions: false, env: { ANTHROPIC_API_KEY: "inline" } }, {}],
-    ["claude_local", { engine: "cli", dangerouslySkipPermissions: false }, { "env.ANTHROPIC_API_KEY": "provider" }],
+    ["claude_local", { engine: "cli", dangerouslySkipPermissions: false }, { apiKey: "provider" }],
+    ["claude_local", { engine: "cli", dangerouslySkipPermissions: false }, { "env.PAPERCLIP_API_KEY": "provider" }],
+    ["claude_local", { engine: "cli", dangerouslySkipPermissions: false, env: { CLAUDE_CODE_OAUTH_TOKEN: "x" } }, { "env.CLAUDE_CODE_OAUTH_TOKEN": "claude-oauth" }],
     ["invented_remote", {}, {}],
   ] as const)("rejects unsupported, malformed, inline-secret or conflicting %s configuration", (type, config, credentials) => {
     expect(() => validateDeclaredAdapterConfig(type, config, credentials)).toThrow();

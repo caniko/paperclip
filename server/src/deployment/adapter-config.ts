@@ -48,7 +48,8 @@ const schemas: Record<string, z.ZodType> = {
     && Object.keys(config.env ?? {}).every(key => /^PAPERCLIP_[A-Z0-9_]+$/.test(key)))),
   // Claude Code through its CLI. The ACP engine (the adapter's default) and the
   // sandbox, network, Chrome and managed-connection fields stay closed until
-  // audited; the adapter otherwise defaults to skipping permissions.
+  // audited; the adapter otherwise defaults to skipping permissions. Runtime
+  // credentials (e.g. CLAUDE_CODE_OAUTH_TOKEN) arrive as env.* bindings.
   claude_local: z.object({
     engine: z.literal("cli"),
     dangerouslySkipPermissions: z.boolean(),
@@ -78,7 +79,7 @@ export function validateDeclaredAdapterConfig(
   if (!schema.safeParse(config).success) throw new Error("Invalid declared adapter configuration");
   for (const field of Object.keys(credentials)) {
     if (type === "hermes_gateway" && field === "apiKey") continue;
-    if (!["process", "opencode_local"].includes(type) || !/^env\.[A-Z_][A-Z0-9_]*$/.test(field)
+    if (!["process", "opencode_local", "claude_local"].includes(type) || !/^env\.[A-Z_][A-Z0-9_]*$/.test(field)
       || /^(PAPERCLIP_|DATABASE_|BETTER_AUTH_|NODE_OPTIONS$|LD_)/.test(field.slice(4))) {
       throw new Error("Unsupported or reserved adapter credential binding");
     }
