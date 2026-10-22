@@ -7,7 +7,7 @@ import {
   pluginManagedResources, builtInManagedResources,
   instanceSettings, projectWorkspaces, environments,
 } from "@paperclipai/db";
-import { deploymentManifestSchema, type DeploymentManifest, type Environment } from "@paperclipai/shared";
+import { LOCAL_ENVIRONMENT_ADOPT, deploymentManifestSchema, type DeploymentManifest, type Environment } from "@paperclipai/shared";
 import type { createAgentLifecycleInTransaction } from "../services/agent-lifecycle.js";
 import { publishAccountingActivities } from "../services/accounting-transaction.js";
 import type { ActivityPublication } from "../types/activity-publication.js";
@@ -28,6 +28,13 @@ type Fields = Record<string, unknown>;
 type Spec = { kind: Kind; key: string; id: string; companyId: string | null; adopt?: string; enabled: boolean; fields: () => Fields; create: (fields: Fields) => Promise<string>; update: (fields: Fields) => Promise<unknown> };
 export type DeploymentDifference = { kind: string; key: string; action: "create" | "adopt" | "update" | "disable"; fields: string[] };
 
+/** The manifest owns only the fallback list inside application-managed runtime configuration. */
+function withFallbacks({ fallbackEnvironmentIds, ...fields }: Fields, runtimeConfig: unknown = {}): Fields {
+  if (fallbackEnvironmentIds === undefined) return fields;
+  const current = runtimeConfig && typeof runtimeConfig === "object" ? runtimeConfig as Fields : {};
+  return { ...fields, runtimeConfig: { ...current, fallbackEnvironmentIds } };
+}
+
 /** Values never appear in plans, including adapter URLs, paths and credentials. */
 export function changedFields(before: Fields, after: Fields): string[] {
   return [...new Set([...Object.keys(before), ...Object.keys(after)])].sort()
@@ -38,7 +45,7 @@ async function validateAdapters(manifest: DeploymentManifest, credentials: Recor
   for (const e of Object.values(manifest.environments)) {
     const { normalizeEnvironmentConfig } = await import("../services/environment-config.js");
     normalizeEnvironmentConfig({ driver: e.fields.driver, config: e.fields.config });
-    if (!credentials[e.credential]) throw new Error("Missing declared execution credential");
+    if (e.credential && !credentials[e.credential]) throw new Error("Missing declared execution credential");
   }
   for (const a of Object.values(manifest.agents)) {
     validateDeclaredAdapterConfig(a.fields.adapterType, a.fields.adapterConfig, a.credentials);
@@ -118,7 +125,13 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     for (const [key, c] of Object.entries(m.companies)) getId("company", key, c.adopt);
     for (const [key, p] of Object.entries(m.projects)) getId("project", key, p.adopt);
     for (const [key, w] of Object.entries(m.projectWorkspaces)) getId("workspace", key, w.adopt);
-    for (const [key, e] of Object.entries(m.environments)) getId("environment", key, e.adopt);
+    // The explicit sentinel adopts the singleton local environment once it exists.
+    const [localEnvironment] = Object.values(m.environments).some((e) => e.adopt === LOCAL_ENVIRONMENT_ADOPT)
+      ? await tx.select({ id: environments.id }).from(environments).where(eq(environments.driver, "local")).limit(1)
+      : [];
+    const environmentAdopt = (e: DeploymentManifest["environments"][string]) =>
+      e.adopt === LOCAL_ENVIRONMENT_ADOPT ? localEnvironment?.id : e.adopt;
+    for (const [key, e] of Object.entries(m.environments)) getId("environment", key, environmentAdopt(e));
     for (const [key, a] of Object.entries(m.agents)) getId("agent", key, a.adopt);
     const actorId = await bootstrapOperator(tx, options.config, options.descriptor.bootstrap, false);
     if (Object.keys(m.routines).length && !actorId && !options.descriptor.bootstrap) throw new Error("Declared routines require an operator bootstrap identity");
@@ -142,20 +155,35 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     }
     for (const [key, e] of Object.entries(m.environments).sort()) {
       const { collectEnvironmentSecretRefs, normalizeEnvironmentConfig } = await import("../services/environment-config.js");
-      const companyId = getId("company", e.company), secretKey = `environment-${key}.privateKey`;
-      const value = credentials[e.credential], digest = createHash("sha256").update(value).digest("hex");
+      const companyId = getId("company", e.company), svc = services?.environmentService(tx);
+      if (e.fields.driver === "local") {
+        const config = e.fields.config;
+        const fields = () => ({ config: normalizeEnvironmentConfig({ driver: "local", config }) });
+        add({ kind: "environment", key, adopt: environmentAdopt(e), companyId, enabled: true, fields,
+          create: async (f) => {
+            const { id } = await svc!.ensureLocalEnvironment(companyId);
+            if (!await svc!.update(id, f)) throw new Error("Managed environment is missing; explicit recovery is required");
+            return id;
+          },
+          update: async (f) => {
+            if (!await svc!.update(getId("environment", key), f)) throw new Error("Managed environment is missing; explicit recovery is required");
+          } });
+        continue;
+      }
+      const secretKey = `environment-${key}.privateKey`;
+      const value = credentials[e.credential!], digest = createHash("sha256").update(value).digest("hex");
       add({ kind: "secret", key: secretKey, companyId, enabled: true, fields: () => ({ digest }),
         create: async () => (await secrets!.create(companyId, { name: `deployment.${m.owner}.${secretKey}`, provider: "local_encrypted", value })).id,
         update: () => secrets!.rotate(getId("secret", secretKey), { value }) });
-      const fields = () => ({ ...e.fields, status: "active" as const, envVars: {}, config: normalizeEnvironmentConfig({ driver: "ssh", config: {
-        ...e.fields.config, privateKeySecretRef: { type: "secret_ref", secretId: getId("secret", secretKey), version: "latest" },
+      const ssh = e.fields;
+      const fields = () => ({ ...ssh, status: "active" as const, envVars: {}, config: normalizeEnvironmentConfig({ driver: "ssh", config: {
+        ...ssh.config, privateKeySecretRef: { type: "secret_ref", secretId: getId("secret", secretKey), version: "latest" },
       } }) });
       const syncRefs = async (environment: Environment) => {
         await secrets!.replaceSecretRefsForInstanceTarget({ targetType: "environment", targetId: environment.id },
           await collectEnvironmentSecretRefs({ db: tx, environment }));
         return environment.id;
       };
-      const svc = services?.environmentService(tx);
       add({ kind: "environment", key, adopt: e.adopt, companyId, enabled: true, fields,
         create: async () => syncRefs(await svc!.create(fields())),
         update: async () => {
@@ -211,13 +239,16 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
           else adapterConfig[field] = ref;
         }
         return { ...a.fields, adapterConfig, reportsTo: a.reportsTo ? getId("agent", a.reportsTo) : null, companyId,
-          ...(a.environment !== undefined ? { defaultEnvironmentId: a.environment ? getId("environment", a.environment) : null } : {}) };
+          ...(a.environment !== undefined ? { defaultEnvironmentId: a.environment ? getId("environment", a.environment) : null } : {}),
+          ...(a.overflowEnvironments !== undefined ? { fallbackEnvironmentIds: a.overflowEnvironments.map((k) => getId("environment", k)) } : {}) };
       };
       add({ kind: "agent", key, adopt: a.adopt, companyId, enabled: a.enabled, fields,
-        create: async (f) => (await agentLifecycle!.requestHire(companyId, { ...a.fields, ...f, id: getId("agent", key), status: a.enabled ? "idle" : "paused", ...(a.enabled ? {} : { pauseReason: "deployment" }) }, { runnerResolved: true, responsibleUserId: actor.userId, createdByUserId: actor.userId })).id,
-        update: (f) => {
+        create: async (f) => (await agentLifecycle!.requestHire(companyId, { ...a.fields, ...withFallbacks(f), id: getId("agent", key), status: a.enabled ? "idle" : "paused", ...(a.enabled ? {} : { pauseReason: "deployment" }) }, { runnerResolved: true, responsibleUserId: actor.userId, createdByUserId: actor.userId })).id,
+        update: async (f) => {
           const { companyId: _companyId, ...configuration } = f;
-          return agentLifecycle!.updateConfiguration(getId("agent", key), configuration);
+          const [current] = configuration.fallbackEnvironmentIds === undefined ? []
+            : await tx.select({ runtimeConfig: agents.runtimeConfig }).from(agents).where(eq(agents.id, getId("agent", key)));
+          return agentLifecycle!.updateConfiguration(getId("agent", key), withFallbacks(configuration, current?.runtimeConfig));
         } });
     }
     for (const [key, r] of Object.entries(m.routines).sort()) {
@@ -291,7 +322,8 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
           if (owners.length) throw new Error("Adoption conflicts with an existing managed resource owner");
         }
       }
-      if (!binding && !spec.adopt && ["company", "project", "agent", "routine", "environment"].includes(spec.kind)) {
+      if (!binding && !spec.adopt && ["company", "project", "agent", "routine", "environment"].includes(spec.kind)
+        && !(spec.kind === "environment" && spec.fields().name === undefined)) {
         const fields = spec.fields();
         const label = spec.kind === "routine" ? "title" : "name";
         const matches = await tx.execute(sql`select id from ${table} where ${sql.identifier(label)} = ${fields[label] as string}

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { filesystemOwnershipSchema } from "@paperclipai/shared";
+import { environmentCapacitySchema, filesystemOwnershipSchema } from "@paperclipai/shared";
 import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import type {
@@ -44,6 +44,8 @@ const inPlacePolicyFields = {
   // omission preserves it. Parsed/persisted configs keep the nonnullable shape.
   filesystemOwnership: filesystemOwnershipSchema.nullish().transform((value) => value ?? undefined),
 };
+// Host-backed drivers may gate agent fallback selection by capacity.
+const hostCapacityFields = { capacity: environmentCapacitySchema.optional() };
 
 function omitClearedFilesystemOwnership<T extends { filesystemOwnership?: unknown }>(config: T): T {
   if (config.filesystemOwnership === undefined) delete config.filesystemOwnership;
@@ -55,12 +57,13 @@ function ownershipRequiresInPlace(config: { workspaceRealizationMode?: string; f
 }
 
 const ownershipRequiresInPlaceMessage = "Filesystem ownership requires an in-place workspace.";
-const localEnvironmentConfigSchema = z.object(inPlacePolicyFields).passthrough()
+const localEnvironmentConfigSchema = z.object({ ...inPlacePolicyFields, ...hostCapacityFields }).passthrough()
   .refine(ownershipRequiresInPlace, ownershipRequiresInPlaceMessage)
   .transform(omitClearedFilesystemOwnership);
 
 const sshEnvironmentConfigBaseSchema = z.object({
   ...inPlacePolicyFields,
+  ...hostCapacityFields,
   host: z.string({ error: "SSH environments require a host." }).trim().min(1, "SSH environments require a host."),
   port: z.coerce.number().int().min(1).max(65535).default(22),
   username: z.string({ error: "SSH environments require a username." }).trim().min(1, "SSH environments require a username."),

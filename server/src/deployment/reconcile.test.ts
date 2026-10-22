@@ -581,3 +581,33 @@ it("reconciles protected SSH environments and agent references with stable IDs a
   await expect(run({ ...declaration, environments: {}, agents: {} })).rejects.toThrow("Environment removal requires an explicit ownership handoff");
   expect((await run(declaration, false)).differences).toEqual([]);
 });
+
+it("binds the managed local environment and owns only the agent overflow list", async () => {
+  writeFileSync(join(root, "overflow-executor"), "fixture-only-overflow-key", { mode: 0o600 });
+  const overflowDescriptor = { ...descriptor, credentialFiles: { ...descriptor.credentialFiles, executor: join(root, "overflow-executor") } };
+  const declaration = { version: 1, owner: "overflow-execution", companies: { example: { fields: { name: "Overflow execution" } } },
+    environments: {
+      primary: { adopt: "instance-local", company: "example", fields: { driver: "local", config: { capacity: { maxConcurrentRuns: 1 } } } },
+      nomad: { company: "example", credential: "executor", fields: { name: "SSH Overflow", driver: "ssh",
+        config: { host: "nomad", port: 22, username: "exec", remoteWorkspacePath: "/work", knownHosts: "nomad ssh-ed25519 AAAA", strictHostKeyChecking: true,
+          capacity: { maxConcurrentRuns: 1, admissionCommand: ["probe"] } } } },
+    },
+    agents: { worker: { company: "example", environment: "primary", overflowEnvironments: ["nomad"], fields: { name: "Overflow worker", adapterType: "opencode_local",
+      adapterConfig: { dangerouslySkipPermissions: false } } } },
+  };
+  const run = (raw: unknown) => reconcileDeployment(db, raw, { descriptor: overflowDescriptor, config, apply: true, singleOwner: false });
+  const first = await run(declaration);
+  const local = await environmentService(db).ensureLocalEnvironment("unused");
+  expect(first.bindings["environment/primary"]).toBe(local.id);
+  expect(local.config).toMatchObject({ capacity: { maxConcurrentRuns: 1 } });
+  const agentId = first.bindings["agent/worker"];
+  const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+  expect(agent.defaultEnvironmentId).toBe(local.id);
+  expect(agent.runtimeConfig).toMatchObject({ fallbackEnvironmentIds: [first.bindings["environment/nomad"]] });
+  expect((await run(declaration)).differences).toEqual([]);
+  await db.update(agents).set({ runtimeConfig: { ...agent.runtimeConfig, heartbeat: { enabled: false } } }).where(eq(agents.id, agentId));
+  const cleared = structuredClone(declaration); cleared.agents.worker.overflowEnvironments = [];
+  await run(cleared);
+  const [updated] = await db.select().from(agents).where(eq(agents.id, agentId));
+  expect(updated.runtimeConfig).toMatchObject({ heartbeat: { enabled: false }, fallbackEnvironmentIds: [] });
+});

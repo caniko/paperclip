@@ -749,6 +749,7 @@ export type {
   FakeSandboxEnvironmentConfig,
   LocalEnvironmentConfig,
   FilesystemOwnershipPolicy,
+  EnvironmentCapacity,
   PluginSandboxEnvironmentConfig,
   PluginEnvironmentConfig,
   SandboxEnvironmentConfig,
@@ -1836,6 +1837,7 @@ export {
   type ExternalObjectTypeInput,
   environmentDriverSchema,
   filesystemOwnershipSchema,
+  environmentCapacitySchema,
   environmentStatusSchema,
   environmentLeaseStatusSchema,
   environmentLeaseCleanupStatusSchema,
@@ -2786,7 +2788,7 @@ export type { AgentInstructionCandidate } from "./types/agent.js";
 export { resolveAgentInstructionCandidateSchema, type ResolveAgentInstructionCandidate } from "./validators/agent.js";
 
 export { isHeartbeatRunVisibleInMine } from "./heartbeat-inbox.js";
-export { deploymentManifestSchema, type DeploymentManifest } from "./deployment-manifest.js";
+export { LOCAL_ENVIRONMENT_ADOPT, deploymentManifestSchema, type DeploymentManifest } from "./deployment-manifest.js";
 export * from "./browser-use.js";
 
 export * from "./types/skill-source.js";

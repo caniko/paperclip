@@ -85,6 +85,7 @@ export {
 export {
   environmentDriverSchema,
   filesystemOwnershipSchema,
+  environmentCapacitySchema,
   environmentStatusSchema,
   environmentLeaseStatusSchema,
   environmentLeaseCleanupStatusSchema,

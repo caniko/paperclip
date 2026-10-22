@@ -3,9 +3,11 @@ import { createCompanySchema } from "./validators/company.js";
 import { createAgentSchema } from "./validators/agent.js";
 import { createProjectSchema, createProjectWorkspaceSchema } from "./validators/project.js";
 import { createRoutineSchema, createRoutineTriggerSchema } from "./validators/routine.js";
-import { filesystemOwnershipSchema } from "./validators/environment.js";
+import { environmentCapacitySchema, filesystemOwnershipSchema } from "./validators/environment.js";
 
 const key = z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/);
+/** Explicitly adopts the instance's singleton local environment. */
+export const LOCAL_ENVIRONMENT_ADOPT = "instance-local";
 const identity = z.object({ adopt: z.string().uuid().optional() });
 const company = identity.extend({
   fields: createCompanySchema.pick({ name: true, description: true, budgetMonthlyCents: true }).strict(),
@@ -17,6 +19,8 @@ const project = identity.extend({
 const agent = identity.extend({
   company: key,
   environment: key.nullable().optional(),
+  /** Ordered environment keys tried when the agent's default lacks capacity. */
+  overflowEnvironments: z.array(key).max(8).optional(),
   enabled: z.boolean().default(true),
   reportsTo: key.nullable().default(null),
   fields: createAgentSchema.pick({
@@ -46,23 +50,37 @@ export const deploymentManifestSchema = z.object({
   owner: key,
   companies: z.record(key, company),
   projects: z.record(key, project).default({}),
-  environments: z.record(key, identity.extend({
+  environments: z.record(key, z.object({
+    // The singleton local environment has no UUID before the first apply; adopt it by name.
+    adopt: z.union([z.string().uuid(), z.literal(LOCAL_ENVIRONMENT_ADOPT)]).optional(),
     company: key,
-    credential: key,
-    fields: z.object({
-      name: z.string().trim().min(1),
-      description: z.string().nullable().optional(),
-      driver: z.literal("ssh"),
-      config: z.object({
-        host: z.string().trim().min(1), port: z.number().int().min(1).max(65535).default(22),
-        username: z.string().trim().min(1),
-        remoteWorkspacePath: z.string().refine(p => p.startsWith("/") && !p.includes("\0")),
-        knownHosts: z.string().trim().min(1), strictHostKeyChecking: z.literal(true),
-        workspaceRealizationMode: z.enum(["copy", "in_place"]).optional(),
-        filesystemOwnership: filesystemOwnershipSchema.optional(),
-      }).strict().refine(c => !c.filesystemOwnership || c.workspaceRealizationMode === "in_place"),
-    }).strict(),
-  }).strict()).default({}),
+    // SSH declarations name their private key; local declarations take none.
+    credential: key.optional(),
+    fields: z.discriminatedUnion("driver", [
+      z.object({
+        name: z.string().trim().min(1),
+        description: z.string().nullable().optional(),
+        driver: z.literal("ssh"),
+        config: z.object({
+          host: z.string().trim().min(1), port: z.number().int().min(1).max(65535).default(22),
+          username: z.string().trim().min(1),
+          remoteWorkspacePath: z.string().refine(p => p.startsWith("/") && !p.includes("\0")),
+          knownHosts: z.string().trim().min(1), strictHostKeyChecking: z.literal(true),
+          workspaceRealizationMode: z.enum(["copy", "in_place"]).optional(),
+          filesystemOwnership: filesystemOwnershipSchema.optional(),
+          capacity: environmentCapacitySchema.optional(),
+        }).strict().refine(c => !c.filesystemOwnership || c.workspaceRealizationMode === "in_place"),
+      }).strict(),
+      // Binds the instance's managed local environment and owns only its capacity.
+      z.object({
+        driver: z.literal("local"),
+        config: z.object({ capacity: environmentCapacitySchema }).strict(),
+      }).strict(),
+    ]),
+  }).strict().refine((e) => (e.fields.driver === "ssh") === (e.credential !== undefined),
+    { message: "SSH environments require a credential; local environments take none", path: ["credential"] })
+    .refine((e) => (e.fields.driver === "local") === (e.adopt === LOCAL_ENVIRONMENT_ADOPT),
+      { message: `Local environments require adopt: "${LOCAL_ENVIRONMENT_ADOPT}"; other drivers cannot use it`, path: ["adopt"] })).default({}),
   projectWorkspaces: z.record(key, identity.extend({
     project: key,
     fields: createProjectWorkspaceSchema.strict(),
@@ -95,9 +113,17 @@ export const deploymentManifestSchema = z.object({
       if (!m.companies[resource.company]) issue([kind, name, "company"], "Unknown company key");
     }
   }
+  if (Object.values(m.environments).filter((e) => e.fields.driver === "local").length > 1) {
+    issue(["environments"], "The instance has one local environment; declare it at most once");
+  }
   for (const [name, a] of Object.entries(m.agents)) {
     if (a.environment && m.environments[a.environment]?.company !== a.company) {
       issue(["agents", name, "environment"], "Environment must be declared in the same company");
+    }
+    for (const overflow of a.overflowEnvironments ?? []) {
+      if (m.environments[overflow]?.company !== a.company) {
+        issue(["agents", name, "overflowEnvironments"], "Overflow environments must be declared in the same company");
+      }
     }
     const seen = new Set([name]);
     let manager = a.reportsTo;

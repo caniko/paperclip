@@ -14,9 +14,17 @@ export interface FilesystemOwnershipPolicy {
   roots: string[];
 }
 
+/** Overflow gate for agent fallback selection. */
+export interface EnvironmentCapacity {
+  maxConcurrentRuns?: number;
+  /** Argv run on the controller host; exit 0 admits the run. */
+  admissionCommand?: string[];
+}
+
 export interface LocalEnvironmentConfig {
   workspaceRealizationMode?: "copy" | "in_place";
   filesystemOwnership?: FilesystemOwnershipPolicy;
+  capacity?: EnvironmentCapacity;
   [key: string]: unknown;
 }
 
@@ -28,6 +36,7 @@ export interface SshEnvironmentConfig {
   /** Maintain this existing directory without workspace upload or restore. */
   workspaceRealizationMode?: "copy" | "in_place";
   filesystemOwnership?: FilesystemOwnershipPolicy;
+  capacity?: EnvironmentCapacity;
   privateKey: string | null;
   privateKeySecretRef: EnvSecretRefBinding | null;
   knownHosts: string | null;

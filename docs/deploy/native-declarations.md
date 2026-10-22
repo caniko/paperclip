@@ -274,6 +274,17 @@ and removal require an explicit ownership handoff, as do workspace removals;
 they cannot silently retarget retained runs or sessions. Declaring an environment
 does not establish reachability or qualify execution, Stop, or recovery.
 
+SSH configs may add `capacity` (`maxConcurrentRuns`, `admissionCommand`). A
+`driver: "local"` declaration takes no credential and only `config.capacity`.
+It must set `adopt: "instance-local"`. Paperclip creates the single local
+environment itself, so it has no UUID before the first apply; the sentinel is
+the explicit adoption of that environment. The declaration then owns its config.
+Other drivers cannot use the sentinel.
+Set `agents.<key>.overflowEnvironments` to ordered environment keys in the same
+company. Reconciliation writes their IDs to the agent's
+`runtimeConfig.fallbackEnvironmentIds` and preserves the other application-owned
+runtime keys. See [environment overflow](../guides/board-operator/execution-workspaces-and-runtime-services.md#environment-overflow).
+
 Hermes declarations accept the boolean `adapterConfig.waitForJobs`. When enabled,
 the existing adapter binds a selected execution target and requires the worker's
 `wait_for_jobs` and Stop-admission capabilities. Run ownership is retained until

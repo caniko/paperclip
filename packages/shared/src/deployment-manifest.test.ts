@@ -18,6 +18,25 @@ describe("deployment manifest", () => {
       { ...manifest, environments: { atlas: { ...ssh, company: "other" } }, companies: { example: company, other: company } },
     ]) expect(deploymentManifestSchema.safeParse(invalid).success).toBe(false);
   });
+  it("declares local capacity and same-company overflow environments", () => {
+    const ssh = { company: "example", credential: "executor", fields: { name: "Nomad", driver: "ssh",
+      config: { host: "nomad", username: "exec", remoteWorkspacePath: "/work", knownHosts: "nomad ssh-ed25519 AAAA", strictHostKeyChecking: true,
+        capacity: { maxConcurrentRuns: 1, admissionCommand: ["probe"] } } } };
+    const local = { adopt: "instance-local", company: "example", fields: { driver: "local", config: { capacity: { maxConcurrentRuns: 1 } } } };
+    const manifest = { version: 1, owner: "deployment", companies: { example: company },
+      environments: { local, nomad: ssh }, agents: { worker: { ...agent, environment: "local", overflowEnvironments: ["nomad"] } } };
+    expect(deploymentManifestSchema.parse(manifest).agents.worker.overflowEnvironments).toEqual(["nomad"]);
+    for (const invalid of [
+      { ...manifest, agents: { worker: { ...agent, overflowEnvironments: ["missing"] } } },
+      { ...manifest, environments: { local: { ...local, credential: "executor" }, nomad: ssh } },
+      { ...manifest, environments: { local, nomad: { ...ssh, credential: undefined } } },
+      { ...manifest, environments: { local, again: local, nomad: ssh } },
+      { ...manifest, environments: { local: { ...local, adopt: undefined }, nomad: ssh } },
+      { ...manifest, environments: { local: { ...local, adopt: "00000000-0000-4000-8000-000000000000" }, nomad: ssh } },
+      { ...manifest, environments: { local, nomad: { ...ssh, adopt: "instance-local" } } },
+      { ...manifest, environments: { local: { ...local, fields: { ...local.fields, config: { capacity: { maxConcurrentRuns: 1 }, host: "x" } } }, nomad: ssh } },
+    ]) expect(deploymentManifestSchema.safeParse(invalid).success).toBe(false);
+  });
   it("requires one explicit primary and a valid source for each declared project workspace", () => {
     const manifest = {
       version: 1, owner: "deployment", companies: { example: company },

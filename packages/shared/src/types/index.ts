@@ -82,6 +82,7 @@ export type {
   FakeSandboxEnvironmentConfig,
   LocalEnvironmentConfig,
   FilesystemOwnershipPolicy,
+  EnvironmentCapacity,
   PluginSandboxEnvironmentConfig,
   PluginEnvironmentConfig,
   SandboxEnvironmentConfig,
