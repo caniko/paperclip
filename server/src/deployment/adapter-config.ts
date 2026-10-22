@@ -46,6 +46,19 @@ const schemas: Record<string, z.ZodType> = {
   }).strict().refine(config => !config.managedService || (config.dangerouslySkipPermissions === false
     && !config.variant && !config.args?.length && !config.extraArgs?.length
     && Object.keys(config.env ?? {}).every(key => /^PAPERCLIP_[A-Z0-9_]+$/.test(key)))),
+  // Claude Code through its CLI. The ACP engine (the adapter's default) and the
+  // sandbox, network, Chrome and managed-connection fields stay closed until
+  // audited; the adapter otherwise defaults to skipping permissions.
+  claude_local: z.object({
+    engine: z.literal("cli"),
+    dangerouslySkipPermissions: z.boolean(),
+    command: text.optional(), model: text.optional(), effort: text.optional(), cwd: text.optional(),
+    args: z.array(z.string()).optional(), extraArgs: z.array(z.string()).optional(),
+    env: env.optional(), timeoutSec: duration.optional(), graceSec: duration.optional(),
+    maxTurnsPerRun: z.number().int().nonnegative().optional(),
+    instructionsFilePath: text.optional(), promptTemplate: z.string().optional(),
+    bootstrapPromptTemplate: z.string().optional(),
+  }).strict(),
   hermes_gateway: z.object({
     apiBaseUrl: url, paperclipApiUrl: url.optional(),
     waitForJobs: z.boolean().optional(),
