@@ -36,6 +36,17 @@ describe("native declaration adapter contracts", () => {
     }
   });
 
+  it("accepts Claude Code's CLI engine with an explicit permission choice", () => {
+    expect(() => validateDeclaredAdapterConfig("claude_local", {
+      engine: "cli", command: "claude", model: "claude-opus-5-5", cwd: "/workspace",
+      dangerouslySkipPermissions: false, extraArgs: ["--allowedTools", "mcp__open-pencil"],
+      timeoutSec: 900, graceSec: 20, maxTurnsPerRun: 40,
+    }, {})).not.toThrow();
+    expect(() => validateDeclaredAdapterConfig("claude_local", {
+      engine: "cli", dangerouslySkipPermissions: false,
+    }, { "env.CLAUDE_CODE_OAUTH_TOKEN": "claude-oauth" })).not.toThrow();
+  });
+
   it("accepts structured HTTP and Hermes payloads without using form field types", () => {
     expect(() => validateDeclaredAdapterConfig("http", {
       url: "https://worker.example.test/invoke", headers: { Accept: "application/json" },
@@ -85,6 +96,17 @@ describe("native declaration adapter contracts", () => {
     ["opencode_local", { dangerouslySkipPermissions: false, env: {
       PAPERCLIP_OPENCODE_PROVIDERS: JSON.stringify({ gateway: { options: { headers: { Authorization: "Bearer sk-inline" } } } }),
     } }, {}],
+    ["claude_local", { command: "claude", dangerouslySkipPermissions: false }, {}],
+    ["claude_local", { engine: "acp", dangerouslySkipPermissions: false }, {}],
+    ["claude_local", { engine: "auto", dangerouslySkipPermissions: false }, {}],
+    ["claude_local", { engine: "cli" }, {}],
+    ["claude_local", { engine: "cli", dangerouslySkipPermissions: false, chrome: true }, {}],
+    ["claude_local", { engine: "cli", dangerouslySkipPermissions: false, filesystemScope: "workspace" }, {}],
+    ["claude_local", { engine: "cli", dangerouslySkipPermissions: false, maxTurnsPerRun: 1.5 }, {}],
+    ["claude_local", { engine: "cli", dangerouslySkipPermissions: false, env: { ANTHROPIC_API_KEY: "inline" } }, {}],
+    ["claude_local", { engine: "cli", dangerouslySkipPermissions: false }, { apiKey: "provider" }],
+    ["claude_local", { engine: "cli", dangerouslySkipPermissions: false }, { "env.PAPERCLIP_API_KEY": "provider" }],
+    ["claude_local", { engine: "cli", dangerouslySkipPermissions: false, env: { CLAUDE_CODE_OAUTH_TOKEN: "x" } }, { "env.CLAUDE_CODE_OAUTH_TOKEN": "claude-oauth" }],
     ["invented_remote", {}, {}],
   ] as const)("rejects unsupported, malformed, inline-secret or conflicting %s configuration", (type, config, credentials) => {
     expect(() => validateDeclaredAdapterConfig(type, config, credentials)).toThrow();

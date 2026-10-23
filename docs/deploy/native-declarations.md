@@ -245,8 +245,11 @@ contract; the real worker and rotation recovery still need their own receipts.
 
 The executable contract is `packages/shared/src/deployment-manifest.ts`. It
 reuses native validators. Supported declaration adapters are `hermes_gateway`,
-`opencode_local`, `process`, and `http`; `server/src/deployment/adapter-config.ts` defines their
-allowed fields. Worker credentials are native encrypted secret references.
+`opencode_local`, `claude_local`, `process`, and `http`;
+`server/src/deployment/adapter-config.ts` defines their allowed fields.
+`claude_local` declarations must set `engine: "cli"` (the ACP engine is not
+declarable yet) and an explicit boolean `dangerouslySkipPermissions`; runtime
+credentials such as `CLAUDE_CODE_OAUTH_TOKEN` bind as `env.*` credentials. Worker credentials are native encrypted secret references.
 Manifest fields must contain nonsecret values.
 
 ### Owned SSH environments
