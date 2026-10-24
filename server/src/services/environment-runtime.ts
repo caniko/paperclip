@@ -48,6 +48,7 @@ import type {
   PluginSyncOperation,
 } from "@paperclipai/plugin-sdk";
 import { ensureSshWorkspaceReady } from "@paperclipai/adapter-utils/ssh";
+import { parseObject } from "../adapters/utils.js";
 import {
   getActiveStepContext,
   runWithRuntimeParent,
@@ -1094,6 +1095,13 @@ export function findReusableSandboxLeaseId(input: {
   });
 }
 
+/** Run leases honour the environment's slot cap; probes and logins do not. */
+function runSlotCap(input: { environment: Environment; heartbeatRunId?: string | null }): number | undefined {
+  if (!input.heartbeatRunId) return undefined;
+  const max = parseObject(parseObject(input.environment.config).capacity).maxConcurrentRuns;
+  return typeof max === "number" ? max : undefined;
+}
+
 function createLocalEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
   const environmentsSvc = environmentService(db);
 
@@ -1109,6 +1117,7 @@ function createLocalEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
         heartbeatRunId: input.heartbeatRunId,
         leasePolicy: "ephemeral",
         provider: "local",
+        maxConcurrentRuns: runSlotCap(input),
         metadata: {
           ...(input.agentId ? { agentId: input.agentId } : {}),
           driver: input.environment.driver,
@@ -1184,6 +1193,7 @@ function createSshEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
         leasePolicy: "ephemeral",
         provider: "ssh",
         providerLeaseId: `ssh://${parsed.config.username}@${parsed.config.host}:${parsed.config.port}${remoteCwd}`,
+        maxConcurrentRuns: runSlotCap(input),
         metadata: {
           ...(input.agentId ? { agentId: input.agentId } : {}),
           driver: input.environment.driver,

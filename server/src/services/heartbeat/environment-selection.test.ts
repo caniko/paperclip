@@ -7,7 +7,7 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import { resolvePaperclipInstanceRoot } from "../../home-paths.js";
-import { environmentService } from "../environments.js";
+import { EnvironmentCapacityExhaustedError, environmentService } from "../environments.js";
 import { executionWorkspaceService } from "../execution-workspaces.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { buildNativeExecutionInput } from "../native-runtime/native-execution-input.js";
@@ -288,6 +288,24 @@ describe.skipIf(!support.supported)("heartbeat environment selection boundary", 
       await lease(local.id);
       input.agent.defaultEnvironmentId = null;
       expect((await selectHeartbeatEnvironment(db, input)).selectedEnvironmentId).toBe(local.id);
+    });
+
+    it("defers while every candidate is full and admits once a slot frees", async () => {
+      const { input, local, remote, lease } = await overflowFixture();
+      await db.update(environments).set({ config: { ...remote.config, capacity: { maxConcurrentRuns: 1 } } }).where(eq(environments.id, remote.id));
+      await lease(local.id);
+      const [held] = await lease(remote.id).returning();
+      await expect(selectHeartbeatEnvironment(db, input)).rejects.toMatchObject({ name: "WorkspaceBusyDeferral", capacityEnvironmentId: local.id });
+      await db.update(environmentLeases).set({ status: "released" }).where(eq(environmentLeases.id, held!.id));
+      expect((await selectHeartbeatEnvironment(db, input)).selectedEnvironmentId).toBe(remote.id);
+    });
+
+    it("lets only one concurrent run lease take the last slot", async () => {
+      const { input, local } = await overflowFixture();
+      const take = () => environmentService(db).acquireLease({ companyId: input.agent.companyId, environmentId: local.id, maxConcurrentRuns: 1 });
+      const results = await Promise.allSettled([take(), take()]);
+      expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      expect(results.find((r) => r.status === "rejected")).toMatchObject({ reason: expect.any(EnvironmentCapacityExhaustedError) });
     });
 
     it("returns an issue session to the host that last ran it", async () => {
