@@ -1,6 +1,9 @@
+import { taskInterruptionPresentation, taskInterruptionPresentations } from "../services/task-interruption-presentation.js";
 import { parseObject } from "../adapters/utils.js";
+import { prepareRestrictedWorkspaceRetry } from "../services/restricted-workspace-retry.js";
 import { issueSummariesQuerySchema, type IssueSummary } from "@paperclipai/shared";
 import { listIssueSummaries } from "../services/issue-summaries.js";
+import { assertNoCaseHandoffMutation } from "../services/heartbeat/case-handoff-lifecycle.js";
 import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
 import { enqueueFastResponse } from "../services/fast-responses.js";
 import { hasRequiredWorkspaceRecovery, LEGACY_WORKSPACE_RECOVERY_SCHEMA } from "../services/workspace-restore-recovery-state.js";
@@ -97,6 +100,8 @@ import {
   resolveCreateIssueStatusDefault,
   resolveIssueRecoveryActionSchema,
   retryWorkspaceExportSchema,
+  recoverWorkspaceSchema,
+  taskRetrySchema,
   resumeWorkspaceFinalizationSchema,
   runnerGoalActionRequestSchema,
   feedbackTargetTypeSchema,
@@ -2931,6 +2936,7 @@ function toCompactIssue(issue: any): CompactIssue {
       ? { isUnreadForMe: issue.isUnreadForMe }
       : {}),
     activeRecoveryAction: issue.activeRecoveryAction ?? null,
+    interruption: issue.interruption ?? null,
     successfulRunHandoff: issue.successfulRunHandoff ?? null,
   };
 }
@@ -3431,7 +3437,7 @@ export function issueRoutes(
   const goalsSvc = goalService(db);
   const issueApprovalsSvc = issueApprovalService(db);
   const recoveryActionsSvc = issueRecoveryActionService(db);
-  const executionWorkspacesSvc = executionWorkspaceServiceDirect(db);
+  const executionWorkspacesSvc = executionWorkspaceServiceDirect(db, { pluginWorkerManager: opts.pluginWorkerManager });
   const workProductsSvc = workProductService(db);
   const documentsSvc = documentService(db);
   const artifactReviewDocumentsSvc = artifactReviewDocumentService(db, storage);
@@ -5467,6 +5473,7 @@ export function issueRoutes(
   ) {
     if (!(await assertIssueReadAllowed(req, res, issue))) return false;
     if (req.actor.type !== "agent") return true;
+    if (req.actor.runId) await assertNoCaseHandoffMutation(db, req.actor.runId, issue.id);
     const actorAgentId = req.actor.agentId;
     if (!actorAgentId) {
       res.status(403).json({ error: "Agent authentication required" });
@@ -7679,11 +7686,12 @@ export function issueRoutes(
     return commentCreatedAtMs >= activeRunStartedAtMs;
   }
   async function getClosedIssueExecutionWorkspace(issue: {
+    companyId: string;
     executionWorkspaceId?: string | null;
   }) {
     if (!issue.executionWorkspaceId) return null;
-    const workspace = await executionWorkspacesSvc.getById(
-      issue.executionWorkspaceId,
+    const workspace = await executionWorkspacesSvc.getStoredById(
+      issue.companyId, issue.executionWorkspaceId,
     );
     if (!workspace || !isClosedIsolatedExecutionWorkspace(workspace))
       return null;
@@ -8513,6 +8521,7 @@ export function issueRoutes(
           : await filterIssuesForActor(req, rawResult);
         const result = await redactIssueRelationEdgesOnRows(req, companyId, visibleRows);
         const issueIds = result.map((issue) => issue.id);
+        const interruptions = await taskInterruptionPresentations(db, companyId, result);
         if (compactView) {
           const [handoffStates, recoveryActionByIssue] = await Promise.all([
             listSuccessfulRunHandoffStates(db, companyId, issueIds),
@@ -8538,6 +8547,7 @@ export function issueRoutes(
             toCompactIssue({
               ...issue,
               activeRecoveryAction: recoveryActionByIssue.get(issue.id) ?? null,
+              interruption: interruptions.get(issue.id) ?? null,
               successfulRunHandoff: handoffStates.get(issue.id) ?? null,
             }),
           );
@@ -8574,6 +8584,7 @@ export function issueRoutes(
             ...issue,
             successfulRunHandoff: handoffStates.get(issue.id) ?? null,
             activeRecoveryAction: recoveryActionByIssue.get(issue.id) ?? null,
+            interruption: interruptions.get(issue.id) ?? null,
           })),
         };
       },
@@ -8915,7 +8926,7 @@ export function issueRoutes(
         : null;
 
     const currentExecutionWorkspacePromise = issue.executionWorkspaceId
-      ? executionWorkspacesSvc.getById(issue.executionWorkspaceId)
+      ? executionWorkspacesSvc.getStoredById(issue.companyId, issue.executionWorkspaceId, { includeRuntimeServices: true })
       : Promise.resolve(null);
     const [
       { project, goal },
@@ -9282,7 +9293,7 @@ export function issueRoutes(
       inboxArchiveFieldsPromise,
       timing.time("channel", () => getExternalChannelBindingSummary(db, issue.companyId, issue.id)),
       timing.time("workspace", () => issue.executionWorkspaceId
-        ? executionWorkspacesSvc.getById(issue.executionWorkspaceId)
+        ? executionWorkspacesSvc.getStoredById(issue.companyId, issue.executionWorkspaceId, { includeRuntimeServices: true })
         : Promise.resolve(null)),
       timing.time("work_products", () => workProductsSvc.listForIssue(issue.id)),
       timing.time("created_from", () => resolveVisibleIssueCreationSource(req, issue)),
@@ -9321,6 +9332,7 @@ export function issueRoutes(
       ...(reviewAttention ? { reviewAttention } : {}),
       successfulRunHandoff: successfulRunHandoffStates.get(issue.id) ?? null,
       executionBlocker,
+      interruption: await taskInterruptionPresentation(db, issue),
       scheduledRetry,
       activeRecoveryAction: revalidatedActiveRecoveryAction,
       blockedBy: visibleRelations.blockedBy,
@@ -9492,6 +9504,42 @@ export function issueRoutes(
       actions: [...(active ? [active] : []), ...retainedHolds
         .filter(action => action.id !== active?.id).map(issueRecoveryActionReadModel)],
     });
+  });
+
+  router.post("/issues/:id/retry", validate(taskRetrySchema), async (req, res) => {
+    assertBoard(req);
+    const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    const decision = await decideIssueAccess(req, issue, "issue:mutate");
+    if (!decision.allowed) throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
+    if (issue.conversationAgentId) {
+      if (!(await instanceSettings.getExperimental()).enableAgentChat) throw notFound("Agent Chat is disabled");
+      if (!req.actor.userId || req.actor.userId !== issue.conversationUserId)
+        throw forbidden("Only the conversation owner can retry a chat run");
+    }
+    const { requestTaskRetry } = await import("../services/task-retry.js");
+    const receipt = await requestTaskRetry({ db, companyId: issue.companyId, issueId: issue.id,
+      ...req.body, actorId: getActorInfo(req).actorId, actorSource: req.actor.source,
+      prepareChatRetry: opts.chatRunRetries?.prepareFailedChatRunRetry });
+    res.status(receipt.accepted ? 202 : 200).json({ ...receipt, presentation: await taskInterruptionPresentation(db, issue) });
+    // The receipt commits before dispatch. Maintenance redelivers it after a
+    // crash or a lost response; this nudge only reduces perceived latency.
+    if (receipt.chatActionId) void opts.chatRunRetries?.processFailedChatRunRetry(receipt.chatActionId).catch(err =>
+      logger.warn({ err, issueId: issue.id }, "Connected task Retry remains queued"));
+    else if (receipt.accepted && receipt.requestId) void heartbeat.resumeTaskRetry(issue.companyId, receipt.requestId).catch(err =>
+      logger.warn({ err, issueId: issue.id }, "Task Retry remains queued"));
+  });
+
+  router.post("/issues/:id/recovery-actions/recover-workspace", validate(recoverWorkspaceSchema), async (req, res) => {
+    assertBoard(req);
+    const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    const decision = await decideIssueAccess(req, issue, "issue:mutate");
+    if (!decision.allowed) throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
+    const { requestWorkspaceRecovery } = await import("../services/workspace-recovery.js");
+    const receipt = await requestWorkspaceRecovery({ db, companyId: issue.companyId, issueId: issue.id,
+      ...req.body, actorId: getActorInfo(req).actorId });
+    res.status(202).json(receipt);
   });
 
   router.post("/issues/:id/recovery-actions/resume-workspace-finalization", validate(resumeWorkspaceFinalizationSchema), async (req, res) => {
@@ -9713,6 +9761,10 @@ export function issueRoutes(
           { source: "recovery_action_resolution" },
         );
 
+        const workspaceRetry = outcome === "restored" && sourceIssueStatus === "todo"
+          ? await prepareRestrictedWorkspaceRetry(tx as unknown as Db, lockedIssue, activeRecoveryAction)
+          : null;
+        if (workspaceRetry) assertBoard(req);
         let repairedWorkspaceSettings: Record<string, unknown> | undefined;
         if (workspaceBaseRef) {
           const currentSettings = parseObject(lockedIssue.executionWorkspaceSettings);
@@ -9777,12 +9829,12 @@ export function issueRoutes(
         if (
           outcome === "restored" &&
           sourceIssueStatus === "todo" &&
-          (activeRecoveryAction.kind === "deliberate_wait_without_target" || workspaceBaseRef)
+          (activeRecoveryAction.kind === "deliberate_wait_without_target" || workspaceBaseRef || workspaceRetry)
         ) {
           if (
             lockedIssue.status !== "blocked" ||
             activeRecoveryAction.ownerType !== "board" ||
-            (!workspaceBaseRef && activeRecoveryAction.wakePolicy?.type !== "board_escalation") ||
+            (!workspaceBaseRef && !workspaceRetry && activeRecoveryAction.wakePolicy?.type !== "board_escalation") ||
             !activeRecoveryAction.returnOwnerAgentId ||
             lockedIssue.assigneeAgentId !== activeRecoveryAction.returnOwnerAgentId
           ) {
@@ -9947,6 +9999,14 @@ export function issueRoutes(
             });
           } else {
             await requireRecoverySourceMutationAuthority(req, lockedIssue);
+          }
+
+          if (workspaceRetry?.selection) {
+            await executionWorkspaceServiceDirect(tx as unknown as Db).selectTaskWorkspace({
+              companyId: lockedIssue.companyId, issueId: lockedIssue.id, actor: req.actor,
+              selection: workspaceRetry.selection, expectedBindingRevision: lockedIssue.workspaceBindingRevision,
+              requestKey: activeRecoveryAction.id, source: "recovery",
+            });
           }
 
           if (
@@ -13859,6 +13919,7 @@ export function issueRoutes(
         });
       const effectiveMoveToTodoRequested =
         !assigneeSelfCommentOnTerminal &&
+        !(isBlocked && !!commentBody && (await getExecutionBlocker(db, existing.companyId, existing.id))?.workspaceRepairRequired) &&
         (explicitMoveToTodoRequested ||
           (!!commentBody &&
             shouldImplicitlyMoveCommentedIssueToTodo({
@@ -17631,6 +17692,27 @@ export function issueRoutes(
   );
 
   router.post(
+    "/issues/:id/interactions/:interactionId/dismiss",
+    async (req, res) => {
+      assertBoard(req);
+      const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+      if (!issue) return;
+      if (!(await assertIssueReadAllowed(req, res, issue))) return;
+      const actor = getActorInfo(req);
+      const interaction = await issueThreadInteractionService(db).dismissInteraction(
+        issue, req.params.interactionId as string,
+        { userId: actor.actorType === "user" ? actor.actorId : null },
+      );
+      await logActivity(db, {
+        companyId: issue.companyId, actorType: actor.actorType, actorId: actor.actorId,
+        action: "issue.thread_interaction_dismissed", entityType: "issue", entityId: issue.id,
+        details: { interactionId: interaction.id, interactionKind: interaction.kind },
+      });
+      res.json(interaction);
+    },
+  );
+
+  router.post(
     "/issues/:id/interactions/:interactionId/skip",
     validate(skipIssueThreadInteractionSchema),
     async (req, res) => {
@@ -18342,6 +18424,7 @@ export function issueRoutes(
         });
       const effectiveMoveToTodoRequested =
         !assigneeSelfCommentOnTerminal &&
+        !(isBlocked && (await getExecutionBlocker(db, issue.companyId, issue.id))?.workspaceRepairRequired) &&
         (explicitMoveToTodoRequested ||
           shouldImplicitlyMoveCommentedIssueToTodo({
             issueStatus: issue.status,

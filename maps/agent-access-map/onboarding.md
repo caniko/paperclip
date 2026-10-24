@@ -2,6 +2,8 @@
 
 Product map: [Onboarding and first work](../feature-map/onboarding.md).
 
+Feature ID: `onboarding`.
+
 Review date: 2026-10-12. Source commit: `f981fa3cc10cb8663a87dec60345fbff46d54d0a`.
 
 This is a source-reviewed baseline of representative operations and known gaps.
@@ -15,6 +17,8 @@ selected-runtime validation and draft restoration. Unrelated baseline entries
 retain the original source commit; no live agent verification is added.
 
 ## `instance`
+
+Capability ID: `onboarding/instance`.
 
 Review: `baseline`.
 
@@ -38,6 +42,8 @@ Gaps: Bootstrapping an instance cannot depend solely on an API served by that
 not-yet-running instance.
 
 ## `company`
+
+Capability ID: `onboarding/company`.
 
 Review: `baseline`.
 
@@ -66,6 +72,8 @@ a company key.
 
 ## `adapter`
 
+Capability ID: `onboarding/adapter`.
+
 Review: `baseline`.
 
 API: `present` — representative operation IDs:
@@ -87,6 +95,19 @@ setup validation requires `agents:create`, plus saved-agent update access when
 testing an existing agent; interactive account login additionally requires a
 board user and owner-bound session. An agent's right to hire is not login or
 instance-environment administration authority.
+
+Scoped source-only runtime preparation: the existing authorized adapter test
+prepares the default Claude CLI in its already acquired sandbox when the image
+version is too old for the selected model. It installs a pinned package into a
+workspace-private versioned prefix and verifies the executable before the hello
+test. This adds no installation API, account grant, environment authority or
+engine fallback. Cloud UI omits manual shell debugging and legacy operator hints
+while retaining check messages and details. Local, SSH and custom
+commands remain operator-managed. Controls:
+[runtime](../../packages/adapters/claude-local/src/server/sandbox-cli-version.test.ts),
+[probe](../../packages/adapters/claude-local/src/server/test.remote.test.ts), and
+[wizard](../../ui/src/components/OnboardingWizard.test.tsx). Live managed
+authorization and subscription execution remain `not-run` for this change.
 
 For fresh managed Codex Auto setup, the wizard's explicit Connect path can call
 `POST /api/environments/{environmentId}/probe?companyId={companyId}` before
@@ -146,6 +167,8 @@ environment access separately. These agent-context checks remain `not-run`.
 
 ## `first-task`
 
+Capability ID: `onboarding/first-task`.
+
 Review: `baseline`.
 
 API: `present` — representative operation IDs:
@@ -184,6 +207,8 @@ wording only. The literal baseline live attempt failed child-file delivery and
 completion reporting; revised live authorization and execution remain `not-run`.
 
 ## `resume`
+
+Capability ID: `onboarding/resume`.
 
 Review: `baseline`.
 

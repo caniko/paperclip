@@ -2,6 +2,8 @@
 
 Product map: [External chat and email conversations](../feature-map/chat-channels.md).
 
+Feature ID: `chat-channels`.
+
 Review date: 2026-10-12. Source commit: `58e16dbddfc9c8d0cf60867f9d9847f0feda055b`.
 Native REST transport reconciled in this change; see the
 [shared transport contract](README.md#native-rest-transport).
@@ -12,6 +14,8 @@ qualified. No live agent execution is claimed. Follow the [map contract](../READ
 for format, permission checks, evidence and maintenance.
 
 ## `providers`
+
+Capability ID: `chat-channels/providers`.
 
 Review: `baseline`.
 
@@ -41,6 +45,8 @@ and the UI integration; live provider qualification is still separate.
 
 ## `identity`
 
+Capability ID: `chat-channels/identity`.
+
 Review: `baseline`.
 
 API: `present` — representative operation IDs:
@@ -63,6 +69,8 @@ Gaps: Identity linking requires a signed-in board user, rollout admission and
 provider checks at the HTTP route. Native `call_api` preserves these permissions.
 
 ## `conversation`
+
+Capability ID: `chat-channels/conversation`.
 
 Review: `baseline`.
 
@@ -87,6 +95,13 @@ remaining operations before qualifying the whole capability.
 Gaps: Normal agent replies work through server delivery. Explicit endpoint publication
 APIs are board management paths.
 
+Monitor publication lineage uses the admitted wake and its source run's matching
+`set_task_monitor` receipt, including company, task, immutable agent, requester,
+and scheduled time. A source ID in context cannot grant publication. The normal
+delivery worker rechecks current endpoint and sender authority. Database fixtures
+exercise lineage and finalization recovery; live Slack qualification remains
+separate.
+
 Publication, provider-reply, and form-open 403/permission errors fail the rejected
 operation without removing unrelated assigned channel tools. Confirmed
 authentication failures still put the endpoint in attention, which blocks tool
@@ -109,6 +124,16 @@ not task completion. Source:
 [gateway](../../server/src/services/tool-gateway.ts). Verification uses
 PostgreSQL-backed provider fixtures; this entry does not claim live provider
 qualification for the new retry path.
+
+GitHub main-response identity (2026-10-19): PR requests share a company-, App-,
+repository- and PR-bound comment. Agents still supply no comment destination.
+Current sender, assignee, repository and publication authority are checked before
+edits, including maintenance failure notices. Leading mentions for another
+recipient are filtered before task work; explicit mentions of this bot still
+follow normal access checks. Provider-fixture coverage is not live GitHub proof.
+Native terminal reconciliation resolves the accepted run identity through the
+existing chat provenance resolver; an older run's reply cannot complete a newer
+request merely because both requests share the same PR comment.
 
 Speko browser sessions use `POST /api/companies/{companyId}/voice-sessions`,
 with GET inspection/notification and POST `/{sessionId}/end` operations below
@@ -185,6 +210,8 @@ An existing conversation keeps its task binding. See
 
 ## `attachments`
 
+Capability ID: `chat-channels/attachments`.
+
 Review: `baseline`.
 
 API: `present` — representative operation IDs:
@@ -210,6 +237,8 @@ Gaps: Uploading/registering is supported. Provider delivery status and board rep
 separate operations.
 
 ## `lifecycle`
+
+Capability ID: `chat-channels/lifecycle`.
 
 Review: `baseline`.
 
@@ -246,3 +275,28 @@ caller/session permissions and real provider delivery need separate verification
 
 GitHub review summary headings use the bot display name. Checks remain
 independently scoped by GitHub App and endpoint/PR/commit identity.
+
+After publishing a review, native agents can report `yielded` with
+`response_wake` and no attention requests. Current conversation authorization
+is checked again at commit. The task remains in review without a human card;
+real human dependencies retain the ordinary attention-request path. A timed
+wait requires a confirmed `set_task_monitor` schedule. Database coverage lives
+in `external-chat-wait.integration.test.ts`; this is not live model evidence.
+
+## `outbound-email`
+
+Capability ID: `chat-channels/outbound-email`.
+
+Review: `baseline`.
+
+API: `present` — GET /api/companies/{companyId}/email/inboxes; POST /api/companies/{companyId}/email/send for both send/reply; GET /api/companies/{companyId}/email/tasks/{issueId}; GET /api/companies/{companyId}/email/deliveries/{publicationId}. Administrative uncertain-outcome resolution uses POST /api/companies/{companyId}/email/deliveries/{publicationId}/resolve.
+
+Agent access: `partial` — the assigned agent can use the email REST/CLI path with its actual active run and admitted email.send/email.reply policy. Board writers use their own credential authority. Availability of a CLI or scenario email tool does not establish that a native run has that tool binding or generic fallback admitted.
+
+Policy: Agent sends require ownership of the inbox and source task, task read access, an available agent within budget, a running task run that owns execution/checkout, standard work mode, and no restricted external execution. Active endpoint, connection, credential access, and email.send/email.reply policy are rechecked. Authenticated board sends require active company membership and credential access; viewer sends additionally require instance-admin status. Local implicit authority skips the membership check. Agent reads retain task/inbox/company checks; board thread/delivery reads use the route’s company-access boundary. Delivery resolution requires board tools:manage_connections or existing elevated operator authority, not ordinary agent access.
+
+Evidence: `source-only` — reviewed at `9ef434fe79c57d976b8b03b14c5242db270b8320`. [Email CLI](../../cli/src/commands/client/email.ts), [request schema](../../packages/shared/src/validators/email.ts), [email routes](../../server/src/routes/email.ts), and [email authority/publication](../../server/src/services/email-channels.ts).
+
+Verification: `not-run` — Use the actual permitted writer and run to create one child/publication, confirm recipient delivery and an exact-message reply, and repeat idempotent requests without duplicate sends. Assert run/owner/mode/budget/company/credential/attachment denials and separate read access. Inspect the provider before resolving an unknown write outcome; a 202 or queued publication alone is not proof of delivery.
+
+Gaps: Real AgentMail transport, recipient delivery, and each native tool binding still need live proof. Controlled provider receipts and inbound-reply recipes do not establish a newly initiated external email journey.

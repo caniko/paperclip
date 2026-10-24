@@ -1,6 +1,12 @@
+import { restConnectorFor } from "./connectors/rest-registry.js";
+import type { runPromptInjectionProvider } from "./prompt-injection-provider.js";
+import { promptInjectionPreventionService } from "./prompt-injection-prevention.js";
+import { adapterExecutionControls } from "./adapter-execution-control.js";
+import type { BudgetServiceHooks } from "./budgets.js";
+import type { PromptInjectionDetectorMetadata } from "@paperclipai/shared";
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { measureToolDiscovery, measureRunPhase } from "./execution-preparation-timing.js";
-import { executeDaytonaTool, isDaytonaConnection, isCurrentDaytonaCatalogEntry } from "./daytona.js";
+import { nativeProviderCatalogFor } from "./native-provider-catalogs.js";
 import { composeConnectionInstructions } from "./connection-instructions.js";
 import { googleWorkspaceToolTarget, googleWorkspaceGrantedScopes, isGoogleWorkspaceToolGranted } from "@paperclipai/shared";
 import { isInsufficientConnectionScope, INSUFFICIENT_CONNECTION_SCOPE_MESSAGE } from "./connection-permission-errors.js";
@@ -24,6 +30,8 @@ import { emitConnectionInvoked } from "./connector-telemetry.js";
 import { resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
 import { extractRemoteMcpPending } from "./remote-mcp-pending.js";
 import { logger } from "../middleware/logger.js";
+import { getAppDefinitionForApplicationKey, isConnectorFeatureEnabled } from "@paperclipai/shared";
+import { instanceSettingsService } from "./instance-settings.js";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -155,6 +163,7 @@ import {
   type ToolRuntimeSlotView,
 } from "./tool-runtime-supervisor.js";
 import { recordToolRuntimeAuditWriteFailure } from "./tool-runtime-metrics.js";
+import { unresolvedRecoveryToolInvocation } from "./recovery-effect-receipts.js";
 import { isRetiredComposioConnection, RETIRED_COMPOSIO_MESSAGE } from "@paperclipai/shared";
 import {
   createPaperclipCloudConnector,
@@ -175,6 +184,7 @@ import {
   readSignedToolArgumentsPayload,
   signToolArguments,
   summarizeToolValue,
+  toolRequestIdentityHash,
   TOOL_ACTION_REQUEST_SIGNING_GRACE_MS,
   ToolActionSigningSecretMissingError,
   ToolContentValidationError,
@@ -380,6 +390,7 @@ export function deduplicateToolDescriptors(tools: readonly ToolGatewayDescriptor
 }
 
 interface ExecuteGatewayToolInput {
+  signal?: AbortSignal;
   sessionToken: string;
   gatewayId?: string | null;
   gatewayPublicId?: string | null;
@@ -392,6 +403,7 @@ interface ExecuteGatewayToolInput {
 }
 
 interface ExecuteTestCallInput {
+  signal?: AbortSignal;
   companyId: string;
   connectionId: string;
   agentId: string;
@@ -402,6 +414,7 @@ interface ExecuteTestCallInput {
 }
 
 interface ExecutePluginToolInput {
+  signal?: AbortSignal;
   actor: {
     type: "agent" | "board";
     agentId?: string | null;
@@ -1125,6 +1138,9 @@ export function createToolGatewayService(
   db: Db,
   options: {
     pluginToolDispatcher?: PluginToolDispatcher;
+    budgetHooks?: BudgetServiceHooks;
+    /** Internal test seam for classification; never accepted from tool inputs. */
+    promptInjectionProvider?: typeof runPromptInjectionProvider;
     deploymentMode?: DeploymentMode;
     deploymentExposure?: DeploymentExposure;
     trustedLocalStdioRuntimeHost?: string | null;
@@ -1165,6 +1181,32 @@ export function createToolGatewayService(
     now?: () => number;
   } = {},
 ) {
+  const injectionPrevention = promptInjectionPreventionService(db, { budgetHooks: options.budgetHooks, provider: options.promptInjectionProvider });
+  function resultClassifier(session: ToolGatewaySession, tool: ToolGatewayDescriptor, toolInvocationId: string | null,
+    { approvedAction = false, signal: callerSignal }: { approvedAction?: boolean; signal?: AbortSignal } = {}) {
+    // Approved actions retain historical run attribution, not that run's lifetime.
+    const runSignal = session.runId && !approvedAction
+      ? adapterExecutionControls.get(session.runId)?.controller.signal : undefined;
+    const signal = callerSignal && runSignal ? AbortSignal.any([callerSignal, runSignal]) : callerSignal ?? runSignal;
+    return async (content: string) => {
+      signal?.throwIfAborted();
+      // Legacy/plugin sessions may not carry identity fields. Resolve them from
+      // the admitted run, never from parameters. Signed approvals keep their origin.
+      let identity = session;
+      if (session.runId && !approvedAction && !session.identityContextId) {
+        const [run] = await db.select({ responsibleUserId: heartbeatRuns.responsibleUserId }).from(heartbeatRuns)
+          .where(and(eq(heartbeatRuns.id, session.runId), eq(heartbeatRuns.companyId, session.companyId)));
+        identity = await captureSessionIdentity({ ...session, responsibleUserId: run?.responsibleUserId ?? session.responsibleUserId });
+      }
+      return injectionPrevention.classify({ companyId: identity.companyId, source: "gateway",
+        actorType: identity.actorType === "user" ? "user" : identity.agentId ? "agent" : "system",
+        actorId: identity.actorId ?? identity.agentId ?? identity.gatewayTokenId ?? identity.companyId,
+        responsibleUserId: identity.responsibleUserId ?? null, agentId: identity.agentId,
+        issueId: identity.issueId, projectId: identity.projectId, runId: identity.runId, identityContextId: identity.identityContextId,
+        toolInvocationId, toolName: tool.name, toolType: tool.providerType, approvedAction,
+      }, content, signal);
+    };
+  }
   // Authorization links can contain one-time codes. Keep them briefly in memory;
   // persist only the redacted request and execution identifiers for recovery.
   const upstreamHandoffs = new Map<string, { pending: ToolUpstreamPending; expires: number }>();
@@ -1172,9 +1214,9 @@ export function createToolGatewayService(
     for (const [id, value] of upstreamHandoffs) if (value.expires <= Date.now()) upstreamHandoffs.delete(id);
     while (upstreamHandoffs.size >= 256) upstreamHandoffs.delete(upstreamHandoffs.keys().next().value!);
     upstreamHandoffs.set(invocationId, { pending, expires: Date.now() + 15 * 60_000 });
-    const summary = validateToolContent({
+    const summary = (await validateToolContent({
       value: { upstreamPending: { ...pending, links: [] } }, direction: "result", sensitiveMode: "redact", promptInjectionMode: "ignore",
-    }).summary;
+    })).summary;
     await db.update(toolInvocations).set({ resultSummary: summary }).where(eq(toolInvocations.id, invocationId));
   }
   function recoverUpstreamHandoff(invocation: typeof toolInvocations.$inferSelect): ToolUpstreamPending | undefined {
@@ -1195,7 +1237,18 @@ export function createToolGatewayService(
   });
   const pluginToolDispatcher = options.pluginToolDispatcher;
   const interactions = issueThreadInteractionService(db);
-  const policyService = toolAccessPolicyService(db);
+  const policyService = toolAccessPolicyService(db, { toolActionSigningSecret: options.toolActionSigningSecret });
+  async function recordToolInvocation(input: ToolAccessDecisionInput, decision: ToolAccessDecision) {
+    try {
+      return await policyService.recordInvocation(input, decision);
+    } catch (error) {
+      const details = error instanceof HttpError ? asRecord(error.details) : null;
+      if (error instanceof HttpError && error.status === 409 && details?.reasonCode === "legacy_tool_idempotency_unverifiable") {
+        throw new ToolGatewayHttpError(error.status, error.message, details.reasonCode, details);
+      }
+      throw error;
+    }
+  }
   const secrets = secretService(db);
   // Authentication produces a new session object for every operation. Keep
   // credential acquisition scoped to that object and out of persisted inputs.
@@ -1399,12 +1452,16 @@ export function createToolGatewayService(
       return connectionRow ? [{ catalogEntry, ...connectionRow }] : [];
     });
 
+    const featureSettings = connectionRows.some(({ application }) => getAppDefinitionForApplicationKey(application.applicationKey)?.experimentalFeatureKey)
+      ? await instanceSettingsService(db).getExperimental() : undefined;
     const eligibleRows = rows.filter(
       ({ catalogEntry, connection, application }) =>
+        (!featureSettings || isConnectorFeatureEnabled(getAppDefinitionForApplicationKey(application.applicationKey), featureSettings)) &&
         !isRetiredComposioConnection(connection) &&
-        !(isDaytonaConnection(connection) && !isCurrentDaytonaCatalogEntry(catalogEntry)) &&
+        !(nativeProviderCatalogFor(connection) && !nativeProviderCatalogFor(connection)!.isCurrentEntry(catalogEntry)) &&
+        !(restConnectorFor(connection) && !restConnectorFor(connection)!.isCurrent(catalogEntry)) &&
         !(isRailwayEndpoint(connection.config.url) && (isRailwayToolBlocked(catalogEntry.toolName) || (normalizeRailwayToolName(catalogEntry.toolName).startsWith(RAILWAY_TOOL_PREFIX) && connection.config.railwayApiStatus !== "available"))) &&
-        (((isBrowserUseConnection(connection) || isDaytonaConnection(connection)) && application.type === "rest_api") ||
+        (((isBrowserUseConnection(connection) || nativeProviderCatalogFor(connection) || restConnectorFor(connection)) && application.type === "rest_api") ||
         (connection.transport === "mcp_remote" &&
           application.type === "mcp_http") ||
         (connection.transport === "local_stdio" &&
@@ -1430,7 +1487,7 @@ export function createToolGatewayService(
       ({ catalogEntry, connection, application }, index) => {
         if (
           connection.transport !== "mcp_remote" &&
-          connection.transport !== "local_stdio" && !isBrowserUseConnection(connection) && !isDaytonaConnection(connection)
+          connection.transport !== "local_stdio" && !isBrowserUseConnection(connection) && !nativeProviderCatalogFor(connection) && !restConnectorFor(connection)
         ) {
           throw new Error(
             `Non-MCP connection ${connection.id} cannot be exposed through the MCP gateway`,
@@ -2149,6 +2206,7 @@ export function createToolGatewayService(
     reasonCode?: string | null;
     argumentsSummary?: ReturnType<typeof summarizeToolValue> | null;
     resultSummary?: ReturnType<typeof summarizeToolValue> | null;
+    detectorMetadata?: PromptInjectionDetectorMetadata;
     metadata?: Record<string, unknown> | null;
     tool?: ToolGatewayDescriptor | null;
   }) {
@@ -2183,7 +2241,7 @@ export function createToolGatewayService(
       resultSizeBytes: input.resultSummary?.sizeBytes ?? null,
       metadata:
         Object.keys(metadata).length > 0 ||
-        input.metadata ||
+        input.metadata || input.detectorMetadata ||
         input.session.projectId ||
         input.session.identityContextId
           ? {
@@ -2193,6 +2251,7 @@ export function createToolGatewayService(
               gatewayName: input.session.gatewayName ?? null,
               projectId: input.session.projectId ?? null,
               ...(input.metadata ?? {}),
+              ...(input.detectorMetadata ? { promptInjection: input.detectorMetadata } : {}),
             }
           : null,
     });
@@ -2362,7 +2421,7 @@ export function createToolGatewayService(
     policyDecision: ToolAccessDecision;
   }): Promise<never> {
     const canonicalArguments = canonicalToolArguments(input.parameters);
-    const canonicalArgumentsHash = input.argumentsSummary.sha256 ?? "";
+    const canonicalArgumentsHash = toolRequestIdentityHash(input.parameters, options.toolActionSigningSecret);
     const approvalSnapshot = await connectedRemoteApprovalSnapshot(
       input.session,
       input.tool,
@@ -3164,8 +3223,20 @@ export function createToolGatewayService(
       }
     }
     if (tool.providerType === "paperclip_github_chat") {
-      const data = await githubChatReviewService(db).execute(session, tool.upstreamToolName ?? "", parameters, invocationId);
-      return { content: JSON.stringify(data), data };
+      try {
+        const data = await githubChatReviewService(db).execute(session, tool.upstreamToolName ?? "", parameters, invocationId);
+        return { content: JSON.stringify(data), data };
+      } catch (error) {
+        // Complete request identities can reach the publication owner through
+        // fresh execution instead of receipt replay. Preserve the same conflict
+        // category for changed content without reclassifying stale-head or
+        // assessment-coverage conflicts from that owner.
+        if (error instanceof HttpError && error.status === 409
+          && asRecord(error.details)?.reasonCode === "github_idempotency_conflict") {
+          throw new ToolGatewayHttpError(error.status, error.message, "github_idempotency_conflict", asRecord(error.details) ?? {});
+        }
+        throw error;
+      }
     }
     if (tool.name === "mcp-remote-fixture:echo") {
       return {
@@ -4858,7 +4929,7 @@ export function createToolGatewayService(
         ),
       )
       .limit(1);
-    if (!connection || (connection.transport !== "mcp_remote" && !isBrowserUseConnection(connection) && !isDaytonaConnection(connection))) {
+    if (!connection || (connection.transport !== "mcp_remote" && !isBrowserUseConnection(connection) && !nativeProviderCatalogFor(connection) && !restConnectorFor(connection))) {
       throw new ToolGatewayHttpError(
         404,
         `Tool "${tool.name}" not found`,
@@ -4881,8 +4952,13 @@ export function createToolGatewayService(
     if (isRailwayEndpoint(connection.config.url) && isRailwayToolBlocked(entry.toolName)) {
       throw new ToolGatewayHttpError(403, "This Railway action cannot bind its effects to an approved target. Use redeploy, restart, or rollback for an existing deployment.", "railway_action_blocked");
     }
-    if (isDaytonaConnection(connection) && !isCurrentDaytonaCatalogEntry(entry)) {
-      throw new ToolGatewayHttpError(409, "Daytona's action catalog changed. Review the updated actions in Permissions.", "daytona_catalog_changed");
+    const nativeProvider = nativeProviderCatalogFor(connection);
+    if (nativeProvider && !nativeProvider.isCurrentEntry(entry)) {
+      throw new ToolGatewayHttpError(409, `${nativeProvider.name}'s action catalog changed. Review the updated actions in Permissions.`, `${nativeProvider.slug}_catalog_changed`);
+    }
+    const restConnector = restConnectorFor(connection);
+    if (restConnector && !restConnector.isCurrent(entry)) {
+      throw new ToolGatewayHttpError(409, `${restConnector.name}'s action catalog changed. Review the updated actions in Permissions.`, "provider_catalog_changed");
     }
     return { entry, connection };
   }
@@ -5300,15 +5376,23 @@ export function createToolGatewayService(
     }
   }
 
+  async function assertApplicationFeatureAvailable(applicationKey: unknown) {
+    const app = getAppDefinitionForApplicationKey(applicationKey);
+    if (app?.experimentalFeatureKey && !isConnectorFeatureEnabled(app, await instanceSettingsService(db).getExperimental())) {
+      throw new ToolGatewayHttpError(403, "This connector is unavailable on this instance.", "connector_unavailable");
+    }
+  }
+
   async function fullyAssignedMcpConnections(session: ToolGatewaySession) {
     if (!session.gatewayProfileId) return [];
-    return db
-      .select({ connection: toolConnections })
+    const rows = await db
+      .select({ connection: toolConnections, applicationKey: toolApplications.applicationKey })
       .from(toolProfileEntries)
       .innerJoin(
         toolConnections,
         eq(toolProfileEntries.connectionId, toolConnections.id),
       )
+      .innerJoin(toolApplications, eq(toolConnections.applicationId, toolApplications.id))
       .where(
         and(
           eq(toolProfileEntries.companyId, session.companyId),
@@ -5316,12 +5400,16 @@ export function createToolGatewayService(
           eq(toolProfileEntries.selectorType, "connection"),
           eq(toolProfileEntries.effect, "include"),
           eq(toolConnections.companyId, session.companyId),
+          eq(toolApplications.companyId, session.companyId),
           eq(toolConnections.enabled, true),
           eq(toolConnections.status, "active"),
           inArray(toolConnections.transport, ["mcp_remote", "local_stdio"]),
         ),
-      )
-      .then((rows) => rows.map((row) => row.connection));
+      );
+    const settings = rows.some(row => getAppDefinitionForApplicationKey(row.applicationKey)?.experimentalFeatureKey)
+      ? await instanceSettingsService(db).getExperimental() : undefined;
+    return rows.filter(row => !settings || isConnectorFeatureEnabled(getAppDefinitionForApplicationKey(row.applicationKey), settings))
+      .map(row => row.connection);
   }
 
   async function callRemoteConnectionProtocol(input: {
@@ -5432,6 +5520,10 @@ export function createToolGatewayService(
     params?: Record<string, unknown>;
     callerHeaders?: Record<string, string | string[] | undefined>;
   }): Promise<unknown> {
+    const [application] = await db.select({ applicationKey: toolApplications.applicationKey }).from(toolApplications)
+      .where(and(eq(toolApplications.id, input.connection.applicationId), eq(toolApplications.companyId, input.session.companyId))).limit(1);
+    if (!application) throw new ToolGatewayHttpError(404, "MCP connection not found", "connection_not_found");
+    await assertApplicationFeatureAvailable(application.applicationKey);
     if (input.connection.transport === "mcp_remote") {
       return callRemoteConnectionProtocol({
         ...input,
@@ -5999,6 +6091,7 @@ export function createToolGatewayService(
       session,
       tool,
     );
+    await assertApplicationFeatureAvailable(tool.applicationKey);
     // Recheck immediately before dispatch, including previously approved calls
     // and connections whose stored grant/catalog predates scope reduction.
     assertGoogleChatToolArgumentsSupported(connection, entry.toolName, parameters);
@@ -6007,11 +6100,23 @@ export function createToolGatewayService(
       ms = railwayCommandBudgetMs(parameters);
     }
     const grant = await resolveConnectionGrant(session, connection);
-    if (isDaytonaConnection(connection)) {
+    const restConnector = restConnectorFor(connection);
+    if (restConnector) {
       const budgetMs = Math.min(ms, 30_000);
       const deadlineAt = Date.now() + budgetMs;
       const signal = AbortSignal.timeout(budgetMs);
-      const data = await executeDaytonaTool({ binding: session, connection,
+      const client = restConnector.client(connection, await resolveCredentialHeaders(session, connection, grant),
+        (url, init) => options.remoteHttpRequest ? options.remoteHttpRequest(url, init)
+          : guardedRemoteHttpFetch(url, init, remoteHttpFetchOptions()), signal, deadlineAt);
+      const data = await client.invoke(entry.toolName, parameters);
+      return { result: { content: JSON.stringify(data), data: { structuredContent: data, transport: "rest_api" } } };
+    }
+    const nativeProvider = nativeProviderCatalogFor(connection);
+    if (nativeProvider) {
+      const budgetMs = Math.min(ms, 30_000);
+      const deadlineAt = Date.now() + budgetMs;
+      const signal = AbortSignal.timeout(budgetMs);
+      const data = await nativeProvider.execute({ binding: session, connection,
         headers: await resolveCredentialHeaders(session, connection, grant),
         request: (url, init) => options.remoteHttpRequest ? options.remoteHttpRequest(url, init)
           : guardedRemoteHttpFetch(url, init, remoteHttpFetchOptions()),
@@ -7308,6 +7413,7 @@ export function createToolGatewayService(
     reasonCode: string;
     matchedPolicyIds: string[];
     timeoutMs?: number;
+    signal?: AbortSignal;
   }): Promise<
     | { decision: "allowed"; invocationId: string; result: unknown }
     | {
@@ -7379,11 +7485,11 @@ export function createToolGatewayService(
         );
       }
       const result = connectedMcpExecution.result;
-      const resultValidation = validateToolContent({
+      const resultValidation = await validateToolContent({
         value: result,
         direction: "result",
         sensitiveMode: "redact",
-        promptInjectionMode: "block",
+        promptInjectionMode: "block", classifier: resultClassifier(args.session, args.tool, args.invocationId, { signal: args.signal }),
       });
       const providerResult = asRecord(resultValidation.value);
       if (providerResult?.error) {
@@ -7411,6 +7517,7 @@ export function createToolGatewayService(
         reasonCode: "tool_completed",
         argumentsSummary: args.argumentsSummary,
         resultSummary: resultValidation.summary,
+        detectorMetadata: resultValidation.detectorMetadata,
         metadata: {
           source: "test",
           headerSummary: connectedMcpExecution.headerSummary ?? undefined,
@@ -7438,6 +7545,7 @@ export function createToolGatewayService(
           argumentsSummary: args.argumentsSummary,
           result: summarizeResult(resultValidation.value),
           resultSummary: resultValidation.summary,
+          promptInjection: resultValidation.detectorMetadata,
           headerSummary: connectedMcpExecution.headerSummary ?? undefined,
           execution: connectedMcpExecution.execution,
         },
@@ -7488,7 +7596,7 @@ export function createToolGatewayService(
         metadata: {
           source: "test",
           ...(err instanceof ToolContentValidationError
-            ? { findings: err.findings }
+            ? { findings: err.findings, promptInjection: err.detectorMetadata }
             : {}),
           ...(executionAuditFromError(err)
             ? { execution: executionAuditFromError(err) }
@@ -7518,6 +7626,7 @@ export function createToolGatewayService(
           argumentsSummary: args.argumentsSummary,
           durationMs: Date.now() - startedAt,
           error: message,
+          ...(err instanceof ToolContentValidationError ? { promptInjection: err.detectorMetadata } : {}),
           ...(executionAuditFromError(err)
             ? { execution: executionAuditFromError(err) }
             : {}),
@@ -7599,12 +7708,12 @@ export function createToolGatewayService(
       });
       return;
     }
-    const argumentsSummary = validateToolContent({
+    const argumentsSummary = (await validateToolContent({
       value: parameters,
       direction: "arguments",
       sensitiveMode: "redact",
       promptInjectionMode: "ignore",
-    }).summary;
+    })).summary;
     try {
       await runTestToolInvocation({
         session,
@@ -7731,7 +7840,7 @@ export function createToolGatewayService(
     error: unknown;
   }) {
     const reasonCode =
-      input.error instanceof ToolGatewayHttpError
+      (input.error instanceof ToolGatewayHttpError || input.error instanceof ToolContentValidationError)
         ? input.error.reasonCode
         : "tool_execution_failed";
     const message =
@@ -8110,8 +8219,12 @@ export function createToolGatewayService(
     const parameters = signedPayload.arguments;
     const canonicalArguments = canonicalToolArguments(parameters);
     if (
-      claimed.canonicalArgumentsHash !==
-        summarizeToolValue(parameters).sha256 ||
+      ![
+        toolRequestIdentityHash(parameters, options.toolActionSigningSecret),
+        // Historical approvals used the redacted preview hash. Their signature
+        // still binds the complete canonical arguments checked below.
+        summarizeToolValue(parameters).sha256,
+      ].includes(claimed.canonicalArgumentsHash) ||
       !verifyToolArgumentsSignature({
         signedArguments: claimed.signedArguments,
         invocationId: invocation.id,
@@ -8160,12 +8273,12 @@ export function createToolGatewayService(
       });
     }
 
-    const argumentsSummary = validateToolContent({
+    const argumentsSummary = (await validateToolContent({
       value: parameters,
       direction: "arguments",
       sensitiveMode: "redact",
       promptInjectionMode: "ignore",
-    }).summary;
+    })).summary;
     // Final recheck at the last DB write before dispatch: tool and snapshot
     // resolution above involve network calls, so re-verify the issue is still
     // open now that only the provider call remains. A close that commits after
@@ -8233,11 +8346,11 @@ export function createToolGatewayService(
           String(resultRecord.content || resultRecord.error),
           "tool_execution_failed",
         );
-      const resultValidation = validateToolContent({
+      const resultValidation = await validateToolContent({
         value: result,
         direction: "result",
         sensitiveMode: "redact",
-        promptInjectionMode: "block",
+        promptInjectionMode: "block", classifier: resultClassifier(session, tool, invocation.id, { approvedAction: true }),
       });
       const now = new Date();
       await db
@@ -8272,6 +8385,7 @@ export function createToolGatewayService(
         reasonCode: "approved_action_executed",
         argumentsSummary,
         resultSummary: resultValidation.summary,
+        detectorMetadata: resultValidation.detectorMetadata,
         metadata: {
           durationMs: Date.now() - startedAt,
           timeoutMs: executionTimeoutMs,
@@ -8297,7 +8411,7 @@ export function createToolGatewayService(
         policyDecision: "deny",
         reasonCode,
         argumentsSummary,
-        metadata: { durationMs: Date.now() - startedAt },
+        metadata: { durationMs: Date.now() - startedAt, ...(error instanceof ToolContentValidationError ? { promptInjection: error.detectorMetadata, findings: error.findings } : {}) },
         tool,
       });
       throw error;
@@ -8308,6 +8422,7 @@ export function createToolGatewayService(
     session: ToolGatewaySession;
     toolName: string;
     argumentsHash: string;
+    parameters: unknown;
   }) {
     if (!input.session.issueId || !input.session.agentId) return null;
     const [match] = await db
@@ -8324,7 +8439,7 @@ export function createToolGatewayService(
         and(
           eq(toolActionRequests.companyId, input.session.companyId),
           eq(toolActionRequests.issueId, input.session.issueId),
-          eq(toolActionRequests.canonicalArgumentsHash, input.argumentsHash),
+          inArray(toolActionRequests.canonicalArgumentsHash, [input.argumentsHash, summarizeToolValue(input.parameters).sha256]),
           eq(toolInvocations.agentId, input.session.agentId),
           eq(toolInvocations.toolName, input.toolName),
           inArray(toolActionRequests.status, [
@@ -8337,9 +8452,25 @@ export function createToolGatewayService(
           ]),
         ),
       )
-      .orderBy(desc(toolActionRequests.createdAt))
+      .orderBy(
+        desc(sql`${toolActionRequests.canonicalArgumentsHash} = ${input.argumentsHash}`),
+        desc(toolActionRequests.createdAt),
+      )
       .limit(1);
     if (!match) return null;
+    if (match.actionRequest.signedArguments) {
+      const signed = readSignedToolArgumentsPayload({
+        signedArguments: match.actionRequest.signedArguments,
+        invocationId: match.invocation.id,
+        toolName: match.invocation.toolName,
+        signingSecret: options.toolActionSigningSecret,
+      });
+      // Redacted legacy hashes can collide across different secrets. Only
+      // replay the exact authenticated arguments, including legacy approvals.
+      if (!signed || canonicalToolArguments(signed.arguments) !== canonicalToolArguments(input.parameters)) return null;
+    } else if (match.actionRequest.canonicalArgumentsHash !== input.argumentsHash) {
+      return null;
+    }
     if (match.actionRequest.status === "failed" && match.invocation.errorCode !== "provider_interaction_required") return null;
     // The gateway builds an ask-first request in two steps inside one call: it
     // inserts the row with a null signature and a null expiry, then signs the
@@ -8395,6 +8526,7 @@ export function createToolGatewayService(
     session: ToolGatewaySession;
     toolName: string;
     argumentsHash: string;
+    parameters: unknown;
   }) {
     const match = await matchingAgentActionRequest(input);
     if (!match) return null;
@@ -8472,10 +8604,10 @@ export function createToolGatewayService(
    * Test tab panel renders. Recovers the redacted parameter snapshot (the
    * "Where" row) and, once the call has run, the structured result or error.
    */
-  function buildTestCallStatus(
+  async function buildTestCallStatus(
     actionRequest: typeof toolActionRequests.$inferSelect,
     invocation: typeof toolInvocations.$inferSelect,
-  ): ToolConnectionTestCallStatus {
+  ): Promise<ToolConnectionTestCallStatus> {
     const invocationDone =
       invocation.status === "succeeded" ||
       invocation.status === "failed" ||
@@ -8514,12 +8646,12 @@ export function createToolGatewayService(
       typeof signed.arguments === "object" &&
       !Array.isArray(signed.arguments)
     ) {
-      const redacted = validateToolContent({
+      const redacted = (await validateToolContent({
         value: signed.arguments,
         direction: "arguments",
         sensitiveMode: "redact",
         promptInjectionMode: "ignore",
-      }).value;
+      })).value;
       if (
         redacted &&
         typeof redacted === "object" &&
@@ -9331,7 +9463,7 @@ export function createToolGatewayService(
         tool,
         input.parameters ?? {},
       );
-      const argumentValidation = validateToolContent({
+      const argumentValidation = await validateToolContent({
         value: requestedParameters,
         direction: "arguments",
         sensitiveMode: "redact",
@@ -9348,7 +9480,7 @@ export function createToolGatewayService(
         consumeRateLimit: true,
       });
       const accessDecision = await policyService.decide(decisionInput);
-      const recorded = await policyService.recordInvocation(
+      const recorded = await recordToolInvocation(
         decisionInput,
         accessDecision,
       );
@@ -9368,7 +9500,7 @@ export function createToolGatewayService(
           );
         }
         const canonicalArguments = canonicalToolArguments(requestedParameters);
-        const canonicalArgumentsHash = argumentValidation.summary.sha256 ?? "";
+        const canonicalArgumentsHash = toolRequestIdentityHash(requestedParameters, options.toolActionSigningSecret);
         const approvalSnapshot = await connectedRemoteApprovalSnapshot(
           session,
           tool,
@@ -9530,6 +9662,7 @@ export function createToolGatewayService(
         reasonCode: accessDecision.reasonCode,
         matchedPolicyIds: accessDecision.matchedPolicyIds,
         timeoutMs: input.timeoutMs,
+        signal: input.signal,
       });
     },
 
@@ -10076,7 +10209,7 @@ export function createToolGatewayService(
         if (typeof args.idempotencyKey === "string") {
           const key = `slack:${tool.connectionId}:${session.issueId}:${session.responsibleUserId}:${args.idempotencyKey}`;
           const [prior] = await db.select().from(toolInvocations).where(and(eq(toolInvocations.companyId, session.companyId), eq(toolInvocations.idempotencyKey, key)));
-          const currentHash = validateToolContent({ value: args, direction: "arguments", sensitiveMode: "redact", promptInjectionMode: "ignore" }).summary.sha256;
+          const currentHash = toolRequestIdentityHash(args, options.toolActionSigningSecret);
           if (prior && (prior.toolName !== tool.name || prior.argumentsHash !== currentHash)) throw new ToolGatewayHttpError(409, "Idempotency key belongs to a different Slack operation", "slack_idempotency_conflict");
           input = { ...input, idempotencyKey: key };
         }
@@ -10088,7 +10221,7 @@ export function createToolGatewayService(
         tool.name === "search_tools" &&
         tool.providerType === "paperclip_virtual"
       ) {
-        const argumentValidation = validateToolContent({
+        const argumentValidation = await validateToolContent({
           value: requestedParameters,
           direction: "arguments",
           sensitiveMode: "redact",
@@ -10098,11 +10231,18 @@ export function createToolGatewayService(
           session,
           requestedParameters,
         );
-        const resultValidation = validateToolContent({
-          value: result,
-          direction: "result",
-          sensitiveMode: "redact",
-          promptInjectionMode: "block",
+        const resultValidation = await validateToolContent({
+          value: result, direction: "result", sensitiveMode: "redact",
+          promptInjectionMode: "block", classifier: resultClassifier(session, tool, null, { signal: input.signal }),
+        }).catch(async (error: unknown) => {
+          if (error instanceof ToolContentValidationError) {
+            await writeToolCallEvent({ session, eventType: "call_failed", outcome: "failure", toolName: tool.name,
+              reasonCode: error.reasonCode, tool, detectorMetadata: error.detectorMetadata, metadata: { findings: error.findings } });
+            await writeAudit({ session, companyId: session.companyId, agentId: session.agentId, runId: session.runId, issueId: session.issueId,
+              action: "tool_gateway.call_failed", details: { tool: tool.name, reasonCode: error.reasonCode, promptInjection: error.detectorMetadata } });
+            throw new ToolGatewayHttpError(422, error.message, error.reasonCode, { findings: error.findings });
+          }
+          throw error;
         });
         const [invocation] = await db
           .insert(toolInvocations)
@@ -10135,6 +10275,8 @@ export function createToolGatewayService(
             completedAt: new Date(),
           })
           .returning();
+        if (resultValidation.detectorMetadata?.invocationId) await injectionPrevention.linkToolInvocation(
+          session.companyId, resultValidation.detectorMetadata.invocationId, invocation.id);
         await writeToolCallEvent({
           invocationId: invocation.id,
           session,
@@ -10145,6 +10287,7 @@ export function createToolGatewayService(
           reasonCode: "virtual_tool_completed",
           argumentsSummary: argumentValidation.summary,
           resultSummary: resultValidation.summary,
+          detectorMetadata: resultValidation.detectorMetadata,
           metadata: { virtualToolName: "search_tools" },
           tool,
         });
@@ -10165,6 +10308,7 @@ export function createToolGatewayService(
             argumentsSummary: argumentValidation.summary,
             result: summarizeResult(resultValidation.value),
             resultSummary: resultValidation.summary,
+            promptInjection: resultValidation.detectorMetadata,
           },
         });
         return {
@@ -10208,7 +10352,7 @@ export function createToolGatewayService(
         );
       }
 
-      const argumentValidation = validateToolContent({
+      const argumentValidation = await validateToolContent({
         value: requestedParameters,
         direction: "arguments",
         sensitiveMode: "redact",
@@ -10218,11 +10362,25 @@ export function createToolGatewayService(
       let effectiveParameters: unknown = requestedParameters;
       let effectiveArgumentsSummary = argumentValidation.summary;
 
+      if (session.runId && session.issueId && tool.connectionId && tool.risk !== "read" &&
+          // This owner has an exact publication receipt/reconciliation protocol.
+          !(tool.providerType === "paperclip_github_chat" &&
+            ["comment", "update_comment", "submit_review"].includes(tool.upstreamToolName ?? ""))) {
+        const unresolved = await unresolvedRecoveryToolInvocation(db, {
+          companyId: session.companyId, issueId: session.issueId, runId: session.runId,
+          connectionId: tool.connectionId, toolName: tool.name, risk: tool.risk,
+        });
+        if (unresolved) throw new ToolGatewayHttpError(409,
+          "A previous operation has an unconfirmed outcome. Reconcile it before repeating this operation; reads and independent work remain available.",
+          "recovery_effect_outcome_unresolved", { invocationId: unresolved });
+      }
+
       if (!input.approvedActionRequestId) {
         const replay = await replayMatchingAgentAction({
           session,
           toolName: tool.name,
-          argumentsHash: argumentValidation.summary.sha256 ?? "",
+          argumentsHash: toolRequestIdentityHash(requestedParameters, options.toolActionSigningSecret),
+          parameters: requestedParameters,
         });
         if (replay?.matched) {
           let replayResult: unknown = replay.result;
@@ -10231,8 +10389,28 @@ export function createToolGatewayService(
             if (!access.allowed && access.decision !== "require_approval")
               throw new ToolGatewayHttpError(policyErrorStatus(access), access.explanation, access.reasonCode);
             const receipt = await githubChatReviewService(db).readPublicationReceipt(session, tool.upstreamToolName ?? "", effectiveParameters, replay.invocationId);
-            if (receipt) replayResult = validateToolContent({ value: { content: JSON.stringify(receipt), data: receipt },
-              direction: "result", sensitiveMode: "redact", promptInjectionMode: "block" }).value;
+            if (receipt) {
+              // Revalidate the recovered receipt, without mutating the completed
+              // invocation or executing its external write again.
+              try {
+                const validation = await validateToolContent({ value: { content: JSON.stringify(receipt), data: receipt },
+                  direction: "result", sensitiveMode: "redact", promptInjectionMode: "block", classifier: resultClassifier(session, tool, replay.invocationId, { signal: input.signal }) });
+                replayResult = validation.value;
+                await writeToolCallEvent({ invocationId: replay.invocationId, session, eventType: "call_completed", outcome: "success",
+                  toolName: tool.name, reasonCode: "receipt_revalidated", tool, detectorMetadata: validation.detectorMetadata, metadata: { replay: true } });
+                await writeAudit({ session, companyId: session.companyId, agentId: session.agentId, runId: session.runId, issueId: session.issueId,
+                  action: "tool_gateway.call_completed", details: { invocationId: replay.invocationId, replay: true, promptInjection: validation.detectorMetadata } });
+              } catch (error) {
+                if (error instanceof ToolContentValidationError) {
+                  await writeToolCallEvent({ invocationId: replay.invocationId, session, eventType: "call_failed", outcome: "failure",
+                    toolName: tool.name, reasonCode: error.reasonCode, tool, detectorMetadata: error.detectorMetadata, metadata: { replay: true, findings: error.findings } });
+                  await writeAudit({ session, companyId: session.companyId, agentId: session.agentId, runId: session.runId, issueId: session.issueId,
+                    action: "tool_gateway.call_failed", details: { invocationId: replay.invocationId, replay: true, reasonCode: error.reasonCode, promptInjection: error.detectorMetadata } });
+                  throw new ToolGatewayHttpError(422, error.message, error.reasonCode, { findings: error.findings });
+                }
+                throw error;
+              }
+            }
           }
           return {
             invocationId: replay.invocationId,
@@ -10527,7 +10705,7 @@ export function createToolGatewayService(
           );
         }
         const storedParameters = signedPayload.arguments;
-        const storedArgumentValidation = validateToolContent({
+        const storedArgumentValidation = await validateToolContent({
           value: storedParameters,
           direction: "arguments",
           sensitiveMode: "redact",
@@ -10535,8 +10713,10 @@ export function createToolGatewayService(
         });
         const storedCanonical = canonicalToolArguments(storedParameters);
         if (
-          actionRequest.canonicalArgumentsHash !==
-            summarizeToolValue(storedParameters).sha256 ||
+          ![
+            toolRequestIdentityHash(storedParameters, options.toolActionSigningSecret),
+            summarizeToolValue(storedParameters).sha256,
+          ].includes(actionRequest.canonicalArgumentsHash) ||
           !verifyToolArgumentsSignature({
             signedArguments: actionRequest.signedArguments,
             invocationId: storedInvocation.id,
@@ -10617,7 +10797,7 @@ export function createToolGatewayService(
         if (accessDecision.allowed && tool.providerType === "paperclip_slack_chat" && SLACK_TOOLS.some(t => t.name === tool.upstreamToolName && t.risk === "approval")) {
           accessDecision = { ...accessDecision, allowed: false, decision: "require_approval", reasonCode: "requires_approval_policy", explanation: "Slack destructive actions, channel creation and invitations require approval." };
         }
-        const recorded = await policyService.recordInvocation(
+        const recorded = await recordToolInvocation(
           decisionInput,
           accessDecision,
         );
@@ -10816,11 +10996,11 @@ export function createToolGatewayService(
                 executionTimeoutMs,
               ));
 
-        const resultValidation = validateToolContent({
+        const resultValidation = await validateToolContent({
           value: result,
           direction: "result",
           sensitiveMode: "redact",
-          promptInjectionMode: "block",
+          promptInjectionMode: "block", classifier: resultClassifier(session, tool, invocationId, { approvedAction: Boolean(input.approvedActionRequestId), signal: input.signal }),
         });
         const completedAt = new Date();
         const validatedMcpResult = connectedMcpExecution
@@ -10878,6 +11058,7 @@ export function createToolGatewayService(
           reasonCode: "tool_completed",
           argumentsSummary: effectiveArgumentsSummary,
           resultSummary: resultValidation.summary,
+          detectorMetadata: resultValidation.detectorMetadata,
           metadata: {
             ...(virtualToolName
               ? { virtualToolName, targetToolName: tool.name }
@@ -10911,6 +11092,7 @@ export function createToolGatewayService(
             argumentsSummary: effectiveArgumentsSummary,
             result: summarizeResult(resultValidation.value),
             resultSummary: resultValidation.summary,
+            promptInjection: resultValidation.detectorMetadata,
             headerSummary: connectedMcpExecution?.headerSummary ?? undefined,
             execution: connectedMcpExecution?.execution ?? undefined,
           },
@@ -11015,7 +11197,7 @@ export function createToolGatewayService(
               ? { virtualToolName, targetToolName: tool.name }
               : {}),
             ...(normalizedError instanceof ToolContentValidationError
-              ? { findings: normalizedError.findings }
+              ? { findings: normalizedError.findings, promptInjection: normalizedError.detectorMetadata }
               : {}),
             ...(executionAuditFromError(normalizedError)
               ? { execution: executionAuditFromError(normalizedError) }
@@ -11043,6 +11225,7 @@ export function createToolGatewayService(
             argumentsSummary: effectiveArgumentsSummary,
             durationMs: Date.now() - startedAt,
             error: message,
+            ...(normalizedError instanceof ToolContentValidationError ? { promptInjection: normalizedError.detectorMetadata } : {}),
             ...(executionAuditFromError(normalizedError)
               ? { execution: executionAuditFromError(normalizedError) }
               : {}),
@@ -11119,7 +11302,7 @@ export function createToolGatewayService(
       }
 
       const requestedParameters = input.parameters ?? {};
-      const argumentValidation = validateToolContent({
+      const argumentValidation = await validateToolContent({
         value: requestedParameters,
         direction: "arguments",
         sensitiveMode: "redact",
@@ -11133,7 +11316,7 @@ export function createToolGatewayService(
         consumeRateLimit: true,
       });
       const accessDecision = await policyService.decide(decisionInput);
-      const recorded = await policyService.recordInvocation(
+      const recorded = await recordToolInvocation(
         decisionInput,
         accessDecision,
       );
@@ -11225,11 +11408,11 @@ export function createToolGatewayService(
           requestedParameters,
           input.runContext,
         );
-        const resultValidation = validateToolContent({
+        const resultValidation = await validateToolContent({
           value: result,
           direction: "result",
           sensitiveMode: "redact",
-          promptInjectionMode: "block",
+          promptInjectionMode: "block", classifier: resultClassifier(sessionLike, tool, invocationId, { signal: input.signal }),
         });
         await db
           .update(toolInvocations)
@@ -11252,6 +11435,7 @@ export function createToolGatewayService(
           reasonCode: "tool_completed",
           argumentsSummary: argumentValidation.summary,
           resultSummary: resultValidation.summary,
+          detectorMetadata: resultValidation.detectorMetadata,
           tool,
         });
         await writeAudit({
@@ -11272,6 +11456,7 @@ export function createToolGatewayService(
               (resultValidation.value as typeof result).result,
             ),
             resultSummary: resultValidation.summary,
+            promptInjection: resultValidation.detectorMetadata,
           },
         });
         // After the bookkeeping above: a throw there is caught below, overwrites
@@ -11310,7 +11495,7 @@ export function createToolGatewayService(
           argumentsSummary: argumentValidation.summary,
           metadata:
             err instanceof ToolContentValidationError
-              ? { findings: err.findings }
+              ? { findings: err.findings, promptInjection: err.detectorMetadata }
               : null,
           tool,
         });
@@ -11330,6 +11515,7 @@ export function createToolGatewayService(
             argumentsSummary: argumentValidation.summary,
             durationMs: Date.now() - startedAt,
             error: message,
+            ...(err instanceof ToolContentValidationError ? { promptInjection: err.detectorMetadata } : {}),
           },
         });
         if (err instanceof ToolContentValidationError) {

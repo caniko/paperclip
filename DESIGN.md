@@ -76,6 +76,16 @@ that relayed a message from another channel.
 
 ## Contextual feedback
 
+Keep the runner turn's avatar, name, Working header and current-activity slot
+in place from message submission through queued admission and native startup.
+Runtime discovery must not replace the turn with a generic spinner or a
+"run started" receipt. Queued and running headers use the same spacing.
+
+Stream the provider's final reply as the conversational answer. Completion-tool
+reports remain inspectable run data while work continues. Use their summary as
+an answer fallback only after the run ends and its final transcript fetch
+completes without a provider reply. Preserve the reply through persistence.
+
 Task chat shows execution errors and waits only while they remain relevant.
 Completing or cancelling a task hides its old execution notices. A newer attempt by
 the same agent or an explicit successor supersedes earlier run notices; an
@@ -85,6 +95,14 @@ Run history retains the full diagnostic record. Session reset boundaries remain
 in the conversation. Time passing or a new human comment alone does not resolve
 an error. Stored notices need run or recovery provenance before they can be hidden;
 child-task relays and other unrelated system updates stay visible.
+
+Interrupted runs use compact rows without divider rules, including
+older saved markers. When a run error and a no-live-execution-path notice are
+adjacent, show only the last error row. Keep its details and retry action. If a
+legacy run has a permitted retry, keep that action on the surviving notice,
+including its pending state. A
+message, input, session boundary or credential-access denial separates errors;
+it must not disappear as part of this grouping. Run details retain full history.
 
 Credential-sharing denials stay expanded as an error card in the task conversation.
 Name the agent and selected AI connection when known, and say which person lacks
@@ -836,7 +854,7 @@ tokenize motion. Principles — reasoning only; values live in `ui/src/index.css
   block collapses the duration/stagger tokens to zero, cascading to every scoped token,
   in addition to each animation's own component-level guard.
 
-Agent Chat and regular task chats keep pending questions as compact “Unanswered question” entries at their original position in history. Dismissing the form or sending a newer user message clears it from the composer without resolving it. Questions never contribute to composer pending counts or navigation. Opening the history entry restores the original form and its draft; submitting later uses the same durable question response path. Actual permission reviews retain their permission checks.
+Agent Chat and regular task chats keep pending questions and requests as compact, reopenable entries at their original position in history. Dismissing any composer request—including completion reviews, confirmations, choices, suggested tasks, item verdicts, and runtime input—removes its form and pending reminder. Saved interactions record human dismissal on the server; raw runtime requests retain a browser-local preference. Dismissal is not an answer, approval, or rejection. Sending a newer user message also clears an ordinary question from the composer without resolving it. Questions never contribute to composer pending counts or navigation. Opening the history entry restores the original form and its draft; submitting later uses the same durable question response path. Actual permission reviews retain their permission checks.
 
 ## Canonical proposal toolbars
 
@@ -914,14 +932,14 @@ labelled primitive compositions with local state. Page navigation and
 collection filters remain in Tabs. This comparison does not migrate app styles
 or certify backend behavior or keyboard accessibility.
 
-Agents and Connectors compose the same `ToolbarSearch` with canonical Standard filled tabs. `AgentsToolbar` is shared by the roster page and
+Agents and Connectors compose the same `ToolbarSearch`. Connectors also use canonical Standard filled tabs. `AgentsToolbar` is shared by the roster page and
 toolbar references; `ConnectorsToolbar` is shared by Browse and toolbar references. Keep search
-first, status/source selection next, and view/actions last where present.
+first, source selection next where present, and view/actions last. The agent roster uses a harness filter icon without a status selector.
 Connector source choices use radio semantics and preserve Browse's existing
 automatic search expansion; they do not switch separate content panels.
-Agents status navigation retains route-backed Tabs with its associated roster
-panel. Agent search intersects the chosen status/built-in filter, matches name,
-role and title words, and retains ancestor context for matching org-chart nodes.
+Legacy agent status and built-in URLs redirect to the full roster at `/agents/all`.
+Agent search matches name, role and title words, and retains ancestor context
+for matching org-chart nodes.
 
 Projects uses `ProjectsToolbar` for shared search, the existing name/updated/
 created/target-date sort choices and direction toggling, and Add Project. Project

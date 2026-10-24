@@ -1,7 +1,9 @@
+import { insertIssueComment } from "../issue-comment-writes.js";
 import {
   issues,
   issueComments,
   heartbeatRuns,
+  nativeRunFinalizations,
   companies,
   agentTaskSessions,
   agentSessionGoalActions,
@@ -382,7 +384,7 @@ export function createHeartbeatScheduling(
     }
 
     if (input.recoveryPolicy === "escalate_to_board") {
-      await db.insert(issueComments).values({
+      await insertIssueComment(db, {
         companyId: input.claimed.companyId,
         issueId: input.claimed.id,
         body: monitorRecoveryComment({
@@ -864,7 +866,11 @@ export function createHeartbeatScheduling(
       where monitor_run.company_id = ${issues.companyId}
         and monitor_run.native_issue_id = ${issues.id}
         and monitor_run.runtime_mode = 'native'
-        and monitor_run.status in ('queued', 'running', 'scheduled_retry'))`;
+        and (monitor_run.status in ('queued', 'running', 'scheduled_retry')
+          or exists (select 1 from ${nativeRunFinalizations} monitor_finalization
+            where monitor_finalization.company_id = monitor_run.company_id
+              and monitor_finalization.run_id = monitor_run.id
+              and monitor_finalization.phase not in ('committed', 'terminal_failure'))))`;
   }
 
   async function triggerIssueMonitor(
@@ -918,6 +924,7 @@ export function createHeartbeatScheduling(
         .where(
           and(
             eq(issues.id, issueId),
+            noActiveNativeMonitorRun(),
             sql`${issues.monitorNextCheckAt} is not null`,
             isNull(issues.assigneeUserId),
             sql`${issues.assigneeAgentId} is not null`,
@@ -933,7 +940,7 @@ export function createHeartbeatScheduling(
     });
 
     if (!claimed) {
-      throw conflict("Issue monitor check is already in progress");
+      throw conflict("Issue monitor check is already in progress or waiting for the previous run to settle");
     }
 
     return dispatchClaimedIssueMonitor(claimed, {

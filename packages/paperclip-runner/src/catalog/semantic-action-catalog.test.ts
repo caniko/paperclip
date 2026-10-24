@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { createTaskAction } from "../protocol-actions/create-task.js";
 import { createProjectAction } from "../protocol-actions/create-project.js";
 import { updateSkillAction } from "../protocol-actions/update-skill.js";
+import { handoffCaseAction } from "../protocol-actions/handoff-case.js";
 
 import {
   PAPERCLIP_SEMANTIC_ACTION_CATALOG,
@@ -21,6 +22,63 @@ const packageRoot = resolve(
 );
 
 describe("semantic action catalog", () => {
+  it("compiles case handoff identity constraints in strict consumers and rejects malformed IDs", () => {
+    const ajv = new Ajv2020({ allErrors: true, allowUnionTypes: true, strict: true });
+    for (const schema of [handoffCaseAction.live.descriptor.inputSchema, paperclipSemanticAction("handoff_case")!.inputSchema]) {
+      const validate = ajv.compile(schema);
+      const input = handoffCaseAction.examples.call.input;
+      expect(validate(input), JSON.stringify(validate.errors)).toBe(true);
+      expect(validate({ ...input, case: { id: "case-id" } })).toBe(false);
+      expect(validate({ ...input, toAgentId: "agent-id" })).toBe(false);
+      expect(validate({ ...input, bindIssueId: "task-id" })).toBe(false);
+      expect(validate({ ...input, case: { create: { caseType: "work", title: "New case", projectId: null } }, workflow_document_text: "Implement, verify, then finish." })).toBe(true);
+      expect(validate({ ...input, case: { create: { caseType: "work", title: "New case", projectId: null } } })).toBe(false);
+      expect(validate({ ...input, case: { create: { caseType: "work", title: "New case", projectId: "project-id" } }, workflow_document_text: "Implement, then verify." })).toBe(false);
+    }
+  });
+  it("requires a workflow source for new cases and defers existing-case first-task checks to the service", () => {
+    const ajv = new Ajv2020({ allErrors: true, allowUnionTypes: true, strict: true });
+    for (const schema of [handoffCaseAction.live.descriptor.inputSchema, paperclipSemanticAction("handoff_case")!.inputSchema]) {
+      const validate = ajv.compile(schema);
+      const input = handoffCaseAction.examples.call.input;
+      const create = { ...input, case: { create: { caseType: "work", title: "New work" } } };
+      expect(validate(create)).toBe(false);
+      const workflowId = "00000000-0000-4000-8000-000000000004";
+      expect(validate({ ...create, workflowId })).toBe(true);
+      expect(validate({ ...create, workflowId: null })).toBe(false);
+      expect(validate({ ...create, workflowId, workflow_document_text: "Duplicate source" })).toBe(false);
+      expect(validate({ ...input, workflowId: null })).toBe(true);
+      expect(validate({ ...create, workflow_document_text: "Triage, implement, verify, done." })).toBe(true);
+      expect(validate({ ...create, bindIssueId: "00000000-0000-4000-8000-000000000003", workflow_document_text: "Triage, implement, verify, done." })).toBe(true);
+      expect(validate({ ...create, bindIssueId: "00000000-0000-4000-8000-000000000003" })).toBe(false);
+      // The service decides whether this existing case is still passive.
+      expect(validate({ ...input, workflow_document_text: "Triage, implement, verify, done." })).toBe(true);
+      for (const text of ["", " \t\n", "x".repeat(200001)]) expect(validate({ ...create, workflow_document_text: text })).toBe(false);
+      expect(validate({ ...create, workflow_document_text: "Verify the result.", initialDocuments: [{ key: "workflow", title: "Duplicate", body: "No" }] })).toBe(false);
+    }
+  });
+  it("advertises completion intent without accepting agent routing or bypassing completion", () => {
+    const ajv = new Ajv2020({ allErrors: true, allowUnionTypes: true, strict: true });
+    const done = { to: "done", idempotencyKey: "finish-case", case: { id: "00000000-0000-4000-8000-000000000001" },
+      instructions: "Saved final artifacts; finish the task through its existing completion gates.",
+      expectedHandoffVersion: 4, expectedIssueStatusVersion: 7 };
+    for (const schema of [handoffCaseAction.live.descriptor.inputSchema, paperclipSemanticAction("handoff_case")!.inputSchema]) {
+      const validate = ajv.compile(schema);
+      expect(validate(done), JSON.stringify(validate.errors)).toBe(true);
+      expect(validate({ ...done, phase: "done" }), JSON.stringify(validate.errors)).toBe(true);
+      const { expectedHandoffVersion: _caseVersion, ...withoutCaseVersion } = done;
+      const { expectedIssueStatusVersion: _issueVersion, ...withoutIssueVersion } = done;
+      for (const input of [withoutCaseVersion, withoutIssueVersion, { ...done, case: { id: "invalid" } },
+        { ...done, case: { create: { caseType: "work", title: "New work" } } },
+        { ...done, toAgentId: "00000000-0000-4000-8000-000000000002" },
+        { ...done, bindIssueId: "00000000-0000-4000-8000-000000000003" },
+        { ...done, phase: "verification" }, { ...done, status: "done" }, { ...done, initialDocuments: [] }, { ...done, workflow_document_text: "Already finished." }]) {
+        expect(validate(input), JSON.stringify(input)).toBe(false);
+      }
+    }
+    expect(handoffCaseAction.documentation.description).toContain("does not complete the task or yield execution");
+    expect(handoffCaseAction.documentation.description).toContain("call finish_task normally with truthful completion evidence");
+  });
   it("limits project repository URLs to HTTPS GitHub repository paths on both tool surfaces", () => {
     const ajv = new Ajv2020({ allErrors: true, allowUnionTypes: true, strict: true });
     for (const schema of [createProjectAction.live.descriptor.inputSchema, paperclipSemanticAction("create_project")!.inputSchema]) {
@@ -70,21 +128,9 @@ describe("semantic action catalog", () => {
       (action) => action.operationId,
     );
 
-    // The skill-update binding and four workspace actions extend the original 37.
-    expect(operationIds).toHaveLength(42);
-    expect(operationIds).toEqual([
-      "create_skill", "update_skill", "search_api", "call_api",
-      "get_task_context", "get_task_history", "list_documents", "read_document",
-      "list_document_revisions", "set_task_title", "report_progress", "answer_status_question",
-      "write_document", "request_human_input", "register_deliverable", "finish_task",
-      "block_task", "request_review", "list_agents", "hire_agent", "get_agent",
-      "search_tasks", "list_approvals", "get_approval", "get_approval_context",
-      "get_workspace_runtime", "control_workspace_service", "reassign_task",
-      "set_dependencies", "get_workspace", "list_workspaces", "select_workspace", "prepare_repository",
-      "list_projects", "list_project_repositories", "create_project",
-      "create_task", "request_approval", "decide_approval", "comment_on_approval",
-      "set_task_monitor", "schedule_wake",
-    ]);
+    // Upstream's 49 actions plus the fork's update_skill binding.
+    expect(operationIds).toHaveLength(50);
+    expect(operationIds).toContain("update_skill");
     expect(operationIds).toContain("set_task_monitor");
     expect(new Set(operationIds).size).toBe(operationIds.length);
     expect(operationIds).not.toContain("generic_api_request");

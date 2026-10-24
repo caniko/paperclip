@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import {
   activityLog,
   agents,
+  agentWakeupRequests,
   companySecretBindings,
   companySecrets,
   companySecretVersions,
@@ -580,6 +581,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
     await db.delete(companySecrets);
     await db.delete(userSecretDefinitions);
     await db.delete(issueThreadInteractions);
+    await db.delete(agentWakeupRequests);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(projects);
@@ -654,6 +656,54 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
       const testEvents = await db.select().from(toolCallEvents).where(eq(toolCallEvents.invocationId, testCall.invocationId));
       expect(testEvents.some(event => event.eventType === "call_failed")).toBe(true);
       expect(testEvents.some(event => event.eventType === "call_completed")).toBe(false);
+    } finally {
+      await remote.close();
+    }
+  });
+
+  it("returns a JSON-RPC reconciliation error instead of repeating an unverifiable legacy write", async () => {
+    const company = await createCompany(db);
+    const remote = await startFakeRemoteMcpServer(({ body }) => ({
+      body: { jsonrpc: "2.0", id: body?.id, result: { content: [{ type: "text", text: "saved" }] } },
+    }));
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, { url: remote.url });
+      const toolName = expectedConnectedToolName({ applicationKey: application.applicationKey,
+        connectionId: connection.id, toolName: catalogEntry.toolName });
+      const [profile] = await db.insert(toolProfiles).values({ companyId: company.id,
+        profileKey: `legacy-${randomUUID()}`, name: "Legacy write test", defaultAction: "deny" }).returning();
+      await db.insert(toolProfileEntries).values({ companyId: company.id, profileId: profile.id,
+        selectorType: "tool_name", effect: "include", toolName });
+      await db.insert(toolPolicies).values({ companyId: company.id, name: "Allow fixture writes",
+        policyType: "allow", selectors: { toolName } });
+      const gateway = createTestToolGatewayService(db);
+      const named = await gateway.createNamedGateway({ companyId: company.id,
+        body: { name: "Legacy write test", profileId: profile.id } });
+      const token = await gateway.createNamedGatewayToken({ companyId: company.id,
+        gatewayId: named.id, body: { name: "Test" } });
+      const app = createGatewayRouteApp(db, gateway);
+      const parameters = { key: "large-note", value: `${"x".repeat(500)}original` };
+      await request(app).post(named.endpointPath).set("authorization", `Bearer ${token.token}`)
+        .send({ jsonrpc: "2.0", id: "initial-write", method: "tools/call", params: { name: toolName, arguments: parameters } }).expect(200);
+      const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id));
+      expect(invocation.status).toBe("succeeded");
+      const oldHash = invocation.argumentsSummary!.sha256!;
+      const scope = { companyId: invocation.companyId, runId: invocation.runId, issueId: invocation.issueId,
+        applicationId: invocation.applicationId, connectionId: invocation.connectionId,
+        catalogEntryId: invocation.catalogEntryId, toolName: invocation.toolName, argumentsHash: oldHash };
+      const oldKey = `side_effect:${createHash("sha256").update(JSON.stringify(Object.fromEntries(
+        Object.entries(scope).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
+      ))).digest("hex")}`;
+      await db.update(toolInvocations).set({ argumentsHash: oldHash, idempotencyKey: oldKey })
+        .where(eq(toolInvocations.id, invocation.id));
+      const requestCount = remote.requests.length;
+      const replay = await request(app).post(named.endpointPath).set("authorization", `Bearer ${token.token}`)
+        .send({ jsonrpc: "2.0", id: "legacy-write", method: "tools/call", params: { name: toolName, arguments: parameters } }).expect(409);
+      expect(replay.body).toMatchObject({ jsonrpc: "2.0", id: "legacy-write", error: {
+        code: -32000, data: { reasonCode: "legacy_tool_idempotency_unverifiable", invocationId: invocation.id },
+      } });
+      expect(replay.body.error.message).toContain("Reconcile");
+      expect(remote.requests).toHaveLength(requestCount);
     } finally {
       await remote.close();
     }
@@ -1383,6 +1433,40 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
       agentId: agent.id,
       runId: run.id,
     });
+  });
+
+  it("fences an uncertain upstream mutation after fresh Retry while allowing independent reads", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { issue, run } = await createIssueAndRun(db, company.id, agent.id);
+    const remote = await createRemoteMcpTool(db, company.id);
+    await allowAllToolsForAgent(db, company.id, agent.id);
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+    const tool = (await gateway.listToolsForSession(session.token))
+      .find(item => item.connectionId === remote.connection.id)!;
+    const [source] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id,
+      issueId: issue.id, status: "failed", createdAt: new Date(Date.now() - 60_000) }).returning();
+    const intentId = randomUUID();
+    await db.insert(agentWakeupRequests).values({ id: intentId, companyId: company.id, agentId: agent.id,
+      runId: run.id, source: "on_demand", reason: "task_retry", status: "coalesced",
+      requestedByActorType: "user", requestedByActorId: "board",
+      payload: { issueId: issue.id, taskRetry: { schema: "paperclip.task-retry.v1",
+        generationId: intentId, sourceRunId: source.id, actorId: "board", strategy: "fresh_isolated_workspace" } } });
+    const [uncertain] = await db.insert(toolInvocations).values({ companyId: company.id,
+      issueId: issue.id, runId: source.id, agentId: agent.id, connectionId: remote.connection.id,
+      toolName: tool.name, riskLevel: "write", status: "timed_out", startedAt: new Date() }).returning();
+    const fetcher = vi.spyOn(globalThis, "fetch");
+    try {
+      await expect(gateway.executeTool({ sessionToken: session.token, tool: tool.name,
+        idempotencyKey: randomUUID(), parameters: { key: "new-key", value: "do not repeat" } }))
+        .rejects.toMatchObject({ status: 409, reasonCode: "recovery_effect_outcome_unresolved" });
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(await gateway.executeTool({ sessionToken: session.token, tool: "mcp-remote-fixture:add",
+        parameters: { a: 2, b: 3 } })).toMatchObject({ status: "completed", result: { content: "5" } });
+      const [retained] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, uncertain.id));
+      expect(retained.status).toBe("timed_out");
+    } finally { fetcher.mockRestore(); }
   });
 
   it("filters discovery, executes a remote HTTP fixture, and audits run and issue links", async () => {

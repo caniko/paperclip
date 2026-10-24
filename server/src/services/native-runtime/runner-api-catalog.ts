@@ -41,6 +41,8 @@ function words(text: string): string[] {
 }
 
 function dedicatedTools(method: string, path: string): string[] {
+  if (/\/companies\/\{[^}]+\}\/workflows$/.test(path)) return method === "GET" ? ["list_workflows"] : method === "POST" ? ["create_workflow"] : [];
+  if (/\/workflows\/\{[^}]+\}$/.test(path)) return method === "GET" ? ["read_workflow"] : method === "PATCH" ? ["update_workflow"] : [];
   if (/\/issues\/\{[^}]+\}\/title$/.test(path) && method === "PUT") return ["set_task_title"];
   if (/\/agents\/\{[^}]+\}\/instructions-bundle\/file$/.test(path)) return method === "GET" ? ["read_agent_instructions"] : method === "PUT" ? ["update_agent_instructions"] : [];
   if (/\/agents\/\{[^}]+\}\/instructions-bundle\/history$/.test(path) && method === "GET") return ["get_agent_instruction_history"];
@@ -53,6 +55,8 @@ function dedicatedTools(method: string, path: string): string[] {
   if (/\/project-repositories$/.test(path) && method === "GET") return ["list_project_repositories"];
   if (/\/issues\/\{[^}]+\}\/comments$/.test(path)) return method === "GET" ? ["get_task_history"] : ["report_progress"];
   if (/\/issues\/\{[^}]+\}\/documents/.test(path)) return method === "DELETE" ? [] : method === "GET" ? ["list_documents", "read_document", "list_document_revisions"] : ["write_document"];
+  if (/\/case-handoffs$/.test(path) && method === "POST") return ["handoff_case", "create_case"];
+  if (/\/cases\/\{[^}]+\}$/.test(path)) return method === "GET" ? ["read_case"] : method === "PATCH" ? ["update_case"] : [];
   if (/\/issues$/.test(path)) return method === "GET" ? ["search_tasks"] : ["create_task"];
   if (/\/issues\/\{[^}]+\}$/.test(path)) return method === "GET" ? ["get_task_context"] : ["reassign_task", "set_dependencies", "finish_task", "block_task", "request_review"];
   if (/\/agents$/.test(path) && method === "GET") return ["list_agents"];
@@ -110,7 +114,8 @@ export function buildRunnerApiCatalog(document: Json = buildOpenApiDocument()): 
         dedicatedToolGuidance: dedicatedTools(method, path).includes("hire_agent")
           ? "Prefer hire_agent for native teammate identity and persona fields. It fixes the reportsTo and source task context and inherits the caller's native runtime. Additional API fields use the route's existing agent permissions."
           : "Prefer an available dedicated tool for its supported fields. call_api supports the route's other operations and fields under the same agent permissions.",
-        allowedModes: method === "GET" || method === "HEAD" || taskTitleUpdate ? ["standard", "ask", "planning", "skill_test"]
+        allowedModes: method !== "GET" && (path.endsWith("/case-handoffs") || /\/handoffs\//.test(path)) ? ["standard"]
+          : method === "GET" || method === "HEAD" || taskTitleUpdate ? ["standard", "ask", "planning", "skill_test"]
           : conversationalConfirmation ? ["standard", "planning", "skill_test"] : ["standard", "skill_test"],
         ...(skillReference ? { skillReference } : {}),
       });

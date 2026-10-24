@@ -61,6 +61,9 @@ diagnostics/
 /.idea/
 /.agents/
 
+# Personal agent instructions
+/AGENTS.local.md
+
 # Doc maintenance cursor
 .doc-review-cursor
 
@@ -88,6 +91,9 @@ test-results/
 
 # Retained local lifecycle behavior measurements
 .lifecycle-baseline/
+# Copilot assets are generated from pinned platform packages during installation.
+/packages/paperclip-runner/provider-assets/
+/server/provider-assets/
 
 # Local native Runner test/session state
 .paperclip-runner-prp/

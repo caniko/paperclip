@@ -1,4 +1,5 @@
 import { isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
+import type { WorkspaceWorkers } from "../plugin-workspaces.js";
 import { createHeartbeatAgentStatus } from "./agent-status.js";
 import { preserveWorkspaceRestoreRecoveryMetadataSql } from "../legacy-workspace-restore-recovery.js";
 import { preserveCancelledNativeWorkspaces } from "../native-runtime/native-failed-workspace-recovery.js";
@@ -8,7 +9,8 @@ import {
   hasStopOnlyCleanup,
   settleStopOnlyCleanup,
 } from "../sandbox-stop-and-retain.js";
-import { recordNativeLocalProcessStop } from "../native-local-process-stop.js";
+import { discoverSettledNativeRunProcesses, recordNativeLocalProcessStop, retryPendingSettledNativeRunProcesses } from "../native-local-process-stop.js";
+import { pendingCaseHandoffForRun } from "./case-handoff-lifecycle.js";
 import {
   legacyControllerBootId,
   hasLiveLegacyController,
@@ -19,6 +21,7 @@ import { claimedAdapterType, runUsedConversationAdapter } from "../conversation-
 import { lockRunForAdapterSettlement, reconcileAdapterExecution } from "../adapter-execution-ownership.js";
 import { revokeHeartbeatRunGatewayTokens } from "./run-preparation.js";
 import { legacyExecutionNeedsReconciliationWithEvidence, terminalizeLegacyExecution } from "../legacy-execution-recovery.js";
+import { reconcileRetainedWorkspaces } from "../workspace-recovery.js";
 import { randomUUID } from "node:crypto";
 import {
   and,
@@ -103,6 +106,7 @@ export interface HeartbeatRecoveryDependencies extends Pick<HeartbeatRetryDepend
     Awaited<ReturnType<ReturnType<typeof createHeartbeatRunState>["getRun"]>> | null
   >;
   environmentRuntime: ReturnType<typeof environmentRuntimeService>;
+  pluginWorkerManager?: WorkspaceWorkers;
   environmentsSvc: Pick<ReturnType<typeof environmentService>, "getById" | "getLeaseById" | "releaseLease">;
   instructionCopies: Pick<ReturnType<typeof agentInstructionWorkingCopyService>, "recoverStopped" | "recoverCaptured" | "release">;
   runtimeEnv: Record<string, string | undefined>;
@@ -1002,11 +1006,13 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
   }
 
   async function recoverNativeRunsAfterRestart(now = new Date()) {
+    await reconcileRetainedWorkspaces(db, environmentRuntime, resumeRemoteStopComments);
     // A result committed before the old controller stopped outranks process
     // recovery. Finish its durable workspace/status suffix before deciding
     // whether any provider authority needs to be reopened.
     await reconcileNativeFinalizations(db, undefined, {
       environmentRuntime,
+      pluginWorkerManager: dependencies.pluginWorkerManager,
       onWorkspaceSettled: settleRecoveredNativeWorkspace,
     });
     await preserveCancelledNativeWorkspaces(db);
@@ -2020,6 +2026,8 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
     void cleanup.finally(() => activeRunExecutionPromises.delete(cleanup));
   }
 
+  let settledProcessesDiscovered = false;
+
   async function reapOrphanedRuns(opts?: { staleThresholdMs?: number }) {
     await preserveCancelledNativeWorkspaces(db);
     const staleThresholdMs = opts?.staleThresholdMs ?? 0;
@@ -2063,6 +2071,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
     // mode, never the current feature flag.
     await reconcileNativeFinalizations(db, undefined, {
       environmentRuntime,
+      pluginWorkerManager: dependencies.pluginWorkerManager,
       onWorkspaceSettled: settleRecoveredNativeWorkspace,
     }).catch((error) => {
       logger.warn(
@@ -2071,6 +2080,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
       );
     });
     scheduleRetainedNativeSessionCleanup();
+    await reconcileRetainedWorkspaces(db, environmentRuntime, resumeRemoteStopComments);
     await dispatchPendingNativeStatusWakeups().catch((error) => {
       logger.warn(
         { err: error },
@@ -2147,6 +2157,18 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         return cleared;
       });
       if (cleared) claimableNativeRunIds.add(cleared.id);
+    }
+
+    const executingRun = (runId: string) => activeRunExecutions.has(runId) || runningProcesses.has(runId);
+    if (!settledProcessesDiscovered) {
+      settledProcessesDiscovered = await discoverSettledNativeRunProcesses(db, { skip: executingRun }).then(() => true, (error) => {
+        logger.warn({ err: error }, "failed to discover settled native process identities");
+        return false;
+      });
+    } else {
+      await retryPendingSettledNativeRunProcesses(db, { skip: executingRun }).catch((error) => {
+        logger.warn({ err: error }, "failed to retry settled native process identity release");
+      });
     }
 
     // An explicit result-less retryable failure resumes on the original run.
@@ -2470,6 +2492,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         !revokedState.processPid &&
         !revokedState.processGroupId;
       const shouldRetry =
+        !await pendingCaseHandoffForRun(db, run.id, run.companyId) &&
         (run.processLossRetryCount ?? 0) < 1 &&
         ((tracksLegacyLocalChild &&
           (!!run.processPid || !!run.processGroupId)) ||

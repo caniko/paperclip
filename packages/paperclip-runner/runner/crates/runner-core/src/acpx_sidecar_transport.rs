@@ -302,6 +302,8 @@ impl AcpxSidecarTransport {
                 "PAPERCLIP_OBSERVABILITY_CODEX_CONFIG",
                 "OTEL_EXPORTER_OTLP_LOGS_TIMEOUT",
                 "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT",
+                "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+                "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
             ]);
         }
         let pi_keys = if agent == "pi" {
@@ -908,6 +910,7 @@ fn response_error_classification(error: &ResponseError) -> &'static str {
         "ACPX_TOOL_CALL_STALE" => return "provider_tool_call_retired",
         "AUTH_REQUIRED" => return "authentication_required",
         "COPILOT_AUTH_REQUIRED" => return "authentication_required",
+        "COPILOT_INSTALLATION_INVALID" => return "agent_installation_invalid",
         "COPILOT_POLICY_VIOLATION" => return "copilot_policy_violation",
         "COPILOT_DETACHED_WORK_UNSUPPORTED" => return "copilot_detached_work_unsupported",
         "COPILOT_ENTITLEMENT_DENIED" => return "provider_entitlement_denied",

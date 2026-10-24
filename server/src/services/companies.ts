@@ -1,8 +1,9 @@
+import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { isRunnerApiResponseAsset } from "./asset-content-access.js";
 import { deleteCompany } from "./company-deletion.js";
-import { createAgentLifecycle } from "./agent-lifecycle.js";
+import { fenceActiveCompanyAgentStopsInTransaction } from "./agent-lifecycle.js";
 import { publishAccountingActivities } from "./accounting-transaction.js";
-import { budgetServiceInTransaction, deliverBudgetEnforcement, type BudgetServiceHooks } from "./budgets.js";
+import { budgetServiceInTransaction, type BudgetServiceHooks } from "./budgets.js";
 import { and, count, eq, gte, inArray, isNull, lt, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -26,7 +27,6 @@ import {
   rekeyCompanyIssueIdentifiers,
 } from "./issue-prefix.js";
 import { environmentService } from "./environments.js";
-import { heartbeatService } from "./heartbeat.js";
 import { logActivity, type ActivityPublication } from "./activity-log.js";
 import { builtInAgentService } from "./built-in-agents.js";
 
@@ -46,27 +46,25 @@ const SYSTEM_COMPANY_ACTOR: CompanyActivityActor = {
   runId: null,
 };
 
-export function companyService(db: Db, budgetHooks: BudgetServiceHooks = {}, outerTransaction?: {
+export function companyService(db: Db, _budgetHooks: BudgetServiceHooks = {}, outerTransaction?: {
   db: Db;
   afterCommit: Array<() => Promise<void>>;
   publications: ActivityPublication[];
 }) {
   const environmentsSvc = environmentService(db);
-  const heartbeat = heartbeatService(db);
 
   type CompanyTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
   async function applyArchiveCascadeInTx(tx: CompanyTx, id: string) {
-    const pausedAgentRows = await tx.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, id), notInArray(agents.status, ["paused", "terminated", "pending_approval"])));
+    const [agentCount] = await tx.select({ value: count() }).from(agents).where(and(eq(agents.companyId, id), notInArray(agents.status, ["paused", "terminated", "pending_approval"])));
 
-    const activeRunIds = await tx
-      .select({ id: heartbeatRuns.id })
+    const [runCount] = await tx
+      .select({ value: count() })
       .from(heartbeatRuns)
       .where(and(
         eq(heartbeatRuns.companyId, id),
-        inArray(heartbeatRuns.status, ["queued", "running"]),
-      ))
-      .then((rows) => rows.map((row) => row.id));
+        inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+      ));
 
     await tx
       .update(agentWakeupRequests)
@@ -82,18 +80,16 @@ export function companyService(db: Db, budgetHooks: BudgetServiceHooks = {}, out
         isNull(agentWakeupRequests.runId),
       ));
 
-    return { agentsPaused: pausedAgentRows.length, activeRunIds };
+    return { agentsPauseRequested: agentCount.value, runsCancellationRequested: runCount.value };
   }
 
   async function finalizeArchive(
     id: string,
     actor: CompanyActivityActor,
-    cascade: { agentsPaused: number; activeRunIds: string[] },
+    cascade: { agentsPauseRequested: number; runsCancellationRequested: number },
   ) {
-    for (const runId of cascade.activeRunIds) {
-      await heartbeat.cancelRun(runId, "Cancelled because the company was archived");
-    }
-
+    // The committed company status blocks dispatch immediately. Lifecycle
+    // projection owns provider termination, including paused agents with work.
     await logActivity(db, {
       companyId: id,
       actorType: actor.actorType,
@@ -104,8 +100,8 @@ export function companyService(db: Db, budgetHooks: BudgetServiceHooks = {}, out
       entityType: "company",
       entityId: id,
       details: {
-        agentsPaused: cascade.agentsPaused,
-        runsCancelled: cascade.activeRunIds.length,
+        agentsPauseRequested: cascade.agentsPauseRequested,
+        runsCancellationRequested: cascade.runsCancellationRequested,
       },
     });
   }
@@ -305,14 +301,14 @@ export function companyService(db: Db, budgetHooks: BudgetServiceHooks = {}, out
     ) => {
       const budgetPublications: ActivityPublication[] = [];
       const result = await db.transaction(async (tx) => {
+        if (data.status !== undefined || data.budgetMonthlyCents !== undefined) {
+          await tx.select({ id: companies.id }).from(companies).where(eq(companies.id, id)).for("no key update");
+        }
         const existing = await getCompanyQuery(tx)
           .where(eq(companies.id, id))
           .then((rows) => rows[0] ?? null);
         if (!existing) return null;
 
-        if (data.budgetMonthlyCents !== undefined) {
-          await tx.select({ id: companies.id }).from(companies).where(eq(companies.id, id)).for("no key update");
-        }
         const { logoAssetId, ...companyPatch } = data;
         const willReactivate = existing.status !== "active" && companyPatch.status === "active";
         const willArchive = existing.status !== "archived" && companyPatch.status === "archived";
@@ -334,6 +330,10 @@ export function companyService(db: Db, budgetHooks: BudgetServiceHooks = {}, out
 
         const renamedPrefix = await resolveRenamedIssuePrefix(tx, id, companyPatch);
 
+        if (companyPatch.status !== undefined && companyPatch.status !== existing.status) {
+          await notifyDeliveryWork(tx, DELIVERY_QUEUES.skillSourceSync);
+          await notifyDeliveryWork(tx, DELIVERY_QUEUES.agentLifecycle, id);
+        }
         const updated = await tx
           .update(companies)
           .set({
@@ -373,6 +373,9 @@ export function companyService(db: Db, budgetHooks: BudgetServiceHooks = {}, out
         }
 
         const archiveCascade = willArchive ? await applyArchiveCascadeInTx(tx, id) : null;
+        if (companyPatch.status !== existing.status && (companyPatch.status === "paused" || companyPatch.status === "archived")) {
+          await fenceActiveCompanyAgentStopsInTransaction(tx as unknown as Db, id, companyPatch.status);
+        }
 
         if (logoAssetId === null) {
           await tx.delete(companyLogos).where(eq(companyLogos.companyId, id));
@@ -420,17 +423,19 @@ export function companyService(db: Db, budgetHooks: BudgetServiceHooks = {}, out
         };
       });
       if (!result) return null;
-      const publishAndReconcile = async () => {
-        const root = outerTransaction?.db ?? db;
-        // Notify only after the owning transaction commits, before finalization
-        // can throw and leave Cloud unaware of the committed archive boundary.
-        if (result.archiveCascade || result.unarchived) void notifyCloudOfPrimaryCompanyLifecycleChange(id);
-        await createAgentLifecycle(root).reconcilePolicyHolds(id);
+      const publishAfterCommit = async () => {
         publishAccountingActivities(id, budgetPublications);
-        if (data.budgetMonthlyCents !== undefined) await deliverBudgetEnforcement(root, budgetHooks, id);
+        // Post-commit, fire-and-forget, and BEFORE any finalization that
+        // could throw: a Cloud-pinned primary company that crossed the
+        // archived boundary (either direction) rings the harness so the
+        // stack itself can converge. A deployment transaction defers this
+        // until it commits.
+        if (result.archiveCascade || result.unarchived) {
+          void notifyCloudOfPrimaryCompanyLifecycleChange(id);
+        }
       };
-      if (outerTransaction) outerTransaction.afterCommit.push(publishAndReconcile);
-      else await publishAndReconcile();
+      if (outerTransaction) outerTransaction.afterCommit.push(publishAfterCommit);
+      else await publishAfterCommit();
       if (result.issuePrefixRederived) {
         await logActivity(db, {
           companyId: id,
@@ -473,12 +478,15 @@ export function companyService(db: Db, budgetHooks: BudgetServiceHooks = {}, out
           .select({ status: companies.status })
           .from(companies)
           .where(eq(companies.id, id))
+          .for("no key update")
           .then((rows) => rows[0] ?? null);
         if (!existing) return null;
 
         const wasAlreadyArchived = existing.status === "archived";
 
         if (!wasAlreadyArchived) {
+          await notifyDeliveryWork(tx, DELIVERY_QUEUES.skillSourceSync);
+          await notifyDeliveryWork(tx, DELIVERY_QUEUES.agentLifecycle, id);
           await tx
             .update(companies)
             .set({ status: "archived", updatedAt: new Date() })
@@ -486,6 +494,7 @@ export function companyService(db: Db, budgetHooks: BudgetServiceHooks = {}, out
         }
 
         const cascade = wasAlreadyArchived ? null : await applyArchiveCascadeInTx(tx, id);
+        if (!wasAlreadyArchived) await fenceActiveCompanyAgentStopsInTransaction(tx as unknown as Db, id, "archived");
 
         const row = await getCompanyQuery(tx)
           .where(eq(companies.id, id))
@@ -498,10 +507,10 @@ export function companyService(db: Db, budgetHooks: BudgetServiceHooks = {}, out
         };
       });
       if (!result) return null;
+
       // Same doorbell rule as update(): the archive is committed, so ring
       // before finalization, which can throw without undoing it.
       if (result.cascade) void notifyCloudOfPrimaryCompanyLifecycleChange(id);
-      await createAgentLifecycle(db).reconcilePolicyHolds(id);
       if (result.cascade) await finalizeArchive(id, actor, result.cascade);
 
       return result.company;

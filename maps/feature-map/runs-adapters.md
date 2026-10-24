@@ -6,16 +6,18 @@ navigation: {"section":"Agents and reusable capabilities","sectionOrder":30,"ord
 
 Operators choose an agent harness and model account, inspect execution history and transcripts, and distinguish a working configuration from a successful task result.
 
+Feature ID: `runs-adapters`.
+
 Implementation: [adapter manager](../../ui/src/pages/AdapterManager.tsx), [run host](../../ui/src/pages/AgentDetail.tsx), [configuration](../../ui/src/components/AgentConfigForm.tsx).
 
 Agent access: [companion](../agent-access-map/runs-adapters.md).
 
 ## Sub-features
 
-- `availability`: discover installed adapters and available models/accounts.
-- `validation`: test an adapter in the selected execution environment and surface authentication failures.
-- `runs`: inspect run status, events, output, costs, and the source task.
-- `session`: preserve or reset execution context through supported lifecycle actions.
+- `availability`: `runs-adapters/availability` — discover installed adapters and available models/accounts.
+- `validation`: `runs-adapters/validation` — test an adapter in the selected execution environment and surface authentication failures.
+- `runs`: `runs-adapters/runs` — inspect run status, events, output, costs, and the source task.
+- `session`: `runs-adapters/session` — preserve or reset execution context through supported lifecycle actions.
 
 ## How to get to it (user POV)
 
@@ -26,6 +28,9 @@ Open an agent’s model/adapter configuration or the instance adapter settings p
 ### `run-history`
 
 Open an agent run at `/agents/:agentId/runs/:runId` from the agent or task activity.
+The agent header has one Run now action. Administrators can enable
+Capture raw provider traces under the agent configuration’s Debugging section
+for future runs. The header shows Raw tracing on while that setting is enabled.
 
 For latency diagnosis with an operator OTLP endpoint, search the hashed run ID
 without restricting the root span name. Compare workspace preparation with its
@@ -41,6 +46,25 @@ turn; do not count a nested discovery interval twice.
 
 Preconditions: follow the [baseline](./README.md#before-driving-a-journey). Record adapter, model, account, native/legacy runtime, and environment. Capabilities vary; one harness result is not a matrix-wide qualification.
 
+### `session`
+
+For `runs-adapters/session`, complete a task in a disposable warm sandbox and
+retain its saved workspace file. Let the warm session close normally and verify
+that the retained lease has a complete, lease-bound harness backup before
+injecting sandbox loss. Removing a still-warm sandbox before that checkpoint
+exercises the separate acquisition safety gate, which must remain blocked.
+Use a board-authorized session reset, then remove only that fixture's inactive
+provider sandbox. Send a follow-up that
+reads the retained file and appends one new line. Verify a replacement sandbox,
+a new provider session, the exact file contents, successful finalization and no
+stranded task lock. Send another follow-up and verify ordinary session reuse.
+
+Repeat without resetting the session: its replacement must restore verified
+history or remain blocked. Missing backup state must not silently start an
+existing session again. The [executor controls](../../server/src/services/native-runtime/native-session-executor.test.ts)
+cover the bootstrap identity, activity and atomic directory claim; those
+controls do not establish live provider acceptance.
+
 ### `adapter-setup`
 
 Automated: [adapter validation routes](../../server/src/__tests__/agent-adapter-validation-routes.test.ts) and [model refresh](../../server/src/__tests__/adapter-model-refresh-routes.test.ts) cover server behavior.
@@ -49,7 +73,21 @@ Claude native setup uses the existing Anthropic API-key or subscription connecti
 flow. Record the selected account separately from successful execution; unavailable
 models/authentication and unsupported Legacy-only options must fail visibly.
 
+Claude CLI tests and runs also prepare a compatible private executable when a
+managed sandbox image's default CLI is too old for the selected model. Verify
+the command used for the hello test and task, reuse of a compatible private
+installation, and a blocking failure when installation cannot establish a valid
+version. Local, SSH and explicit custom commands retain operator management.
+Cloud onboarding must not offer shell commands the customer cannot run.
+
 Manual: Select the intended adapter and account, refresh model choices, and run its environment test. Save, reload, then execute a small task. Repeat with a deliberately unavailable account and verify the failure remains visible.
+
+For Legacy Codex, assign a service secret such as `SLACK_BOT_TOKEN` through agent
+configuration and run a task that checks its presence without printing its value.
+Check both ACP and CLI execution. Remove the binding and repeat on the next run.
+The assigned secret must reach shell tools; an unassigned host token and Codex's
+own login keys must remain unavailable. Verify the same delivery without an
+agent identity. Shell-policy metadata must contain names rather than values.
 
 Choose Codex as the harness; the UI displays its name/icon for both runners.
 Advanced identifies the automatic default and offers Paperclip Runner or Legacy.
@@ -59,6 +97,26 @@ and [runtime prerequisites](../../packages/paperclip-runner/README.md) define th
 platform/libc boundary. Windows and Alpine/musl remain Legacy. Claude follows
 its qualified rollout described above. Disabled adapters, external overrides, and selected-target
 qualification also affect availability.
+
+Choose OpenCode with the native-runner experimental flag off on a qualified
+macOS or GNU/Linux x64 target. Linux ARM64 must retain Legacy because its pinned
+OpenCode runtime is not qualified. Advanced should show Paperclip Runner as the
+automatic default on qualified targets. Save an inactive draft without a model,
+resume it, select an explicit `provider/model`,
+test, finish setup, and reload. Verify the saved provider is `opencode`. Repeat
+with explicit Legacy and an existing Legacy agent; neither should migrate on an
+unrelated edit. Check that saved native permission/lifecycle choices survive
+resuming setup. Custom commands, arguments, variants, and inherited permissions
+must give Legacy remediation when native is selected. A live task with the
+selected account is separate proof from these setup and persistence controls.
+Repeat with Pi on macOS or GNU/Linux x64 after explicit operator setup of the
+pinned runtime (`paperclipai runtime setup pi`). Linux ARM64 retains Legacy.
+Resume an inactive model-free draft, connect an account, choose a `provider/model`,
+and finish setup with the generic native flag off. Verify Pi branding and native
+ACPX Pi execution by completing a simple assigned task. Preserve saved native
+thinking/permission/lifecycle settings on resume and unrelated edits. Native
+thinking supports `off`, `low`, `high`, `max`; legacy aliases must give remediation,
+and returning to Legacy must reject settings it cannot honor.
 On a fresh forced-Kubernetes instance without an environment row, inspect discovery
 and create with automatic selection. Both must retain Legacy without provisioning;
 an explicit Paperclip request must give target-qualification guidance. Begin the

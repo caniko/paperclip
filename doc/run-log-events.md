@@ -13,6 +13,37 @@ SHA-256 digest of the complete canonical wire payload. Redacted display content
 does not define replay identity. A changed replay is rejected, and the adapter
 requests Stop before releasing execution ownership. These receipts stay in the
 instance database.
+## Startup reuse evidence
+
+`run.startup.reuse` uses schema `paperclip.startup-reuse.v1`. Each receipt names
+one layer: `environment` (the lease), `workspace`, `runner`, `provider_process`,
+or `provider_session`. Its state is `reused`, `fresh`, `unknown`, or
+`not_applicable`. Reasons use a closed set: `verified_reuse`, `created`,
+`replacement`, `not_found`, `expired`, `identity_mismatch`, `resume_failed`,
+`configuration_changed`, `tools_changed`, `workspace_changed`, `cache_miss`,
+`not_applicable`, and `evidence_missing`. No paths, identifiers, configuration
+values, or exception messages enter these fields.
+
+Provider-process receipts carry a cumulative `providerLaunchCount` for the run.
+`null` means unobserved; zero requires a physical launch observer. Direct ACPX
+processes count initial launches and respawns, including launches during retries.
+On the remote process-session bridge, ACPX observes the host relay rather than
+the sandbox provider. Provider-process reuse and launch counts stay unknown on
+that transport. Native Runner session events establish session continuity, but
+do not establish provider-process reuse or its launch count. Those values stay
+unknown without physical evidence. The final ACPX receipt does not wait for
+persistence, so a stalled diagnostic sink cannot hold the staging lease.
+The existing successful `runner.process.launch` performance receipt establishes
+a fresh Runner process, independently of provider-session continuity.
+
+The Product E2E result stores `startupReuse` by run, and its dashboard displays
+each layer, its reason, and the launch count. `warm` requires all applicable
+layers to be reused and zero observed provider launches. `cold` requires all
+applicable layers to be fresh. Some reuse with other fresh or missing evidence
+is `partial_reuse`; otherwise the label is `unknown`. Fresh decisions dominate
+later reuse receipts within a run. Legacy runs without receipts retain unknown
+layers and a null launch count. Session IDs and follow-up turns never establish
+warmth. These events stay in the local run log; they add no first-party Telemetry.
 
 ## Ordinary event persistence
 
@@ -23,6 +54,21 @@ also rolls back the sequence allocation. The returned row uses the existing
 column decoders, including the lossless payload codec. Callers still wait for
 the durable write before they publish or acknowledge the event. Native-source
 replay and retry-exhaustion deduplication retain their existing transaction path.
+
+## Legacy case handoff cleanup
+
+`legacy.case_handoff_cleanup_intent` records local cleanup ownership before
+dispatch, then binds it atomically to the observed process identity on spawn.
+It includes the host, controller/run generation, PID/group/start identity, and
+owned scratch descriptor or explicit `null`. It does not prove termination.
+`legacy.case_handoff_cleanup_verified` records the later stop proof before
+scratch removal. Restart recovery rechecks process, controller, workspace and
+ownership gates before completing cleanup and releasing the handoff.
+These controller receipts are cleanup bookkeeping, not evidence of agent task
+progress, and are excluded from run-liveness action counts.
+The controller authors both events on the system stream. Adapter ingestion
+rejects the reserved `legacy.case_handoff_` namespace. These events stay in the
+instance run log and add no first-party Telemetry or OpenTelemetry export.
 
 ## Provider-pack preparation timing
 

@@ -161,6 +161,13 @@ export const INSTANCE_FEATURE_CATALOG: Record<InstanceFeatureKey, FeatureCatalog
     cloudDefault: false,
     selfHostedDefault: false,
   },
+  enablePaperclipNotebook: {
+    title: "Paperclip Notebook",
+    description: "Allow Paperclip Notebook connections and publishing through an explicitly enabled instance rollout.",
+    tier: "managed",
+    cloudDefault: false,
+    selfHostedDefault: false,
+  },
   enableMcpAggregators: {
     title: "MCP aggregators (compatibility)",
     description: "Deprecated compatibility key. MCP aggregators are always enabled; stored and managed values are ignored.",
@@ -188,6 +195,14 @@ export const INSTANCE_FEATURE_CATALOG: Record<InstanceFeatureKey, FeatureCatalog
     title: "Combined Inbox + Task List",
     description:
       "Inbox becomes a set of views inside Tasks: one Tasks row in the nav carries the unread badge, and a Views menu reaches every inbox and task view.",
+    tier: "managed",
+    cloudDefault: false,
+    selfHostedDefault: false,
+  },
+  enableArtifactsV1: {
+    title: "Artifacts V1",
+    description:
+      "The artifact presentation from the artifact directions lab: paper stacks and tiles on the Artifacts page, compact rows in the panel's Artifacts tab, and grouped rows in the task thread.",
     tier: "managed",
     cloudDefault: false,
     selfHostedDefault: false,
@@ -281,7 +296,7 @@ export const INSTANCE_FEATURE_CATALOG: Record<InstanceFeatureKey, FeatureCatalog
   enableFastResponses: {
     title: "Experimental fast responses",
     description:
-      "Show Connections in company settings and allow short acknowledgements while agents begin work.",
+      "Allow short acknowledgements while agents begin work. Configure them in Settings → Connections.",
     tier: "managed",
     cloudDefault: false,
     selfHostedDefault: false,

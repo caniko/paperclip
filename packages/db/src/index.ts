@@ -3,6 +3,8 @@ export {
   acquireDeploymentLease,
   assertDeploymentSchemaCompatible,
   withDedicatedDbConnection,
+  livenessDb,
+  closeLivenessDb,
   closeRegisteredClients,
   getPostgresDataDirectory,
   ensurePostgresDatabase,
