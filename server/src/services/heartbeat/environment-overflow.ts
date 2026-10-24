@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { and, count, desc, eq, inArray, or, sql } from "drizzle-orm";
 import { environmentLeases, type Db } from "@paperclipai/db";
 import type { Environment, EnvironmentCapacity } from "@paperclipai/shared";
@@ -14,10 +14,24 @@ export interface EnvironmentOverflowDeps {
   admit(command: string[]): Promise<boolean>;
 }
 
-/** Exit 0 admits; a nonzero exit, spawn error or timeout refuses. */
+/**
+ * Exit 0 admits; a nonzero exit, spawn error or timeout refuses. The probe runs
+ * in its own process group, which is killed as a whole on timeout so no child
+ * it started outlives the check.
+ */
 export function runAdmissionCommand(command: string[], timeoutMs = ADMISSION_TIMEOUT_MS): Promise<boolean> {
   return new Promise((resolve) => {
-    execFile(command[0]!, command.slice(1), { timeout: timeoutMs, killSignal: "SIGKILL" }, (error) => resolve(!error));
+    const child = spawn(command[0]!, command.slice(1), { detached: true, stdio: "ignore" });
+    const timer = setTimeout(() => {
+      try { process.kill(-child.pid!, "SIGKILL"); } catch { /* group already gone */ }
+    }, timeoutMs);
+    child.once("error", () => { clearTimeout(timer); resolve(false); });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      // The leader can exit before the timer fires while its children run on.
+      try { process.kill(-child.pid!, "SIGKILL"); } catch { /* none left */ }
+      resolve(code === 0);
+    });
   });
 }
 
@@ -26,12 +40,13 @@ export function runAdmissionCommand(command: string[], timeoutMs = ADMISSION_TIM
  * capacity. A candidate that already hosted this run or issue session is tried
  * first so provider sessions keep resuming on their host; when it can no longer
  * admit, the session config fingerprint changes and the next host starts fresh.
- * With no eligible candidate the primary is kept and the run waits there as before.
+ * Returns null when no candidate admits the run, so the caller defers it. The
+ * slot count here only steers selection; the lease insert enforces the cap.
  */
 export async function selectOverflowEnvironmentId(input: {
   primaryEnvironmentId: string;
   fallbackEnvironmentIds: string[];
-}, deps: EnvironmentOverflowDeps): Promise<string> {
+}, deps: EnvironmentOverflowDeps): Promise<string | null> {
   const candidateIds = [...new Set([input.primaryEnvironmentId, ...input.fallbackEnvironmentIds])];
   if (candidateIds.length === 1) return input.primaryEnvironmentId;
   const pinned = await deps.findAffinityEnvironmentId(candidateIds);
@@ -45,7 +60,7 @@ export async function selectOverflowEnvironmentId(input: {
     if (capacity.admissionCommand?.length && !(await deps.admit(capacity.admissionCommand))) continue;
     return id;
   }
-  return input.primaryEnvironmentId;
+  return null;
 }
 
 export function environmentOverflowDeps(db: Db, input: {
