@@ -1,4 +1,7 @@
 import type { Environment } from "@paperclipai/shared";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { runAdmissionCommand, selectOverflowEnvironmentId, type EnvironmentOverflowDeps } from "./environment-overflow.js";
 
@@ -27,10 +30,10 @@ describe("environment overflow selection", () => {
     expect(await select(deps([env("local", { maxConcurrentRuns: 1 }), env("nomad")], { local: 1 }))).toBe("nomad");
   });
 
-  it("keeps the primary when every fallback refuses admission", async () => {
+  it("admits no candidate when the primary is full and every fallback refuses", async () => {
     const admit = vi.fn(async () => false);
     const d = deps([env("local", { maxConcurrentRuns: 1 }), env("nomad", { admissionCommand: ["probe"] })], { local: 1 }, { admit });
-    expect(await select(d)).toBe("local");
+    expect(await select(d)).toBeNull();
     expect(admit).toHaveBeenCalledWith(["probe"]);
   });
 
@@ -58,5 +61,13 @@ describe("environment overflow selection", () => {
     expect(await runAdmissionCommand(["sh", "-c", "exit 3"])).toBe(false);
     expect(await runAdmissionCommand(["/nonexistent/paperclip-probe"])).toBe(false);
     expect(await runAdmissionCommand(["sh", "-c", "sleep 5"], 100)).toBe(false);
+  });
+
+  it("kills the probe's whole process group on timeout", async () => {
+    const pidFile = join(mkdtempSync(join(tmpdir(), "admission-probe-")), "pid");
+    expect(await runAdmissionCommand(["sh", "-c", `sleep 60 & echo $! > ${pidFile}; wait`], 300)).toBe(false);
+    const grandchild = Number(readFileSync(pidFile, "utf8"));
+    const alive = () => { try { process.kill(grandchild, 0); return true; } catch { return false; } };
+    await vi.waitFor(() => expect(alive()).toBe(false), { timeout: 5_000 });
   });
 });
