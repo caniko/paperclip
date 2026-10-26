@@ -7,9 +7,11 @@ import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 
 // These adapters accept a conversation turn. Retrying a process or webhook can
 // replay the action itself, so those adapters retain their recovery contract.
+// t3code_local is absent like the gateways: a lost or unverified T3 Code turn
+// may still be running there, so it is held for reconciliation instead.
 export const CONVERSATION_ADAPTER_TYPES = [
   "claude_local", "codex_local", "cursor", "gemini_local", "opencode_local",
-  "pi_local", "grok_local", "kimi_local", "hermes_local", "t3code_local",
+  "pi_local", "grok_local", "kimi_local", "hermes_local",
 ] as const;
 
 export function isConversationAdapter(adapterType: string): boolean {
