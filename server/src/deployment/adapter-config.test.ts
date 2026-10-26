@@ -47,6 +47,20 @@ describe("native declaration adapter contracts", () => {
     }, { "env.CLAUDE_CODE_OAUTH_TOKEN": "claude-oauth" })).not.toThrow();
   });
 
+  it("accepts Codex's CLI engine with an explicit approvals-and-sandbox choice", () => {
+    expect(() => validateDeclaredAdapterConfig("codex_local", {
+      engine: "cli", command: "codex", model: "gpt-6.1-sol", modelReasoningEffort: "high",
+      dangerouslyBypassApprovalsAndSandbox: false, timeoutSec: 900, graceSec: 20,
+    }, {})).not.toThrow();
+  });
+
+  it("accepts T3 Code threads with provider and model together", () => {
+    expect(() => validateDeclaredAdapterConfig("t3code_local", {
+      command: "t3", provider: "claudeAgent", model: "claude-opus-5-5", timeoutSec: 900, graceSec: 20,
+    }, {})).not.toThrow();
+    expect(() => validateDeclaredAdapterConfig("t3code_local", { command: "t3" }, {})).not.toThrow();
+  });
+
   it("accepts structured HTTP and Hermes payloads without using form field types", () => {
     expect(() => validateDeclaredAdapterConfig("http", {
       url: "https://worker.example.test/invoke", headers: { Accept: "application/json" },
@@ -107,6 +121,16 @@ describe("native declaration adapter contracts", () => {
     ["claude_local", { engine: "cli", dangerouslySkipPermissions: false }, { apiKey: "provider" }],
     ["claude_local", { engine: "cli", dangerouslySkipPermissions: false }, { "env.PAPERCLIP_API_KEY": "provider" }],
     ["claude_local", { engine: "cli", dangerouslySkipPermissions: false, env: { CLAUDE_CODE_OAUTH_TOKEN: "x" } }, { "env.CLAUDE_CODE_OAUTH_TOKEN": "claude-oauth" }],
+    ["codex_local", { dangerouslyBypassApprovalsAndSandbox: false }, {}],
+    ["codex_local", { engine: "acp", dangerouslyBypassApprovalsAndSandbox: false }, {}],
+    ["codex_local", { engine: "cli" }, {}],
+    ["codex_local", { engine: "cli", dangerouslyBypassApprovalsAndSandbox: false, networkScope: "open" }, {}],
+    ["codex_local", { engine: "cli", dangerouslyBypassApprovalsAndSandbox: false, env: { OPENAI_API_KEY: "inline" } }, {}],
+    ["codex_local", { engine: "cli", dangerouslyBypassApprovalsAndSandbox: false }, { "env.OPENAI_API_KEY": "provider" }],
+    ["t3code_local", { provider: "claudeAgent" }, {}],
+    ["t3code_local", { model: "claude-opus-5-5" }, {}],
+    ["t3code_local", { command: "t3", worktree: "main" }, {}],
+    ["t3code_local", { command: "t3" }, { "env.ANTHROPIC_API_KEY": "provider" }],
     ["invented_remote", {}, {}],
   ] as const)("rejects unsupported, malformed, inline-secret or conflicting %s configuration", (type, config, credentials) => {
     expect(() => validateDeclaredAdapterConfig(type, config, credentials)).toThrow();

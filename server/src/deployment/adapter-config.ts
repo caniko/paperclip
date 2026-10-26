@@ -60,6 +60,26 @@ const schemas: Record<string, z.ZodType> = {
     instructionsFilePath: text.optional(), promptTemplate: z.string().optional(),
     bootstrapPromptTemplate: z.string().optional(),
   }).strict(),
+  // Codex through its CLI. The ACP engine, the sandbox/network/filesystem
+  // scopes and managed AI routing stay closed until audited; declarations must
+  // make the approvals-and-sandbox bypass choice explicit.
+  codex_local: z.object({
+    engine: z.literal("cli"),
+    dangerouslyBypassApprovalsAndSandbox: z.boolean(),
+    command: text.optional(), model: text.optional(), modelReasoningEffort: text.optional(),
+    cwd: text.optional(), extraArgs: z.array(z.string()).optional(),
+    env: env.optional(), timeoutSec: duration.optional(), graceSec: duration.optional(),
+    instructionsFilePath: text.optional(), promptTemplate: z.string().optional(),
+    bootstrapPromptTemplate: z.string().optional(),
+  }).strict(),
+  // T3 Code threads through the host-local `t3` CLI. The agent runs in the
+  // T3 Code server's provider, so the env configures only the `t3` client.
+  t3code_local: z.object({
+    command: text.optional(), provider: text.optional(), model: text.optional(), cwd: text.optional(),
+    env: env.optional(), timeoutSec: duration.optional(), graceSec: duration.optional(),
+    instructionsFilePath: text.optional(), promptTemplate: z.string().optional(),
+    bootstrapPromptTemplate: z.string().optional(),
+  }).strict().refine(config => (config.provider === undefined) === (config.model === undefined)),
   hermes_gateway: z.object({
     apiBaseUrl: url, paperclipApiUrl: url.optional(),
     waitForJobs: z.boolean().optional(),
