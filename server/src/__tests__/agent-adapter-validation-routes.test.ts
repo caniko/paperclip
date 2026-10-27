@@ -762,6 +762,14 @@ describe("agent routes adapter validation", () => {
     expect(mockAgentService.create).not.toHaveBeenCalled();
   });
 
+  it.each([{ provider: "claudeAgent" }, { model: "claude-opus-5-5" }])("rejects a one-sided T3 Code provider/model %j", async (adapterConfig) => {
+    const app = await createApp();
+    const response = await requestApp(app, baseUrl => request(baseUrl).post("/api/companies/company-1/agents").send({ name: "T3", adapterType: "t3code_local", adapterConfig }));
+    expect(response.status, JSON.stringify(response.body)).toBe(422);
+    expect(response.body.error).toContain("provider and model together");
+    expect(mockAgentService.create).not.toHaveBeenCalled();
+  });
+
   it("keeps other native provider selection behind its existing flag", async () => {
     const app = await createApp();
     const response = await requestApp(app, baseUrl => request(baseUrl).post("/api/companies/company-1/agents").send({ name: "Native OpenCode", adapterType: "paperclip_runner", adapterConfig: { provider: "opencode", model: "openrouter/deepseek/deepseek-v4-flash-0731" } }));
