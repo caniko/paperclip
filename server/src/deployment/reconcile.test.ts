@@ -16,7 +16,7 @@ import { projectWorkspaces, environments } from "@paperclipai/db";
 import { resolveEnvironmentDriverConfigForRuntime } from "../services/environment-config.js";
 import { environmentService } from "../services/environments.js";
 import { projectService } from "../services/projects.js";
-import { budgetPolicies, resourceLifecycleEvents } from "@paperclipai/db";
+import { resourceLifecycleEvents } from "@paperclipai/db";
 import { budgetService } from "../services/budgets.js";
 import * as liveEvents from "../services/live-events.js";
 

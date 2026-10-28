@@ -5629,14 +5629,6 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       if (!this.options.prepareLaunch && provider === "codex") {
         // These controller-owned, token-free paths belong to the new run.
         // Keep the durable provider profile and thread identity unchanged.
-        const providerConfig = record(runAttachTemplate.provider);
-        if (providerConfig.commandEnvironment != null) {
-          providerConfig.driver = "codex_app_server_command_environment_v2";
-          providerConfig.instructionWorkingCopyRoot = codexCommandEnvironment(
-            this.options.environment ?? {},
-            runtimeContext?.instructions.workingCopy?.rootPath,
-          ).AGENT_HOME ?? null;
-        }
         const recordedCommand = record(runAttachTemplate.provider).command;
         const providerConfig = record(runAttachTemplate.provider);
         if (providerConfig.commandEnvironment != null) {
@@ -5652,13 +5644,6 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
             disableWebSearch: this.options.disableCodexWebSearch,
             environment: this.options.environment,
             codexHome,
-            persistedCommandEnvironment: record(providerConfig.commandEnvironment),
-            // Older profiles retain their explicit argv values. Moving those
-            // values to a different channel would change protected launch args.
-            commandEnvironmentTransport:
-              record(runAttachTemplate.provider).commandEnvironment == null
-                ? "argv"
-                : "thread",
             workingDirectory: this.options.resumeWorkingDirectory,
             runtimeStateRoot: this.options.runnerFilesystemRoot ?? this.#root,
             codexCommand: typeof recordedCommand === "string" ? recordedCommand : this.options.codexCommand,
