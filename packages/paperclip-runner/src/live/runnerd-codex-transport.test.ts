@@ -2515,8 +2515,7 @@ it("trusts a preconfigured workspace through launch flags without editing the us
     codexHome: "/home/executor/.codex", workingDirectory: "/work/task", commandEnvironmentTransport: "argv",
   });
   expect(args.join("\n")).toContain('projects={"/work/task"={trust_level="trusted"}}');
-  expect(args.join("\n")).toContain('shell_environment_policy.include_only=["HOME"]');
-  expect(args.join("\n")).not.toContain("shell_environment_policy.set=");
+  expect(args.join("\n")).toContain('HOME="/home/executor"');
   expect(args.join("\n")).not.toContain('"/home/executor"="none"');
 });
 
