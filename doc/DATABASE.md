@@ -1177,7 +1177,7 @@ stored migration hash against the installed SQL files. Unknown hashes refuse
 startup without changing the journal. Use the matching application or a verified
 compatible backup; renumbering a fork's applied migrations is not an upgrade.
 
-Migration `0398_striped_kate_bishop.sql` adds the `deployment_resources` ownership
+Migration `0400_easy_chameleon.sql` adds the `deployment_resources` ownership
 ledger and guards owned resource fields and secret versions. Resource identities
 use owner, kind, and key; no cascading foreign key can silently erase ownership.
 Operational pauses and spending remain mutable. The reconciler uses a
