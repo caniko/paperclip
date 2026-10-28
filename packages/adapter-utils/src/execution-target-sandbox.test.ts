@@ -78,7 +78,6 @@ import {
 } from "./duplex-observability.js";
 
 const execFileAsync = promisify(execFile);
-// Keep shell lookup independent of the remote PATH values supplied by tests.
 const localToolPath = process.env.PATH;
 
 type RecordedSpan = { name: string; parentName: string | null; ended: boolean };
@@ -589,8 +588,6 @@ describe("sandbox adapter execution targets", () => {
       vi.stubEnv("PATH", `${controllerBin}:${localToolPath}`);
       const hostProbe = await execFileAsync("sh", ["-c", `command -v ${controllerOnly}`]);
       expect(hostProbe.stdout.trim()).toBe(path.join(controllerBin, controllerOnly));
-      // Bridge staging, queue I/O, and the background launcher need only these
-      // tools. Do not make the rest of the controller's toolchain visible.
       const sandboxNativePath = path.join(rootDir, "sandbox-tools");
       await mkdir(sandboxNativePath);
       for (const tool of ["sh", "bash", "mkdir", "rm", "mv", "cat", "base64", "sleep", "nohup", "basename", "head", "wc"]) {
