@@ -49,7 +49,6 @@ import type {
   CodexTransportProcessInfo,
 } from "../drivers/codex/app-server-transport.js";
 import { createSanitizedCodexEnvironment } from "../drivers/codex/app-server-transport.js";
-import { codexCommandEnvironment } from "../drivers/codex/codex-security-config.js";
 import {
   CodexAppServerDriver,
   codexSemanticToolSpecs,
@@ -2030,9 +2029,6 @@ function commandDigest(value: unknown): string {
   return `sha256:${createHash("sha256").update(durableRecoveryInternals.canonicalJson(value)).digest("hex")}`;
 }
 
-// Warm-recovery admission reads this inside the runner's post-auth welcome
-// window. Rehash only when the file identity changes, so a replaced binary is
-// still detected without blocking the event loop on every admission.
 const runnerArtifactDigests = new Map<string, { file: string; digest: string }>();
 
 function approvedRunnerArtifact(runnerBinaryPath: string): {
@@ -5632,14 +5628,6 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       if (!this.options.prepareLaunch && provider === "codex") {
         // These controller-owned, token-free paths belong to the new run.
         // Keep the durable provider profile and thread identity unchanged.
-        const providerConfig = record(runAttachTemplate.provider);
-        if (providerConfig.commandEnvironment != null) {
-          providerConfig.driver = "codex_app_server_command_environment_v2";
-          providerConfig.instructionWorkingCopyRoot = codexCommandEnvironment(
-            this.options.environment ?? {},
-            runtimeContext?.instructions.workingCopy?.rootPath,
-          ).AGENT_HOME ?? null;
-        }
         const recordedCommand = record(runAttachTemplate.provider).command;
         runAttachTemplate.runtimeLaunchArgs =
           createRunnerdCodexAppServerArgs({
@@ -5647,13 +5635,6 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
             disableWebSearch: this.options.disableCodexWebSearch,
             environment: this.options.environment,
             codexHome,
-            persistedCommandEnvironment: record(providerConfig.commandEnvironment),
-            // Older profiles retain their explicit argv values. Moving those
-            // values to a different channel would change protected launch args.
-            commandEnvironmentTransport:
-              record(runAttachTemplate.provider).commandEnvironment == null
-                ? "argv"
-                : "thread",
             workingDirectory: this.options.resumeWorkingDirectory,
             runtimeStateRoot: this.options.runnerFilesystemRoot ?? this.#root,
             codexCommand: typeof recordedCommand === "string" ? recordedCommand : this.options.codexCommand,
@@ -7460,17 +7441,13 @@ export async function probeNativeRunnerEnvironment(options: {
   let completed = false;
   let effectiveModel: string | undefined;
   let failure: unknown;
-  const expectedDriver = { codex: "codex_app_server", opencode: "opencode_server", acpx: "acpx_runtime" }[options.provider];
   const operation = (async () => {
     session = await driver.openSession({ runId: "environment-probe", normalizedSessionId: "environment-probe",
       workingDirectory, signal: controller.signal });
     controller.signal.throwIfAborted();
     const ids = session.ids();
-    // Launch profiles version the command environment, not the canonical driver.
-    const acceptedDrivers = options.provider === "codex"
-      ? [expectedDriver, "codex_app_server_command_environment_v1", "codex_app_server_command_environment_v2"]
-      : [expectedDriver];
-    if (!ids.driverSessionId || !ids.providerSessionId || !acceptedDrivers.includes(bundle.evidence().providerDriver ?? "")) {
+    const expectedDriver = { codex: "codex_app_server", opencode: "opencode_server", acpx: "acpx_runtime" }[options.provider];
+    if (!ids.driverSessionId || !ids.providerSessionId || bundle.evidence().providerDriver !== expectedDriver) {
       throw new Error(`The native environment probe returned no matching provider identity (${bundle.evidence().providerDriver ?? "missing driver"}).`);
     }
     const events = session.events()[Symbol.asyncIterator]();
@@ -7554,7 +7531,7 @@ export async function probeNativeRunnerEnvironment(options: {
   }
   if (failure !== undefined) throw failure;
   if (!completed) throw new Error("The native provider hello probe did not complete.");
-  return Object.freeze({ provider: options.provider, providerDriver: expectedDriver, effectiveModel: effectiveModel!, helloProbePassed: true });
+  return Object.freeze({ provider: options.provider, providerDriver: bundle.evidence().providerDriver!, effectiveModel: effectiveModel!, helloProbePassed: true });
 }
 
 /** The transport provider identifies the biller, independently of model family. */
