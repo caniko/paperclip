@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { and, count, desc, eq, inArray, or, sql } from "drizzle-orm";
 import { environmentLeases, type Db } from "@paperclipai/db";
 import type { Environment, EnvironmentCapacity } from "@paperclipai/shared";
@@ -13,16 +13,24 @@ export interface EnvironmentOverflowDeps {
   admit(command: string[]): Promise<boolean>;
 }
 
+function killProcessTree(pid: number) {
+  try {
+    if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
+    else process.kill(-pid, "SIGKILL");
+  } catch { }
+}
+
 export function runAdmissionCommand(command: string[], timeoutMs = ADMISSION_TIMEOUT_MS): Promise<boolean> {
   return new Promise((resolve) => {
-    const child = spawn(command[0]!, command.slice(1), { detached: true, stdio: "ignore" });
+    const child = spawn(command[0]!, command.slice(1), { detached: true, stdio: "ignore", windowsHide: true });
     const timer = setTimeout(() => {
-      try { process.kill(-child.pid!, "SIGKILL"); } catch { }
+      killProcessTree(child.pid!);
+      resolve(false);
     }, timeoutMs);
     child.once("error", () => { clearTimeout(timer); resolve(false); });
     child.once("close", (code) => {
       clearTimeout(timer);
-      try { process.kill(-child.pid!, "SIGKILL"); } catch { }
+      killProcessTree(child.pid!);
       resolve(code === 0);
     });
   });
