@@ -38,8 +38,6 @@ beforeEach(() => {
 afterEach(async () => {
   try {
     await act(async () => root.unmount());
-    // Radix defers focus restoration. Finish it while the JSDOM event realm
-    // and React globals still exist instead of leaking it into the next file.
     await act(async () => { await vi.runOnlyPendingTimersAsync(); });
     expect(vi.getTimerCount()).toBe(0);
   } finally {
