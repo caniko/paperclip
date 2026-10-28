@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
-import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
+import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, budgetPolicies, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
 import { reconcileDeployment } from "./reconcile.js";
 import { loadConfig } from "../config.js";
 import { secretService } from "../services/secrets.js";
@@ -144,6 +144,17 @@ it.each(["manual", "budget"])("reenables declarations without resuming %s pauses
   expect((await reconcile(enabled)).differences).toEqual([]);
   expect((await db.select().from(agents).where(eq(agents.id, agentId)))[0].status).toBe("idle");
   expect((await db.select().from(routines).where(eq(routines.id, routineId)))[0].status).toBe("active");
+});
+
+it("creates native budget policies for newly declared company and agent limits", async () => {
+  const declaration = { ...structuredClone(manifest), owner: "budget-create", projects: {}, routines: {}, taskBridges: {} };
+  declaration.companies.example.fields.name = "Budget create";
+  const created = await reconcile(declaration);
+  const policies = await db.select().from(budgetPolicies).where(and(
+    eq(budgetPolicies.windowKind, "calendar_month_utc"), eq(budgetPolicies.isActive, true)));
+  const amounts = new Map(policies.map((policy) => [policy.scopeId, policy.amount]));
+  expect(amounts.get(created.bindings["company/example"])).toBe(10000);
+  expect(amounts.get(created.bindings["agent/worker"])).toBe(2000);
 });
 
 it("preserves existing and later operator membership decisions for adopted companies", async () => {
