@@ -120,7 +120,13 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     const add = (spec: Omit<Spec, "id">) => specs.push({ ...spec, id: getId(spec.kind, spec.key, spec.adopt) });
     for (const [key, c] of Object.entries(m.companies).sort()) {
       add({ kind: "company", key, adopt: c.adopt, companyId: null, enabled: true, fields: () => c.fields,
-        create: async (f) => (await companySvc.create({ ...c.fields, ...f, id: getId("company", key), defaultResponsibleUserId: actor.userId }, { provisionBundledAgents: false })).id,
+        create: async (f) => {
+          const { budgetMonthlyCents, ...rest } = { ...c.fields, ...f };
+          const created = await companySvc.create({ ...rest, id: getId("company", key), defaultResponsibleUserId: actor.userId }, { provisionBundledAgents: false });
+          // Creation stores no budget policy; the native update path creates it.
+          if (budgetMonthlyCents) await companySvc.update(created.id, { budgetMonthlyCents });
+          return created.id;
+        },
         update: (f) => companySvc.update(getId("company", key), f) });
     }
     for (const [key, p] of Object.entries(m.projects).sort()) {
@@ -178,7 +184,13 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         return { ...a.fields, adapterConfig, reportsTo: a.reportsTo ? getId("agent", a.reportsTo) : null, companyId };
       };
       add({ kind: "agent", key, adopt: a.adopt, companyId, enabled: a.enabled, fields,
-        create: async (f) => (await agentLifecycle.requestHire(companyId, { ...a.fields, ...f, id: getId("agent", key), status: a.enabled ? "idle" : "paused", ...(a.enabled ? {} : { pauseReason: "deployment" }) }, { runnerResolved: true, responsibleUserId: actor.userId, createdByUserId: actor.userId })).id,
+        create: async (f) => {
+          const { budgetMonthlyCents, ...rest } = { ...a.fields, ...f };
+          const created = await agentLifecycle.requestHire(companyId, { ...rest, id: getId("agent", key), status: a.enabled ? "idle" : "paused", ...(a.enabled ? {} : { pauseReason: "deployment" }) }, { runnerResolved: true, responsibleUserId: actor.userId, createdByUserId: actor.userId });
+          // Creation stores no budget policy; the native update path creates it.
+          if (budgetMonthlyCents) await agentLifecycle.updateConfiguration(created.id, { budgetMonthlyCents });
+          return created.id;
+        },
         update: async (f) => {
           const { companyId: _companyId, ...configuration } = f;
           return agentLifecycle.updateConfiguration(getId("agent", key), configuration);
@@ -319,11 +331,9 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
           }
           await spec.update(updateFields);
         }
-        if (spec.kind === "agent") {
-          lifecycleAgents.add(spec.id);
-          if ((binding || spec.adopt) && spec.companyId && "budgetMonthlyCents" in fields &&
-              actions.get(spec)!.fields.includes("budgetMonthlyCents")) budgetCompanies.add(spec.companyId);
-        }
+        if (spec.kind === "agent") lifecycleAgents.add(spec.id);
+        if ((spec.kind === "agent" || spec.kind === "company") && "budgetMonthlyCents" in fields &&
+            actions.get(spec)!.fields.includes("budgetMonthlyCents")) budgetCompanies.add(spec.companyId ?? spec.id);
         if (!spec.enabled) await disableResource(tx, spec.kind, spec.id, agentLifecycle);
         const next = { owner: m.owner, kind: spec.kind, key: spec.key, resourceId: spec.id, companyId: spec.companyId, fields: spec.fields(), enabled: spec.enabled };
         await tx.insert(deploymentResources).values(next).onConflictDoUpdate({ target: [deploymentResources.owner, deploymentResources.kind, deploymentResources.key], set: next });

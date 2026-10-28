@@ -4,6 +4,12 @@ import { deploymentManifestSchema } from "./deployment-manifest.js";
 const company = { fields: { name: "Example" } };
 const agent = { company: "example", fields: { name: "Worker", adapterType: "process" } };
 describe("deployment manifest", () => {
+  it("keeps omitted fields absent instead of applying native create defaults", () => {
+    const parsed = deploymentManifestSchema.parse({ version: 1, owner: "deployment", companies: { example: company }, agents: { worker: agent } });
+    expect(parsed.companies.example.fields).toEqual({ name: "Example" });
+    expect(parsed.agents.worker.fields).toEqual({ name: "Worker", adapterType: "process" });
+  });
+
   it("requires one explicit primary and a valid source for each declared project workspace", () => {
     const manifest = {
       version: 1, owner: "deployment", companies: { example: company },

@@ -4,23 +4,29 @@ import { createAgentSchema } from "./validators/agent.js";
 import { createProjectSchema, createProjectWorkspaceSchema } from "./validators/project.js";
 import { createRoutineSchema, createRoutineTriggerSchema } from "./validators/routine.js";
 
+/** Omitted manifest fields must stay absent (operator-owned), so drop the native create defaults. */
+function undefaulted<T extends z.ZodObject>(schema: T) {
+  return z.object(Object.fromEntries(Object.entries(schema.shape).map(([name, field]) =>
+    [name, field instanceof z.ZodDefault ? field.removeDefault() : field])) as T["shape"]);
+}
+
 const key = z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/);
 const identity = z.object({ adopt: z.string().uuid().optional() });
 const company = identity.extend({
-  fields: createCompanySchema.pick({ name: true, description: true, budgetMonthlyCents: true }).strict(),
+  fields: undefaulted(createCompanySchema.pick({ name: true, description: true, budgetMonthlyCents: true })).strict(),
 }).strict();
 const project = identity.extend({
   company: key,
-  fields: createProjectSchema.pick({ name: true, description: true, executionWorkspacePolicy: true }).strict(),
+  fields: undefaulted(createProjectSchema.pick({ name: true, description: true, executionWorkspacePolicy: true })).strict(),
 }).strict();
 const agent = identity.extend({
   company: key,
   enabled: z.boolean().default(true),
   reportsTo: key.nullable().default(null),
-  fields: createAgentSchema.pick({
+  fields: undefaulted(createAgentSchema.pick({
     name: true, role: true, title: true, capabilities: true,
     adapterType: true, adapterConfig: true, budgetMonthlyCents: true, permissions: true,
-  }).strict(),
+  })).strict(),
   // Values are names in the runtime credential map, never secret values or paths.
   credentials: z.record(z.string().regex(/^(env\.[A-Z_][A-Z0-9_]*|[a-zA-Z][a-zA-Z0-9]*)$/), key).default({}),
 }).strict();
@@ -29,10 +35,10 @@ const routine = identity.extend({
   project: key,
   agent: key,
   enabled: z.boolean().default(true),
-  fields: createRoutineSchema.pick({
+  fields: undefaulted(createRoutineSchema.pick({
     title: true, description: true, priority: true, concurrencyPolicy: true,
     catchUpPolicy: true,
-  }).strict(),
+  })).strict(),
   schedule: createRoutineTriggerSchema.options[0].omit({ enabled: true }).extend({
     adopt: z.string().uuid().optional(),
   }).strict(),
