@@ -38,7 +38,6 @@ const secretRefSchema = z.object({
   version: z.union([z.literal("latest"), z.number().int().positive()]).optional().default("latest"),
 }).strict();
 
-// Host-backed drivers may gate agent fallback selection by capacity.
 const hostCapacityFields = { capacity: environmentCapacitySchema.optional() };
 const localEnvironmentConfigSchema = z.object(hostCapacityFields).passthrough();
 

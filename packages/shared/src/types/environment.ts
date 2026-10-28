@@ -7,10 +7,8 @@ import type {
 } from "../constants.js";
 import type { AgentEnvConfig, EnvSecretRefBinding } from "./secrets.js";
 
-/** Overflow gate for agent fallback selection. */
 export interface EnvironmentCapacity {
   maxConcurrentRuns?: number;
-  /** Argv run on the controller host; exit 0 admits the run. */
   admissionCommand?: string[];
 }
 

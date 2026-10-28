@@ -2742,7 +2742,6 @@ export function heartbeatService(
           appendRunEvent,
         },
       }).catch((err: unknown) => {
-        // Another run took the environment's last slot after selection; wait for it.
         if (!(err instanceof EnvironmentCapacityExhaustedError)) throw err;
         throw environmentCapacityDeferral({
           run, environmentId: err.environmentId, wasIssueAssignee: issueContext?.assigneeAgentId === agent.id,

@@ -220,8 +220,6 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
   const executionForcedToKubernetes =
     isExecutionForcedToKubernetes(executionPolicy);
   let selectedEnvironmentId = environmentResolution.environmentId;
-  // Overflow applies only to the agent's own default; issue and platform
-  // placements are explicit and never fall back to another host.
   const fallbackEnvironmentIds = parseObject(agent.runtimeConfig).fallbackEnvironmentIds;
   if (environmentResolution.source === "agent" && !managedSandboxOnly && !executionForcedToKubernetes &&
       Array.isArray(fallbackEnvironmentIds) && fallbackEnvironmentIds.length > 0) {
@@ -232,7 +230,6 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
       companyId: agent.companyId, agentId: agent.id, runId: run.id, issueId,
       getEnvironment: async (id) => id === localEnvironment.id ? localEnvironment : await environmentsSvc.getById(id),
     }));
-    // Every candidate is full or refused admission: wait like a busy workspace.
     if (!admitted) {
       throw environmentCapacityDeferral({
         run, environmentId: selectedEnvironmentId, wasIssueAssignee: issueContext?.assigneeAgentId === agent.id,
