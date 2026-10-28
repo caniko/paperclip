@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/data/nvme0/can/canix/projects/worktrees/paperclip/unify-20261029/packages/adapter-utils/scripts/paperclip-issue-update.sh:*)",
+      "Bash(/data/nvme0/can/canix/projects/worktrees/paperclip/unify-20261029/packages/adapter-utils/scripts/paperclip:*)",
+      "Bash(curl:*)",
+      "Bash(env)",
+      "Bash(env:*)"
+    ],
+    "additionalDirectories": [
+      "/data/scratch/tmp/paperclip-acpx-skills-4ipke4/state",
+      "/data/scratch/tmp/paperclip-acpx-skills-Mv8fbB/state",
+      "/data/scratch/tmp/paperclip-acpx-skills-N8cYPU/state",
+      "/data/scratch/tmp/paperclip-acpx-skills-OsmLgW/state",
+      "/data/scratch/tmp/paperclip-acpx-skills-tC9Yza/state",
+      "/home/can/.paperclip/instances/default/companies/company-1",
+      "/home/can/.paperclip/instances/default/companies/company-1/acp-engine/agents/agent-1"
+    ],
+    "defaultMode": "default"
+  }
+}

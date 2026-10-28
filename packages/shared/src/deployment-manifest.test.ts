@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { deploymentManifestSchema } from "./deployment-manifest.js";
 
 const company = { fields: { name: "Example" } };
-const agent = { company: "example", fields: { name: "Worker", adapterType: "process" } };
+const agent = { company: "example", fields: { name: "Worker", adapterType: "process", adapterConfig: { command: "true" } } };
 describe("deployment manifest", () => {
   it("resolves company-owned SSH environments by declaration key without database IDs or key material", () => {
     const ssh = { company: "example", credential: "executor", fields: { name: "Atlas", driver: "ssh",
@@ -40,7 +40,9 @@ describe("deployment manifest", () => {
   it("keeps omitted fields absent instead of applying native create defaults", () => {
     const parsed = deploymentManifestSchema.parse({ version: 1, owner: "deployment", companies: { example: company }, agents: { worker: agent } });
     expect(parsed.companies.example.fields).toEqual({ name: "Example" });
-    expect(parsed.agents.worker.fields).toEqual({ name: "Worker", adapterType: "process" });
+    expect(parsed.agents.worker.fields).toEqual({ name: "Worker", adapterType: "process", adapterConfig: { command: "true" } });
+    expect(() => deploymentManifestSchema.parse({ version: 1, owner: "deployment", companies: { example: company },
+      agents: { worker: { ...agent, fields: { name: "Worker", adapterType: "process" } } } })).toThrow();
   });
 
   it("requires one explicit primary and a valid source for each declared project workspace", () => {
