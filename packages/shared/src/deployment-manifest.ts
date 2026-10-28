@@ -25,7 +25,7 @@ const agent = identity.extend({
   fields: undefaulted(createAgentSchema.pick({
     name: true, role: true, title: true, capabilities: true,
     adapterType: true, adapterConfig: true, budgetMonthlyCents: true, permissions: true,
-  })).strict(),
+  })).required({ adapterConfig: true }).strict(),
   credentials: z.record(z.string().regex(/^(env\.[A-Z_][A-Z0-9_]*|[a-zA-Z][a-zA-Z0-9]*)$/), key).default({}),
 }).strict();
 const routine = identity.extend({

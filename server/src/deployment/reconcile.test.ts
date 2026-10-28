@@ -156,6 +156,15 @@ it("creates native budget policies for newly declared company and agent limits",
   expect(amounts.get(created.bindings["agent/worker"])).toBe(2000);
 });
 
+it("re-enables the hard stop when adopting a company with a disabled monthly policy", async () => {
+  const [company] = await db.insert(companies).values({ name: "Adopted budget", issuePrefix: "ADBUD" }).returning();
+  const [policy] = await db.insert(budgetPolicies).values({ companyId: company.id, scopeType: "company", scopeId: company.id,
+    windowKind: "calendar_month_utc", amount: 1, hardStopEnabled: false, isActive: false }).returning();
+  await reconcile({ version: 1, owner: "adopt-budget", companies: { existing: { adopt: company.id, fields: { name: company.name, budgetMonthlyCents: 900 } } } });
+  expect((await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, policy.id)))[0])
+    .toMatchObject({ amount: 900, hardStopEnabled: true, isActive: true });
+});
+
 it("preserves existing and later operator membership decisions for adopted companies", async () => {
   await reconcile({ version: 1, owner: "adopt-membership", companies: {} });
   const [account] = await db.select().from(authAccounts);

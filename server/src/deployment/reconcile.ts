@@ -5,7 +5,7 @@ import {
   type Db, deploymentResources, companies, projects, agents, routines,
   routineTriggers, agentApiKeys, companySecrets, companySecretVersions, companyMemberships,
   pluginManagedResources, builtInManagedResources,
-  instanceSettings, projectWorkspaces,
+  instanceSettings, projectWorkspaces, budgetPolicies,
 } from "@paperclipai/db";
 import { deploymentManifestSchema, type DeploymentManifest } from "@paperclipai/shared";
 import { companyService } from "../services/companies.js";
@@ -316,7 +316,12 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         }
         if (spec.kind === "agent") lifecycleAgents.add(spec.id);
         if ((spec.kind === "agent" || spec.kind === "company") && "budgetMonthlyCents" in fields &&
-            actions.get(spec)!.fields.includes("budgetMonthlyCents")) budgetCompanies.add(spec.companyId ?? spec.id);
+            actions.get(spec)!.fields.includes("budgetMonthlyCents")) {
+          budgetCompanies.add(spec.companyId ?? spec.id);
+          await tx.update(budgetPolicies).set({ hardStopEnabled: true, isActive: Number(fields.budgetMonthlyCents) > 0, enforcementVersion: sql`${budgetPolicies.enforcementVersion} + 1` })
+            .where(and(eq(budgetPolicies.scopeType, spec.kind), eq(budgetPolicies.scopeId, spec.id),
+              eq(budgetPolicies.metric, "billed_cents"), eq(budgetPolicies.windowKind, "calendar_month_utc")));
+        }
         if (!spec.enabled) await disableResource(tx, spec.kind, spec.id, agentLifecycle);
         const next = { owner: m.owner, kind: spec.kind, key: spec.key, resourceId: spec.id, companyId: spec.companyId, fields: spec.fields(), enabled: spec.enabled };
         await tx.insert(deploymentResources).values(next).onConflictDoUpdate({ target: [deploymentResources.owner, deploymentResources.kind, deploymentResources.key], set: next });
