@@ -160,13 +160,10 @@ export async function acknowledgeChatCompletionReply(tx: Connection, runId: stri
       eq(deliveries.targetRunId, runId), eq(deliveries.status, "queued")));
 }
 
-/** Only the server's final presentation decision may acknowledge an ordinary
- * provider comment. Progress comments do not pass through this boundary. */
 export async function acknowledgeReusedChatCompletionReply(db: Db, input: {
   companyId: string; issueId: string; runId: string; commentId: string;
 }) {
   return db.transaction(async tx => {
-    // Share the publication/reset fence and task-first lock order of addComment.
     const [source] = await tx.select().from(issues).where(and(
       eq(issues.id, input.issueId), eq(issues.companyId, input.companyId),
     )).for("update");
