@@ -2512,7 +2512,7 @@ it("allows trusted package-manager runtime roots without exposing HOME paths", (
 it("trusts a preconfigured workspace through launch flags without editing the user config", () => {
   const args = createRunnerdCodexAppServerArgs({
     environment: { HOME: "/home/executor", PAPERCLIP_RUNNER_HOME_MODE: "preconfigured" },
-    codexHome: "/home/executor/.codex", workingDirectory: "/work/task",
+    codexHome: "/home/executor/.codex", workingDirectory: "/work/task", commandEnvironmentTransport: "argv",
   });
   expect(args.join("\n")).toContain('projects={"/work/task"={trust_level="trusted"}}');
   expect(args.join("\n")).toContain('shell_environment_policy.include_only=["HOME"]');
@@ -3014,6 +3014,40 @@ it.each(["missing", "changed"] as const)("reuses the recorded Codex command when
     await transport.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+it("keeps long native command environment values out of bounded launch arguments", () => {
+  const commandPath = Array.from({ length: 600 }, (_, i) => `/tools/toolchain-${i}/bin`).join(":");
+  const args = createRunnerdCodexAppServerArgs({
+    environment: { PATH: commandPath, LANG: "C.UTF-8" },
+    codexHome: "/isolated/codex-home",
+  });
+  expect(Buffer.byteLength(commandPath)).toBeGreaterThan(4096);
+  expect(args.length).toBeLessThanOrEqual(64);
+  for (const argument of args) expect(Buffer.byteLength(argument)).toBeLessThanOrEqual(4096);
+  expect(args.join("\n")).not.toContain(commandPath);
+  expect(args).toContain('shell_environment_policy.inherit="none"');
+  expect(args).toContain('shell_environment_policy.include_only=["LANG","PATH"]');
+});
+
+it("retains persisted command keys when rebuilding native launch arguments", () => {
+  const args = createRunnerdCodexAppServerArgs({
+    environment: {}, codexHome: "/isolated/codex",
+    persistedCommandEnvironment: { PATH: "/persisted/tools", LANG: "C.UTF-8", AGENT_HOME: "/previous/run", OPENAI_API_KEY: "secret" },
+  });
+  expect(args).toContain('shell_environment_policy.include_only=["LANG","PATH"]');
+  expect(args.join("\n")).not.toContain("/persisted/tools");
+  expect(args.join("\n")).not.toContain("AGENT_HOME");
+  expect(args.join("\n")).not.toContain("secret");
+});
+
+it("retains explicit argv values for legacy native session profiles", () => {
+  const args = createRunnerdCodexAppServerArgs({
+    environment: { PATH: "/tools/bin", LANG: "C.UTF-8" },
+    codexHome: "/isolated/codex-home",
+    commandEnvironmentTransport: "argv",
+  });
+  expect(args).toContain('shell_environment_policy.set={PATH="/tools/bin",LANG="C.UTF-8"}');
 });
 
 it("rejects remote OpenCode before spawn when provider-pack paths are absent", async () => {
@@ -8226,7 +8260,6 @@ it.each(["changed", "removed", "unregistered"] as const)("rebinds command AGENT_
     current = createCapabilityRunnerdCodexTransport(nextOptions);
     await expect(current.transport.request("thread/read", {})).resolves.toHaveProperty("thread.id", (started.thread as { id: string }).id);
     await current.transport.close();
-    // Exact recovery must retain the new binding without a second run.attach.
     current = createCapabilityRunnerdCodexTransport(nextOptions);
     await current.transport.request("thread/read", {});
     await current.transport.close();

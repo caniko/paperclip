@@ -40,9 +40,9 @@ describe("Codex security configuration", () => {
       const pathDirectory = join(pathOnlyRoot, "bin");
       const pathCommand = join(pathDirectory, "codex");
       const commandEnvironment = { PATH: pathDirectory };
-       const consumer = join(root, "node_modules/standalone-consumer");
-       const issuer = join(consumer, "dist/runtime/codex-command.js");
-       const bridge = join(consumer, "node_modules/@agentclientprotocol/codex-acp");
+      const issuer = join(root, "node_modules/@paperclipai/server/dist/vendor/paperclip-runner/drivers/codex/codex-command.js");
+      const adapter = join(root, "node_modules/@paperclipai/adapter-codex-local");
+      const bridge = join(adapter, "node_modules/@agentclientprotocol/codex-acp");
       const codex = join(bridge, "node_modules/@openai/codex");
       const executable = join(codex, "bin/codex.js");
       const platformName = "@openai/codex-" + process.platform + "-" + process.arch;
@@ -103,7 +103,8 @@ describe("Codex security configuration", () => {
         assert.throws(() => resolveCodexCommand(pathOnlyIssuer, commandEnvironment), /runtime unavailable/);
         mkdirSync(dirname(issuer), { recursive: true });
         mkdirSync(join(codex, "bin"), { recursive: true });
-         writeFileSync(join(consumer, "package.json"), JSON.stringify({ name: "standalone-consumer", dependencies: { "@agentclientprotocol/codex-acp": "1.6.2" } }));
+        writeFileSync(join(adapter, "package.json"), JSON.stringify({ name: "@paperclipai/adapter-codex-local", exports: { "./server": "./server.js" } }));
+        writeFileSync(join(adapter, "server.js"), "");
         writeFileSync(join(bridge, "package.json"), JSON.stringify({ name: "@agentclientprotocol/codex-acp", version: "1.6.2" }));
         writeFileSync(join(codex, "package.json"), JSON.stringify(metadata));
         mkdirSync(vendor, { recursive: true });
@@ -283,7 +284,7 @@ describe("Codex security configuration", () => {
     });
     expect(codexCommandEnvironment({ AGENT_HOME: "/arbitrary" }, root)).not.toHaveProperty("AGENT_HOME");
     expect(codexCommandEnvironment({ AGENT_HOME: root })).not.toHaveProperty("AGENT_HOME");
-    const args = createIsolatedCodexAppServerArgs({ AGENT_HOME: root }, [], root, "thread");
+    const args = createIsolatedCodexAppServerArgs({ AGENT_HOME: root }, [], root, [], false, "thread");
     expect(args).toContain('shell_environment_policy.include_only=["AGENT_HOME"]');
     expect(args.some((arg) => arg.startsWith("shell_environment_policy.set="))).toBe(false);
   });
@@ -311,7 +312,7 @@ describe("Codex security configuration", () => {
       GH_TOKEN: "stale-credential", PAPERCLIP_API_KEY: "persisted-secret",
     };
     const source = { AGENT_HOME: "/agent-files/current", OPENAI_API_KEY: "ambient-secret" };
-    const args = createIsolatedCodexAppServerArgs(source, [], root, "thread", persisted);
+    const args = createIsolatedCodexAppServerArgs(source, [], root, [], false, "thread", persisted);
     const allowlist = JSON.parse(args.find((arg) => arg.startsWith("shell_environment_policy.include_only="))!.split("=", 2)[1]!);
     expect(allowlist).toEqual([
       ...(root ? ["AGENT_HOME"] : []), "BASH_ENV", "HOME", "LANG", "LC_ALL", "PATH", "PATHEXT", "SystemRoot", "WINDIR", "ZDOTDIR",
@@ -319,8 +320,8 @@ describe("Codex security configuration", () => {
     expect(args.some((arg) => arg.startsWith("shell_environment_policy.set="))).toBe(false);
     expect(args.join("\n")).not.toContain("secret");
     expect(args.join("\n")).not.toContain("stale-credential");
-    expect(createIsolatedCodexAppServerArgs(source, [], root, "argv", persisted))
-      .toEqual(createIsolatedCodexAppServerArgs(source, [], root, "argv"));
+    expect(createIsolatedCodexAppServerArgs(source, [], root, [], false, "argv", persisted))
+      .toEqual(createIsolatedCodexAppServerArgs(source, [], root, [], false, "argv"));
   });
 
   it("preserves target DNS symlink resources without opening all of /run", () => {
