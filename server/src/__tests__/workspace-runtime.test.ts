@@ -1987,9 +1987,6 @@ process.stderr.write(${JSON.stringify(stderr)}, () => { process.exitCode = ${cod
     const sharedEnvPath = path.join(sharedConfigDir, ".env");
 
     // Keep this server-side fixture on provision-worktree.sh's config writer path;
-    // CLI/database seeding is covered by the CLI worktree tests. Include only
-    // required tools (including Git hook stdin/temporary-file handling), so
-    // pnpm/paperclipai stay absent even on non-FHS hosts.
     await fs.symlink(process.execPath, path.join(isolatedBin, "node"));
     for (const command of ["bash", "sh", "git", "env", "dirname", "basename", "mkdir", "find", "sed", "ln", "rm", "mktemp", "cat"]) {
       const { stdout } = await execFileAsync("sh", ["-c", 'command -v "$1"', "sh", command]);
@@ -2163,7 +2160,6 @@ process.stderr.write(${JSON.stringify(stderr)}, () => { process.exitCode = ${cod
       expect(reusedConfigContents.server.port).toBe(preservedPort);
       expect(reusedConfigContents.database.embeddedPostgresDataDir).toBe(path.join(expectedInstanceRoot, "db"));
       expect(reusedEnvContents).toContain('PAPERCLIP_WORKTREE_COLOR="#112233"');
-      // A failed process substitution can still leave the shell exit code at zero.
       const provisions = operations.filter((entry) => entry.phase === "workspace_provision");
       expect(provisions).toHaveLength(2);
       for (const operation of provisions) {
