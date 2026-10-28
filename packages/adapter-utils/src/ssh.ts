@@ -5,7 +5,6 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
 import type { CommandManagedRuntimeRunner } from "./command-managed-runtime.js";
 import {
   createUnrelatedHistoryGraftCommit,
@@ -28,7 +27,6 @@ export interface SshConnectionConfig {
   port: number;
   username: string;
   remoteWorkspacePath: string;
-  workspaceRealizationMode?: "copy" | "in_place";
   privateKey: string | null;
   knownHosts: string | null;
   strictHostKeyChecking: boolean;
@@ -48,7 +46,7 @@ export function createSshCommandManagedRuntimeRunner(input: {
   defaultCwd?: string | null;
   maxBufferBytes?: number | null;
 }): CommandManagedRuntimeRunner {
-  const defaultCwd = input.defaultCwd || input.spec.remoteCwd;
+  const defaultCwd = input.defaultCwd?.trim() || input.spec.remoteCwd;
   const maxBufferBytes =
     typeof input.maxBufferBytes === "number" && Number.isFinite(input.maxBufferBytes) && input.maxBufferBytes > 0
       ? Math.trunc(input.maxBufferBytes)
@@ -59,7 +57,7 @@ export function createSshCommandManagedRuntimeRunner(input: {
       const startedAt = new Date().toISOString();
       const command = commandInput.command.trim();
       const args = commandInput.args ?? [];
-      const cwd = commandInput.cwd || defaultCwd;
+      const cwd = commandInput.cwd?.trim() || defaultCwd;
       const envEntries = Object.entries(commandInput.env ?? {})
         .filter((entry): entry is [string, string] => typeof entry[1] === "string");
       for (const [key] of envEntries) {
@@ -168,11 +166,9 @@ export function parseSshRemoteExecutionSpec(value: unknown): SshRemoteExecutionS
   const parsed = value as Record<string, unknown>;
   const host = typeof parsed.host === "string" ? parsed.host.trim() : "";
   const username = typeof parsed.username === "string" ? parsed.username.trim() : "";
-  const remoteCwd = typeof parsed.remoteCwd === "string" ? parsed.remoteCwd : "";
+  const remoteCwd = typeof parsed.remoteCwd === "string" ? parsed.remoteCwd.trim() : "";
   const portValue = typeof parsed.port === "number" ? parsed.port : Number(parsed.port);
-  if (!host || !username || !remoteCwd.trim() || remoteCwd.includes("\0")
-    || !Number.isInteger(portValue) || portValue < 1 || portValue > 65535
-    || (parsed.workspaceRealizationMode !== undefined && parsed.workspaceRealizationMode !== "copy" && parsed.workspaceRealizationMode !== "in_place")) {
+  if (!host || !username || !remoteCwd || !Number.isInteger(portValue) || portValue < 1 || portValue > 65535) {
     return null;
   }
 
@@ -183,9 +179,8 @@ export function parseSshRemoteExecutionSpec(value: unknown): SshRemoteExecutionS
     remoteCwd,
     remoteWorkspacePath:
       typeof parsed.remoteWorkspacePath === "string" && parsed.remoteWorkspacePath.trim().length > 0
-        ? parsed.remoteWorkspacePath
+        ? parsed.remoteWorkspacePath.trim()
         : remoteCwd,
-    ...(parsed.workspaceRealizationMode ? { workspaceRealizationMode: parsed.workspaceRealizationMode as "copy" | "in_place" } : {}),
     privateKey: typeof parsed.privateKey === "string" && parsed.privateKey.length > 0 ? parsed.privateKey : null,
     knownHosts: typeof parsed.knownHosts === "string" && parsed.knownHosts.length > 0 ? parsed.knownHosts : null,
     strictHostKeyChecking:
@@ -401,8 +396,6 @@ async function createSshAuthArgs(
   if (config.privateKey) {
     const privateKey = await withTempFile("paperclip-ssh-key-", config.privateKey, 0o600);
     tempFiles.push(privateKey.cleanup);
-    // A supplied private key must not fall back to the controller's SSH agent
-    // or let unrelated agent keys exhaust the server's MaxAuthTries limit.
     sshArgs.push("-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-i", privateKey.path);
   }
 
@@ -665,7 +658,7 @@ async function streamLocalFileToSsh(input: {
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    buildRemoteShellCommand([`exec sh -c ${shellQuote(input.remoteScript)}`]),
+    `sh -c ${shellQuote(input.remoteScript)}`,
   ];
 
   await new Promise<void>((resolve, reject) => {
@@ -682,14 +675,6 @@ async function streamLocalFileToSsh(input: {
       settled = true;
       source.destroy();
       ssh.kill("SIGTERM");
-      // A destination EPIPE usually means the remote script exited early; if
-      // it left a diagnostic on stderr, surface that instead of the bare
-      // EPIPE so the run log shows the real cause.
-      const remoteStderr = sshStderr.trim();
-      if ((error as NodeJS.ErrnoException).code === "EPIPE" && remoteStderr) {
-        reject(new Error(remoteStderr));
-        return;
-      }
       reject(error);
     };
 
@@ -698,10 +683,6 @@ async function streamLocalFileToSsh(input: {
     });
     source.on("error", fail);
     ssh.on("error", fail);
-    // pipe() does not forward destination errors: when the remote script exits
-    // early, the kernel answers our continued writes with EPIPE on ssh.stdin,
-    // which crashes the whole server process as an unhandled 'error' event.
-    ssh.stdin?.on("error", fail);
     if (input.progress) {
       input.progress.counter.on("error", fail);
       source.pipe(input.progress.counter).pipe(ssh.stdin ?? null);
@@ -732,7 +713,7 @@ async function streamSshToLocalFile(input: {
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    buildRemoteShellCommand([`exec sh -c ${shellQuote(input.remoteScript)}`]),
+    `sh -c ${shellQuote(input.remoteScript)}`,
   ];
 
   await new Promise<void>((resolve, reject) => {
@@ -748,66 +729,34 @@ async function streamSshToLocalFile(input: {
       if (settled) return;
       settled = true;
       ssh.kill("SIGTERM");
-      // Destroy the sink so a stuck pipeline rejects instead of hanging;
-      // do not call sink.end() here — pipeline() owns the sink lifecycle.
       sink.destroy();
       reject(error);
     };
 
+    if (input.progress) {
+      input.progress.counter.on("error", fail);
+      ssh.stdout?.pipe(input.progress.counter).pipe(sink);
+    } else {
+      ssh.stdout?.pipe(sink);
+    }
     ssh.stderr?.on("data", (chunk) => {
       sshStderr += String(chunk);
     });
     ssh.on("error", fail);
     sink.on("error", fail);
-
-    // Drain stdout through the (optional) progress counter with pipeline() so
-    // every byte lands in the sink before we resolve. The old
-    // pipe()+close→sink.end() shape could end the sink while the counter still
-    // held buffered chunks, truncating the bundle under backpressure.
-    const counter = input.progress?.counter;
-    if (counter) counter.on("error", fail);
-    const drained = ssh.stdout
-      ? (counter ? pipeline(ssh.stdout, counter, sink) : pipeline(ssh.stdout, sink))
-      : Promise.resolve();
-
-    // The child's exit code, resolved once it closes. A spawn "error" without a
-    // later "close" still unblocks settle(); fail() above already rejected.
-    const exitCodePromise = new Promise<number>((resolveExit) => {
-      ssh.on("error", () => resolveExit(-1));
-      ssh.on("close", (code) => resolveExit(code ?? 0));
+    ssh.on("close", (code) => {
+      sink.end(() => {
+        if (settled) return;
+        settled = true;
+        if ((code ?? 0) !== 0) {
+          reject(new Error(sshStderr.trim() || `ssh exited with code ${code ?? -1}`));
+          return;
+        }
+        resolve();
+      });
     });
-
-    // Resolve only after BOTH the pipeline drained (sink finish) AND the
-    // child exited 0. Either side failing rejects; fail() above wins the race
-    // on transport errors via the settled flag.
-    const settle = async () => {
-      let drainError: Error | null = null;
-      try {
-        await drained;
-      } catch (error) {
-        drainError = error instanceof Error ? error : new Error(String(error));
-      }
-      const exitCode = await exitCodePromise;
-      if (settled) return;
-      settled = true;
-      if (drainError) {
-        ssh.kill("SIGTERM");
-        sink.destroy();
-        reject(drainError);
-        return;
-      }
-      if (exitCode !== 0) {
-        reject(new Error(sshStderr.trim() || `ssh exited with code ${exitCode}`));
-        return;
-      }
-      resolve();
-    };
-    void settle();
   }).finally(auth.cleanup);
 }
-
-/** Test-only. Drive the SSH download path with a caller-supplied progress counter. */
-export const streamSshToLocalFileForTest = streamSshToLocalFile;
 
 async function importGitWorkspaceToSsh(input: {
   spec: SshRemoteExecutionSpec;
@@ -893,13 +842,6 @@ async function importGitWorkspaceToSsh(input: {
   }
 }
 
-// Matches the fetch-side signature of a truncated bundle download: the
-// tail of the pack never arrived, so index-pack hits EOF while inflating.
-function isTruncatedBundleFetchError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /early EOF|index-pack (died|failed)|did not end with a hash|not a bundle|unexpected end/i.test(message);
-}
-
 async function exportGitWorkspaceFromSsh(input: {
   spec: SshRemoteExecutionSpec;
   remoteDir: string;
@@ -926,57 +868,33 @@ async function exportGitWorkspaceFromSsh(input: {
 
     // The remote bundle size isn't known before streaming, so report bytes
     // received (MB mode) with a terminal completion line.
-    // Created fresh per attempt: pipeline() ends the counter it drains, so a
-    // retried stream needs a new one. Annotated (not inferred) so closure
-    // assignment doesn't narrow the later finish/fail calls to never.
-    let progress: TransferProgress | null | undefined;
-    const createProgress = () => {
-      progress = input.onProgress
-        ? createTransferProgress({
-          onProgress: input.onProgress,
-          phase: "Exporting git history",
-          direction: "from",
-          totalBytes: null,
-          estimated: false,
-        })
-        : null;
-      return progress ?? undefined;
-    };
+    const progress = input.onProgress
+      ? createTransferProgress({
+        onProgress: input.onProgress,
+        phase: "Exporting git history",
+        direction: "from",
+        totalBytes: null,
+        estimated: false,
+      })
+      : null;
 
     try {
-      // A truncated stream surfaces at fetch time as `fatal: early EOF` /
-      // `error: index-pack died`. `git bundle verify` cannot gate this — it
-      // only reads the ref header, so it reports "okay" on a truncated file.
-      // Re-stream once on that signature instead.
-      let retriedTruncatedFetch = false;
-      for (;;) {
-        await streamSshToLocalFile({
-          spec: input.spec,
-          remoteScript: exportScript,
-          localFile: bundlePath,
-          progress: createProgress(),
-        });
-        try {
-          await runLocalGit(input.localDir, ["fetch", "--force", bundlePath, `refs/paperclip/ssh-sync/export:${importedRef}`], {
-            timeout: 60_000,
-            maxBuffer: 1024 * 1024,
-          });
-          break;
-        } catch (error) {
-          if (!retriedTruncatedFetch && isTruncatedBundleFetchError(error)) {
-            retriedTruncatedFetch = true;
-            // Close out this attempt's progress line before the retry replaces it.
-            await progress?.fail();
-            continue;
-          }
-          throw error;
-        }
-      }
+      await streamSshToLocalFile({
+        spec: input.spec,
+        remoteScript: exportScript,
+        localFile: bundlePath,
+        progress: progress ?? undefined,
+      });
       await progress?.finish();
     } catch (error) {
       await progress?.fail();
       throw error;
     }
+
+    await runLocalGit(input.localDir, ["fetch", "--force", bundlePath, `refs/paperclip/ssh-sync/export:${importedRef}`], {
+      timeout: 60_000,
+      maxBuffer: 1024 * 1024,
+    });
     if (input.resetLocalWorkspace !== false) {
       await runLocalGit(input.localDir, ["reset", "--hard", importedRef], {
         timeout: 60_000,
@@ -1355,41 +1273,6 @@ export function buildKnownHostsEntry(input: {
   return `[${input.host}]:${input.port} ${input.publicKey.trim()}`;
 }
 
-function buildRemoteShellCommand(commandLines: string[]): string {
-  // Every SSH path needs the target's login PATH, including tar and Git
-  // streams. Keep profile I/O separate from command/archive I/O: a profile
-  // can print a banner or read stdin, but must not alter the transferred bytes.
-  // Shell-specific profiles must run in the matching login shell, never sh.
-  // .bash_profile commonly sources .bashrc; use the latter only as a fallback.
-  // Do not source nvm.sh directly; a host profile may still opt into it.
-  // `command .` removes the POSIX special-builtin behavior of `.`: under dash,
-  // a bash-only profile line such as `export -a` otherwise exits the whole
-  // shell before `|| true` runs. Keep exports made before that failing line.
-  // Native zsh's `command` searches only external commands. Select its `.`
-  // builtin explicitly without enabling POSIX_BUILTINS for the host's profile.
-  // https://zsh.sourceforge.io/Doc/Release/Shell-Grammar.html#Precommand-Modifiers
-  const sourceProfile = (file: string) =>
-    `case "\${0##*/}" in zsh) builtin . ${file} || true ;; *) command . ${file} || true ;; esac`;
-  const profiles = [
-    `if [ -f /etc/profile ]; then ${sourceProfile("/etc/profile")}; fi`,
-    `if [ -f "$HOME/.profile" ]; then ${sourceProfile('"$HOME/.profile"')}; fi`,
-    'case "${0##*/}" in bash) if [ -f "$HOME/.bash_profile" ]; then command . "$HOME/.bash_profile" || true; elif [ -f "$HOME/.bashrc" ]; then command . "$HOME/.bashrc" || true; fi ;; zsh) if [ -f "$HOME/.zprofile" ]; then builtin . "$HOME/.zprofile" || true; fi ;; esac',
-  ].join(" && ");
-  const script = [
-    `{ ${profiles}; } </dev/null >/dev/null 2>&1`,
-    "exec 0<&3 1>&4 2>&5 3<&- 4>&- 5>&-",
-    ...commandLines,
-  ].join(" && ");
-  // Protect streams during automatic startup too (BASH_ENV / .zshenv), then
-  // restore and close the saved descriptors before starting the command.
-  const launcher = [
-    "shell=sh",
-    'case "${SHELL##*/}" in bash|zsh) shell="$SHELL" ;; esac',
-    `exec "$shell" -c ${shellQuote(script)} 3<&0 4>&1 5>&2 </dev/null >/dev/null 2>&1`,
-  ].join("; ");
-  return `sh -c ${shellQuote(launcher)}`;
-}
-
 export async function runSshCommand(
   config: SshConnectionConfig,
   remoteCommand: string,
@@ -1413,19 +1296,33 @@ export async function runSshCommand(
       }
     }
 
-    // Apply explicit environment values after profiles so identity overrides win.
+    // Mirror buildSshSpawnTarget: source the login profiles first, then run
+    // `env KEY=VAL cmd` so user-supplied identity overrides win over anything a
+    // profile re-exports. The SSH target is an operator-configured host, not a
+    // Paperclip sandbox image, so it can expose `node` or an agent CLI only
+    // through a login profile; a non-login SSH command would miss that PATH.
+    // Source `/etc/profile` first so a host that exposes the PATH through
+    // `/etc/profile.d` scripts still resolves node and the agent CLI.
+    // The script no longer sources `nvm.sh`; a profile that adds nvm still runs.
+    // .bash_profile typically sources .bashrc itself; only source .bashrc
+    // directly when no .bash_profile exists, so a host that adds nvm in
+    // .bashrc still resolves node without a double-run of the setup.
     const envArgs = envEntries.map(([key, value]) => `${key}=${shellQuote(value)}`);
-    const remoteShellCommand = buildRemoteShellCommand([
+    const remoteScript = [
+      'if [ -f /etc/profile ]; then . /etc/profile >/dev/null 2>&1 || true; fi',
+      'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" >/dev/null 2>&1 || true; fi',
+      'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" >/dev/null 2>&1 || true; elif [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc" >/dev/null 2>&1 || true; fi',
+      'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" >/dev/null 2>&1 || true; fi',
       envArgs.length > 0
         ? `exec env ${envArgs.join(" ")} sh -c ${shellQuote(remoteCommand)}`
         : `exec sh -c ${shellQuote(remoteCommand)}`,
-    ]);
+    ].join(" && ");
 
     sshArgs.push(
       "-p",
       String(config.port),
       `${config.username}@${config.host}`,
-      remoteShellCommand,
+      `sh -c ${shellQuote(remoteScript)}`,
     );
 
     return options.stdin != null
@@ -1464,18 +1361,33 @@ export async function buildSshSpawnTarget(input: {
     .filter((entry): entry is [string, string] => typeof entry[1] === "string")
     .map(([key, value]) => `${key}=${shellQuote(value)}`);
   const remoteCommandParts = [shellQuote(input.command), ...input.args.map((arg) => shellQuote(arg))].join(" ");
-  const remoteShellCommand = buildRemoteShellCommand([
+  // Source the login profiles first, then run `env KEY=VAL cmd` so
+  // user-supplied identity overrides win over anything a profile re-exports.
+  // The SSH target is an operator-configured host, not a Paperclip sandbox
+  // image, so it can expose `node` or an agent CLI only through a login
+  // profile; a non-login SSH command would miss that PATH. Source
+  // `/etc/profile` first so a host that exposes the PATH through
+  // `/etc/profile.d` scripts still resolves node and the agent CLI. The script
+  // no longer sources `nvm.sh`; a profile that adds nvm still runs.
+  // .bash_profile typically sources .bashrc itself; only source .bashrc
+  // directly when no .bash_profile exists, so a host that adds nvm in
+  // .bashrc still resolves node without a double-run of the setup.
+  const remoteScript = [
+    'if [ -f /etc/profile ]; then . /etc/profile >/dev/null 2>&1 || true; fi',
+    'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" >/dev/null 2>&1 || true; fi',
+    'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" >/dev/null 2>&1 || true; elif [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc" >/dev/null 2>&1 || true; fi',
+    'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" >/dev/null 2>&1 || true; fi',
     `cd ${shellQuote(input.spec.remoteCwd)}`,
     envArgs.length > 0
       ? `exec env ${envArgs.join(" ")} ${remoteCommandParts}`
       : `exec ${remoteCommandParts}`,
-  ]);
+  ].join(" && ");
 
   sshArgs.push(
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    remoteShellCommand,
+    `sh -c ${shellQuote(remoteScript)}`,
   );
 
   return {
@@ -1500,10 +1412,7 @@ export async function syncDirectoryToSsh(input: {
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    buildRemoteShellCommand([
-      `mkdir -p ${shellQuote(input.remoteDir)}`,
-      `exec tar -xf - -C ${shellQuote(input.remoteDir)}`,
-    ]),
+    `sh -c ${shellQuote(`mkdir -p ${shellQuote(input.remoteDir)} && tar -xf - -C ${shellQuote(input.remoteDir)}`)}`,
   ];
 
   // tar's archive size isn't known until tar finishes, so estimate it from the
@@ -1575,19 +1484,9 @@ export async function syncDirectoryToSsh(input: {
       settled = true;
       tar.kill("SIGTERM");
       ssh.kill("SIGTERM");
-      // Prefer the remote diagnostic over a bare EPIPE (see
-      // streamLocalFileToSsh).
-      const remoteStderr = sshStderr.trim();
-      if ((error as NodeJS.ErrnoException).code === "EPIPE" && remoteStderr) {
-        reject(new Error(remoteStderr));
-        return;
-      }
       reject(error);
     };
 
-    // pipe() does not forward destination errors: an early ssh exit surfaces
-    // as EPIPE on ssh.stdin and would crash the server if left unhandled.
-    ssh.stdin?.on("error", fail);
     if (progress) {
       progress.counter.on("error", fail);
       tar.stdout?.pipe(progress.counter).pipe(ssh.stdin ?? null);
@@ -1641,7 +1540,7 @@ export async function syncDirectoryFromSsh(input: {
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    buildRemoteShellCommand([`exec sh -c ${shellQuote(remoteTarScript)}`]),
+    `sh -c ${shellQuote(remoteTarScript)}`,
   ];
 
   // The remote tar size isn't known locally, so probe the remote directory for
@@ -1696,20 +1595,9 @@ export async function syncDirectoryFromSsh(input: {
         settled = true;
         ssh.kill("SIGTERM");
         tar.kill("SIGTERM");
-        // The EPIPE destination is the local tar, but the actual failure is
-        // usually the remote side (ssh stderr), so prefer that diagnostic
-        // over the bare EPIPE (see streamLocalFileToSsh).
-        const remoteStderr = sshStderr.trim();
-        if ((error as NodeJS.ErrnoException).code === "EPIPE" && remoteStderr) {
-          reject(new Error(remoteStderr));
-          return;
-        }
         reject(error);
       };
 
-      // pipe() does not forward destination errors: an early tar exit surfaces
-      // as EPIPE on tar.stdin and would crash the server if left unhandled.
-      tar.stdin?.on("error", fail);
       if (progress) {
         progress.counter.on("error", fail);
         ssh.stdout?.pipe(progress.counter).pipe(tar.stdin ?? null);
@@ -1954,14 +1842,12 @@ async function restoreWorkspaceRootFromSsh(input: {
 export async function ensureSshWorkspaceReady(
   config: SshConnectionConfig,
 ): Promise<{ remoteCwd: string }> {
-  const inPlace = config.workspaceRealizationMode === "in_place";
   const result = await runSshCommand(
     config,
-    `${inPlace ? "test -d" : "mkdir -p"} ${shellQuote(config.remoteWorkspacePath)} && cd ${shellQuote(config.remoteWorkspacePath)} && pwd`,
+    `mkdir -p ${shellQuote(config.remoteWorkspacePath)} && cd ${shellQuote(config.remoteWorkspacePath)} && pwd`,
   );
   return {
-    // Keep the declared spelling (including symlinks) for target preconditions.
-    remoteCwd: inPlace ? config.remoteWorkspacePath : result.stdout.trim(),
+    remoteCwd: result.stdout.trim(),
   };
 }
 
@@ -2165,8 +2051,6 @@ export async function startSshEnvLabFixture(input: {
   const sshdPidPath = path.join(rootDir, "sshd.pid");
 
   await fs.mkdir(workspaceDir, { recursive: true });
-  const fixtureHome = path.join(rootDir, "home");
-  await fs.mkdir(fixtureHome, { recursive: true, mode: 0o700 });
   await execFileText("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", clientPrivateKeyPath], {
     timeout: 15_000,
   });
@@ -2199,9 +2083,6 @@ export async function startSshEnvLabFixture(input: {
       "UsePAM no",
       "StrictModes no",
       `AllowUsers ${username}`,
-      // Loopback commands use the fixture's home and the same toolchain as its
-      // parent, including systems without tools in /usr/bin (such as NixOS).
-      `SetEnv ${JSON.stringify(`HOME=${fixtureHome}`)} ${JSON.stringify(`PATH=${process.env.PATH ?? "/usr/bin:/bin"}`)}`,
       "LogLevel VERBOSE",
       "PrintMotd no",
       "UseDNS no",
