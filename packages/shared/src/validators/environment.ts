@@ -8,7 +8,6 @@ import {
 import { envConfigSchema } from "./secret.js";
 
 export const environmentDriverSchema = z.enum(ENVIRONMENT_DRIVERS);
-/** Overflow gate: a candidate accepts a run only below its cap and after its admission command exits 0. */
 export const environmentCapacitySchema = z.object({
   maxConcurrentRuns: z.number().int().positive().optional(),
   admissionCommand: z.array(z.string().min(1)).min(1).max(64).optional(),

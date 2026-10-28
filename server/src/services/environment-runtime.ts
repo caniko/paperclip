@@ -1135,7 +1135,6 @@ export function findReusableSandboxLeaseId(input: {
   });
 }
 
-/** Run leases honour the environment's slot cap; probes and logins do not. */
 function runSlotCap(input: { environment: Environment; heartbeatRunId?: string | null }): number | undefined {
   if (!input.heartbeatRunId) return undefined;
   const max = parseObject(parseObject(input.environment.config).capacity).maxConcurrentRuns;

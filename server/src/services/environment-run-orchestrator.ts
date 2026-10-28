@@ -220,7 +220,6 @@ export function environmentRunOrchestrator(
     try {
       return await environmentRuntime.acquireRunLease(input);
     } catch (err) {
-      // A full environment is contention, not a failure: the heartbeat defers the run.
       if (err instanceof EnvironmentCapacityExhaustedError) throw err;
       throw new EnvironmentRunError(
         "lease_acquire_failed",

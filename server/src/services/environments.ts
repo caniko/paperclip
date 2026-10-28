@@ -331,7 +331,6 @@ function preserveInvalidatedSnapshotProofs(replacement: SQL): SQL {
     else coalesce(${replacement}, '{}'::jsonb) || jsonb_build_object(${SANDBOX_PLATFORM_PROBE_METADATA_KEY}::text, ${proofs}) end`;
 }
 
-/** A capped environment had no free slot when the run tried to take its lease. */
 export class EnvironmentCapacityExhaustedError extends Error {
   code = "environment_capacity_exhausted" as const;
   constructor(readonly environmentId: string) {
@@ -1468,12 +1467,6 @@ export function environmentService(db: Db) {
        * member. All other callers keep the plain, non-transactional insert.
        */
       assertCompanyBinding?: boolean;
-      /**
-       * Run-slot cap from the environment's `capacity.maxConcurrentRuns`. The
-       * environment row is locked while active leases are counted, so two runs
-       * cannot both take the last slot; an exhausted cap throws
-       * EnvironmentCapacityExhaustedError and creates no lease.
-       */
       maxConcurrentRuns?: number;
     }): Promise<EnvironmentLease> => {
       const now = new Date();

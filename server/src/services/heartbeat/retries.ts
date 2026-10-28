@@ -184,8 +184,7 @@ export interface ExecutionWorkspaceHolder extends SharedWorkspaceHolder {
 // shared project workspace, or the shared execution workspace it reuses. Not a
 // failure — the run is parked as a bounded scheduled retry and re-attempted
 // once the holder finishes, so two agents never mutate the same working tree
-// concurrently. A capped environment with no free run slot (and no admitting
-// fallback) waits the same way, without a single holder.
+// concurrently.
 export class WorkspaceBusyDeferral extends Error {
   code = WORKSPACE_BUSY_ERROR_CODE;
   holder: SharedWorkspaceHolder | null;
@@ -218,7 +217,6 @@ export class WorkspaceBusyDeferral extends Error {
   }
 }
 
-/** Waits on the workspace_busy retry ladder until an environment slot frees. */
 export function environmentCapacityDeferral(input: {
   run: Pick<typeof heartbeatRuns.$inferSelect, "scheduledRetryReason" | "scheduledRetryAttempt">;
   environmentId: string;
@@ -437,7 +435,6 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
         reason: "Repair the invalid tool definitions before starting a new attempt.",
         issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
     }
-    // A workspace/capacity wait is not an attempt: the successor run inherits the outbox rows below.
     if (opts?.retryReason !== WORKSPACE_BUSY_RETRY_REASON && Array.isArray(run.contextSnapshot?.chatCompletionDeliveryIds) &&
         run.contextSnapshot.chatCompletionDeliveryIds.some(id => typeof id === "string")) {
       return { outcome: "not_scheduled" as const, reason: "The completion outbox owns this reply's retry budget and publication identity.",
