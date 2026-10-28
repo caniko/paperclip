@@ -1119,8 +1119,6 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
         .from(issues)
         .where(eq(issues.id, issueId))
         .then((rows) => rows[0] ?? null);
-      // The fake assignee must give the reopened task a disposition before
-      // returning success, or lifecycle recovery correctly adds another run.
       if (shouldReopen) {
         await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, issueId));
       }
