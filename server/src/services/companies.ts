@@ -24,7 +24,6 @@ import { notifyCloudOfPrimaryCompanyLifecycleChange } from "./cloud-lifecycle-sy
 import {
   MAX_ISSUE_PREFIX_ATTEMPTS,
   deriveIssuePrefixBase,
-  isIssuePrefixConflict,
   issuePrefixSuffixForAttempt,
   pickAvailableIssuePrefix,
   rekeyCompanyIssueIdentifiers,
@@ -49,9 +48,12 @@ const SYSTEM_COMPANY_ACTOR: CompanyActivityActor = {
   runId: null,
 };
 
-export function companyService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
+export function companyService(db: Db, _budgetHooks: BudgetServiceHooks = {}, outerTransaction?: {
+  db: Db;
+  afterCommit: Array<() => Promise<void>>;
+  publications: ActivityPublication[];
+}) {
   const environmentsSvc = environmentService(db);
-  const builtInAgents = builtInAgentService(db);
 
   type CompanyTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -248,15 +250,15 @@ export function companyService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
     let suffix = 1;
     while (suffix <= MAX_ISSUE_PREFIX_ATTEMPTS) {
       const candidate = `${base}${issuePrefixSuffixForAttempt(suffix)}`;
-      try {
-        const rows = await db
-          .insert(companies)
-          .values({ ...data, issuePrefix: candidate })
-          .returning();
-        return rows[0];
-      } catch (error) {
-        if (!isIssuePrefixConflict(error)) throw error;
-      }
+      // A unique violation aborts an enclosing deployment transaction. Handle
+      // only the prefix index in SQL so retries preserve that transaction and
+      // other constraint failures still propagate.
+      const rows = await db
+        .insert(companies)
+        .values({ ...data, issuePrefix: candidate })
+        .onConflictDoNothing({ target: companies.issuePrefix })
+        .returning();
+      if (rows[0]) return rows[0];
       suffix += 1;
     }
     throw new Error("Unable to allocate unique issue prefix");
@@ -286,7 +288,7 @@ export function companyService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
     create: async (data: typeof companies.$inferInsert, options?: { provisionBundledAgents?: boolean }) => {
       const created = await createCompanyWithUniquePrefix(data);
       await environmentsSvc.ensureLocalEnvironment(created.id);
-      if (options?.provisionBundledAgents !== false) await builtInAgents.autoProvisionBundledAgents(created.id);
+      if (options?.provisionBundledAgents !== false) await builtInAgentService(db).autoProvisionBundledAgents(created.id);
       const row = await getCompanyQuery(db)
         .where(eq(companies.id, created.id))
         .then((rows) => rows[0] ?? null);
@@ -429,16 +431,19 @@ export function companyService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
         };
       });
       if (!result) return null;
-      publishAccountingActivities(id, budgetPublications);
-      // Post-commit, fire-and-forget, and BEFORE any finalization that
-      // could throw: a Cloud-pinned primary company that crossed the
-      // archived boundary (either direction) rings the harness so the
-      // stack itself can converge. The status transaction has already
-      // committed, so a later cascade or activity-log failure must not
-      // leave Cloud unaware of a company that is in fact archived.
-      if (result.archiveCascade || result.unarchived) {
-        void notifyCloudOfPrimaryCompanyLifecycleChange(id);
-      }
+      const publishAfterCommit = async () => {
+        publishAccountingActivities(id, budgetPublications);
+        // Post-commit, fire-and-forget, and BEFORE any finalization that
+        // could throw: a Cloud-pinned primary company that crossed the
+        // archived boundary (either direction) rings the harness so the
+        // stack itself can converge. A deployment transaction defers this
+        // until it commits.
+        if (result.archiveCascade || result.unarchived) {
+          void notifyCloudOfPrimaryCompanyLifecycleChange(id);
+        }
+      };
+      if (outerTransaction) outerTransaction.afterCommit.push(publishAfterCommit);
+      else await publishAfterCommit();
       if (result.issuePrefixRederived) {
         await logActivity(db, {
           companyId: id,
@@ -454,7 +459,7 @@ export function companyService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
             reason: "issue_prefix_rederived",
             ...result.issuePrefixRederived,
           },
-        });
+        }, outerTransaction?.publications);
       }
       if (result.reactivated) {
         await logActivity(db, {
@@ -467,7 +472,7 @@ export function companyService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
           entityType: "company",
           entityId: id,
           details: { agentsRestored: result.reactivated.agentsRestored },
-        });
+        }, outerTransaction?.publications);
       }
       if (result.archiveCascade) {
         await finalizeArchive(id, actor, result.archiveCascade);

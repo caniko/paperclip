@@ -6,8 +6,8 @@ import { createServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { authUsers, companies, companyMemberships, createDb, startEmbeddedPostgresTestDatabase } from "@paperclipai/db";
-import { sql } from "drizzle-orm";
+import { agents, authUsers, companies, companyMemberships, createDb, startEmbeddedPostgresTestDatabase } from "@paperclipai/db";
+import { eq, sql } from "drizzle-orm";
 import { paperclipConfigSchema } from "@paperclipai/shared";
 
 const root = mkdtempSync(join(tmpdir(), "paperclip-deployment-entry-"));
@@ -56,7 +56,7 @@ beforeAll(async () => {
     companies: { example: { fields: { name: "Entry test" } }, other: { fields: { name: "Other company" } },
       adopted: { adopt: adoptedCompanyId, fields: { name: "Existing company" } } },
     projects: { main: { company: "example", fields: { name: "Main" } }, outside: { company: "example", fields: { name: "Outside bridge" } } },
-    agents: { worker: { company: "example", fields: { name: "Bridge worker", adapterType: "hermes_gateway", adapterConfig: { apiBaseUrl: "http://127.0.0.1:1" } }, credentials: { apiKey: "gateway" } } },
+    agents: { worker: { company: "example", fields: { name: "Bridge worker", adapterType: "process", adapterConfig: { command: process.execPath, args: ["-e", "process.exit(0)"] } }, credentials: { "env.FIXTURE_KEY": "gateway" } } },
     taskBridges: { ingress: { agent: "worker", project: "main", allowedAssignees: ["worker"], credential: "bridge" } },
   }));
   writeFileSync(join(root, "database"), database.connectionString, { mode: 0o600 });
@@ -101,6 +101,10 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
     bindings["company/example"], bindings["company/other"], adoptedCompanyId,
   ].sort());
   expect((await fetch(`http://localhost:${port}/api/companies/${adoptedCompanyId}`, { headers: { cookie } })).status).toBe(200);
+  // Server health does not imply that asynchronous agent setup has completed.
+  await expect.poll(async () => (await db.select({ status: agents.status, lifecycleState: agents.lifecycleState })
+    .from(agents).where(eq(agents.id, bindings["agent/worker"])))[0], { timeout: 30000, interval: 100 })
+    .toEqual({ status: "idle", lifecycleState: "ready" });
   const createIssue = (company: string, project: string) => fetch(`http://localhost:${port}/api/companies/${company}/issues`, {
     method: "POST", headers: { "content-type": "application/json", authorization: "Bearer entry-test-bridge-token-at-least-32-characters" },
     body: JSON.stringify({ title: "Bridge request", status: "backlog", projectId: project, assigneeAgentId: bindings["agent/worker"] }),
