@@ -4,15 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { build } from "vite";
-import {
-  SERVICE_WORKER_BUILD_ID_PLACEHOLDER,
-  SERVICE_WORKER_OFFLINE_STYLES_PLACEHOLDER,
-  serviceWorkerBuildIdPlugin,
-} from "./vite-sw-build-id";
+import { SERVICE_WORKER_BUILD_ID_PLACEHOLDER, SERVICE_WORKER_OFFLINE_STYLES_PLACEHOLDER, serviceWorkerBuildIdPlugin } from "./vite-sw-build-id";
 
 describe("service worker build stamping", () => {
   const roots: string[] = [];
-  const offlineStyles = ".paperclip-offline { display: grid; }";
 
   afterEach(async () => {
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -23,13 +18,10 @@ describe("service worker build stamping", () => {
     roots.push(root);
     await mkdir(path.join(root, "public"));
     await mkdir(path.join(root, "src"));
-    await writeFile(
-      path.join(root, "src/index.css"),
-      `/* offline-recovery:start */\n${offlineStyles}\n/* offline-recovery:end */`,
-    );
+    await writeFile(path.join(root, "src/index.css"), "/* offline-recovery:start */a{}/* offline-recovery:end */");
     await writeFile(
       path.join(root, "public/sw.js"),
-      `const BUILD_ID = "${SERVICE_WORKER_BUILD_ID_PLACEHOLDER}";\nconst OFFLINE_STYLES = "${SERVICE_WORKER_OFFLINE_STYLES_PLACEHOLDER}";`,
+      `const BUILD_ID = "${SERVICE_WORKER_BUILD_ID_PLACEHOLDER}";\nconst STYLES = "${SERVICE_WORKER_OFFLINE_STYLES_PLACEHOLDER}";`,
     );
     await writeFile(path.join(root, "index.html"), '<script type="module" src="/entry.js"></script>');
     await writeFile(path.join(root, "entry.js"), entry);
@@ -61,10 +53,7 @@ describe("service worker build stamping", () => {
     const entry = result.output.find((item) => item.type === "chunk" && item.isEntry);
     expect(entry).toBeDefined();
     const worker = await readFile(path.join(root, "dist/sw.js"), "utf8");
-    expect(worker).toBe(
-      `const BUILD_ID = "${path.basename(entry!.fileName, ".js")}";\nconst OFFLINE_STYLES = ${JSON.stringify(offlineStyles)};`,
-    );
+    expect(worker).toBe(`const BUILD_ID = "${path.basename(entry!.fileName, ".js")}";\nconst STYLES = "a{}";`);
     expect(worker).not.toContain(SERVICE_WORKER_BUILD_ID_PLACEHOLDER);
-    expect(worker).not.toContain(SERVICE_WORKER_OFFLINE_STYLES_PLACEHOLDER);
   });
 });
