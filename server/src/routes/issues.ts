@@ -12655,7 +12655,7 @@ export function issueRoutes(
         action: "project:read",
         resource: { type: "project", companyId, projectId: selectedProject.id },
       });
-      if (!projectDecision.allowed && !isTaskBridgeKeyActor(req)) {
+      if (!projectDecision.allowed) {
         res.status(404).json({ error: "Project not found" });
         return;
       }

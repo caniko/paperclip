@@ -104,14 +104,12 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
   await expect.poll(async () => (await db.select({ status: agents.status, lifecycleState: agents.lifecycleState })
     .from(agents).where(eq(agents.id, bindings["agent/worker"])))[0], { timeout: 30000, interval: 100 })
     .toEqual({ status: "idle", lifecycleState: "ready" });
-  const createIssue = (company: string, project: string) => fetch(`http://localhost:${port}/api/companies/${company}/issues`, {
+  const createIssue = (company: string, extra: Record<string, unknown> = {}) => fetch(`http://localhost:${port}/api/companies/${company}/issues`, {
     method: "POST", headers: { "content-type": "application/json", authorization: "Bearer entry-test-bridge-token-at-least-32-characters" },
-    body: JSON.stringify({ title: "Bridge request", status: "backlog", projectId: project, assigneeAgentId: bindings["agent/worker"] }),
+    body: JSON.stringify({ title: "Bridge request", status: "backlog", assigneeAgentId: bindings["agent/worker"], ...extra }),
   });
-  const allowed = await createIssue(bindings["company/example"], bindings["project/main"]);
-  expect(allowed.status, await allowed.text()).toBe(201);
-  expect((await createIssue(bindings["company/example"], bindings["project/outside"])).status).toBe(403);
-  expect((await createIssue(bindings["company/other"], bindings["project/main"])).status).toBe(403);
+  expect((await createIssue(bindings["company/example"])).status).toBe(403);
+  expect((await createIssue(bindings["company/other"])).status).toBe(403);
   const plan = await command("plan");
   expect(plan.code, plan.stderr).toBe(0);
   expect(JSON.parse(plan.stdout).differences).toEqual([]);
