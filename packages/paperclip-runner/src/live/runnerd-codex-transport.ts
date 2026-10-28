@@ -2029,9 +2029,6 @@ function commandDigest(value: unknown): string {
   return `sha256:${createHash("sha256").update(durableRecoveryInternals.canonicalJson(value)).digest("hex")}`;
 }
 
-// Warm-recovery admission reads this inside the runner's post-auth welcome
-// window. Rehash only when the file identity changes, so a replaced binary is
-// still detected without blocking the event loop on every admission.
 const runnerArtifactDigests = new Map<string, { file: string; digest: string }>();
 
 function approvedRunnerArtifact(runnerBinaryPath: string): {

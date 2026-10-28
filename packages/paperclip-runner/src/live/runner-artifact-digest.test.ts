@@ -15,8 +15,6 @@ const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const digest = (bytes: string) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 
-// Warm-recovery admission runs inside runnerd's post-auth welcome window.
-// Rehashing a large daemon there under load made runnerd fail closed.
 describe("runner artifact digest", () => {
   it("hashes an unchanged binary once and rehashes a replaced one", () => {
     const root = mkdtempSync(join(tmpdir(), "runner-digest-")); roots.push(root);
