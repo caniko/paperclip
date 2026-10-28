@@ -37,7 +37,7 @@ import {
   normalizeAcpFormElicitation,
   type NormalizedAcpForm,
 } from "../drivers/acpx/acp-question-adapter.js";
-import { openCodexAcpxRuntime } from "../drivers/acpx/codex-runtime-adapter.js";
+import { openCodexAcpxRuntime, AcpxProviderProcessLostError } from "../drivers/acpx/codex-runtime-adapter.js";
 import { AcpxApprovalRequiredError } from "../drivers/acpx/permission-policy.js";
 import { normalizeAcpxPermission, type NormalizedAcpxPermission } from "../drivers/acpx/acp-permission-adapter.js";
 import { acpxGoalProjection } from "../drivers/acpx/session-goals.js";
@@ -307,6 +307,7 @@ async function dispatch(
         runtimeContext: params.runtimeContext,
         environment: createAcpxSidecarHostEnvironment(process.env, params.agent, params.normalizedSessionId),
         expectedIdentity: params.expectedIdentity,
+        assignedMcpTransport: "prp",
         semanticTools: {
           tools: params.tools,
           handler: waitForTool,
@@ -683,7 +684,7 @@ async function pumpTurn(
     terminal = {
       status: "failed",
       error: {
-        ...(error instanceof AcpxApprovalRequiredError ? { code: error.code } : {}),
+        ...(error instanceof AcpxApprovalRequiredError || error instanceof AcpxProviderProcessLostError ? { code: error.code } : {}),
         message: safeMessage(error),
         retryable: false,
       },

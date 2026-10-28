@@ -1,3 +1,4 @@
+import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import type { Db } from "@paperclipai/db";
 import { companies, instanceSettings } from "@paperclipai/db";
 
@@ -36,6 +37,7 @@ import { eq } from "drizzle-orm";
 import { getManagedInstanceConfig, type ManagedInstanceConfig } from "./managed-config.js";
 import { getOperatorSettingDefaults } from "./setting-defaults.js";
 import { isCloudStagingExperimentalSetting, isCloudStagingInstance } from "./cloud-instance.js";
+import { forbidden } from "../errors.js";
 
 const DEFAULT_SINGLETON_KEY = "default";
 const instanceGeneralSettingsStorageSchema = instanceGeneralSettingsSchema.strip();
@@ -241,9 +243,11 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
       enableChatConnectors: parsed.data.enableChatConnectors ?? false,
       enableGitHubReviewBots: parsed.data.enableGitHubReviewBots ?? false,
       enableMemoryConnectors: parsed.data.enableMemoryConnectors ?? false,
+      enablePaperclipNotebook: parsed.data.enablePaperclipNotebook ?? false,
       enableCases: parsed.data.enableCases ?? false,
       enableAgentChat: parsed.data.enableAgentChat ?? false,
       enableCombinedInboxTasks: parsed.data.enableCombinedInboxTasks ?? false,
+      enableArtifactsV1: parsed.data.enableArtifactsV1 ?? false,
       enableConferenceRoomChat: parsed.data.enableConferenceRoomChat ?? false,
       enableClassicTaskInterface: parsed.data.enableClassicTaskInterface ?? false,
       enableIssuePlanDecompositions: parsed.data.enableIssuePlanDecompositions ?? false,
@@ -291,9 +295,11 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
     enableChatConnectors: false,
     enableGitHubReviewBots: false,
     enableMemoryConnectors: false,
+    enablePaperclipNotebook: false,
     enableCases: false,
     enableAgentChat: false,
     enableCombinedInboxTasks: false,
+    enableArtifactsV1: false,
     enableConferenceRoomChat: false,
     enableClassicTaskInterface: false,
     enableIssuePlanDecompositions: false,
@@ -440,7 +446,8 @@ export function instanceSettingsService(db: Db, options: InstanceSettingsService
   const enforcedManagedConfig = staging && managedConfig
     ? {
       ...managedConfig,
-      features: Object.fromEntries(Object.entries(managedConfig.features).filter(([key]) => !isCloudStagingExperimentalSetting(key))),
+      features: Object.fromEntries(Object.entries(managedConfig.features)
+        .filter(([key, enabled]) => enabled || !isCloudStagingExperimentalSetting(key))),
     }
     : managedConfig;
   // Same posture for PAPERCLIP_SETTING_DEFAULTS: parsed once, applied per
@@ -575,6 +582,13 @@ export function instanceSettingsService(db: Db, options: InstanceSettingsService
     },
 
     updateExperimental: async (patch: PatchInstanceExperimentalSettings): Promise<InstanceSettings> => {
+      for (const [key, enabled] of Object.entries(managedConfig?.features ?? {})) {
+        if (enabled && patch[key as ManagedExperimentalFeatureKey] === false) {
+          throw forbidden(`${key} is enabled by Paperclip Cloud and cannot be disabled on this instance`, {
+            code: "settings_operator_managed",
+          });
+        }
+      }
       const current = await getOrCreateRow();
       // Guarded Cloud flags stay absent from the row unless chosen, so the
       // read-time catalog default keeps applying (see stripCloudCatalogDefaultEchoes).
@@ -595,14 +609,18 @@ export function instanceSettingsService(db: Db, options: InstanceSettingsService
         }
       }
       const now = new Date();
-      const [updated] = await db
-        .update(instanceSettings)
-        .set({
-          experimental: { ...nextExperimental },
-          updatedAt: now,
-        })
-        .where(eq(instanceSettings.id, current.id))
-        .returning();
+      const [updated] = await db.transaction(async tx => {
+        await notifyDeliveryWork(tx, DELIVERY_QUEUES.mcpEvents, "*");
+        await notifyDeliveryWork(tx, DELIVERY_QUEUES.dotEvents, "*");
+        return tx
+          .update(instanceSettings)
+          .set({
+            experimental: { ...nextExperimental },
+            updatedAt: now,
+          })
+          .where(eq(instanceSettings.id, current.id))
+          .returning();
+      });
       return toInstanceSettings(updated ?? current);
     },
 

@@ -2,6 +2,8 @@
 
 Product map: [Steering and queued messages](../feature-map/steering.md).
 
+Feature ID: `steering`.
+
 Review date: 2026-10-12. Source commit: `58e16dbddfc9c8d0cf60867f9d9847f0feda055b`.
 Native REST transport reconciled in this change; see the
 [shared transport contract](README.md#native-rest-transport).
@@ -12,6 +14,8 @@ qualified. No live agent execution is claimed. Follow the [map contract](../READ
 for format, permission checks, evidence and maintenance.
 
 ## `queue`
+
+Capability ID: `steering/queue`.
 
 Review: `baseline`.
 
@@ -46,6 +50,8 @@ messages requires separate authority.
 
 ## `edit-order-discard`
 
+Capability ID: `steering/edit-order-discard`.
+
 Review: `baseline`.
 
 API: `present` — representative operation IDs:
@@ -71,6 +77,8 @@ needed before granting one.
 
 ## `steer`
 
+Capability ID: `steering/steer`.
+
 Review: `baseline`.
 
 API: `present` — representative operation IDs:
@@ -95,6 +103,8 @@ preserves this denial and cannot impersonate the steering user.
 
 ## `interrupt`
 
+Capability ID: `steering/interrupt`.
+
 Review: `baseline`.
 
 API: `present` — representative operation IDs:
@@ -118,6 +128,8 @@ Gaps: Explicit operator action is distinct from an agent yielding/blocking its o
 
 ## `stop-and-pause`
 
+Capability ID: `steering/stop-and-pause`.
+
 Review: `baseline`.
 
 API: `present` — representative operation IDs:
@@ -129,7 +141,9 @@ Agent access: `restricted` — Board control APIs; agent paperclip_finish/paperc
 for its own turn.
 
 Policy: Queue inspection follows task visibility; queued user-message mutation and run
-cancellation require a board actor/user.
+cancellation require a board actor/user. A saved pre-Stop message does not authorize
+automatic resumption. A later authorized user message may continue with retained
+input after current cleanup, ownership, and budget gates pass.
 
 Evidence: `source-only` — [implementation](../../server/src/routes/issues.ts#L16166) at
 the reviewed commit above.
@@ -142,6 +156,8 @@ Gaps: Task-tree/agent pause and confirmed stop need policy-preserving authority;
 generic agent management path.
 
 ## `drafts`
+
+Capability ID: `steering/drafts`.
 
 Review: `baseline`.
 
@@ -164,6 +180,8 @@ Gaps: No shared server draft resource for this presentation state; cross-client 
 would be a deliberate new capability.
 
 ## `approval-queue`
+
+Capability ID: `steering/approval-queue`.
 
 Review: `baseline`.
 

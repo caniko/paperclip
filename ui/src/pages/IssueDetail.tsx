@@ -1,5 +1,7 @@
+import { useTaskRetry } from "../hooks/useTaskRetry";
 import { grokBotApi } from "@/api/grokBot";
 import { WorkspaceBaseRefRecoveryProvider } from "../components/WorkspaceBaseRefRecovery";
+import { WorkspaceRetryControl } from "../components/WorkspaceRetryButton";
 import { isLockedIssueStub, LockedIssueChip } from "@/components/LockedIssueChip";
 import { canManageIssuePrivacy } from "../lib/issuePrivacy";
 import { TextAttachmentContext } from "../context/TextAttachmentContext";
@@ -309,6 +311,7 @@ import { buildIssuePropertiesPanelKey } from "../lib/issue-properties-panel-key"
 import { openSkillPanelState, shouldSuppressTaskPanelUntilPlan } from "../lib/task-side-panel-state";
 import {
   interactionReadinessRefetchInterval,
+  isDeferredConversationInteraction,
   buildAnsweredQuestionsDeliveryText,
   buildIssueThreadInteractionSummary,
 } from "../lib/issue-thread-interactions";
@@ -1197,6 +1200,9 @@ function InboxMobileToolbar({
 }
 
 type IssueDetailChatTabProps = {
+  executionBlocked?: boolean;
+  interruption?: Issue["interruption"];
+  retryPreparing?: boolean;
   queryIssueId?: string;
   browsers?: import("@paperclipai/shared").TaskBrowser[];
   onOpenBrowser?: (browserId: string) => void;
@@ -1332,6 +1338,7 @@ type IssueDetailChatTabProps = {
     interaction: AskUserQuestionsInteraction,
   ) => Promise<void>;
   onSkipInteraction: (interaction: IssueThreadInteraction) => Promise<void>;
+  onDismissInteraction: (interaction: IssueThreadInteraction) => Promise<void>;
   onSubmitInteractionVerdicts: (
     interaction: RequestItemVerdictsInteraction,
     verdicts: {
@@ -1354,6 +1361,9 @@ type IssueDetailChatTabProps = {
 const DesignSandboxTaskThread = lazy(() => import("../components/design-sandbox/DesignSandboxTaskThread"));
 
 const IssueDetailChatTab = memo(function IssueDetailChatTab({
+  executionBlocked,
+  interruption,
+  retryPreparing,
   queryIssueId,
   browsers,
   onOpenBrowser,
@@ -1443,6 +1453,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   onSubmitInteractionAnswers,
   onCancelInteraction,
   onSkipInteraction,
+  onDismissInteraction,
   onSubmitInteractionVerdicts,
   assigneeUserId,
   onResumeFromBacklog,
@@ -2506,6 +2517,9 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
         >
           <EmailThreadProvider companyId={companyId} issueId={issueId}>
           <ThreadComponent
+            executionBlocked={executionBlocked}
+            interruption={interruption}
+            retryPreparing={retryPreparing}
             key={conversationMode ? draftKey : issueId}
             {...(!classicTaskInterfaceEnabled ? { creationActivity: resolvedActivity } : {})}
             onOpenSkill={onOpenSkill}
@@ -2538,7 +2552,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
               if (activeRunQueryEnabled) void refetchActiveRun();
             }}
             composerRef={composerRef}
-            composerAccessory={composerAccessory}
+            composerAccessory={<><WorkspaceRetryControl />{composerAccessory}</>}
             threadHeader={
               !classicTaskInterfaceEnabled &&
               (threadHeader || loadOlderButton) ? (
@@ -2657,6 +2671,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
             }
             onCancelInteraction={onCancelInteraction}
             onSkipInteraction={onSkipInteraction}
+            onDismissInteraction={onDismissInteraction}
             onSubmitInteractionVerdicts={onSubmitInteractionVerdicts}
             issueWorkMode={issueWorkMode}
             onWorkModeChange={onWorkModeChange}
@@ -3228,6 +3243,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     if (issueId) void prefetchIssueThread(queryClient, issueId);
   }, [issueId, queryClient]);
   const issue = queriedIssue ?? conversation?.issue ?? draftIssue;
+  const taskRetry = useTaskRetry(issue ?? undefined);
   const resolveWritableIssueId = async () => {
     if (!conversation) return issueId!;
     const resolved = await conversation.ensureIssue();
@@ -3974,7 +3990,9 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
 
   const threadComments = useMemo(
     () =>
-      mergeIssueComments(comments ?? [], optimisticComments).map((comment) => {
+      mergeIssueComments(comments ?? [], optimisticComments)
+      .filter(comment => !(comment.authorType === "system" && comment.metadata?.recoveryResponsibility === "system"))
+      .map((comment) => {
         if ("clientId" in comment && comment.clientId)
           commentRenderKeys.current.set(comment.id, comment.clientId);
         const clientId = commentRenderKeys.current.get(comment.id);
@@ -5138,6 +5156,15 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
           err instanceof Error ? err.message : "Unable to cancel the question",
         tone: "error",
       });
+    },
+  });
+
+  const dismissInteraction = useMutation({
+    mutationFn: (interaction: IssueThreadInteraction) => issuesApi.dismissInteraction(issueId!, interaction.id),
+    onSuccess: (interaction) => {
+      upsertInteractionInCache(interaction);
+      invalidateIssueDetail();
+      invalidateIssueCollections();
     },
   });
 
@@ -7780,15 +7807,15 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
             issueCacheRefs={issueCacheRefs}
           />
 
-          {resolvedDetailTab === "chat" && (
+          {resolvedDetailTab === "chat" && !issue.interruption && !issue.executionBlocker?.workspaceRecovery && (
             <WorkspaceExportRecovery key={`workspace-export:${issue.activeRecoveryAction?.id ?? issue.id}`}
               className={shellSectionClass}
               action={issue.activeRecoveryAction ?? null} />
           )}
-          {resolvedDetailTab === "chat" && issue.executionBlocker && (
-            <ExecutionBlockerNotice className={shellSectionClass} companyId={issue.companyId} issueId={issue.id}
-              issueStatus={issue.status} canManage={canManageBoardRuntime && canResolveBoardRecoveryAction}
-              blocker={issue.executionBlocker} onRetried={invalidateIssueDetail} />
+          {resolvedDetailTab === "chat" && (
+            <ExecutionBlockerNotice className={shellSectionClass} presentation={issue.interruption}
+              canRetry={canResolveBoardRecoveryAction} onRetry={taskRetry.retry}
+              optimistic={taskRetry.optimistic} takingLonger={taskRetry.takingLonger} error={taskRetry.error} />
           )}
 
           {issue.status === "in_review" && issue.externalConversationState === "waiting" && (
@@ -8096,15 +8123,16 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
             >
               {resolvedDetailTab === "chat" ? (
                 <WorkspaceBaseRefRecoveryProvider issue={issue} agentMap={agentMap} onRepaired={() => { invalidateIssueDetail(); invalidateIssueCollections(); }}
-                  unavailableReason={!canManageBoardRuntime || !canResolveBoardRecoveryAction ? "You don’t have permission to repair this task’s workspace."
+                  baseRefUnavailableReason={!canManageBoardRuntime ? "You don’t have permission to repair this task’s workspace." : null}
+                  unavailableReason={!canResolveBoardRecoveryAction ? "You don’t have permission to retry this task."
                     : treeControlStateError ? "Couldn’t check whether this task is paused. Refresh to try again."
                     : activePauseHold ? "Resume the task before retrying."
                     : issue.project?.pausedAt ? "Resume the project before retrying."
-                    : interactions.some(i => i.status === "pending") ? "Respond to the pending question or confirmation before retrying." : null}>
+                    : interactions.some(i => i.status === "pending" && !isDeferredConversationInteraction(i)) ? "Respond to the pending question or confirmation before retrying." : null}>
                 <DispositionRecoveryProvider value={{
                   issue,
                   agentMap,
-                  hasPendingInteraction: interactions.some((interaction) => interaction.status === "pending"),
+                  hasPendingInteraction: interactions.some((interaction) => interaction.status === "pending" && !isDeferredConversationInteraction(interaction)),
                   unavailableReason: boardAccess && !canResolveBoardRecoveryAction
                     ? "You don’t have permission to retry this recovery action."
                     : treeControlStateError
@@ -8117,6 +8145,9 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                   onRetry: (actionId) => retryDispositionRecovery.mutateAsync(actionId).then(() => undefined),
                 }}>
                 <IssueDetailChatTab
+                  executionBlocked={Boolean(issue.executionBlocker)}
+                  interruption={issue.interruption}
+                  retryPreparing={taskRetry.optimistic}
                   queryIssueId={issueId ?? issue.id}
                   onOpenSkill={handleOpenSkill}
                   browsers={browserQuery.data}
@@ -8170,7 +8201,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                   blockerAttention={issue.blockerAttention ?? null}
                   successfulRunHandoff={issue.successfulRunHandoff ?? null}
                   scheduledRetry={issue.scheduledRetry ?? null}
-                  recoveryAction={issue.activeRecoveryAction?.cause === "native_workspace_finalization_owner_unverified" ? null : issue.activeRecoveryAction ?? null}
+                  recoveryAction={issue.interruption?.responsibility === "system" || issue.activeRecoveryAction?.cause === "native_workspace_finalization_owner_unverified" ? null : issue.activeRecoveryAction ?? null}
                   onResolveRecoveryAction={handleResolveRecoveryAction}
                   onReissueIsolatedRecoveryAction={
                     handleReissueIsolatedRecoveryAction
@@ -8341,6 +8372,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                   onSubmitInteractionAnswers={handleSubmitInteractionAnswers}
                   onCancelInteraction={handleCancelInteraction}
                   onSkipInteraction={handleSkipInteraction}
+                  onDismissInteraction={async interaction => { await dismissInteraction.mutateAsync(interaction); }}
                   onSubmitInteractionVerdicts={handleSubmitInteractionVerdicts}
                   assigneeUserId={issue.assigneeUserId ?? null}
                   onResumeFromBacklog={
@@ -8355,7 +8387,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                   }
                   resumeAssigneePending={resumeAssigneeAgent.isPending}
                   onTryAgainNoLiveExecutionPath={
-                    issue.status === "blocked" && issue.activeRecoveryAction
+                    issue.status === "blocked" && !issue.interruption && issue.activeRecoveryAction
                       ? handleTryAgainNoLiveExecutionPath
                       : undefined
                   }

@@ -189,9 +189,9 @@ afterEach(async () => {
   // Release every sealed skills tree before the plain `rm` below. `rm` does
   // not restore write permission, so a tree still sealed at this point would
   // otherwise fail with EACCES and hide the real test failure.
+  // Cancelled opens can reuse one home. Parallel cleanup must visit it once.
   await Promise.all(
-    materializedSkillsHomes
-      .splice(0)
+    [...new Set(materializedSkillsHomes.splice(0))]
       .map((skillsHome) => releaseMaterializedNativeRuntimeSkills(skillsHome)),
   );
   await Promise.all(
@@ -377,6 +377,45 @@ describe("ACPX runtime host", () => {
     expect(openRuntime).not.toHaveBeenCalled();
     const nextOwner = await waitForAcpxOperation(() => AcpxRuntimeHost.open(options, fixture.dependencies({ openRuntime })));
     await nextOwner.close({ reason: "cancelled initializer ownership released" });
+  });
+
+  it.each(["deny-all", "approve-all"] as const)("admits the compact assigned MCP catalog through PRP with %s policy", async permissionMode => {
+    const fixture = await hostFixture();
+    const runtimeContext = { skills: [], mcp: { bindingId: "assigned-run" } } as unknown as NativeRuntimeContextSnapshot;
+    const catalog = ["paperclip_search_assigned_tools", "paperclip_call_assigned_tool"].map(name => ({ name, inputSchema: { type: "object" } }));
+    const readOnly = permissionMode === "deny-all";
+    const handler = vi.fn(async () => ({ value: "assigned result" }));
+    let bridge: { url: string; bearerToken: string } | undefined;
+    const options = { ...fixture.options, agent: "claude" as const, model: "claude-sonnet-5",
+      permissionMode, providerPolicy: { readOnly }, runtimeContext,
+      semanticTools: { tools: catalog, handler } };
+    const openRuntime = vi.fn(async (launch: AcpxRuntimePortOpenOptions) => {
+      expect(launch.permissionMode).toBe(permissionMode);
+      expect(launch.launchEnvironment.PAPERCLIP_RUNNER_HOME_MODE).toBeUndefined();
+      expect(launch.mcpServers.map(server => server.name)).toEqual(["paperclip"]);
+      if (!("url" in launch.mcpServers[0])) throw new Error("missing tool bridge");
+      bridge = launch.mcpServers[0];
+      return runtimePort({ getStatus: async () => ({ models: { currentModelId: "claude-sonnet-5" } }) });
+    });
+    const dependencies = fixture.dependencies({ openRuntime });
+    const prepare = dependencies.prepareSandbox!;
+    dependencies.prepareSandbox = input => { expect(input.providerPolicy?.readOnly).toBe(readOnly); return prepare(input); };
+    await expect(AcpxRuntimeHost.open(options, dependencies)).rejects.toThrow("assigned native MCP launch binding is unavailable");
+    await expect(AcpxRuntimeHost.open({ ...options, assignedMcpTransport: "prp", semanticTools: undefined }, dependencies)).rejects.toThrow("assigned native MCP launch binding is unavailable");
+    expect(openRuntime).not.toHaveBeenCalled();
+    const host = await AcpxRuntimeHost.open({ ...options, assignedMcpTransport: "prp" }, dependencies);
+    try {
+      for (const tool of catalog) {
+        const response = await fetch(bridge!.url, { method: "POST", headers: {
+          Authorization: `Bearer ${bridge!.bearerToken}`, "Content-Type": "application/json",
+        }, body: JSON.stringify({ jsonrpc: "2.0", id: tool.name, method: "tools/call", params: { name: tool.name, arguments: {} } }) });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ id: tool.name, result: { content: expect.any(Array) } });
+        expect(handler).toHaveBeenLastCalledWith(expect.objectContaining({ tool: tool.name, arguments: {} }));
+      }
+      expect(handler).toHaveBeenCalledTimes(catalog.length);
+    } finally { await host.close({ reason: "PRP assignment verified" }); }
+    expect(openRuntime).toHaveBeenCalledTimes(1);
   });
 
   it("registers the assigned connection gateway alongside the Claude task bridge", async () => {
@@ -1475,7 +1514,7 @@ describe("ACPX runtime host", () => {
     ).rejects.toThrow("initialization and cleanup failed");
     expect(runtime.close).toHaveBeenCalledOnce();
     expect(credential.close).not.toHaveBeenCalled();
-    expect(fixture.commandClose).toHaveBeenCalledOnce();
+    expect(fixture.commandClose).not.toHaveBeenCalled();
     expect(retainedAdmissionCleanup).not.toBeNull();
     let cleanupSettled = false;
     void retainedAdmissionCleanup!.finally(() => {
@@ -1488,6 +1527,7 @@ describe("ACPX runtime host", () => {
     await retainedAdmissionCleanup;
     expect(cleanupSettled).toBe(true);
     expect(credential.close).toHaveBeenCalledOnce();
+    expect(fixture.commandClose).toHaveBeenCalledOnce();
   });
 
   it("retains credential ownership when runtime shutdown fails until retry succeeds", async () => {
@@ -1565,7 +1605,7 @@ describe("ACPX runtime host", () => {
 
     const first = host.close({ reason: "runtime close pending" });
     await waitForAcpxOperation(() => expect(runtime.close).toHaveBeenCalledOnce());
-    await waitForAcpxOperation(() => expect(fixture.commandClose).toHaveBeenCalledOnce());
+    expect(fixture.commandClose).not.toHaveBeenCalled();
     const second = host.close({ reason: "same exact close" });
     await expect(readFile(authPath, "utf8")).resolves.toBe("{}");
     await expect(
@@ -1583,6 +1623,7 @@ describe("ACPX runtime host", () => {
       undefined,
       undefined,
     ]);
+    expect(fixture.commandClose).toHaveBeenCalledOnce();
     await expect(readFile(authPath)).rejects.toMatchObject({ code: "ENOENT" });
     const contender = await waitForAcpxOperation(() =>
       stageManagedCodexCredential({
@@ -1595,9 +1636,10 @@ describe("ACPX runtime host", () => {
     await contender.close();
   }, ACPX_LONG_WAIT_TEST_TIMEOUT_MS);
 
-  it("retains the exact pending cleanup while independent resources close", async () => {
+  it("retains the exact pending cleanup and command snapshot until runtime retirement", async () => {
     const fixture = await hostFixture();
-    const firstClose = new Promise<void>(() => undefined);
+    let resolveRuntimeClose!: () => void;
+    const firstClose = new Promise<void>(resolve => { resolveRuntimeClose = resolve; });
     const runtime = runtimePort({
       onClose: vi
         .fn()
@@ -1625,6 +1667,9 @@ describe("ACPX runtime host", () => {
     await Promise.resolve();
     expect(settled).toBe(false);
     expect(runtime.close).toHaveBeenCalledOnce();
+    expect(fixture.commandClose).not.toHaveBeenCalled();
+    resolveRuntimeClose();
+    await Promise.all([first, second]);
     expect(fixture.commandClose).toHaveBeenCalledOnce();
   }, ACPX_LONG_WAIT_TEST_TIMEOUT_MS);
 

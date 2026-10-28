@@ -717,6 +717,104 @@ describe("AgentConfigForm environment selector", () => {
     expect(result.onSave).toHaveBeenCalledWith({ name: "Renamed Cody" });
   });
 
+  it.each(["codex_local", "claude_local"])("upgrades a saved %s in one click with pending edits", async adapterType => {
+    mockAdaptersApi.list.mockResolvedValueOnce([{ type: adapterType, supportedRunners: ["legacy", "paperclip"], defaultRunner: "paperclip" }]);
+    const result = await renderForm([], { adapterType, adapterConfig: { model: "existing-model", effort: "high" } });
+    roots.push(result.root);
+    expect(result.container.textContent).toContain("Upgrade to Paperclip Runner");
+    await act(async () => setInputValue(result.container.querySelector<HTMLInputElement>('[placeholder="Agent name"]')!, "Renamed agent"));
+    await flushReact();
+    await clickByText(result.container, "Upgrade runner");
+    expect(result.onSave).toHaveBeenCalledWith({ name: "Renamed agent", runner: "paperclip" });
+  });
+
+  it.each(["paperclip_runner", "gemini_local"])("does not offer an upgrade for %s", async adapterType => {
+    const result = await renderForm([], { adapterType });
+    roots.push(result.root);
+    expect(result.container.textContent).not.toContain("Upgrade runner");
+  });
+
+  it("includes an uncommitted environment variable draft in an upgrade", async () => {
+    mockAdaptersApi.list.mockResolvedValueOnce([{ type: "codex_local", supportedRunners: ["legacy", "paperclip"], defaultRunner: "paperclip" }]);
+    const result = await renderForm([], { adapterConfig: { model: "gpt-5.4" } }, { environmentVariablesPlacement: "configuration" });
+    roots.push(result.root);
+    await clickByText(result.container, "Add variable");
+    await act(async () => {
+      setInputValue(result.container.querySelector<HTMLInputElement>('input[aria-label="Variable name"]')!, "MIGRATION_MARKER");
+      setInputValue(result.container.querySelector<HTMLInputElement>('input[aria-label="Variable value"]')!, "kept");
+    });
+    await flushReact();
+    await clickByText(result.container, "Upgrade runner");
+    expect(result.onSave).toHaveBeenCalledWith(expect.objectContaining({ runner: "paperclip", replaceAdapterConfig: true,
+      adapterConfig: { model: "gpt-5.4", env: { MIGRATION_MARKER: { type: "plain", value: "kept" } } },
+    }));
+  });
+
+  it("keeps failed upgrades editable and allows retry", async () => {
+    mockAdaptersApi.list.mockResolvedValueOnce([{ type: "codex_local", supportedRunners: ["legacy", "paperclip"], defaultRunner: "paperclip" }]);
+    const result = await renderForm([]);
+    roots.push(result.root);
+    result.onSave.mockRejectedValueOnce(new Error("Paperclip Runner cannot honor these settings: extraArgs."));
+    await clickByText(result.container, "Upgrade runner");
+    expect(result.container.querySelector('[role="alert"]')?.textContent).toContain("extraArgs");
+    expect(result.onSave).toHaveBeenLastCalledWith({ runner: "paperclip" });
+    await clickByText(result.container, "Upgrade runner");
+    expect(result.onSave).toHaveBeenCalledTimes(2);
+    expect(result.container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("does not show an earlier agent's upgrade result after navigation", async () => {
+    mockAdaptersApi.list.mockResolvedValueOnce([{ type: "codex_local", supportedRunners: ["legacy", "paperclip"], defaultRunner: "paperclip" }]);
+    let finishUpgrade!: () => void;
+    let changeAgent!: () => void;
+    const save = vi.fn(() => new Promise<void>(resolve => { finishUpgrade = resolve; }));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+    function Fixture() {
+      const [agent, setAgent] = useState(() => makeAgent());
+      changeAgent = () => setAgent(makeAgent({ id: "agent-2", name: "Another agent" }));
+      return <AgentConfigForm mode="edit" agent={agent} onSave={save} hidePromptTemplate />;
+    }
+    await act(async () => renderFormView(root, createFormQueryClient(), <Fixture />));
+    await flushReact();
+    await clickByText(container, "Upgrade runner");
+    await act(async () => changeAgent());
+    await act(async () => finishUpgrade());
+    await flushReact();
+    expect(container.textContent).not.toContain("Upgraded to Paperclip Runner.");
+    expect(findButton(container, "Upgrade runner")).toBeDefined();
+  });
+
+  it("switches a saved legacy Claude agent to Paperclip Runner on a Runner-only environment", async () => {
+    mockAdaptersApi.list.mockResolvedValue([{ type: "claude_local", supportedRunners: ["paperclip"], defaultRunner: "paperclip" }]);
+    try {
+      const result = await renderForm([], { adapterType: "claude_local", adapterConfig: { model: "claude-opus-5-5" } });
+      roots.push(result.root);
+      await clickByText(result.container, "Advanced");
+      expect(result.container.querySelector('[aria-label="Runner"]')?.textContent).toContain("Paperclip Runner");
+      await clickByText(result.container, "Save");
+      expect(result.onSave).toHaveBeenCalledWith(expect.objectContaining({ runner: "paperclip" }));
+    } finally { mockAdaptersApi.list.mockResolvedValue([{ type: "codex_local", supportedRunners: ["legacy", "paperclip"], defaultRunner: "legacy" }]); }
+  });
+
+  it("switches a new agent's Legacy choice to Paperclip Runner on a Runner-only environment", async () => {
+    mockAdaptersApi.list.mockResolvedValue([{ type: "claude_local", supportedRunners: ["paperclip"], defaultRunner: "paperclip" }]);
+    try {
+      const result = await renderCreateForm([], { ...defaultCreateValues, adapterType: "claude_local", runner: "legacy" });
+      roots.push(result.root);
+      expect(result.onChange).toHaveBeenCalledWith({ runner: "paperclip" });
+    } finally { mockAdaptersApi.list.mockResolvedValue([{ type: "codex_local", supportedRunners: ["legacy", "paperclip"], defaultRunner: "legacy" }]); }
+  });
+
+  it("does not offer an upgrade when the target only supports Legacy", async () => {
+    mockAdaptersApi.list.mockResolvedValueOnce([{ type: "codex_local", supportedRunners: ["legacy"], defaultRunner: "legacy" }]);
+    const result = await renderForm([]);
+    roots.push(result.root);
+    expect(result.container.textContent).not.toContain("Upgrade runner");
+  });
+
   it.each(["codex", "claude"].flatMap(harness => ["modelReasoningEffort", "reasoningEffort", "effort"].map(key => ({ harness, key }))))("hydrates saved effort and clears explicit Auto for $harness ($key)", async ({ harness, key }) => {
     const profile = harness === "codex" ? { provider: "codex", model: "gpt-5.6-sol" } : { provider: "acpx", acpxAgent: "claude", model: "claude-opus-5-5" };
     const result = await renderForm([], { adapterType: "paperclip_runner", adapterConfig: { ...profile, [key]: "high" } });
@@ -810,11 +908,19 @@ describe("AgentConfigForm environment selector", () => {
     expect(result.onSave).toHaveBeenCalledWith({ name: "Renamed Claude" });
   });
 
-  it.each([{ provider: "opencode", model: "openrouter/anthropic/claude-sonnet-4.6" }, { provider: "unknown-provider" }])("preserves saved native $provider configuration with the experimental gate off", async adapterConfig => {
+  it.each([{ provider: "opencode", model: "openrouter/anthropic/claude-sonnet-4.6" }, { provider: "acpx", acpxAgent: "pi", model: "openrouter/anthropic/claude-sonnet-4.6", piThinkingLevel: "max", acpxPermissionMode: "approve-reads", lifecycleMode: "warm" }, { provider: "unknown-provider" }])("preserves saved native $provider configuration with the experimental gate off", async adapterConfig => {
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableNativeRunner: false });
     const result = await renderForm([], { adapterType: "paperclip_runner", adapterConfig }, { showAdapterTypeField: true });
     roots.push(result.root);
-    expect(result.container.querySelector('[aria-label="Runner"]')).toBeNull();
+    if (adapterConfig.provider === "opencode" || adapterConfig.acpxAgent === "pi") {
+      expect(result.container.querySelector('[aria-label="Harness"]')?.textContent).toContain(adapterConfig.provider === "opencode" ? "OpenCode" : "Pi");
+      await clickByText(result.container, "Advanced");
+      expect(result.container.querySelector('[aria-label="Runner"]')?.textContent).toContain("Paperclip Runner");
+    } else expect(result.container.querySelector('[aria-label="Runner"]')).toBeNull();
+    if (adapterConfig.acpxAgent === "pi") {
+      expect(result.container.querySelector('[aria-label="Pi thinking level"]')).not.toBeNull();
+      expect(result.container.querySelector('[aria-label="Thinking effort"]')).toBeNull();
+    }
     await act(async () => setInputValue(result.container.querySelector<HTMLInputElement>('[placeholder="Agent name"]')!, "Renamed native agent"));
     await flushReact();
     await clickByText(result.container, "Save");
@@ -976,10 +1082,9 @@ describe("AgentConfigForm environment selector", () => {
   });
 
   it.each([
-    ["Codex", "codex", undefined, DEFAULT_CODEX_LOCAL_MODEL],
-    ["ACP agents", "acpx", "claude", "claude-opus-5-5"],
-    ["Claude Managed", "claude_managed", undefined, "claude-sonnet-5"],
-  ])("saves the %s harness default without the previous OpenCode model prefix", async (label, provider, acpxAgent, model) => {
+    ["Codex", "codex_local"],
+    ["Claude Code", "claude_local"],
+  ])("clears OpenCode model settings when choosing %s so the server can apply its default", async (_label, adapterType) => {
     const accountList = vi.spyOn(aiConnectionsApi, "list").mockResolvedValue({
       currentUserId: "you",
       canManageConnections: true,
@@ -990,23 +1095,20 @@ describe("AgentConfigForm environment selector", () => {
         adapterType: "paperclip_runner",
         adapterConfig: { provider: "opencode", model: "openrouter/anthropic/claude-sonnet-4.6" },
         runtimeConfig: { aiConnection: { mode: "responsible_user", provider: "openrouter", method: "api_key" } },
-      });
+      }, { showAdapterTypeField: true });
       roots.push(result.root);
-      await act(async () => {
-        result.container.querySelector('[aria-label="Harness"]')!
-          .dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-      });
+      await clickElement(result.container.querySelector('[aria-label="Harness"]'));
       await flushReact();
-      const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
-        .find(element => element.textContent === label)!;
+      const option = document.querySelector<HTMLElement>(`[role="option"][data-value="${adapterType}"]`);
       expect(option).toBeTruthy();
-      await act(async () => {
-        option.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-      });
+      await clickElement(option);
       await flushReact();
       await clickByText(result.container, "Save");
       expect(result.onSave).toHaveBeenCalledWith(expect.objectContaining({
-        adapterConfig: expect.objectContaining({ provider, model, ...(acpxAgent ? { acpxAgent } : {}) }),
+        adapterType,
+        runner: "auto",
+        replaceAdapterConfig: true,
+        adapterConfig: expect.objectContaining({ model: "" }),
       }));
     } finally {
       accountList.mockRestore();
@@ -1040,6 +1142,33 @@ describe("AgentConfigForm environment selector", () => {
 
     expect(result.container.textContent).not.toContain("Environment override");
     expect(result.container.querySelector('[aria-label="Environment override"]')).toBeNull();
+  });
+
+  it("refreshes Copilot models after reconnecting the same responsible-user account", async () => {
+    const binding = { mode: "responsible_user", provider: "github", method: "api_key" } as const;
+    const account = { id: "copilot-account", grantId: "copilot-grant", companyId: "company-1", provider: "github", method: "api_key", name: "My Copilot", ownership: "personal", ownerUserId: "you", isDefault: true, status: "needs_attention" } as const;
+    const accountList = vi.spyOn(aiConnectionsApi, "list").mockResolvedValue({ currentUserId: "you", canManageConnections: true, connections: [account] });
+    const reconnect = vi.spyOn(aiConnectionsApi, "create").mockResolvedValue({ connectionId: account.id, grantId: account.grantId });
+    mockAgentsApi.adapterModels.mockResolvedValueOnce([{ id: "old-model", label: "Old token model" }])
+      .mockResolvedValue([{ id: "gpt-5.6-luna", label: "New token model" }]);
+    try {
+      const result = await renderForm([makeEnvironment({ id: "local-1", name: "Local", driver: "local" })], {
+        adapterType: "paperclip_runner", adapterConfig: { provider: "acpx", acpxAgent: "copilot", model: "gpt-5.6-luna" }, runtimeConfig: { aiConnection: binding },
+      });
+      roots.push(result.root);
+      await vi.waitFor(() => expect(mockAgentsApi.adapterModels).toHaveBeenCalledTimes(1));
+      await clickByText(result.container, "Reconnect account");
+      const token = document.querySelector<HTMLInputElement>('input[placeholder="github_pat_..."]');
+      expect(token).not.toBeNull();
+      await act(async () => setInputValue(token!, "github_pat_test_reconnect"));
+      await flushReact();
+      await clickByText(document.body, "Connect");
+      await vi.waitFor(() => expect(reconnect).toHaveBeenCalledWith("company-1", expect.objectContaining({ provider: "github", connectionId: account.id, apiKey: "github_pat_test_reconnect" })));
+      await vi.waitFor(() => expect(mockAgentsApi.adapterModels).toHaveBeenCalledTimes(2));
+      expect(mockAgentsApi.adapterModels).toHaveBeenLastCalledWith("company-1", "paperclip_runner", expect.objectContaining({ provider: "acpx", acpxAgent: "copilot", aiConnection: binding }));
+      await flushReact();
+      expect(result.container.textContent).toContain("New token model");
+    } finally { accountList.mockRestore(); reconnect.mockRestore(); }
   });
 
   it("renders GPT-6 Astra and its model-specific reasoning efforts", async () => {

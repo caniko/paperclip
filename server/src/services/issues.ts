@@ -1,14 +1,18 @@
+import { insertIssueComment } from "./issue-comment-writes.js";
 import { measureRunTransaction } from "./execution-transaction-timing.js";
+import { readNativeMonitorSource } from "./native-runtime/native-monitor-delivery.js";
+import { readNativeContinuationSource } from "./native-runtime/native-continuation-delivery.js";
+import { assertNoCaseHandoffMutation, cancelCaseHandoffsForIssue, completeTerminalCaseHandoffsForIssue } from "./heartbeat/case-handoff-lifecycle.js";
 import { measureRunPhase } from "./execution-preparation-timing.js";
-import { automaticReadRecoveryCleanupCondition, touchedByUserCondition } from "./issue-participation.js";
-import { HUMAN_TASK_ORIGIN_KINDS } from "@paperclipai/shared";
+import { automaticReadRecoveryCleanupCondition, directHumanCommentCondition, humanCreatedIssueCondition, pendingUserRequestCondition, touchedByUserCondition } from "./issue-participation.js";
 import { resolveProjectDefaultWorkspaceId } from "./project-default-workspace.js";
 import { type AuthorizationActor, executionWorkspaceReadSqlCondition, projectReadSqlCondition } from "./authorization.js";
-import { assertTaskWorkspaceAccess, assertTaskWorkspaceSourceProjectAccess } from "./task-workspace-source-access.js";
+import { assertExecutionWorkspaceRecordAccess, assertTaskWorkspaceSourceProjectAccess } from "./task-workspace-access.js";
 import { type TaskWorkspaceSelection, type TaskWorkspaceIntent } from "@paperclipai/shared";
 import { executionWorkspaceService } from "./execution-workspaces.js";
 import { notifyChatPublicationWork } from "./chat-work-notifications.js";
 import { notifyTerminalWorkspaceWork } from "./terminal-workspace-work.js";
+import { requestRestorePointDeletion } from "./git-restore-point-ledger.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
@@ -26,6 +30,7 @@ import { isDeepStrictEqual } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { isExplicitContinuationRetryClaim } from "./explicit-continuation-retry-claim.js";
 import { markdownToPlainText, parseMarkdown } from "chat";
+import { listExternalReviewWaits } from "./native-runtime/external-review-wait.js";
 import {
   and,
   asc,
@@ -119,6 +124,7 @@ import {
   issueCommentAuthorTypeSchema,
   issueCommentMetadataSchema,
   issueCommentPresentationSchema,
+  isAgentCreatedIssue,
   isUuidLike,
   normalizeIssueIdentifier as normalizeIssueReferenceIdentifier,
 } from "@paperclipai/shared";
@@ -1148,7 +1154,10 @@ export async function resolveChatOriginPublicationBindings(
   let contextSnapshot: Record<string, unknown> | null = null;
   let lineageAgentId: string | null = null;
   const visitedRunIds = new Set<string>();
-  for (let depth = 0; depth < 16; depth += 1) {
+  // Every hop needs its own durable authorization receipt. A task may continue
+  // many times; an arbitrary hop limit must not silently discard its replies.
+  // The visited set rejects cycles while keeping valid long lineages readable.
+  while (true) {
     if (visitedRunIds.has(originRunId)) return [];
     visitedRunIds.add(originRunId);
     const run = await dbOrTx
@@ -1381,6 +1390,18 @@ export async function resolveChatOriginPublicationBindings(
     if (contextSource?.startsWith("chat:")) {
       contextSnapshot = snapshot;
       break;
+    }
+    if (contextSource === "issue.monitor") {
+      const sourceRunId = await readNativeMonitorSource(dbOrTx, { companyId, issueId, runId: originRunId });
+      if (!sourceRunId) return [];
+      originRunId = sourceRunId;
+      continue;
+    }
+    if (contextSource === "native_status_decision") {
+      const sourceRunId = await readNativeContinuationSource(dbOrTx, { companyId, issueId, runId: originRunId });
+      if (!sourceRunId) return [];
+      originRunId = sourceRunId;
+      continue;
     }
     if (
       contextSource !== "issue.interaction.respond" &&
@@ -1895,6 +1916,7 @@ type IssueWithLabelsAndRun = IssueWithLabels & {
 };
 type IssueUserCommentStats = {
   issueId: string;
+  isUnreadForMe: boolean;
   myLastCommentAt: Date | null;
   lastExternalCommentAt: Date | null;
 };
@@ -1934,6 +1956,8 @@ function serializeAcceptedPlanDecomposition(
   };
 }
 type IssueUserContextInput = {
+  createdByAgentId?: string | null;
+  originKind?: string | null;
   createdByUserId: string | null;
   assigneeUserId: string | null;
   createdAt: Date | string;
@@ -2823,6 +2847,7 @@ function myLastCommentAtExpr(companyId: string, userId: string) {
       WHERE ${issueComments.issueId} = ${issues.id}
         AND ${issueComments.companyId} = ${companyId}
         AND ${issueComments.authorUserId} = ${userId}
+        AND ${directHumanCommentCondition()}
     )
   `;
 }
@@ -2846,7 +2871,7 @@ function myLastTouchAtExpr(companyId: string, userId: string) {
     GREATEST(
       COALESCE(${myLastCommentAt}, to_timestamp(0)),
       COALESCE(${myLastReadAt}, to_timestamp(0)),
-      COALESCE(CASE WHEN ${issues.createdByUserId} = ${userId} THEN ${issues.createdAt} ELSE NULL END, to_timestamp(0)),
+      COALESCE(CASE WHEN ${issues.createdByUserId} = ${userId} AND ${humanCreatedIssueCondition()} THEN ${issues.createdAt} ELSE NULL END, to_timestamp(0)),
       COALESCE(CASE WHEN ${issues.assigneeUserId} = ${userId} THEN ${issues.updatedAt} ELSE NULL END, to_timestamp(0))
     )
   `;
@@ -2902,10 +2927,14 @@ function issueCanonicalLastActivityAtExpr(companyId: string) {
 function unreadForUserCondition(companyId: string, userId: string) {
   const touchedCondition = touchedByUserCondition(companyId, userId);
   const myLastTouchAt = myLastTouchAtExpr(companyId, userId);
+  const myLastRequestReadAt = sql`GREATEST(
+    COALESCE(${myLastCommentAtExpr(companyId, userId)}, to_timestamp(0)),
+    COALESCE(${myLastReadAtExpr(companyId, userId)}, to_timestamp(0))
+  )`;
   return sql<boolean>`
     (
       ${touchedCondition}
-      AND EXISTS (
+      AND (EXISTS (
         SELECT 1
         FROM ${issueComments}
         WHERE ${issueComments.issueId} = ${issues.id}
@@ -2915,7 +2944,7 @@ function unreadForUserCondition(companyId: string, userId: string) {
             OR ${issueComments.authorUserId} <> ${userId}
           )
           AND ${issueComments.createdAt} > ${myLastTouchAt}
-      )
+      ) OR ${pendingUserRequestCondition(companyId, userId, myLastRequestReadAt)})
     )
   `;
 }
@@ -2941,6 +2970,7 @@ function inboxVisibleForUserCondition(companyId: string, userId: string) {
               )
               AND ${issueThreadInteractions.createdAt} > ${issueInboxArchives.archivedAt}
           )
+          OR ${pendingUserRequestCondition(companyId, userId, sql`${issueInboxArchives.archivedAt}`)}
           OR EXISTS (
             SELECT 1
             FROM ${activityLog}
@@ -3009,6 +3039,7 @@ export function deriveIssueUserContext(
   userId: string,
   stats:
     | {
+        isUnreadForMe?: boolean;
         myLastCommentAt: Date | string | null;
         myLastReadAt: Date | string | null;
         lastExternalCommentAt: Date | string | null;
@@ -3027,7 +3058,9 @@ export function deriveIssueUserContext(
   const myLastCommentAt = normalizeDate(stats?.myLastCommentAt);
   const myLastReadAt = normalizeDate(stats?.myLastReadAt);
   const createdTouchAt =
-    issue.createdByUserId === userId ? normalizeDate(issue.createdAt) : null;
+    issue.createdByUserId === userId && !isAgentCreatedIssue(issue)
+      ? normalizeDate(issue.createdAt)
+      : null;
   const assignedTouchAt =
     issue.assigneeUserId === userId ? normalizeDate(issue.updatedAt) : null;
   const myLastTouchAt =
@@ -3035,7 +3068,7 @@ export function deriveIssueUserContext(
       .filter((value): value is Date => value instanceof Date)
       .sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
   const lastExternalCommentAt = normalizeDate(stats?.lastExternalCommentAt);
-  const isUnreadForMe = Boolean(
+  const isUnreadForMe = stats?.isUnreadForMe ?? Boolean(
     myLastTouchAt &&
     lastExternalCommentAt &&
     lastExternalCommentAt.getTime() > myLastTouchAt.getTime(),
@@ -4447,6 +4480,8 @@ function reviewPathLabel(
       return "Linked approval";
     case "monitor":
       return "Scheduled review monitor";
+    case "external_response":
+      return "Waiting for an external update";
     case "human_reviewer":
       return "Human reviewer";
     case "active_run":
@@ -4711,6 +4746,7 @@ async function listIssueReviewAttentionMap(
     queuedWakeRequests: wakeRows,
     pendingInteractions: interactionRows,
     pendingApprovals: approvalRows,
+    externalResponseWaits: await listExternalReviewWaits(dbOrTx, companyId, reviewIds),
     openRecoveryIssues: recoveryPaths,
     now: new Date(),
   };
@@ -4969,7 +5005,8 @@ async function userCommentStatsForIssues(
       .select({
         issueId: issueComments.issueId,
         myLastCommentAt: sql<Date | null>`
-          MAX(CASE WHEN ${issueComments.authorUserId} = ${userId} THEN ${issueComments.createdAt} END)
+          MAX(CASE WHEN ${issueComments.authorUserId} = ${userId} AND ${directHumanCommentCondition()}
+            THEN ${issueComments.createdAt} END)
         `,
         lastExternalCommentAt: sql<Date | null>`
           MAX(
@@ -4988,7 +5025,21 @@ async function userCommentStatsForIssues(
         ),
       )
       .groupBy(issueComments.issueId);
-    stats.push(...rows);
+    const unreadRows = await dbOrTx.select({ id: issues.id }).from(issues).where(and(
+      eq(issues.companyId, companyId),
+      inArray(issues.id, issueIdChunk),
+      unreadForUserCondition(companyId, userId),
+    ));
+    const unreadIds = new Set(unreadRows.map((row: { id: string }) => row.id));
+    const commentsByIssueId = new Map<string, { myLastCommentAt: Date | null; lastExternalCommentAt: Date | null }>(
+      rows.map((row: { issueId: string; myLastCommentAt: Date | null; lastExternalCommentAt: Date | null }) => [row.issueId, row]),
+    );
+    for (const issueId of issueIdChunk) stats.push({
+      issueId,
+      myLastCommentAt: commentsByIssueId.get(issueId)?.myLastCommentAt ?? null,
+      lastExternalCommentAt: commentsByIssueId.get(issueId)?.lastExternalCommentAt ?? null,
+      isUnreadForMe: unreadIds.has(issueId),
+    });
   }
   return stats;
 }
@@ -5797,6 +5848,7 @@ async function listIssueBlockedInboxAttentionMap(
     });
 
   const findings = classifyIssueGraphLiveness({
+    externalResponseWaits: await listExternalReviewWaits(dbOrTx, companyId, graphIssues.filter(issue => issue.status === "in_review").map(issue => issue.id)),
     issues: graphIssues.map((issue) => ({
       id: issue.id,
       companyId: issue.companyId,
@@ -6202,14 +6254,6 @@ function assertValidAssigneeAgentFilter(
   }
 }
 
-function humanCreatedIssueCondition() {
-  return and(
-    isNull(issues.createdByAgentId),
-    isNotNull(issues.createdByUserId),
-    inArray(issues.originKind, [...HUMAN_TASK_ORIGIN_KINDS]),
-  )!;
-}
-
 function creationVisibilityCondition(companyId: string, filters?: IssueFilters) {
   if (filters?.includeAgentCreatedTasks !== false) return undefined;
   return filters.creationVisibilityUserId
@@ -6504,6 +6548,7 @@ async function listBlockedInboxIssues(
             : {}),
           ...(contextUserId
             ? deriveIssueUserContext(row, contextUserId, {
+                isUnreadForMe: statsByIssueId.get(row.id)?.isUnreadForMe ?? false,
                 myLastCommentAt:
                   statsByIssueId.get(row.id)?.myLastCommentAt ?? null,
                 myLastReadAt: readByIssueId.get(row.id) ?? null,
@@ -7835,15 +7880,12 @@ export function issueService(db: Db) {
       );
     if (!parent) return null;
 
-    const [comment] = await dbOrTx
-      .insert(issueComments)
-      .values({
-        companyId: child.companyId,
-        issueId: parent.id,
-        authorType: "system",
-        body,
-      })
-      .returning();
+    const [comment] = await insertIssueComment(dbOrTx, {
+      companyId: child.companyId,
+      issueId: parent.id,
+      authorType: "system",
+      body,
+    });
     await dbOrTx
       .update(issues)
       .set({ updatedAt: new Date() })
@@ -8272,6 +8314,7 @@ export function issueService(db: Db) {
               }
             : {}),
           ...deriveIssueUserContext(row, contextUserId, {
+            isUnreadForMe: statsByIssueId.get(row.id)?.isUnreadForMe ?? false,
             myLastCommentAt:
               statsByIssueId.get(row.id)?.myLastCommentAt ?? null,
             myLastReadAt: readByIssueId.get(row.id) ?? null,
@@ -10159,7 +10202,7 @@ export function issueService(db: Db) {
           if (projectWorkspaceId && isolatedWorkspacesEnabled) {
             const sourceStrategy = await executionWorkspaceService(db).resolveSourceWorkspaceStrategy({ companyId,
               assigneeAgentId: issueData.assigneeAgentId, assigneeAdapterOverrides: issueData.assigneeAdapterOverrides,
-              executionWorkspaceSettings, executionWorkspacePolicy: projectPolicy,
+              executionWorkspaceSettings, executionWorkspacePolicy: projectPolicy, sourceWorkspaceId: projectWorkspaceId,
               typedSelection: false, projectId: issueData.projectId, executionPolicy: issueData.executionPolicy }, tx);
             if (sourceStrategy === "git_worktree") workspaceIntent = { version: 1, source: "project",
               selection: { kind: "configured_source", projectWorkspaceId, mode: "managed_isolated" } };
@@ -10170,20 +10213,17 @@ export function issueService(db: Db) {
             .innerJoin(projects, eq(projects.id, projectWorkspaces.projectId))
             .where(and(eq(projectWorkspaces.id, projectWorkspaceId), eq(projectWorkspaces.companyId, companyId), await projectReadSqlCondition(tx, workspaceActor)));
           if (!readableSource) throw notFound("Workspace source is unavailable or inaccessible");
-          const sourceStrategy = await executionWorkspaceService(db).resolveSourceWorkspaceStrategy({ companyId,
+          await executionWorkspaceService(db).resolveSourceWorkspaceStrategy({ companyId,
             assigneeAgentId: issueData.assigneeAgentId, assigneeAdapterOverrides: issueData.assigneeAdapterOverrides,
-            executionWorkspaceSettings, executionWorkspacePolicy: readableSource.executionWorkspacePolicy,
+            executionWorkspaceSettings, executionWorkspacePolicy: readableSource.executionWorkspacePolicy, sourceWorkspaceId: projectWorkspaceId,
             typedSelection: Boolean(workspaceIntent), projectId: issueData.projectId, executionPolicy: issueData.executionPolicy }, tx);
-          await assertTaskWorkspaceSourceProjectAccess(tx, workspaceActor, companyId, readableSource.projectId, {
-            parentIssueId: issueData.parentId, assigneeAgentId: issueData.assigneeAgentId, assigneeUserId: issueData.assigneeUserId,
-            write: !executionWorkspaceId && sourceStrategy !== "git_worktree",
-          });
+          await assertTaskWorkspaceSourceProjectAccess(tx, workspaceActor, companyId, readableSource.projectId);
         }
         if (executionWorkspaceId && workspaceSelectionActor) {
           const [readableWorkspace] = await tx.select({ id: executionWorkspaces.id, projectId: executionWorkspaces.projectId }).from(executionWorkspaces)
             .where(and(eq(executionWorkspaces.id, executionWorkspaceId), eq(executionWorkspaces.companyId, companyId), await executionWorkspaceReadSqlCondition(tx, workspaceActor)));
           if (!readableWorkspace) throw notFound("Workspace is unavailable or inaccessible");
-          await assertTaskWorkspaceAccess(tx, workspaceActor, companyId, readableWorkspace.id, { write: true, parentIssueId: issueData.parentId, assigneeAgentId: issueData.assigneeAgentId, assigneeUserId: issueData.assigneeUserId });
+          await assertExecutionWorkspaceRecordAccess(tx, workspaceActor, companyId, readableWorkspace.id);
         }
         if (projectWorkspaceId) {
           await assertValidProjectWorkspace(
@@ -10751,6 +10791,8 @@ export function issueService(db: Db) {
         blockedByIssueIds?: string[];
         actorAgentId?: string | null;
         actorRunId?: string | null;
+        /** Server-owned transfer being applied; never accepted from HTTP input. */
+        caseHandoffId?: string;
         actorRunStopId?: string | null;
         actorUserId?: string | null;
         companyGuard?: string;
@@ -10801,6 +10843,7 @@ export function issueService(db: Db) {
         blockedByIssueIds,
         actorAgentId,
         actorRunId,
+        caseHandoffId,
         actorRunStopId,
         actorUserId,
         companyGuard,
@@ -11067,6 +11110,7 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        if (actorRunId) await assertNoCaseHandoffMutation(tx, actorRunId, id);
         if (expectedStatusVersion !== undefined && (
           receiptExisting.statusVersion !== expectedStatusVersion || receiptExisting.status !== "backlog"
         )) {
@@ -11177,8 +11221,14 @@ export function issueService(db: Db) {
         });
         // Ownership changes invalidate observed handoff versions even if status
         // stays the same, including an A -> B -> A assignment race.
+        if (issueData.status === "done" || issueData.status === "cancelled") {
+          await cancelCaseHandoffsForIssue(tx, { companyId: receiptExisting.companyId, issueId: id,
+            reason: `Task was marked ${issueData.status}`, agentTransfersOnly: issueData.status === "done", publications: activityPublications });
+        }
         if ((issueData.assigneeAgentId !== undefined && issueData.assigneeAgentId !== receiptExisting.assigneeAgentId)
           || (issueData.assigneeUserId !== undefined && issueData.assigneeUserId !== receiptExisting.assigneeUserId)) {
+          await cancelCaseHandoffsForIssue(tx, { companyId: receiptExisting.companyId, issueId: id,
+            reason: "Task assignment changed", exceptId: caseHandoffId, publications: activityPublications });
           patch.statusVersion = sql`${issues.statusVersion} + 1` as unknown as number;
           // Invalidate human direction at the common assignment boundary, including
           // plugin/service writes that do not go through HTTP run cancellation.
@@ -11215,6 +11265,10 @@ export function issueService(db: Db) {
           .returning()
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!updated) return null;
+        if (updated.status === "done") {
+          await completeTerminalCaseHandoffsForIssue(tx, { companyId: updated.companyId, issueId: updated.id,
+            publications: activityPublications });
+        }
         if (workspaceSelectionActor && updated.workspaceBindingRevision !== receiptExisting.workspaceBindingRevision) {
           await executionWorkspaceService(db).assertTaskWorkspaceUpdateAccess({
             task: updated, actor: workspaceSelectionActor,
@@ -11610,6 +11664,7 @@ export function issueService(db: Db) {
         let removedIssue;
         try {
           await notifyTerminalWorkspaceWork(tx, `issue:${id}`);
+          await requestRestorePointDeletion(tx, { sourceIssueId: id });
           removedIssue = await tx
             .delete(issues)
             .where(eq(issues.id, id))
@@ -12709,27 +12764,24 @@ export function issueService(db: Db) {
         }
       }
       if (!comment) {
-        [comment] = await measureRunPhase("response.write", () => dbOrTx
-          .insert(issueComments)
-          .values({
-            companyId: issue.companyId,
-            issueId,
-            authorAgentId: actor.agentId ?? null,
-            authorUserId: actor.userId ?? null,
-            onBehalfOfUserId,
-            authorType,
-            createdByRunId,
-            body: redactedBody,
-            clientRequestId: options?.clientRequestId ?? null,
-            presentation,
-            metadata,
-            sourceTrust: options?.sourceTrust ?? null,
-            createdAt: validCreatedAt ?? currentInsertTimestamp!,
-            ...(currentInsertTimestamp
-              ? { updatedAt: currentInsertTimestamp }
-              : {}),
-          })
-          .returning());
+        [comment] = await measureRunPhase("response.write", () => insertIssueComment(dbOrTx, {
+          companyId: issue.companyId,
+          issueId,
+          authorAgentId: actor.agentId ?? null,
+          authorUserId: actor.userId ?? null,
+          onBehalfOfUserId,
+          authorType,
+          createdByRunId,
+          body: redactedBody,
+          clientRequestId: options?.clientRequestId ?? null,
+          presentation,
+          metadata,
+          sourceTrust: options?.sourceTrust ?? null,
+          createdAt: validCreatedAt ?? currentInsertTimestamp!,
+          ...(currentInsertTimestamp
+            ? { updatedAt: currentInsertTimestamp }
+            : {}),
+        }));
       }
       if (!comment) throw new Error("Failed to create issue comment");
       if (options?.completionReply && actor.agentId && createdByRunId) await acknowledgeChatCompletionReply(dbOrTx, createdByRunId, comment.id);

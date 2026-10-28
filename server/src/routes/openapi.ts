@@ -1,6 +1,7 @@
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@paperclipai/shared";
 import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
+import { agentCaseHandoffSchema, caseWorkflowDocumentTextSchema, doneCaseHandoffSchema, createWorkflowSchema, updateWorkflowSchema, listWorkflowsSchema, readWorkflowQuerySchema } from "@paperclipai/shared";
 import {
   experimentalApiPaths,
   experimentalApiQueries,
@@ -13,6 +14,7 @@ import {
   toggleAllGitHubRepositoriesSchema,
   createAiConnectionSchema,
   updateDecisionModelSchema,
+  updatePromptInjectionPreventionSchema,
   updateAgentObservabilitySchema,
   agentObservabilityRevisionSchema,
   agentObservabilityCaptureSchema,
@@ -247,6 +249,8 @@ import {
   // Issue recovery and decomposition
   createAcceptedPlanDecompositionSchema,
   resolveIssueRecoveryActionSchema,
+  recoverWorkspaceSchema,
+  taskRetrySchema,
   retryWorkspaceExportSchema,
   reconstructWorkspaceSchema,
   resumeWorkspaceFinalizationSchema,
@@ -1385,6 +1389,12 @@ const browserUseOperations = [
 ] as const;
 
 const BOARD_ONLY_OPERATIONS = new Set([
+  "POST /api/issues/{id}/interactions/{interactionId}/dismiss",
+  "POST /api/issues/{id}/retry",
+  "GET /api/companies/{companyId}/prompt-injection-prevention",
+  "PUT /api/companies/{companyId}/prompt-injection-prevention",
+  "GET /api/companies/{companyId}/prompt-injection-prevention/models",
+  "POST /api/companies/{companyId}/prompt-injection-prevention/test",
   "GET /api/companies/{companyId}/fast-response",
   "PUT /api/companies/{companyId}/fast-response",
   "GET /api/companies/{companyId}/fast-response/models",
@@ -6894,8 +6904,9 @@ registry.registerPath({
   path: "/api/instance/settings/experimental",
   tags: ["instance"],
   summary: "Update experimental instance settings",
+  description: "Requires instance-admin access or a trusted Cloud stack admin. Operator-hidden settings and Cloud-managed feature restrictions still apply. This does not grant access to other instance administration operations.",
   request: { body: jsonBody(patchInstanceExperimentalSettingsSchema) },
-  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
 });
 
 registry.registerPath({
@@ -10697,6 +10708,24 @@ registerCurrentRoute({
 
 registerCurrentRoute({
   method: "post",
+  path: "/api/issues/{id}/retry",
+  tags: ["issues"],
+  summary: "Request one durable task retry from current input and preserved results",
+  body: taskRetrySchema,
+  responses: { 200: r.ok(), 202: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/issues/{id}/recovery-actions/recover-workspace",
+  tags: ["issues"],
+  summary: "Request safe recovery of a retained workspace without restarting the source turn",
+  body: recoverWorkspaceSchema,
+  responses: { 202: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registerCurrentRoute({
+  method: "post",
   path: "/api/issues/{id}/recovery-actions/resume-workspace-finalization",
   tags: ["issues"],
   summary: "Resume a saved native result after operator verification of the prior workspace owner's stop",
@@ -10750,6 +10779,13 @@ registerCurrentRoute({
   tags: ["issues"],
   summary: "Cancel an issue question interaction",
   body: cancelIssueThreadInteractionSchema,
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/issues/{id}/interactions/{interactionId}/dismiss",
+  tags: ["issues"],
+  summary: "Defer a request to conversation history (human board users only)",
 });
 
 registerCurrentRoute({
@@ -11087,6 +11123,20 @@ registerCurrentRoute({
 });
 
 // --- Tool access -------------------------------------------------------------
+
+for (const [method, suffix, summary] of [
+  ["get", "", "Get prompt injection settings and eligible shared OpenRouter connections; non-managers receive no settings or choices"],
+  ["put", "", "Configure opt-in prompt injection model checks as a board connection manager"],
+  ["get", "/models", "List OpenRouter model suggestions for an authorized shared connection as a board connection manager"],
+  ["post", "/test", "Classify two fixed billed samples using saved settings as a board connection manager; fallback is not a passing model test"],
+] as const) registerCurrentRoute({
+  method, path: `/api/companies/{companyId}/prompt-injection-prevention${suffix}`,
+  tags: ["prompt-injection-prevention"], summary,
+  ...(method === "put" ? { body: updatePromptInjectionPreventionSchema } : {}),
+  ...(method === "post" ? { body: z.object({}).strict() } : {}),
+  ...(suffix === "/models" ? { query: z.object({ connectionId: z.string().uuid() }) } : {}),
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
+});
 
 for (const [method, suffix, summary] of [
   ["get", "", "Get fast response settings and compatible shared API connections"],
@@ -12481,6 +12531,42 @@ registerCurrentRoute({
 
 // Every experimental REST route remains discoverable while its runtime feature
 // flag and actor checks stay authoritative. Shared validators prevent drift.
+// OpenAPI 3.0 cannot represent the shared validator's conditional refinement.
+// Derive separate creation/existing branches so discovery marks workflow text
+// required for case.create without requiring it for ordinary phase transfers.
+const caseHandoffApiBodySchema = z.union([
+  agentCaseHandoffSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflow_document_text: caseWorkflowDocumentTextSchema }),
+  agentCaseHandoffSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflowId: z.string().uuid() }),
+  agentCaseHandoffSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[0] }),
+  doneCaseHandoffSchema,
+]);
+registry.registerPath({ method: "post", path: "/api/companies/{companyId}/case-handoffs", tags: ["Cases"],
+  summary: "Start or hand off a case using its primary task",
+  description: "Requires enableCases and standard work mode. Kickoff requires either workflowId or workflow_document_text. Workflows are reusable name-and-prompt definitions; phases are free text. On later agent handoffs, omit workflowId to preserve instructions, supply an ID to adopt its latest prompt (including refresh of the current ID), or null to detach while keeping instructions. Acceptance snapshots the selected prompt. Transfer applies workflow, phase and task-document revision together after outgoing execution settles; a document revision conflict holds the handoff for recovery. Workflow and other initial document bodies together must total at most 200000 characters. Inline callers remain supported. Current company, case, task assignment, source-trust and run authority apply. Reuses the primary task; self-handoffs also yield. An idempotent replay returns the existing authorized receipt.",
+  request: { params: z.object({ companyId: z.string().uuid() }), body: jsonBody(caseHandoffApiBodySchema) },
+  responses: { 200: r.ok(), 202: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden,
+    404: r.notFound, 409: r.conflict, 422: r.unprocessable } });
+registry.registerPath({ method: "get", path: "/api/cases/{caseId}/handoffs", tags: ["Cases"],
+  summary: "Read a standalone case's handoff history", description: "Requires enableCases and access to all retained case permission sources.",
+  request: { params: z.object({ caseId: z.string().uuid() }), query: z.object({ limit: z.coerce.number().int().min(1).max(100).optional(),
+    before: z.iso.datetime().optional(), cursor: z.string().max(400).optional() }) }, responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound } });
+for (const action of ["retry", "cancel"] as const) registry.registerPath({ method: "post", path: `/api/cases/{caseId}/handoffs/{handoffId}/${action}`,
+  tags: ["Cases"], summary: `${action === "retry" ? "Retry" : "Cancel"} pending case handoff`,
+  description: "Requires case access and ordinary task-control authority. Retry preserves the existing handoff/task identity. Cancellation remains available when enableCases is disabled; it prevents delivery and does not undo an applied assignment.",
+  request: { params: z.object({ caseId: z.string().uuid(), handoffId: z.string().uuid() }) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict } });
+
+for (const [method, path, body, summary] of [
+  ["get", "/api/companies/{companyId}/workflows", undefined, "List reusable workflow metadata"],
+  ["post", "/api/companies/{companyId}/workflows", createWorkflowSchema, "Create a reusable workflow"],
+  ["get", "/api/workflows/{id}", undefined, "Read a reusable workflow and its Markdown prompt"],
+  ["patch", "/api/workflows/{id}", updateWorkflowSchema, "Update a reusable workflow for future adoptions"],
+] as const) registry.registerPath({ method, path, tags: ["Cases"], summary,
+  description: "Requires enableCases and company access. Definitions are company-shared. Writes enforce the current agent run fence and source-trust policy. Editing a definition does not change existing case task documents. Individual reads return an ETag containing a SHA-256 content fingerprint; pass it without quotes or the optional W/ prefix as snapshot to reject a changed definition with 409.",
+  request: { params: path.includes("{companyId}") ? z.object({ companyId: z.string().uuid() }) : z.object({ id: z.string().uuid() }),
+    ...(body ? { body: jsonBody(body) } : {}), ...(method === "get" ? { query: path.includes("{companyId}") ? listWorkflowsSchema : readWorkflowQuerySchema } : {}) },
+  responses: { [method === "post" ? 201 : 200]: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict } });
+
 for (const [method, path, body] of experimentalApiPaths) {
   const query = experimentalApiQueries[`${method.toUpperCase()} ${path}`];
   const metadata = experimentalApiMetadata[`${method.toUpperCase()} ${path}`];

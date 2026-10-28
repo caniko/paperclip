@@ -651,6 +651,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let require_codex_home_auth = args
         .iter()
         .any(|value| value == "--require-codex-home-auth");
+    if args
+        .iter()
+        .any(|value| value == "--require-otel-environment")
+    {
+        for (name, expected) in [
+            (
+                "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+                "authorization=Bearer%20logs-fixture",
+            ),
+            (
+                "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+                "authorization=Bearer%20traces-fixture",
+            ),
+        ] {
+            assert_eq!(std::env::var(name).as_deref(), Ok(expected));
+        }
+        assert!(std::env::var_os("OTEL_EXPORTER_OTLP_HEADERS").is_none());
+        assert!(std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT").is_none());
+    }
     let durable_turn_ids = args.iter().any(|value| value == "--durable-turn-ids");
     let hold_first_durable_turn = args
         .iter()
@@ -661,6 +680,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let expected_native_task_context_file = argument(&args, "--expected-native-task-context-file");
     let emit_tool_call = args.iter().any(|value| value == "--emit-tool-call");
     let completion_result_file = argument(&args, "--completion-result-file");
+    let terminal_result = argument(&args, "--terminal-result-file")
+        .map(|path| -> Result<Value, Box<dyn std::error::Error>> {
+            Ok(serde_json::from_str(&fs::read_to_string(path)?)?)
+        })
+        .transpose()?;
     let replay_completed_tool_call = args
         .iter()
         .any(|value| value == "--replay-completed-tool-call");
@@ -990,6 +1014,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 log_call(call_log.as_deref(), "discovery:success")?;
                 finish_turn(&state_path, &mut state, "completed")?;
             }
+            continue;
+        }
+        if message.get("method").is_none()
+            && message.get("id") == Some(&json!("terminal-result-request"))
+        {
+            let success = message.pointer("/result/success") == Some(&json!(true));
+            log_call(
+                call_log.as_deref(),
+                if success {
+                    "terminal-result:accepted"
+                } else {
+                    "terminal-result:rejected"
+                },
+            )?;
+            finish_turn(
+                &state_path,
+                &mut state,
+                if success { "completed" } else { "failed" },
+            )?;
             continue;
         }
         if message.get("method").is_none() && message.get("id") == Some(&json!("tool-request-1")) {
@@ -1765,6 +1808,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "arguments":{"query":{"PRIVATE_QUERY":"private search"}}
                         }}),
                     )?;
+                } else if let Some(result) = &terminal_result {
+                    send(json!({
+                        "id": "terminal-result-request", "method": "item/tool/call",
+                        "params": { "threadId": state.thread_id, "turnId": provider_turn_id,
+                            "callId": "terminal-result-call", "tool": "paperclip_finish", "arguments": result }
+                    }))?;
                 } else if emit_tool_call {
                     send(json!({
                         "id": "tool-request-1",

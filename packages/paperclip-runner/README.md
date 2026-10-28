@@ -46,6 +46,12 @@ specifications are internal to built-in execution; they are not a plugin wire
 contract. Existing flat transport options remain compatible through this shared
 interface. This refactor does not add Launcher APIs or change harness capabilities.
 
+An execution owner can supply `prepareLaunch`, a Runner artifact identity, and
+process and connection hooks. Core supplies the launch requirements. The owner
+returns a provider descriptor bound to those requirements. Core checks the policy
+and assigned resources. See [Runner launch preparation](../../doc/runner-launch-preparation.md)
+for the contract and recovery record.
+
 Connection continuations inspect the harness descriptor's optional
 `toolRefreshOnResume` capability. Native Codex, Claude Managed Agents, AgentCore,
 OpenCode, and qualified Claude/Codex/Grok ACPX profiles expose it; unqualified
@@ -185,6 +191,14 @@ It validates the exact model, session identity, tool catalog, structured input,
 and terminal settlement at the process boundary. Copilot and Pi remain gated.
 Verified distributions are build-owned; no provider accepts an arbitrary executable.
 See [the rich ACP capability report](../../doc/architecture/runner-rich-acp-capabilities.md).
+
+If the controller sends assigned MCP tools in the PRP catalog, the sidecar uses
+its authenticated tool bridge.
+Isolated provider admission accepts this route without a separate native MCP endpoint.
+Direct runtime-host callers must supply the native gateway binding unless they select
+PRP tool delivery and supply the semantic tool bridge.
+PRP delivery keeps the controller's exact operation names, including compact MCP catalog tools.
+The selected permission and read-only policies still apply.
 
 Install Cursor explicitly with `paperclipai runtime setup cursor`; npm installation
 does not download it. Run setup as the OS user that runs Paperclip (the service

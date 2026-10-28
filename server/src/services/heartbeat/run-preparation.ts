@@ -1,13 +1,16 @@
 import { skillAccessService } from "../skill-access.js";
+import { buildReviewPathRecoveryDisposition } from "../recovery/review-path-recovery.js";
 import type { AuthorizationActor } from "../authorization.js";
 import { spekoToolsForSession } from "../voice/speko-agent-tools.js";
 import { githubConfiguredInstructionSources } from "../chat-github-review-policy.js";
+import { resolveGitHubReviewInstructions } from "../chat-channels/github/review-instructions.js";
 import { CONFIGURED_ENVIRONMENT_KEYS } from "../../vendor/paperclip-runner/index.js";
 import { ASSIGNED_MCP_SERVER_NAME } from "../mcp-tool-names.js";
 import { externalConversationStateSql } from "../slack-conversation-state.js";
 import { githubBotConnectionIdsForRun } from "../chat-github-tools.js";
 import { boundRunIssueIdSql } from "../run-task-binding.js";
 import { isBrowserUseConnection } from "../browser-use-client.js";
+import { restConnectorFor } from "../connectors/rest-registry.js";
 import { explicitOperatorRunIdentity } from "../run-identity.js";
 import {
   type DurableChatWakeupRequest,
@@ -821,12 +824,16 @@ export async function resolveRunScopedMentionedSkillKeys(input: {
 
 
 export interface WakeupOptions {
+  /** Internal durable case assignment receipt. Never accepted from public wake payloads. */
+  durableCaseHandoffRequest?: { handoffId: string; wakeupRequestId: string; issueId: string; expectedIssueStatusVersion: number };
   /** Set only by authenticated board wake routes; never copied from caller payloads. */
   manualUserWake?: boolean;
   /** Internal resume of a queue with persisted board interruption intent. */
   queuedCommentInterruptId?: string;
   /** Internal delivery of an existing undelivered user comment. */
   queuedCommentRequestId?: string;
+  /** Internal delivery of the authenticated task-level Retry receipt. */
+  taskRetryRequestId?: string;
   /** Exact failed run selected by an authenticated board Retry request. */
   failedRunId?: string | null;
   durableChatRequest?: DurableChatWakeupRequest;
@@ -932,7 +939,7 @@ export async function buildPaperclipRuntimeMcpServers(input: {
   expectedAssignmentDigest?: string | null;
 }): Promise<AdapterRuntimeMcpServer[]> {
   const access = toolAccessService(input.db);
-  const effective = await access.getEffectiveProfilesForAgent(
+  const effective = await access.getEffectiveToolAssignmentsForAgent(
     input.agent.companyId,
     input.agent.id,
   );
@@ -990,7 +997,7 @@ export async function buildPaperclipRuntimeMcpServers(input: {
     .filter(
       (connection) =>
         (connection.transport === "mcp_remote" ||
-          connection.transport === "local_stdio" || isBrowserUseConnection(connection)) &&
+          connection.transport === "local_stdio" || isBrowserUseConnection(connection) || restConnectorFor(connection)) &&
         !allInstalledConnectionIds.has(connection.id),
     )
     .map(({ id, name }) => ({ id, name }))
@@ -1016,7 +1023,7 @@ export async function buildPaperclipRuntimeMcpServers(input: {
         connection.credentialPolicy === "per_user" ||
         !isToolConnectionAttentionHealth(connection.healthStatus)) &&
       (connection.transport === "mcp_remote" ||
-        connection.transport === "local_stdio" || isBrowserUseConnection(connection) || githubBotConnectionIds.has(connection.id) || spekoConnectionIds.has(connection.id)),
+        connection.transport === "local_stdio" || isBrowserUseConnection(connection) || restConnectorFor(connection) || githubBotConnectionIds.has(connection.id) || spekoConnectionIds.has(connection.id)),
   );
   const assignedConnectionIds = new Set(
     assignedConnections.map((connection) => connection.id),
@@ -2256,6 +2263,7 @@ export async function buildPaperclipWakePayload(input: {
     priority: string;
     workMode: string;
     projectId?: string | null;
+    originKind?: string | null;
     executionPolicy?: unknown;
   } | null;
   exposeLowTrustRaw?: boolean;
@@ -2287,6 +2295,7 @@ export async function buildPaperclipWakePayload(input: {
             status: issues.status,
             priority: issues.priority,
             workMode: issues.workMode,
+            originKind: issues.originKind,
           })
           .from(issues)
           .where(
@@ -2658,6 +2667,10 @@ export async function buildPaperclipWakePayload(input: {
     chatCompletionUpdates: input.contextSnapshot.chatCompletionUpdates ?? null,
     attachmentOmissions,
     externalChatProvider,
+    githubReviewConfigurations: (externalChatProvider === "github" || issueSummary?.originKind === "chat_channel") && issueId && input.agentId
+      ? await resolveGitHubReviewInstructions({ db: input.db, companyId: input.companyId, agentId: input.agentId, issueId,
+          commentIds: externalChatProvider === "github" ? commentIds : [] })
+      : [],
     recovery:
       recoveryStillActive
         ? {
@@ -2727,12 +2740,14 @@ export async function buildPaperclipWakePayload(input: {
       : [],
     childIssueSummaryTruncated:
       input.contextSnapshot.childIssueSummaryTruncated === true,
-    dispositionRepair: input.contextSnapshot.legacyDispositionEpisode ? {
-      attempt: input.contextSnapshot.dispositionRepairAttempt,
-      maxAttempts: input.contextSnapshot.dispositionRepairMaxAttempts,
-      sourceRunId: input.contextSnapshot.retryOfRunId,
-      instruction: input.contextSnapshot.dispositionRepairInstruction,
-    } : null,
+    dispositionRepair:
+      buildReviewPathRecoveryDisposition(input.contextSnapshot) ??
+      (input.contextSnapshot.legacyDispositionEpisode ? {
+        attempt: input.contextSnapshot.dispositionRepairAttempt,
+        maxAttempts: input.contextSnapshot.dispositionRepairMaxAttempts,
+        sourceRunId: input.contextSnapshot.retryOfRunId,
+        instruction: input.contextSnapshot.dispositionRepairInstruction,
+      } : null),
     livenessContinuation:
       readNonEmptyString(input.contextSnapshot.livenessContinuationState) ||
       readNonEmptyString(

@@ -74,6 +74,7 @@ export interface ClaudeLoginContext {
 }
 
 export interface UpdateAgentOptions {
+  expectedConfiguration?: Pick<AgentConfigurationRecord, "adapterType" | "adapterConfig" | "runtimeConfig" | "defaultEnvironmentId">;
   recordRevision?: RevisionMetadata;
   allowBuiltInAgentMetadata?: boolean;
   allowPendingApprovalConfigUpdate?: boolean;
@@ -87,6 +88,8 @@ export type AgentConfigurationPatch = Partial<Pick<typeof agents.$inferInsert, t
 export type AgentHireRecord = Pick<typeof agents.$inferSelect, "id" | "companyId" | "adapterType" | "adapterConfig" | "permissions" | "metadata" | "status">;
 
 export interface CreateAgentOptions {
+  setupOnly?: boolean;
+  setupAgentId?: string;
   runnerResolved?: boolean;
   responsibleUserId?: string | null;
   createdByUserId?: string | null;
