@@ -125,7 +125,7 @@ describe("managed GitHub launcher environment", () => {
   });
 
   it("stages the complete remote launcher set in one control command", async () => {
-    const fixture = await sandbox("tools with 'quotes'/bin", "host", true);
+    const fixture = await sandbox("tools with 'quotes'/bin", true);
     const env = await prepareGitHubOperationLaunchers({
       runId: "single-control-stage", target: fixture.target, cwd: fixture.root,
       env: githubBrokerEnvironment({ PATH: fixture.remotePath }, { url: "", token: "" }),
@@ -138,7 +138,7 @@ describe("managed GitHub launcher environment", () => {
   });
 
   it("uses one bounded control command and preserves the staged environment", async () => {
-    const fixture = await sandbox("tools with 'quotes'/bin", "host", true);
+    const fixture = await sandbox("tools with 'quotes'/bin", true);
     const execute = fixture.runner.execute.getMockImplementation()!;
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -180,7 +180,7 @@ describe("managed GitHub launcher environment", () => {
   });
 
   it("settles failed upload batches before rejecting and starting no later files", async () => {
-    const fixture = await sandbox("usr/bin", "host", true);
+    const fixture = await sandbox("usr/bin", true);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let started = 0;
@@ -212,7 +212,7 @@ describe("managed GitHub launcher environment", () => {
   });
 
   it("keeps concurrent staging of the same remote launcher directory coherent", async () => {
-    const fixture = await sandbox("usr/bin", "host", true);
+    const fixture = await sandbox("usr/bin", true);
     const input = { runId: "same-directory", target: fixture.target, cwd: fixture.root,
       env: githubBrokerEnvironment({ PATH: fixture.remotePath }, { url: "", token: "" }) };
     const [first, second] = await Promise.all([prepareGitHubOperationLaunchers(input), prepareGitHubOperationLaunchers(input)]);
@@ -224,7 +224,7 @@ describe("managed GitHub launcher environment", () => {
   });
 
   it.each([undefined, false])("keeps providers without a concurrent capability serial (%s)", async (concurrent) => {
-    const fixture = await sandbox("usr/bin", "host", concurrent);
+    const fixture = await sandbox("usr/bin", concurrent);
     const execute = fixture.runner.execute.getMockImplementation()!;
     let active = 0;
     let maximum = 0;
