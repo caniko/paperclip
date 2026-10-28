@@ -6,6 +6,7 @@ import { conflict, notFound } from "../../../errors.js";
 import { agentRecordQueries, type CreateAgentOptions, type CreateAgentData } from "../../../lib/agent-records.js";
 import type { ActivityPublication } from "../../../types/activity-publication.js";
 import { isAgentSetupDraft } from "../domain/policy.js";
+import type { ActivityPublication } from "../../../types/activity-publication.js";
 
 export function agentRecords(db: Db, effects: LifecycleEffects, postCommitPublications?: ActivityPublication[]) {
   const { getById } = agentRecordQueries(db);

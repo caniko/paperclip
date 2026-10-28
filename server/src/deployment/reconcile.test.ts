@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
-import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
+import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, budgetPolicies, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
 import { reconcileDeployment } from "./reconcile.js";
 import { loadConfig } from "../config.js";
 import { secretService } from "../services/secrets.js";
@@ -68,7 +68,6 @@ beforeAll(async () => {
   db = createDb(database.connectionString);
 }, 90000);
 afterAll(async () => { gateway.closeAllConnections(); gateway.close(); await database?.cleanup(); rmSync(root, { recursive: true, force: true }); });
-// This fixture intentionally exercises multiple independent owners in one test database.
 const reconcile = (raw: unknown, apply = true) => reconcileDeployment(db, raw, { descriptor, config, apply, singleOwner: false });
 
 it("plans without writes, bootstraps once and preserves identities, pauses and spending", async () => {
@@ -261,6 +260,17 @@ it.each(["company", "agent"] as const)("preserves %s budget pause and policy on 
   expect((await reconcile(declaration)).differences).toEqual([]);
 });
 
+it("creates native budget policies for newly declared company and agent limits", async () => {
+  const declaration = { ...structuredClone(manifest), owner: "budget-create", projects: {}, routines: {}, taskBridges: {} };
+  declaration.companies.example.fields.name = "Budget create";
+  const created = await reconcile(declaration);
+  const policies = await db.select().from(budgetPolicies).where(and(
+    eq(budgetPolicies.windowKind, "calendar_month_utc"), eq(budgetPolicies.isActive, true)));
+  const amounts = new Map(policies.map((policy) => [policy.scopeId, policy.amount]));
+  expect(amounts.get(created.bindings["company/example"])).toBe(10000);
+  expect(amounts.get(created.bindings["agent/worker"])).toBe(2000);
+});
+
 it("preserves existing and later operator membership decisions for adopted companies", async () => {
   await reconcile({ version: 1, owner: "adopt-membership", companies: {} });
   const [account] = await db.select().from(authAccounts);
@@ -385,8 +395,6 @@ it("rejects implicit primary takeover and wrong-project adoption before writes",
     ...adopted.projectWorkspaces,
     alias: { ...adopted.projectWorkspaces.main, fields: { ...workspace.fields, isPrimary: false } },
   } }, false)).rejects.toThrow("ownership");
-  // A native primary switch also mutates the previously primary row. The trigger
-  // must protect that indirect path, not just direct updates to owned resources.
   await expect(svc.createWorkspace(first.bindings["project/main"], {
     name: "UI primary", cwd: "/fixture/ui-primary", isPrimary: true,
   })).rejects.toThrow();
@@ -476,7 +484,6 @@ it("requires explicit adoption and rolls back an apply that fails after creating
   const adopted = await reconcile({ ...adoption, companies: { existing: { ...adoption.companies.existing, adopt: unmanaged.id } } });
   expect(adopted.bindings["company/existing"]).toBe(unmanaged.id);
   const before = await db.select().from(companies);
-  // Fail at the database boundary after company/project/agent creation.
   await db.execute(sql`create function deployment_test_failure() returns trigger language plpgsql as $$ begin raise exception 'injected write failure'; end; $$`);
   await db.execute(sql`create trigger deployment_test_failure before insert on routines for each row execute function deployment_test_failure()`);
   const invalid = { ...manifest, owner: "rollback", companies: { example: { fields: { name: "Rollback" } } },

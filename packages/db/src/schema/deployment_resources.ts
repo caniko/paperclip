@@ -1,7 +1,5 @@
 import { pgTable, text, uuid, jsonb, boolean, uniqueIndex } from "drizzle-orm/pg-core";
 
-// Deliberately no cascading foreign keys: losing a resource must be an explicit
-// recovery decision, never an invitation to recreate it with a new identity.
 export const deploymentResources = pgTable("deployment_resources", {
   owner: text("owner").notNull(),
   kind: text("kind").notNull(),

@@ -16,8 +16,6 @@ function createUtilitySql(url: string) {
   return postgres(url, { max: 1, onnotice: () => {} });
 }
 
-/** Hold this lease for the entire managed controller or offline apply lifetime.
- * The caller must stop work on loss: reconnecting cannot restore ownership. */
 export async function acquireDeploymentLease(connection: string, onLost: () => void) {
   let active = false;
   const client = postgres(connection, {
@@ -59,7 +57,6 @@ export async function acquireDeploymentLease(connection: string, onLost: () => v
   })();
 }
 
-/** Managed launches must not infer compatibility from an unknown journal. */
 export async function assertDeploymentSchemaCompatible(url: string) {
   const connection = createUtilitySql(url);
   try {

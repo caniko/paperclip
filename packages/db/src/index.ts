@@ -51,3 +51,4 @@ export * from "./schema/index.js";
 export { resolveMigrationConnection } from "./migration-runtime.js";
 
 export { databaseWorkScopeKey, signalDatabaseWork, subscribeDatabaseWork, databaseWorkPending, reconcileDatabaseWork } from "./work-signals.js";
+export { resolveMigrationConnection } from "./migration-runtime.js";
