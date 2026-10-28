@@ -2857,4 +2857,3 @@ export * from "./prompt-injection-prevention.js";
 export * from "./workspace-provider.js";
 export * from "./workflows.js";
 export * from "./agent-configuration.js";
-export { deploymentManifestSchema, type DeploymentManifest } from "./deployment-manifest.js";
