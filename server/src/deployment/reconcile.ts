@@ -13,6 +13,10 @@ import { projectService } from "../services/projects.js";
 import { agentService } from "../services/agents.js";
 import { routineService } from "../services/routines.js";
 import { secretService } from "../services/secrets.js";
+import { deliverBudgetEnforcement } from "../services/budgets.js";
+import { createAgentLifecycleInTransaction, scheduleAgentLifecycle } from "../services/agent-lifecycle.js";
+import { publishAccountingActivities } from "../services/accounting-transaction.js";
+import type { ActivityPublication } from "../types/activity-publication.js";
 import { stableJson } from "../services/managed-resource-drift.js";
 import { logActivity } from "../services/activity-log.js";
 import { validateDeclaredAdapterConfig } from "./adapter-config.js";
@@ -62,7 +66,11 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
   for (const b of Object.values(m.taskBridges)) {
     if (!credentials[b.credential] || credentials[b.credential].trim().length < 32) throw new Error("Task bridge requires a runtime token of at least 32 characters");
   }
-  return db.transaction(async (transaction) => {
+  const publications: ActivityPublication[] = [];
+  const afterCommit: Array<() => Promise<void>> = [];
+  const lifecycleAgents = new Set<string>();
+  const budgetCompanies = new Set<string>();
+  const result = await db.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
     if (!options.apply) await tx.execute(sql`set transaction read only`);
     // Serialize all owners, including adoption across different manifests.
@@ -106,7 +114,8 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     const actorId = await bootstrapOperator(tx, options.config, options.descriptor.bootstrap, false);
     if (Object.keys(m.routines).length && !actorId && !options.descriptor.bootstrap) throw new Error("Declared routines require an operator bootstrap identity");
     const actor = { userId: actorId };
-    const companySvc = companyService(tx), projectSvc = projectService(tx), agentSvc = agentService(tx), routineSvc = routineService(tx), secrets = secretService(tx);
+    const companySvc = companyService(tx, {}, { db, afterCommit, publications }), projectSvc = projectService(tx), agentSvc = agentService(tx), routineSvc = routineService(tx), secrets = secretService(tx);
+    const agentLifecycle = createAgentLifecycleInTransaction(tx, publications);
     const specs: Spec[] = [];
     const add = (spec: Omit<Spec, "id">) => specs.push({ ...spec, id: getId(spec.kind, spec.key, spec.adopt) });
     for (const [key, c] of Object.entries(m.companies).sort()) {
@@ -169,8 +178,11 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         return { ...a.fields, adapterConfig, reportsTo: a.reportsTo ? getId("agent", a.reportsTo) : null, companyId };
       };
       add({ kind: "agent", key, adopt: a.adopt, companyId, enabled: a.enabled, fields,
-        create: async (f) => (await agentSvc.create(companyId, { ...a.fields, ...f, id: getId("agent", key), status: a.enabled ? "idle" : "paused" })).id,
-        update: (f) => agentSvc.update(getId("agent", key), f) });
+        create: async (f) => (await agentLifecycle.requestHire(companyId, { ...a.fields, ...f, id: getId("agent", key), status: a.enabled ? "idle" : "paused", ...(a.enabled ? {} : { pauseReason: "deployment" }) }, { runnerResolved: true, responsibleUserId: actor.userId, createdByUserId: actor.userId })).id,
+        update: async (f) => {
+          const { companyId: _companyId, ...configuration } = f;
+          return agentLifecycle.updateConfiguration(getId("agent", key), configuration);
+        } });
     }
     for (const [key, r] of Object.entries(m.routines).sort()) {
       const companyId = getId("company", r.company);
@@ -296,20 +308,36 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         const binding = bindings.get(`${spec.kind}/${spec.key}`);
         if (!binding && !spec.adopt) {
           spec.id = await spec.create(fields); ids.set(`${spec.kind}/${spec.key}`, spec.id);
-        } else await spec.update(fields);
-        if (!spec.enabled) await disableResource(tx, spec.kind, spec.id);
+        } else {
+          const updateFields = { ...fields };
+          // Native budget setters reconcile pause state even for an unchanged
+          // limit. An enablement or unrelated edit must not reapply that limit.
+          // Keep the full declaration in the ledger so ownership is preserved.
+          if (binding && (spec.kind === "agent" || spec.kind === "company")
+            && !actions.get(spec)!.fields.includes("budgetMonthlyCents")) {
+            delete updateFields.budgetMonthlyCents;
+          }
+          await spec.update(updateFields);
+        }
+        if (spec.kind === "agent") {
+          lifecycleAgents.add(spec.id);
+          if ((binding || spec.adopt) && spec.companyId && "budgetMonthlyCents" in fields &&
+              actions.get(spec)!.fields.includes("budgetMonthlyCents")) budgetCompanies.add(spec.companyId);
+        }
+        if (!spec.enabled) await disableResource(tx, spec.kind, spec.id, agentLifecycle);
         const next = { owner: m.owner, kind: spec.kind, key: spec.key, resourceId: spec.id, companyId: spec.companyId, fields: spec.fields(), enabled: spec.enabled };
         await tx.insert(deploymentResources).values(next).onConflictDoUpdate({ target: [deploymentResources.owner, deploymentResources.kind, deploymentResources.key], set: next });
         const companyId = spec.companyId ?? spec.id;
         if (spec.kind === "company" && actor.userId && !binding) {
           await tx.insert(companyMemberships).values({ companyId, principalType: "user", principalId: actor.userId, status: "active", membershipRole: "owner" }).onConflictDoNothing();
         }
-        await logActivity(tx, { companyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.reconciled", entityType: spec.kind, entityId: spec.id, details: { key: spec.key, fields: actions.get(spec)!.fields } });
+        await logActivity(tx, { companyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.reconciled", entityType: spec.kind, entityId: spec.id, details: { key: spec.key, fields: actions.get(spec)!.fields } }, publications);
       }
       for (const binding of removed) {
-        await disableResource(tx, binding.kind as Kind, binding.resourceId);
+        if (binding.kind === "agent") lifecycleAgents.add(binding.resourceId);
+        await disableResource(tx, binding.kind as Kind, binding.resourceId, agentLifecycle);
         await tx.update(deploymentResources).set({ enabled: false }).where(and(eq(deploymentResources.owner, m.owner), eq(deploymentResources.kind, binding.kind), eq(deploymentResources.key, binding.key)));
-        await logActivity(tx, { companyId: binding.companyId ?? binding.resourceId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.disabled", entityType: binding.kind, entityId: binding.resourceId, details: { key: binding.key } });
+        await logActivity(tx, { companyId: binding.companyId ?? binding.resourceId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.disabled", entityType: binding.kind, entityId: binding.resourceId, details: { key: binding.key } }, publications);
       }
     }
     return {
@@ -317,11 +345,20 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       bindings: Object.fromEntries(specs.filter((s) => options.apply || bindings.has(`${s.kind}/${s.key}`)).map((s) => [`${s.kind}/${s.key}`, s.id])),
     };
   });
+  // Lifecycle work, activity publication and deferred side effects run only after the commit.
+  for (const id of lifecycleAgents) scheduleAgentLifecycle(db, id);
+  for (const publication of publications) publishAccountingActivities(publication.companyId, [publication]);
+  for (const effect of afterCommit) await effect();
+  for (const companyId of budgetCompanies) await deliverBudgetEnforcement(db, {}, companyId);
+  return result;
 }
 
-async function disableResource(db: Db, kind: Kind, id: string) {
+async function disableResource(db: Db, kind: Kind, id: string, lifecycle: ReturnType<typeof createAgentLifecycleInTransaction>) {
   if (kind === "agent") {
-    await db.update(agents).set({ status: "paused" }).where(and(eq(agents.id, id), sql`${agents.status} not in ('paused', 'terminated')`));
+    const [agent] = await db.select().from(agents).where(eq(agents.id, id));
+    if (agent && !["pending_approval", "terminated", "rejected"].includes(agent.lifecycleState)) {
+      await lifecycle.pauseAgent(id, "deployment");
+    }
   } else if (kind === "routine") {
     await db.update(routines).set({ status: "paused" }).where(eq(routines.id, id));
   } else if (kind === "company") {

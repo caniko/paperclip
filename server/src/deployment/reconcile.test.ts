@@ -76,7 +76,7 @@ it("plans without writes, bootstraps once and preserves identities, pauses and s
   const agentId = first.bindings["agent/worker"];
   const routineId = first.bindings["routine/daily"];
   await db.update(routines).set({ status: "paused" }).where(eq(routines.id, routineId));
-  await db.update(agents).set({ status: "paused", pauseReason: "manual", spentMonthlyCents: 123 }).where(eq(agents.id, agentId));
+  await db.update(agents).set({ status: "paused", pauseReason: "manual", lifecycleState: "paused", lifecycleHolds: ["manual"], spentMonthlyCents: 123 }).where(eq(agents.id, agentId));
   const second = await reconcile(manifest);
   expect(second.differences).toEqual([]);
   expect(second.bindings).toEqual(first.bindings);
@@ -122,7 +122,7 @@ it.each(["manual", "budget"])("reenables declarations without resuming %s pauses
   const first = await reconcile(declaration);
   const agentId = first.bindings["agent/worker"];
   const routineId = first.bindings["routine/daily"];
-  await db.update(agents).set({ status: "paused", pauseReason, spentMonthlyCents: 123 }).where(eq(agents.id, agentId));
+  await db.update(agents).set({ status: "paused", pauseReason, lifecycleState: "paused", lifecycleHolds: [pauseReason], spentMonthlyCents: 123 }).where(eq(agents.id, agentId));
   await db.update(routines).set({ status: "paused" }).where(eq(routines.id, routineId));
   const disabled = { ...declaration,
     agents: { worker: { ...declaration.agents.worker, enabled: false } },
