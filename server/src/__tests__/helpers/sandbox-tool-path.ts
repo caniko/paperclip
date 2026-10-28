@@ -5,8 +5,6 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-// Resolve tools from the host once, then expose only the fixture's tool set.
-// The caller owns root and removes it after all sandbox commands have exited.
 export async function createSandboxToolPath(root: string): Promise<string> {
   const bin = path.join(root, "sandbox-tools");
   await mkdir(bin);
