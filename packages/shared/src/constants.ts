@@ -498,6 +498,7 @@ export const EXTERNAL_OBJECT_LIVENESS_STATES = [
   "fresh",
   "stale",
   "auth_required",
+  "rate_limited",
   "unreachable",
 ] as const;
 export type ExternalObjectLivenessState = (typeof EXTERNAL_OBJECT_LIVENESS_STATES)[number];
@@ -945,6 +946,7 @@ export const LIVE_EVENT_TYPES = [
   "heartbeat.run.progress",
   "heartbeat.run.event",
   "heartbeat.run.log",
+  "heartbeat.run.activity",
   "agent.session.goal.changed",
   "agent.status",
   "activity.logged",
@@ -1325,6 +1327,7 @@ export const PLUGIN_CAPABILITIES = [
   "companies.read",
   "projects.read",
   "projects.instance-secrets",
+  "projects.git-credentials",
   "project.workspaces.read",
   "execution.workspaces.read",
   "workspaces.manage",

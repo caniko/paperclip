@@ -14,6 +14,7 @@ Agent access: [companion](../agent-access-map/runs-adapters.md).
 
 ## Sub-features
 
+- `model-accounts`: `runs-adapters/model-accounts` — configure AI accounts, login attempts, defaults, bindings, usage and pools through delegated connection APIs.
 - `availability`: `runs-adapters/availability` — discover installed adapters and available models/accounts.
 - `validation`: `runs-adapters/validation` — test an adapter in the selected execution environment and surface authentication failures.
 - `runs`: `runs-adapters/runs` — inspect run status, events, output, costs, and the source task.
@@ -24,6 +25,13 @@ Agent access: [companion](../agent-access-map/runs-adapters.md).
 ### `adapter-setup`
 
 Open an agent’s model/adapter configuration or the instance adapter settings page when permitted.
+
+### `managed-account-setup`
+
+Ask an authorized agent to save or connect a managed AI account. Open its saved
+`aiLogin` setup link as the responsible human when sign-in or a code is required.
+The agent can inspect the saved attempt and manage authorized account/pool
+bindings; human authentication and raw host administration retain their gates.
 
 ### `run-history`
 
@@ -38,6 +46,9 @@ without restricting the root span name. Compare workspace preparation with its
 `controller.startup.<phase>`. A recovery pause or deployment drain is not model
 execution time. See the [tracing contract](../../doc/observability.md#controller-preparation-phases).
 These source-level diagnostics do not establish a live response-time budget.
+`task.time_to_first_token` measures accepted ingress through the first committed
+text that the task transcript can show, including thinking and completed
+responses. It includes preparation and startup, and excludes browser latency.
 Inspect `native.controller.<phase>` for backend construction, assigned-tool
 discovery and post-turn cleanup. Compare those intervals with the actual model
 turn; do not count a nested discovery interval twice.
@@ -46,7 +57,59 @@ turn; do not count a nested discovery interval twice.
 
 Preconditions: follow the [baseline](./README.md#before-driving-a-journey). Record adapter, model, account, native/legacy runtime, and environment. Capabilities vary; one harness result is not a matrix-wide qualification.
 
+### `managed-account-setup`
+
+Automated: [actual-auth connection integration](../../server/src/__tests__/connection-management.integration.test.ts)
+exercises account/pool persistence, responsible-user ownership, agent attribution,
+saved local-login access and native secret-response protection with provider fixtures.
+[Saved handoff UI tests](../../ui/src/pages/apps/AppsConnect.test.tsx)
+exercise setup routing with mocked APIs. Neither establishes live provider sign-in.
+
+Manual: Start delegated managed-account setup, reload the exact saved human
+handoff, finish the required login, and inspect the saved account and original
+task continuation. Bind the account or pool only to authorized agents, reload
+their configuration, and verify the selected owner and account remain correct.
+Reject a different user's saved attempt, revoked management authority and Ask/Plan
+mutations. Qualify a useful model task separately from saving the account.
+
 ### `session`
+
+For a plugin computer, complete a task, let its warm session suspend, then send
+two follow-ups within the next warm window. Verify the first resumes the saved
+session and the second keeps the same provider history without an identity
+mismatch. After a fresh recovery into a repository-free directory, send another
+ordinary follow-up. Verify it retains that directory without Core Git worktree
+preparation. Explicit repository strategies and changed provider owners must
+remain denied. Executor and workspace-preparation regressions cover control
+behavior; they do not establish live provider acceptance.
+
+For a remote OpenCode agent configured with `per_turn`, complete a task, then
+send two follow-ups without resetting its session. Verify that each continuation
+restores its external controller checkpoint, retains provider context and saved
+files, and finishes with no stranded task lock. A missing checkpoint, an active
+prior owner or a mismatched session must still stop admission. The
+rejected active-owner attempt must not prevent a later continuation from reading
+the owner's newer completed checkpoint. The
+[executor controls](../../server/src/services/native-runtime/native-session-executor.test.ts)
+cover checkpoint restoration and its guards; real-provider acceptance remains
+separate evidence.
+
+After a completed warm turn, change an agent setting that invalidates its
+instruction copy, then send a follow-up. Verify the old runner suspends during
+preparation, saved files remain available, and the follow-up completes once.
+Repeat with an expired or foreign preparation owner and verify that execution
+stays held. The checkpoint integration regression covers the ownership boundary;
+a real provider run remains separate acceptance evidence.
+
+For a repository project that inherits storage-plugin defaults, run a task and
+send two follow-ups. Start with unset task workspace settings, then repeat with
+an explicit isolated mode or strategy. Binding must save `reuse_existing` and
+the resolved mode without changing the effective policy,
+session fingerprint, and workspace identity. An actual project-policy change
+must still reset the session and preserve the stored workspace owner. The
+[session admission regression](../../server/src/__tests__/heartbeat-session-preparation.test.ts)
+checks this with PostgreSQL and synthetic provider execution; it is not live
+warm-process or latency evidence.
 
 For `runs-adapters/session`, complete a task in a disposable warm sandbox and
 retain its saved workspace file. Let the warm session close normally and verify
@@ -58,6 +121,11 @@ provider sandbox. Send a follow-up that
 reads the retained file and appends one new line. Verify a replacement sandbox,
 a new provider session, the exact file contents, successful finalization and no
 stranded task lock. Send another follow-up and verify ordinary session reuse.
+
+With external controller checkpoints enabled, also admit a fresh session on a
+reused sandbox lease. Verify startup from canonical controller evidence and
+reject a marker without a registered controller, changed identity or prior turn
+activity. An existing remote session directory must retain its recovery gate.
 
 Repeat without resetting the session: its replacement must restore verified
 history or remain blocked. Missing backup state must not silently start an
@@ -142,6 +210,16 @@ is released before failure returns. Repeat a warm follow-up and retain its actua
 reply time. The [executor controls](../../server/src/services/native-runtime/native-session-executor.test.ts)
 cover ordering, failure drain and credential projection; they do not qualify a
 live response-time target.
+For native OpenCode with assigned connections, inspect the provider tool surface
+on both local and sandbox execution. It should contain bounded assigned-tool
+search/call schemas. Discover an allowed tool, call its returned alias, revoke
+its grant, and confirm discovery and execution enforce that revocation. Repeat
+in planning/ask mode with a write tool and confirm denial. The controller must
+retain the assigned gateway URL and token. An older direct-catalog OpenCode
+checkpoint must refresh without changing another provider's fingerprint. The
+[assigned-tool](../../server/src/services/native-runtime/assigned-mcp-tools.test.ts)
+and executor controls cover source behavior; live sandbox discovery and a real
+call remain separate acceptance evidence.
 Missing dependencies, failed authentication, invalid models and
 incompatible custom settings must remain actionable errors without silent runner
 switching. Saved unchanged execution can still be tested without applying new
@@ -177,6 +255,17 @@ a separate acceptance requirement.
 Automated: [live run routes](../../server/src/__tests__/agent-live-run-routes.test.ts) and [run event sequencing](../../server/src/__tests__/heartbeat-run-event-sequencing.test.ts) cover run data contracts.
 
 Manual: Start a disposable task, open its running transcript, and follow it to a terminal outcome. Reload and compare task/run IDs, status, output, and cost. Verify a failed run remains distinguishable from a completed run with useful output.
+
+For Legacy OpenCode on a disposable Linux sandbox, run a Bash tool that reads
+`/proc/self/oom_score_adj` and its parent's score. The tool should report `1000`;
+OpenCode should retain its original score. Repeat with an operator `BASH_ENV`
+and confirm that it takes precedence. Repeat with a linked operator plugins
+directory; it must remain unchanged, and the uploaded runtime must contain a
+real plugins directory with the guard and existing plugins. Under controlled memory pressure, record
+the cgroup OOM counters and verify that a killed tool can return an error while
+the agent continues. Local and SSH execution must keep their original shell
+environment. See the [adapter contract](../../docs/adapters/overview.md#opencode-sandbox-memory-pressure).
+These controls do not guarantee that every memory exhaustion preserves the agent.
 
 An explicit runner change starts a configuration revision and invalidates the
 eligible session. Active runs, restart recovery and historical transcript parsing
@@ -221,3 +310,7 @@ The existing transport and ingress suites exercise these conditions without a
 provider. Repeat the actual managed setup and useful task journey separately;
 the literal `651a3de64fc943216cc414b64b1443809f9499da` Test attempt failed
 cleanup before hire and retains its unconfirmed recovery state.
+
+### `delegated-configuration`
+
+See the canonical [delegated configuration guidance and acceptance evidence](connection-setup.md#delegated-configuration).

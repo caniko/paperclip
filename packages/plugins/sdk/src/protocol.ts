@@ -289,6 +289,7 @@ export type PluginRpcErrorCode =
  */
 export interface PluginInvocationScope {
   companyId: string;
+  projectGit?: { projectId: string; workspaceId?: string; runId?: string; agentId?: string; operation?: "prepare" | "inspect" | "remove" };
 }
 
 /**
@@ -669,6 +670,8 @@ export interface PluginEnvironmentAcquireLeaseParams extends PluginEnvironmentDr
 }
 
 export interface PluginEnvironmentResumeLeaseParams extends PluginEnvironmentDriverBaseParams {
+  /** New run authority for a retained task; omitted by legacy environment consumers. */
+  runId?: string;
   providerLeaseId: string;
   leaseMetadata?: Record<string, unknown>;
 }
@@ -1794,6 +1797,10 @@ export interface WorkerToHostMethods {
     params: { companyId: string; limit?: number; offset?: number },
     result: Project[],
   ];
+  "projects.resolveGitCredential": [
+    params: { projectId: string; workspaceId: string; companyId: string },
+    result: string | null,
+  ];
   "projects.getInstanceSecrets": [
     params: { projectId: string; companyId: string },
     result: Record<string, string>,
@@ -2151,7 +2158,7 @@ export interface WorkerToHostMethods {
     result: PluginAgentRuntimeIdentity | null,
   ];
   "agents.getRuntime": [
-    params: { agentId: string; companyId: string },
+    params: { agentId: string; companyId: string; environmentId?: string; installEnvironmentSkills?: boolean },
     result: PluginAgentRuntimeState | null,
   ];
   "agents.get": [

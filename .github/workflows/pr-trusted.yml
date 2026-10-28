@@ -134,6 +134,13 @@ jobs:
       - name: Install policy test dependencies
         uses: ./.github/actions/setup-ci-dependencies
 
+      # Report-only for now (always exits 0); --enforce turns findings into failures.
+      - name: Report raw query-error rendering
+        run: node scripts/check-query-error-rendering.mjs --summary
+
+      - name: Test query-error rendering check
+        run: node --test ./scripts/check-query-error-rendering.test.mjs
+
       - name: Test PR quality-gate scripts
         run: node "$CI_NODE_TEST" '.github/scripts/tests/*.test.mjs'
 
@@ -227,6 +234,7 @@ jobs:
       - name: Restore materialized dependencies and shared builds
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') != ''
         uses: ./.github/actions/setup-ci-dependencies
+
 
       - name: Locate pnpm store
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') == ''
@@ -516,6 +524,7 @@ jobs:
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') != ''
         uses: ./.github/actions/setup-ci-dependencies
 
+
       - name: Locate pnpm store
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') == ''
         id: pnpm_store
@@ -731,6 +740,7 @@ jobs:
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') != ''
         uses: ./.github/actions/setup-ci-dependencies
 
+
       - name: Locate pnpm store
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') == ''
         id: pnpm_store
@@ -938,6 +948,7 @@ jobs:
       - name: Restore materialized dependencies and shared builds
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') != ''
         uses: ./.github/actions/setup-ci-dependencies
+
 
       - name: Locate pnpm store
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') == ''
@@ -1230,6 +1241,7 @@ jobs:
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') != ''
         uses: ./.github/actions/setup-ci-dependencies
 
+
       - name: Locate pnpm store
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') == ''
         id: pnpm_store
@@ -1315,6 +1327,7 @@ jobs:
       - name: Restore materialized dependencies and shared builds
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') != ''
         uses: ./.github/actions/setup-ci-dependencies
+
 
       - name: Locate pnpm store
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') == ''
@@ -1569,6 +1582,7 @@ jobs:
       - name: Restore materialized dependencies and shared builds
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') != ''
         uses: ./.github/actions/setup-ci-dependencies
+
 
       - name: Locate pnpm store
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') == ''

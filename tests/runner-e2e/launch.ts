@@ -1,3 +1,4 @@
+import { readUpgradeArtifacts, verifyUpgradeArtifact, upgradeArtifactKey } from "./upgrade-artifacts.js";
 import { recoverWorkerTiming } from "./worker-timing.js";
 import { openEvalOperations, type EvalOperations } from "./operations.js";
 import { readRecoveredFeedback } from "./feedback-recovery.js";
@@ -32,6 +33,7 @@ import {
 import { isImmutableDaytonaImage, runnerMatrix } from "./catalog.js";
 import { renderRunnerE2EDashboard } from "./dashboard.js";
 import { packageEvidence } from "./evidence.js";
+import { copySharedEvidence } from "./shared-evidence.js";
 import { classifyFailure } from "./failure-classifier.js";
 import { mustPreserveRecoveryState, shouldKeepFailedDiagnostics } from "./cleanup-verification.js";
 import { effectiveAutomaticRetryLimit, executeWithAutomaticRetry } from "./automatic-retry.js";
@@ -451,24 +453,6 @@ async function readResult(resultPath: string, fallback: RunnerE2EResult) {
   }
 }
 
-async function copySharedEvidence(privateRoot: string, casePrivateDir: string) {
-  for (const relative of [
-    "server.log",
-    "playwright.log",
-    "junit.xml",
-    "html-report",
-    "blob-report",
-    "playwright-output",
-  ]) {
-    await cp(
-      path.join(privateRoot, relative),
-      path.join(casePrivateDir, relative),
-      { recursive: true, force: true },
-    ).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") throw error;
-    });
-  }
-}
 
 async function runAttempt(input: {
   executions: readonly MatrixExecution[];
@@ -493,6 +477,15 @@ async function runAttempt(input: {
     throw new Error(
       "One isolated runner E2E harness cannot mix profiles or environments",
     );
+  }
+  const upgrades = await readUpgradeArtifacts(process.env[upgradeArtifactKey]);
+  if (upgrades) {
+    // All attempts and the browser use A's installed fixture admission. The
+    // supervisor changes only the server artifact; the original sandbox lives on.
+    Object.assign(process.env, upgrades.artifacts.A.pins);
+    for (const artifact of [upgrades.artifacts.A, upgrades.artifacts.B]) {
+      await verifyUpgradeArtifact(artifact, process.env, executions);
+    }
   }
   assertInstalledCliSelection(process.env, executions);
   const installedCli = await verifyInstalledCli(process.env, executions);
@@ -595,6 +588,9 @@ async function runAttempt(input: {
     };
     if (gateway) {
       applyEvalGatewayEnvironment(childEnv, execution.profile.credential, gateway);
+      // The fixture/server controller needs Daytona provisioning access. The
+      // remote provider still receives only the scoped model and OTLP tokens.
+      if (execution.environment.id === "daytona") childEnv.DAYTONA_API_KEY = process.env.DAYTONA_API_KEY;
     }
     // The database URLs are stripped here and again at the Playwright web-server
     // boundary so a developer's shell can never redirect this paid test.
@@ -715,6 +711,7 @@ async function runAttempt(input: {
             const leak = await findSecretLeakInDirectory(directory, credentials, {
               includeShapes: false,
               sources: credentialSources,
+              ...(label === "Paperclip home" ? { privateCodexRuntimeIdentityRoot: paperclipHome } : {}),
               ignoreFile: (file) => expectedEphemeralCredentials.has(file),
               allowDisappearedFile: (file) =>
                 label === "Paperclip home" &&
@@ -812,7 +809,7 @@ async function runAttempt(input: {
         `attempt-${attempt}`,
       );
       await mkdir(casePrivateDir, { recursive: true });
-      await copySharedEvidence(privateDir, casePrivateDir);
+      await copySharedEvidence(privateDir, casePrivateDir, temporaryRoot, credentials);
       if (persistedStateError && persistenceCheckedExecutions.includes(candidate)) {
         const snapshots = path.join(casePrivateDir, "snapshots");
         await mkdir(snapshots, { recursive: true });
@@ -1074,6 +1071,13 @@ async function main() {
   }
 
   if (process.env.PAPERCLIP_E2E_OPERATIONS_MANIFEST && executions.some(execution => execution.task.flow === "provider_connection")) throw new Error("Provider connection campaign has no budgeted routing qualification");
+  if (executions.some(execution => execution.task.flow === "github_review_journey")) {
+    if (options.connectionConfig) throw new Error("Use --github-review-config for the GitHub journey.");
+    const { runGitHubReviewCampaign } = await import("./github-review-launch.js");
+    await runGitHubReviewCampaign({ executions, catalog: runnerMatrix, configFile: options.githubReviewConfig, repositoryRoot, provisionRepository: options.provisionGitHubRepository });
+    return;
+  }
+  if (options.githubReviewConfig || options.provisionGitHubRepository) throw new Error("GitHub journey options require an explicit GitHub review journey selection.");
   if (executions.some(execution => execution.task.flow === "provider_connection")) {
     const { runConnectionCampaign } = await import("./connection-launch.js");
     await runConnectionCampaign({ executions, catalog: runnerMatrix, configFile: options.connectionConfig, repositoryRoot });
