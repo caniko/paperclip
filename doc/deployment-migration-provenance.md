@@ -50,3 +50,20 @@ Local regeneration establishes source preparation only. Hosted qualification of
 the exact successor, including fresh bootstrap, authentic-history upgrades and
 snapshot drift, is still required. Earlier hosted receipts above apply to their
 recorded source; they do not qualify this merge or authorize deployment.
+
+## Upstream master integration (2026-10-29)
+
+Upstream `0e365768f` extends the journal through `0397`. The fork migrations
+keep their SQL bytes and follow it:
+
+| Previous name | Combined name | Executable SQL SHA-256 |
+| --- | --- | --- |
+| `0355_sweet_titanium_man.sql` | `0398_sweet_titanium_man.sql` | `ac20d3f6626b23aaf07e7bc7f6502bbcd728a2808d4b4adb56b2116bb30e6412` |
+| `0356_perpetual_manta.sql` | `0399_perpetual_manta.sql` | `e9bfec1b4c74697c941a0791f50000550ccdf211fda8161aad82bdeaa6e75d79` |
+| `0357_deployment_environments.sql` | `0400_deployment_environments.sql` | `b435bb7c9cea086298a29e8a933f281d8f39e2cb0ca9cde4158151a468ff6ef7` |
+| (new) | `0401_deployment_budget_guard.sql` | `7f825c303b1d7d57fd5c4104cd35a747df6f6cae29ab57fac467aad63b872b94` |
+
+`0401` holds only what the refreshed upstream deployment contribution adds beyond
+the applied deployment SQL: the budget-policy guard function and trigger. Its
+Drizzle snapshot is generated from the merged schema; snapshots `0394` through
+`0397` and `0401` remain after pruning.

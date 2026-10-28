@@ -13,8 +13,10 @@ PROVISIONAL = MIGRATIONS / "0295_nostalgic_rhodey.sql"
 ORIGINAL_SHA256 = "ac20d3f6626b23aaf07e7bc7f6502bbcd728a2808d4b4adb56b2116bb30e6412"
 GUARD_MARKER = b"CREATE FUNCTION paperclip_deployment_guard()"
 JOURNALED_MIGRATIONS = {
-    "0355_sweet_titanium_man.sql": ORIGINAL_SHA256,
-    "0356_perpetual_manta.sql": "e9bfec1b4c74697c941a0791f50000550ccdf211fda8161aad82bdeaa6e75d79",
+    "0398_sweet_titanium_man.sql": ORIGINAL_SHA256,
+    "0399_perpetual_manta.sql": "e9bfec1b4c74697c941a0791f50000550ccdf211fda8161aad82bdeaa6e75d79",
+    "0400_deployment_environments.sql": "b435bb7c9cea086298a29e8a933f281d8f39e2cb0ca9cde4158151a468ff6ef7",
+    "0401_deployment_budget_guard.sql": "7f825c303b1d7d57fd5c4104cd35a747df6f6cae29ab57fac467aad63b872b94",
 }
 
 

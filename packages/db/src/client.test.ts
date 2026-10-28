@@ -2189,7 +2189,7 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
           assignee_user_id = 'handoff-owner' WHERE id = ${issueId}`;
         expect(await replaySql`SELECT status_version::int FROM issues WHERE id = ${issueId}`)
           .toEqual([{ status_version: 3 }]);
-        const assignmentVersionHash = await migrationHash("0361_issue_assignment_status_version.sql");
+        const assignmentVersionHash = await migrationHash("0358_issue_assignment_status_version.sql");
         await replaySql`DELETE FROM "drizzle"."__drizzle_migrations" WHERE "hash" = ${assignmentVersionHash}`;
         await applyPendingMigrations(connectionString);
         expect(await replaySql`SELECT status_version::int FROM issues WHERE id = ${issueId}`)

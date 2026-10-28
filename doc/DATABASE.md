@@ -8,8 +8,10 @@ databases. On each upstream merge, upstream's migrations, snapshots and journal 
 taken unchanged, and the fork's `deployment_resources` (with
 `paperclip_deployment_guard`), `adapter_session_affinities` and environment
 deployment-guard migrations are appended after upstream's last entry, with their
-SQL bytes unchanged. Upstream `0357_naive_wolfpack` replaces the fork's identical
-`sticky_wendell_vaughn` copy. The newest snapshot covers the combined schema.
+SQL bytes unchanged (`0398`–`0400` after upstream `0397`). Later additive fork
+changes get their own migration after those (`0401_deployment_budget_guard`
+adds the budget-policy guard), never an edit to an applied file. The newest
+snapshot covers the combined schema.
 
 ### Persistent case handoffs
 
@@ -1149,16 +1151,17 @@ stored migration hash against the installed SQL files. Unknown hashes refuse
 startup without changing the journal. Use the matching application or a verified
 compatible backup; rewriting a fork's applied migration journal is not an upgrade.
 
-Migration `0355_sweet_titanium_man.sql` adds the `deployment_resources` ownership
+Migration `0398_sweet_titanium_man.sql` adds the `deployment_resources` ownership
 ledger and guards owned resource fields and secret versions. Resource identities
 use owner, kind, and key; no cascading foreign key can silently erase ownership.
 Operational pauses and spending remain mutable. The reconciler uses a
 transaction-local setting for its own writes. This guard controls application
 writes, not arbitrary SQL access by the database owner.
 
-The migration follows upstream `0354`. Its SQL hash matches the earlier fork's
-`0289_messy_vivisector.sql`; that applied hash remains in the database journal
-while the upstream `0289`–`0354` gap is filled. A database with the older fork-only
+Migration `0401_deployment_budget_guard.sql` adds the guard for declaratively
+owned budget policies. The migration follows upstream `0397`. Its SQL hash matches
+the earlier fork's `0289_messy_vivisector.sql`; that applied hash remains in the
+database journal while the upstream `0289`–`0397` gap is filled. A database with the older fork-only
 `0284_bizarre_mastermind` / `0285_deployment_workspaces` history needs a separate
 verified migration/restore procedure. The compatibility check refuses that
 unknown history.
