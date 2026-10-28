@@ -4,7 +4,6 @@ import { createAgentSchema } from "./validators/agent.js";
 import { createProjectSchema, createProjectWorkspaceSchema } from "./validators/project.js";
 import { createRoutineSchema, createRoutineTriggerSchema } from "./validators/routine.js";
 
-/** Omitted manifest fields must stay absent (operator-owned), so drop the native create defaults. */
 function undefaulted<T extends z.ZodObject>(schema: T) {
   return z.object(Object.fromEntries(Object.entries(schema.shape).map(([name, field]) =>
     [name, field instanceof z.ZodDefault ? field.removeDefault() : field])) as T["shape"]);
@@ -27,7 +26,6 @@ const agent = identity.extend({
     name: true, role: true, title: true, capabilities: true,
     adapterType: true, adapterConfig: true, budgetMonthlyCents: true, permissions: true,
   })).strict(),
-  // Values are names in the runtime credential map, never secret values or paths.
   credentials: z.record(z.string().regex(/^(env\.[A-Z_][A-Z0-9_]*|[a-zA-Z][a-zA-Z0-9]*)$/), key).default({}),
 }).strict();
 const routine = identity.extend({
@@ -44,7 +42,6 @@ const routine = identity.extend({
   }).strict(),
 }).strict();
 
-/** Deployment v1 deliberately reuses the native validators for owned fields. */
 export const deploymentManifestSchema = z.object({
   version: z.literal(1),
   owner: key,

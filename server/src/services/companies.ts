@@ -248,9 +248,6 @@ export function companyService(db: Db, _budgetHooks: BudgetServiceHooks = {}, ou
     let suffix = 1;
     while (suffix <= MAX_ISSUE_PREFIX_ATTEMPTS) {
       const candidate = `${base}${issuePrefixSuffixForAttempt(suffix)}`;
-      // A unique violation aborts an enclosing deployment transaction. Handle
-      // only the prefix index in SQL so retries preserve that transaction and
-      // other constraint failures still propagate.
       const rows = await db
         .insert(companies)
         .values({ ...data, issuePrefix: candidate })
@@ -425,19 +422,18 @@ export function companyService(db: Db, _budgetHooks: BudgetServiceHooks = {}, ou
         };
       });
       if (!result) return null;
-      const publishAfterCommit = async () => {
-        publishAccountingActivities(id, budgetPublications);
-        // Post-commit, fire-and-forget, and BEFORE any finalization that
-        // could throw: a Cloud-pinned primary company that crossed the
-        // archived boundary (either direction) rings the harness so the
-        // stack itself can converge. A deployment transaction defers this
-        // until it commits.
-        if (result.archiveCascade || result.unarchived) {
-          void notifyCloudOfPrimaryCompanyLifecycleChange(id);
-        }
-      };
-      if (outerTransaction) outerTransaction.afterCommit.push(publishAfterCommit);
-      else await publishAfterCommit();
+      if (outerTransaction) outerTransaction.afterCommit.push(async () => publishAccountingActivities(id, budgetPublications));
+      else publishAccountingActivities(id, budgetPublications);
+      // Post-commit, fire-and-forget, and BEFORE any finalization that
+      // could throw: a Cloud-pinned primary company that crossed the
+      // archived boundary (either direction) rings the harness so the
+      // stack itself can converge. The status transaction has already
+      // committed, so a later cascade or activity-log failure must not
+      // leave Cloud unaware of a company that is in fact archived.
+      if (result.archiveCascade || result.unarchived) {
+        if (outerTransaction) outerTransaction.afterCommit.push(async () => { void notifyCloudOfPrimaryCompanyLifecycleChange(id); });
+        else void notifyCloudOfPrimaryCompanyLifecycleChange(id);
+      }
       if (result.issuePrefixRederived) {
         await logActivity(db, {
           companyId: id,

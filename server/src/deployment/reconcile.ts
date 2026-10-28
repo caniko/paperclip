@@ -34,7 +34,6 @@ type Fields = Record<string, unknown>;
 type Spec = { kind: Kind; key: string; id: string; companyId: string | null; adopt?: string; enabled: boolean; fields: () => Fields; create: (fields: Fields) => Promise<string>; update: (fields: Fields) => Promise<unknown> };
 export type DeploymentDifference = { kind: string; key: string; action: "create" | "adopt" | "update" | "disable"; fields: string[] };
 
-/** Values never appear in plans, including adapter URLs, paths and credentials. */
 export function changedFields(before: Fields, after: Fields): string[] {
   return [...new Set([...Object.keys(before), ...Object.keys(after)])].sort()
     .filter((k) => stableJson(before[k]) !== stableJson(after[k]));
@@ -54,7 +53,6 @@ async function validateAdapters(manifest: DeploymentManifest, credentials: Recor
   }
 }
 
-/** One process-local reconciler for startup, plan, apply and check. No HTTP bypass. */
 export async function reconcileDeployment(db: Db, raw: unknown, options: {
   apply: boolean; descriptor: DeploymentDescriptor; config: Config; singleOwner: boolean;
 }) {
@@ -73,7 +71,6 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
   const result = await db.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
     if (!options.apply) await tx.execute(sql`set transaction read only`);
-    // Serialize all owners, including adoption across different manifests.
     await tx.execute(sql`select pg_advisory_xact_lock(1735289201)`);
     if (options.apply) await tx.execute(sql`select set_config('paperclip.deployment_apply', 'on', true)`);
     const [identity] = await tx.select().from(instanceSettings).where(eq(instanceSettings.singletonKey, "deployment"));
@@ -81,8 +78,6 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     if (options.singleOwner && identity?.general.owner && identity.general.owner !== m.owner) {
       throw new Error("Deployment owner changed; an explicit ownership handoff is required");
     }
-    // Validate historical and unmanaged local secrets too: the instance key is
-    // shared, and a no-op declaration must not mask a broken restore/rotation.
     const encrypted = await tx.select({ material: companySecretVersions.material }).from(companySecretVersions)
       .innerJoin(companySecrets, eq(companySecretVersions.secretId, companySecrets.id))
       .where(eq(companySecrets.provider, "local_encrypted"));
@@ -96,8 +91,6 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     }
     const owned = ledger.filter((b) => b.owner === m.owner);
     if (options.apply && (Object.keys(m.projectWorkspaces).length || owned.some((b) => b.kind === "workspace"))) {
-      // Native primary selection updates sibling rows. Prevent a UI/API writer
-      // from inserting or changing a sibling between ownership validation and apply.
       await tx.execute(sql`lock table project_workspaces in share row exclusive mode`);
     }
     const bindings = new Map(owned.map((b) => [`${b.kind}/${b.key}`, b]));
@@ -123,7 +116,6 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         create: async (f) => {
           const { budgetMonthlyCents, ...rest } = { ...c.fields, ...f };
           const created = await companySvc.create({ ...rest, id: getId("company", key), defaultResponsibleUserId: actor.userId }, { provisionBundledAgents: false });
-          // Creation stores no budget policy; the native update path creates it.
           if (budgetMonthlyCents) await companySvc.update(created.id, { budgetMonthlyCents });
           return created.id;
         },
@@ -135,8 +127,6 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         create: async () => (await projectSvc.create(companyId, { ...p.fields, id: getId("project", key) })).id,
         update: (f) => projectSvc.update(getId("project", key), f) });
     }
-    // Native services auto-select the first workspace and repair missing primaries.
-    // Apply the declared primary first so those repairs never choose a different row.
     const workspaceEntries = Object.entries(m.projectWorkspaces).sort(([a, x], [b, y]) =>
       Number(y.fields.isPrimary) - Number(x.fields.isPrimary) || a.localeCompare(b));
     for (const [key, w] of workspaceEntries) {
@@ -167,8 +157,6 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       for (const [field, credential] of Object.entries(a.credentials).sort()) {
         const secretKey = `${key}.${field}`;
         const value = credentials[credential];
-        // A digest is private database bookkeeping, never exported in a plan.
-        // Runtime sources are expected to contain high-entropy worker keys.
         const digest = createHash("sha256").update(value).digest("hex");
         add({ kind: "secret", key: secretKey, companyId, enabled: true, fields: () => ({ digest }),
           create: async () => (await secrets.create(companyId, { name: `deployment.${m.owner}.${secretKey}`, provider: "local_encrypted", value })).id,
@@ -187,7 +175,6 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         create: async (f) => {
           const { budgetMonthlyCents, ...rest } = { ...a.fields, ...f };
           const created = await agentLifecycle.requestHire(companyId, { ...rest, id: getId("agent", key), status: a.enabled ? "idle" : "paused", ...(a.enabled ? {} : { pauseReason: "deployment" }) }, { runnerResolved: true, responsibleUserId: actor.userId, createdByUserId: actor.userId });
-          // Creation stores no budget policy; the native update path creates it.
           if (budgetMonthlyCents) await agentLifecycle.updateConfiguration(created.id, { budgetMonthlyCents });
           return created.id;
         },
@@ -223,7 +210,6 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     }
     const actions = new Map<Spec, DeploymentDifference>();
     const claimed = new Set<string>();
-    // Read and validate ALL existing identities before the first application write.
     for (const spec of specs) {
       const resource = `${spec.kind}/${spec.id}`;
       if (claimed.has(resource)) throw new Error("Duplicate resource ownership in deployment manifest");
@@ -322,9 +308,6 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
           spec.id = await spec.create(fields); ids.set(`${spec.kind}/${spec.key}`, spec.id);
         } else {
           const updateFields = { ...fields };
-          // Native budget setters reconcile pause state even for an unchanged
-          // limit. An enablement or unrelated edit must not reapply that limit.
-          // Keep the full declaration in the ledger so ownership is preserved.
           if (binding && (spec.kind === "agent" || spec.kind === "company")
             && !actions.get(spec)!.fields.includes("budgetMonthlyCents")) {
             delete updateFields.budgetMonthlyCents;
@@ -355,7 +338,6 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       bindings: Object.fromEntries(specs.filter((s) => options.apply || bindings.has(`${s.kind}/${s.key}`)).map((s) => [`${s.kind}/${s.key}`, s.id])),
     };
   });
-  // Lifecycle work, activity publication and deferred side effects run only after the commit.
   for (const id of lifecycleAgents) scheduleAgentLifecycle(db, id);
   for (const publication of publications) publishAccountingActivities(publication.companyId, [publication]);
   for (const effect of afterCommit) await effect();

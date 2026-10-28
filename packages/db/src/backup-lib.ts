@@ -321,7 +321,6 @@ async function waitForChildExit(child: ReturnType<typeof spawn>, label: string):
   }
 }
 
-/** libpq passwords are child-only environment values, never command arguments. */
 export function postgresUtilityConnection(connectionString: string, inherited = process.env) {
   const url = new URL(connectionString);
   const password = url.searchParams.get("password") ?? decodeURIComponent(url.password);

@@ -102,8 +102,6 @@ export function createAgentLifecycle(db: Db, effects: LifecycleEffects) {
   };
 }
 
-/** Atomic application integrations retain the outer commit and publish/schedule
- * only after it succeeds. State writes still belong to the lifecycle module. */
 export function createAgentLifecycleInTransaction(tx: Db, effects: LifecycleEffects, publications: ActivityPublication[]) {
   if (!("nestedIndex" in tx)) throw new AgentLifecycleConflict("Lifecycle integration requires a database transaction");
   const transactionalEffects: LifecycleEffects = { ...effects,
