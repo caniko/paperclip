@@ -5639,8 +5639,6 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
             runtimeStateRoot: this.options.runnerFilesystemRoot ?? this.#root,
             codexCommand: typeof recordedCommand === "string" ? recordedCommand : this.options.codexCommand,
             persistedCommandEnvironment: record(providerConfig.commandEnvironment),
-            // Older profiles retain their explicit argv values. Moving those
-            // values to a different channel would change protected launch args.
             commandEnvironmentTransport:
               providerConfig.commandEnvironment == null ? "argv" : "thread",
             instructionWorkingCopyRoot: runtimeContext?.instructions.workingCopy?.rootPath,

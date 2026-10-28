@@ -8186,7 +8186,6 @@ it.each(["changed", "removed", "unregistered"] as const)("rebinds command AGENT_
     current = createCapabilityRunnerdCodexTransport(nextOptions);
     await expect(current.transport.request("thread/read", {})).resolves.toHaveProperty("thread.id", (started.thread as { id: string }).id);
     await current.transport.close();
-    // Exact recovery must retain the new binding without a second run.attach.
     current = createCapabilityRunnerdCodexTransport(nextOptions);
     await current.transport.request("thread/read", {});
     await current.transport.close();

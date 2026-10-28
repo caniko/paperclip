@@ -2514,9 +2514,6 @@ impl CodexCommandExecutor {
                         | "codex_app_server_command_environment_v2"
                 )
             {
-                // The base environment stays immutable. Only the authenticated
-                // controller can rotate/clear the registered run copy. Upgrading
-                // a v1 checkpoint also clears its old inline AGENT_HOME at use.
                 instruction_root_changed = next_state.config.driver != config.driver
                     || next_state.config.instruction_working_copy_root
                         != config.instruction_working_copy_root;

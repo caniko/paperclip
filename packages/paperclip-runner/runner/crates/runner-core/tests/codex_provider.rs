@@ -237,7 +237,6 @@ fn command_environment_rebinds_only_the_registered_run_copy() {
         let config = provider_config(&directory, &["--request-log", requests.to_str().unwrap()]);
         let mut wire = serde_json::to_value(&config).unwrap();
         wire["driver"] = json!(initial_driver);
-        // Retain v1's inline root unchanged even when upgrading its projection.
         wire["commandEnvironment"] = json!({"PATH": "/tools", "AGENT_HOME": "/old-copy"});
         if initial_driver.ends_with("v2") {
             wire["instructionWorkingCopyRoot"] = json!("/old-copy");
