@@ -53,5 +53,8 @@ it("keeps a declared budget limit enforced", async () => {
   }
   await expect(db.delete(budgetPolicies).where(eq(budgetPolicies.id, policy.id)))
     .rejects.toMatchObject({ cause: { code: "23514", message: "Declaratively owned budget policy cannot be deleted" } });
+  const [lifetime] = await db.insert(budgetPolicies).values({ companyId: company.id, scopeType: "company", scopeId: company.id,
+    windowKind: "lifetime", amount: 700 }).returning();
+  await db.update(budgetPolicies).set({ amount: 800, isActive: false }).where(eq(budgetPolicies.id, lifetime.id));
   await db.update(budgetPolicies).set({ enforcementDeliveredVersion: 1 }).where(eq(budgetPolicies.id, policy.id));
 });

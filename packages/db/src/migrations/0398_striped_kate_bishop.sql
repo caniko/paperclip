@@ -96,7 +96,7 @@ BEGIN
   IF EXISTS (
     SELECT 1 FROM deployment_resources
     WHERE kind = OLD.scope_type AND kind IN ('company', 'agent') AND resource_id = OLD.scope_id AND fields ? 'budgetMonthlyCents'
-  ) THEN
+  ) AND OLD.metric = 'billed_cents' AND OLD.window_kind = 'calendar_month_utc' THEN
     IF TG_OP = 'DELETE' THEN
       RAISE EXCEPTION 'Declaratively owned budget policy cannot be deleted' USING ERRCODE = '23514';
     END IF;
