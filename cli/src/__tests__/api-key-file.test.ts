@@ -84,7 +84,6 @@ describe.skipIf(process.platform === "win32")("protected API credential file", (
       }
       try { readApiKeyFile(process.argv[1]); process.exitCode = 1; }
       catch (error) { if (!error.message.startsWith('CLI credential file')) throw error; }`;
-    // A blocking open would hang the test runner; exercise it in a bounded child.
     expect(() => execFileSync(process.execPath, ["--input-type=module", "-e", script, file], { timeout: 3_000 })).not.toThrow();
   });
 

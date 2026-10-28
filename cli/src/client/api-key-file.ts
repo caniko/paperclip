@@ -8,7 +8,6 @@ function sameFileSnapshot(before: BigIntStats, after: BigIntStats): boolean {
     .every((field) => before[field] === after[field]);
 }
 
-/** Read an operator-managed local POSIX credential without exporting its contents. */
 export function readApiKeyFile(file: string): string {
   try {
     const { O_RDONLY, O_NONBLOCK, O_NOFOLLOW } = fs.constants;
@@ -20,8 +19,6 @@ export function readApiKeyFile(file: string): string {
       || (before.mode & 0o137n) !== 0n
       || (before.uid !== 0n && before.uid !== BigInt(process.geteuid()))) throw new Error();
 
-    // Pin the opened inode, rather than checking a path then reading it again.
-    // NONBLOCK also avoids waiting for a writer if the path becomes a FIFO.
     const fd = fs.openSync(canonical, O_RDONLY | O_NONBLOCK | O_NOFOLLOW);
     try {
       if (!sameFileSnapshot(before, fs.fstatSync(fd, { bigint: true }))) throw new Error();
@@ -34,7 +31,6 @@ export function readApiKeyFile(file: string): string {
       }
       if (length > MAX_CREDENTIAL_BYTES || BigInt(length) !== before.size
         || !sameFileSnapshot(before, fs.fstatSync(fd, { bigint: true }))) throw new Error();
-      // latin1 preserves every byte so the ASCII check also rejects malformed UTF-8.
       const token = bytes.subarray(0, length).toString("latin1").replace(/\r?\n$/, "");
       if (!/^[\x21-\x7e]+$/.test(token)) throw new Error();
       return token;
@@ -42,7 +38,6 @@ export function readApiKeyFile(file: string): string {
       fs.closeSync(fd);
     }
   } catch {
-    // Never include token contents, paths, or nested operating-system diagnostics.
     throw new Error("CLI credential file is missing, invalid, changed, or insufficiently protected");
   }
 }
