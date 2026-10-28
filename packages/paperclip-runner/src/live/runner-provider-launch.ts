@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { parseNativeRuntimeContext, retargetNativeSystemInstructions } from "../contracts/runtime-context.js";
 import { resolve } from "node:path";
+import { configuredEnvironmentKeys } from "../configured-environment.js";
 import { codexCommandEnvironment, codexExecutableReadOnlyRoots } from "../drivers/codex/codex-security-config.js";
 import { createIsolatedCodexAppServerArgs } from "../drivers/codex/codex-app-server-driver.js";
 import { validatePreparedLaunchWorkingDirectory } from "../drivers/codex/codex-boundaries.js";
@@ -374,7 +375,8 @@ export function createRunnerProviderLaunch(
                         includeSkillInstructions: runtimeContext !== null,
                         ...(input.options.codexArgs === undefined
                           ? {
-                              commandEnvironment: codexCommandEnvironment(input.options.environment ?? {}),
+                              commandEnvironment: Object.fromEntries(Object.entries(codexCommandEnvironment(input.options.environment ?? {}))
+                                .filter(([key]) => !configuredEnvironmentKeys(input.options.environment).includes(key))),
                               instructionWorkingCopyRoot: codexCommandEnvironment(
                                 input.options.environment ?? {},
                                 runtimeContext?.instructions.workingCopy?.rootPath,
