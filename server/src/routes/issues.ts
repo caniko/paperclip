@@ -12655,7 +12655,6 @@ export function issueRoutes(
         action: "project:read",
         resource: { type: "project", companyId, projectId: selectedProject.id },
       });
-      // A task bridge key never holds project:read; assertTaskBridgeCreateAllowed enforces its project boundary below.
       if (!projectDecision.allowed && !isTaskBridgeKeyActor(req)) {
         res.status(404).json({ error: "Project not found" });
         return;

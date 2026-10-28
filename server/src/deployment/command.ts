@@ -7,7 +7,6 @@ import { embeddedDeploymentIdentity, readJson, type DeploymentDescriptor } from 
 import { reconcileDeployment } from "./reconcile.js";
 import { publishDeploymentBindings } from "./startup.js";
 
-/** Plans/checks never initialize a cluster, migrate, bootstrap or publish files. */
 export async function deploymentCommand(command: "plan" | "apply" | "check", descriptor: DeploymentDescriptor) {
   const config = loadConfig();
   const apply = command === "apply";
@@ -26,12 +25,7 @@ export async function deploymentCommand(command: "plan" | "apply" | "check", des
     }
     if (!url) throw new Error("Missing database connection");
     connectionUrl = url;
-    // An offline apply cannot change resources underneath a running server.
-    // Read-only checks may run concurrently with it.
     if (apply) release = await acquireDeploymentLease(url, () => {
-      // The lease lives on a separate connection from migrations and the apply
-      // transaction. Once it is gone another controller can start immediately.
-      // Exit rather than letting either connection continue without ownership.
       console.error("Declarative database lease was lost; aborting offline apply");
       process.exit(1);
     });

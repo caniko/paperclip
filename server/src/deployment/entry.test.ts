@@ -101,7 +101,6 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
     bindings["company/example"], bindings["company/other"], adoptedCompanyId,
   ].sort());
   expect((await fetch(`http://localhost:${port}/api/companies/${adoptedCompanyId}`, { headers: { cookie } })).status).toBe(200);
-  // Server health does not imply that asynchronous agent setup has completed.
   await expect.poll(async () => (await db.select({ status: agents.status, lifecycleState: agents.lifecycleState })
     .from(agents).where(eq(agents.id, bindings["agent/worker"])))[0], { timeout: 30000, interval: 100 })
     .toEqual({ status: "idle", lifecycleState: "ready" });

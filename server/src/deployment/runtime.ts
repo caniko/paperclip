@@ -36,7 +36,6 @@ export class UnqualifiedRemoteExecutionError extends Error {
   }
 }
 
-// Server credentials live in this process, never in the inherited environment.
 let serverCredentials: Partial<Record<"auth" | "database" | "migration", string>> = {};
 export function deploymentServerCredential(name: keyof typeof serverCredentials) {
   return process.env.PAPERCLIP_DECLARATIVE === "true" ? serverCredentials[name] : undefined;
@@ -47,9 +46,6 @@ export function readJson(file: string): unknown {
   catch { throw new Error("Deployment JSON could not be read or parsed"); }
 }
 
-// Walk the upstream schema, including defaults, rather than maintaining another
-// list of configuration keys. Upstream's interactive editor preserves extension
-// keys; declarative configuration must instead reject them until supported.
 function rejectUnknown(value: unknown, schema: z.ZodType, path: string[] = []): void {
   let current = schema;
   while (current instanceof z.ZodOptional || current instanceof z.ZodDefault || current instanceof z.ZodPrefault) {
@@ -74,10 +70,6 @@ export function loadDeploymentDescriptor(file: string): DeploymentDescriptor {
   const parsed = deploymentDescriptorSchema.safeParse(readJson(file));
   if (!parsed.success) throw new Error("Invalid deployment descriptor");
   const descriptor = parsed.data;
-  // The shared dispatch path still prepares controller-local workspaces and
-  // runtime tools before invoking HTTP gateways. Do not advertise containment
-  // by merely filtering adapter names. The profile stays closed until those
-  // paths and plugin/stdio loading have end-to-end enforcement and VM evidence.
   if (descriptor.executionProfile === "remote-only") throw new UnqualifiedRemoteExecutionError();
   const config = validateDeploymentConfig(readJson(descriptor.configFile));
   if (config.database.connectionString) throw new Error("Database connections must use runtime credential files");
