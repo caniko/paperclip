@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { handoffCaseSchema, type HandoffCaseInput } from "./case-handoffs.js";
 
-const recipient = randomUUID();
+// Fixed so parameterized titles do not change between qualification collection and execution.
+const recipient = "5f2c1d3a-8b47-4e69-9a10-3c6d7e8f9a01";
 const kickoff = {
   idempotencyKey: "kickoff-1", case: { create: { caseType: "bug", title: "Fix the bug" } },
   toAgentId: recipient, phase: "triage", instructions: "Investigate and route this task.",
@@ -91,7 +92,7 @@ describe("handoff_case input", () => {
     expect(handoffCaseSchema.safeParse({ ...done, expectedHandoffVersion: 4, expectedIssueStatusVersion: 7 }).success).toBe(true);
   });
   it.each([
-    { toAgentId: recipient }, { bindIssueId: randomUUID() }, { phase: "verification" },
+    { toAgentId: recipient }, { bindIssueId: "a7d4e2b1-6c35-4f80-8e92-1b3c5d7f9a02" }, { phase: "verification" },
     { case: { create: { caseType: "bug", title: "New work cannot finish" } } },
     { responsibleUserId: "invented" }, { status: "done" }, { to: "completed" },
     { initialDocuments: [{ key: "plan", title: "Plan", body: "Work" }] },
