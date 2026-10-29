@@ -167,6 +167,8 @@ jobs:
           pnpm --filter @paperclipai/paperclip-runner exec vitest run src/live/runnerd-codex-transport.test.ts -t '^recovers a warm attachment with a fresh controller and runner \(before-result, routed=true, fault=none, followup=undefined, external=undefined, prepared=undefined\)$' --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter="$GITHUB_WORKSPACE/scripts/qualification-junit-reporter.mjs" --outputFile.junit="$EVIDENCE/managed-producer.junit" 2>&1 | tee "$EVIDENCE/managed-producer.log"
           printf '%s\n' "PAPERCLIP_WARM_TRANSITION_FIXTURE_DIRECTORY=$EVIDENCE/warm-fixtures/transient" "PAPERCLIP_WARM_TRANSITION_MANAGED_FIXTURE_DIRECTORY=$EVIDENCE/warm-fixtures/managed" >> "$GITHUB_ENV"
       - name: Execute every source-mapped profile case once
+        # A hung runnerd scenario must end the step so the profile log and evidence still upload.
+        timeout-minutes: ${{ matrix.profile == 'runnerd' && 45 || 110 }}
         env:
           PROFILE: ${{ matrix.profile }}
           PORTABILITY_IMPORT_BENCH: ${{ matrix.profile == 'import-benchmark' && '1' || '' }}

@@ -152,7 +152,8 @@ try {
   const rawReporter = new QualificationJUnitReporter();
   rawReporter.options.outputFile = path.join(evidence, "raw-results.junit");
   ctx = await createVitest({ ...options, testNamePattern: selection.testNamePattern,
-    reporters: ["default", rawReporter] });
+    // The runnerd profile streams each case as it finishes so a hang names its scenario.
+    reporters: [profile === "runnerd" ? "verbose" : "default", rawReporter] });
   const executionSpecs = await ctx.globTestSpecifications(filters);
   assert.deepEqual(specificationRows(executionSpecs, testRoot), discovery);
   // https://vitest.dev/api/advanced/vitest#start — run once, no retries or timeout overrides.
