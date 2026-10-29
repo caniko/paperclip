@@ -22,6 +22,7 @@ vi.mock("@/context/CompanyContext", () => ({
     selectedCompany: { id: "company-1", name: "Paperclip", issuePrefix: "PAP" },
   }),
 }));
+vi.mock("@/context/ToastContext", () => ({ useToastActions: () => ({ pushToast: vi.fn(), dismissToast: vi.fn(), clearToasts: vi.fn() }) }));
 vi.mock("@/context/BreadcrumbContext", () => ({
   useBreadcrumbs: () => ({ setBreadcrumbs: fixture.setBreadcrumbs }),
 }));

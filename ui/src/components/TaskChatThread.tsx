@@ -3157,7 +3157,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
                               {tailRunId || optimisticRunnerStartup ? (
                                 <div data-testid="task-chat-live-transcript">
                                   {liveRun?.id === tailRunId ? <FilesystemOwnershipNotice run={liveRun} /> : null}
-                                  {paperclipRunnerTail ||
+                                  {tailRunSource?.adapterType === "paperclip_runner" ||
                                   optimisticRunnerStartup ? (
                                     <TaskChatRunnerTurn
                                       runId={tailRunId}

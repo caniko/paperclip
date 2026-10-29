@@ -36,7 +36,7 @@ describe("commentary permission upgrade", () => {
       permissionKey: "commentary:view", scope: { agentIds: [randomUUID()] }, grantedByUserId: "custom-author",
     }).returning();
     const migration = await readFile(new URL(
-      "../../../packages/db/src/migrations/0362_commentary_view_human_defaults.sql", import.meta.url,
+      "../../../packages/db/src/migrations/0359_commentary_view_human_defaults.sql", import.meta.url,
     ), "utf8");
     await db.execute(sql.raw(migration));
     const first = await db.select().from(principalPermissionGrants).where(eq(principalPermissionGrants.companyId, companyId));

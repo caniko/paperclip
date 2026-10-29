@@ -89,7 +89,7 @@ describe("OpenCode timeout reporting", () => {
       expect(plugins).toHaveLength(1);
       return { target: input.target!, additionalSourceDirs: {}, additionalSourceFailures: [], workspaceSyncSnapshot: null,
         runtimeRootDir: "/workspace/runtime", workspaceRemoteDir: "/workspace",
-        assetDirs: { xdgConfig: "/workspace/runtime/config" }, restoreWorkspace: mocks.restore };
+        assetDirs: { xdgConfig: "/workspace/runtime/config", skills: "/workspace/runtime/skills" }, restoreWorkspace: mocks.restore };
     });
     await execute(context(0));
     expect(mocks.process.mock.calls[0]![4].env.XDG_CONFIG_HOME).toBe("/workspace/runtime/config");

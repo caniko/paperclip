@@ -1177,6 +1177,7 @@ describeEmbeddedPostgres("heartbeat sweepPendingCleanupLeases", () => {
     // carries a credential-shaped sentinel in both the name and the message. The
     // reaper's own queries pass through, so only the sweep fails.
     const sentinel = "Bearer sk-SENTINEL-d4e5f6";
+    let leaseReads = 0;
     const realSelect = db.select.bind(db);
     const selectSpy = vi
       .spyOn(db, "select")
@@ -1184,7 +1185,8 @@ describeEmbeddedPostgres("heartbeat sweepPendingCleanupLeases", () => {
         const builder = realSelect(...args);
         const realFrom = builder.from.bind(builder);
         (builder as { from: unknown }).from = (table: unknown) => {
-          if (table === environmentLeases) {
+          // The fork's adapter-execution reconciliation reads the run's leases first; only the sweep's read fails.
+          if (table === environmentLeases && leaseReads++ > 0) {
             const failure = new Error(`sweep query failed: ${sentinel}`);
             failure.name = `SweepQueryError ${sentinel}`;
             (failure as { code?: string }).code = `ESWEEP ${sentinel}`;
