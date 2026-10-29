@@ -123,6 +123,7 @@
           discoveryUrl = "https://idm.example.test/oauth2/openid/paperclip/.well-known/openid-configuration";
           clientId = "paperclip";
         };
+        operatorKeys.cli = "/run/user/1000/paperclip/operator-cli";
       };
     }).config;
   integrated = (machine {}).config;
@@ -194,9 +195,19 @@
       && controller.services.paperclip.manifest == manifest
       && controller.services.paperclip.credentialFiles == {gateway = "/run/user/1000/paperclip/gateway";}
       && controller.services.paperclip.authSecretFile == "/home/operator/.local/share/paperclip/credentials/auth";
-    oidcLogin =
+    oidcAndOperatorKeys =
       assertionsPass oidcController
       && evaluates oidcController.xdg.configFile."paperclip/work/deployment.json".source.drvPath;
+    storeOperatorKeyRejected =
+      !(evaluates
+        (home {
+          programs.paperclip.package = clientPackages.supported;
+          services.paperclip = {
+            enable = true;
+            operator.email = "operator@example.test";
+            operatorKeys.cli = "${builtins.storeDir}/public-key";
+          };
+        }).activationPackage.drvPath);
     storeControllerCredentialRejected =
       !(evaluates
         (home {

@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, budgetPolicies, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
+import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, budgetPolicies, authAccounts, routines, routineTriggers, agentApiKeys, boardApiKeys, authUsers, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
 import { reconcileDeployment } from "./reconcile.js";
 import { loadConfig } from "../config.js";
 import { secretService } from "../services/secrets.js";
@@ -42,7 +43,7 @@ const root = mkdtempSync(join(tmpdir(), "paperclip-deployment-"));
 const config = { ...loadConfig(), deploymentMode: "authenticated" as const, authBaseUrlMode: "explicit" as const, authPublicBaseUrl: "http://localhost:3100" };
 const descriptor: DeploymentDescriptor = {
   version: 1, home: root, instance: "test", configFile: "/unused",
-  credentialFiles: { gateway: join(root, "gateway"), bridge: join(root, "bridge") }, serverCredentials: { encryption: join(root, "master.key") },
+  credentialFiles: { gateway: join(root, "gateway"), bridge: join(root, "bridge"), operator: join(root, "operator"), operator2: join(root, "operator2") }, serverCredentials: { encryption: join(root, "master.key") },
   bootstrap: { name: "Test operator", email: "operator@example.test", passwordFile: join(root, "password") },
 };
 const manifest = {
@@ -64,6 +65,8 @@ beforeAll(async () => {
   writeFileSync(descriptor.bootstrap!.passwordFile, "fixture-only-password", { mode: 0o600 });
   writeFileSync(descriptor.credentialFiles.gateway, "fixture-only-gateway-key", { mode: 0o600 });
   writeFileSync(descriptor.credentialFiles.bridge, "fixture-only-task-bridge-key-at-least-32-characters", { mode: 0o600 });
+  writeFileSync(descriptor.credentialFiles.operator, "fixture-only-operator-key-at-least-32-characters", { mode: 0o600 });
+  writeFileSync(descriptor.credentialFiles.operator2, "fixture-only-rotated-operator-key-at-least-32", { mode: 0o600 });
   database = await startEmbeddedPostgresTestDatabase("paperclip-declarative-db-");
   db = createDb(database.connectionString);
 }, 90000);
@@ -130,6 +133,25 @@ it("rejects task bridges that share one token before writing any key", async () 
   const declaration = { ...base, owner: "duplicate-bridges", taskBridges: { ...base.taskBridges, other: { ...base.taskBridges.tasks } } };
   await expect(reconcile(declaration)).rejects.toThrow("Task bridge tokens must be unique");
   expect(await db.select().from(companies).where(eq(companies.name, "Duplicate bridges"))).toHaveLength(0);
+}, 90000);
+
+it("provisions declared operator keys as board keys, refuses reuse and rotation, and revokes on removal", async () => {
+  const declaration = { ...structuredClone(manifest), owner: "operator-keys", companies: { example: { fields: { name: "Operator keys" } } }, projects: {}, agents: {}, routines: {}, taskBridges: {}, operatorKeys: { ops: { credential: "operator" } } };
+  const first = await reconcile(declaration);
+  const [key] = await db.select().from(boardApiKeys).where(eq(boardApiKeys.id, first.bindings["operatorKey/ops"]));
+  const [operator] = await db.select().from(authUsers).where(eq(authUsers.email, "operator@example.test"));
+  expect(key).toMatchObject({ name: "deployment.operator-keys.ops", userId: operator.id, expiresAt: null, revokedAt: null,
+    keyHash: createHash("sha256").update("fixture-only-operator-key-at-least-32-characters").digest("hex") });
+  expect((await reconcile(declaration)).differences).toEqual([]);
+  const reused = { ...declaration, owner: "operator-keys-reuse", companies: { example: { fields: { name: "Operator key reuse" } } }, operatorKeys: { other: { credential: "operator" } } };
+  await expect(reconcile(reused)).rejects.toThrow("Operator key tokens must be unique");
+  const duplicated = { ...declaration, owner: "operator-keys-twice", operatorKeys: { a: { credential: "operator2" }, b: { credential: "operator2" } } };
+  await expect(reconcile(duplicated)).rejects.toThrow("Operator key tokens must be unique");
+  await expect(reconcile({ ...declaration, operatorKeys: { ops: { credential: "operator2" } } })).rejects.toThrow("requires a new declaration key");
+  await expect(reconcileDeployment(db, declaration, { descriptor: { ...descriptor, bootstrap: undefined }, config, apply: false, singleOwner: false }))
+    .rejects.toThrow("require an operator bootstrap identity");
+  await reconcile({ ...declaration, operatorKeys: {} });
+  expect((await db.select().from(boardApiKeys).where(eq(boardApiKeys.id, key.id)))[0].revokedAt).not.toBeNull();
 }, 90000);
 
 it.each(["manual", "budget"])("reenables declarations without resuming %s pauses", async (pauseReason) => {

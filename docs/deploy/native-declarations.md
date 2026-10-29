@@ -347,6 +347,16 @@ Workspace removal is rejected until an explicit ownership handoff exists.
 Task-bridge rotation requires a new declaration key and token. Existing active
 routine schedules require explicit schedule adoption to avoid duplicates.
 
+### Operator board keys
+
+`operatorKeys.<key>.credential` names a runtime credential file whose token
+becomes a non-expiring board API key for the bootstrap operator, named
+`deployment.<owner>.<key>`. Declaring one requires `bootstrap`. Tokens need at
+least 32 characters and must be unique across operator keys and task bridges.
+Rotation needs a new declaration key and token; removing a declaration revokes
+its key. The Home Manager module maps `services.paperclip.operatorKeys.<key>` to
+a token file.
+
 Task bridges create issues only inside their declared project/parent boundary
 and assignee scope. They do not gain project-read API access. The create route
 validates the selected project's company, then uses the bridge's task boundary

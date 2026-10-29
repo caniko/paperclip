@@ -1,5 +1,6 @@
 // These services pull in execution, adapters and optional providers. Load this
 // boundary only for apply; a local plan/check needs database projections only.
+export { boardAuthService } from "../services/board-auth.js";
 export { companyService } from "../services/companies.js";
 export { projectService } from "../services/projects.js";
 export { agentService } from "../services/agents.js";

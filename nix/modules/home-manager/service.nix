@@ -65,8 +65,11 @@
     inherit (cfg) instance;
     executionProfile = "trusted-local";
     configFile = application;
-    manifestFile = json.generate "paperclip-${cfg.instance}-manifest.json" cfg.manifest;
-    inherit (cfg) credentialFiles;
+    manifestFile = json.generate "paperclip-${cfg.instance}-manifest.json" (cfg.manifest
+      // lib.optionalAttrs (cfg.operatorKeys != {}) {
+        operatorKeys = lib.mapAttrs (key: _: {credential = "operator-${key}";}) cfg.operatorKeys;
+      });
+    credentialFiles = cfg.credentialFiles // lib.mapAttrs' (key: file: lib.nameValuePair "operator-${key}" file) cfg.operatorKeys;
     serverCredentials =
       {
         auth = cfg.authSecretFile;
@@ -165,6 +168,12 @@ in {
         };
       });
     };
+    operatorKeys = lib.mkOption {
+      type = lib.types.attrsOf runtimePath;
+      default = {};
+      example = {cli = "/run/user/1000/paperclip/operator-cli";};
+      description = "Board API keys for the initial operator, by declaration key. Each runtime file holds a token of at least 32 characters; removing an entry revokes its key and rotation needs a new entry.";
+    };
     authSecretFile = lib.mkOption {
       type = runtimePath;
       default = "${credentials}/auth";
@@ -221,7 +230,7 @@ in {
         message = "Paperclip persistent state must be outside the Nix store.";
       }
       {
-        assertion = lib.all (file: !lib.hasPrefix "/nix/store/" file) ([cfg.authSecretFile cfg.encryptionKeyFile cfg.databasePasswordFile cfg.operator.passwordFile] ++ lib.attrValues cfg.credentialFiles ++ lib.optional (cfg.oidc != null) cfg.oidc.secretFile);
+        assertion = lib.all (file: !lib.hasPrefix "/nix/store/" file) ([cfg.authSecretFile cfg.encryptionKeyFile cfg.databasePasswordFile cfg.operator.passwordFile] ++ lib.attrValues cfg.credentialFiles ++ lib.attrValues cfg.operatorKeys ++ lib.optional (cfg.oidc != null) cfg.oidc.secretFile);
         message = "Paperclip credentials must be runtime files outside the Nix store.";
       }
       {

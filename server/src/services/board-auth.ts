@@ -220,8 +220,9 @@ export function boardAuthService(db: Db) {
     userId: string;
     name: string;
     expiresAt?: Date | null;
+    token?: string;
   }) {
-    const token = createBoardApiToken();
+    const token = input.token ?? createBoardApiToken();
     const created = await db
       .insert(boardApiKeys)
       .values({
