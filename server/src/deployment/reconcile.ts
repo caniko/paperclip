@@ -64,6 +64,8 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
   for (const b of Object.values(m.taskBridges)) {
     if (!credentials[b.credential] || credentials[b.credential].trim().length < 32) throw new Error("Task bridge requires a runtime token of at least 32 characters");
   }
+  const bridgeTokens = Object.values(m.taskBridges).map((b) => credentials[b.credential].trimEnd());
+  if (new Set(bridgeTokens).size !== bridgeTokens.length) throw new Error("Task bridge tokens must be unique; use a new runtime token");
   const publications: ActivityPublication[] = [];
   const afterCommit: Array<() => Promise<void>> = [];
   const lifecycleAgents = new Set<string>();
@@ -192,7 +194,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         update: (f) => routineSvc.update(getId("routine", key), f, actor) });
       add({ kind: "schedule", key, adopt: scheduleAdopt, companyId, enabled: true, fields: () => ({ ...schedule, routineId: getId("routine", key) }),
         create: async () => (await routineSvc.createTrigger(getId("routine", key), { ...schedule, enabled: true }, actor)).trigger.id,
-        update: () => routineSvc.updateTrigger(getId("schedule", key), schedule, actor) });
+        update: () => routineSvc.updateTrigger(getId("schedule", key), { ...schedule, enabled: true }, actor) });
     }
     for (const [key, b] of Object.entries(m.taskBridges).sort()) {
       const companyId = getId("company", m.agents[b.agent].company);
