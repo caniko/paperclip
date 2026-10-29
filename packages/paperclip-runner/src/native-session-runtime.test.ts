@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { resolveQualifiedAcpxProfile } from "./drivers/acpx/qualified-profiles.js";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCodexNativeSessionBackend } from "./backends/codex-native-backend.js";
 import { FakeCodexTransport, WORKSPACE } from "./drivers/codex/codex-app-server-driver.test-support.js";
 
@@ -228,6 +228,9 @@ function highestContiguous(events: PrpEvent[]): number {
 }
 
 describe("executeNativeSession recovery", () => {
+  // Hosted runners keep their temporary directory under the real HOME, which the Codex boundary rejects.
+  beforeEach(() => { vi.stubEnv("HOME", "/isolated/home"); });
+  afterEach(() => { vi.unstubAllEnvs(); });
   it.each([false, true].flatMap(recovered => [
     { recovered, cwd: "/home/agent" },
     { recovered, cwd: "/projects/repository/worktrees/task" },

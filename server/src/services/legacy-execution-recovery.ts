@@ -16,7 +16,7 @@ import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { logActivity } from "./activity-log.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
 import { issueService } from "./issues.js";
-import { adapterExecutionOwnershipNotHeldCondition, lockRunForAdapterSettlement } from "./adapter-execution-ownership.js";
+import { adapterExecutionOwnershipNotHeldCondition } from "./adapter-execution-ownership.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 export const LEGACY_RECOVERY_CAUSE = "legacy_execution_requires_reconciliation";
@@ -119,12 +119,12 @@ export async function terminalizeLegacyExecution(input: {
           )
           .for("no key update")
       : [];
-    await lockRunForAdapterSettlement(tx, run.id);
+    // Same lock as lockRunForAdapterSettlement, taken by the one read of the run row.
     const [current] = await tx.select({ runtimeMode: heartbeatRuns.runtimeMode, status: heartbeatRuns.status,
       resultJson: heartbeatRuns.resultJson, executionStatusDeliveryId: heartbeatRuns.executionStatusDeliveryId,
     }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
-    ));
+    )).for("no key update");
     if (!current || (current.runtimeMode !== "legacy" && !(input.recordRestoreFailureOnly && current.runtimeMode === "native")) ||
         (!input.recordRestoreFailureOnly && !(input.fromStatuses ?? [run.status]).includes(current.status))) return null;
     if (patch?.resultJson !== undefined) patch = { ...patch,
