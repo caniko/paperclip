@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { and, count, desc, eq, inArray, or, sql } from "drizzle-orm";
 import { environmentLeases, type Db } from "@paperclipai/db";
 import type { Environment, EnvironmentCapacity } from "@paperclipai/shared";
@@ -8,34 +8,41 @@ const ADMISSION_TIMEOUT_MS = 10_000;
 
 export interface EnvironmentOverflowDeps {
   getEnvironment(id: string): Promise<Environment | null>;
+  /** Environment of the latest lease for this run, else for this agent's issue. */
   findAffinityEnvironmentId(candidateIds: string[]): Promise<string | null>;
   countActiveLeases(environmentId: string): Promise<number>;
   admit(command: string[]): Promise<boolean>;
 }
 
-function killProcessTree(pid: number) {
-  try {
-    if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
-    else process.kill(-pid, "SIGKILL");
-  } catch { }
-}
-
+/**
+ * Exit 0 admits; a nonzero exit, spawn error or timeout refuses. The probe runs
+ * in its own process group, which is killed as a whole on timeout so no child
+ * it started outlives the check.
+ */
 export function runAdmissionCommand(command: string[], timeoutMs = ADMISSION_TIMEOUT_MS): Promise<boolean> {
   return new Promise((resolve) => {
-    const child = spawn(command[0]!, command.slice(1), { detached: true, stdio: "ignore", windowsHide: true });
+    const child = spawn(command[0]!, command.slice(1), { detached: true, stdio: "ignore" });
     const timer = setTimeout(() => {
-      killProcessTree(child.pid!);
-      resolve(false);
+      try { process.kill(-child.pid!, "SIGKILL"); } catch { /* group already gone */ }
     }, timeoutMs);
     child.once("error", () => { clearTimeout(timer); resolve(false); });
     child.once("close", (code) => {
       clearTimeout(timer);
-      killProcessTree(child.pid!);
+      // The leader can exit before the timer fires while its children run on.
+      try { process.kill(-child.pid!, "SIGKILL"); } catch { /* none left */ }
       resolve(code === 0);
     });
   });
 }
 
+/**
+ * Picks the first candidate (agent default, then ordered fallbacks) with spare
+ * capacity. A candidate that already hosted this run or issue session is tried
+ * first so provider sessions keep resuming on their host; when it can no longer
+ * admit, the session config fingerprint changes and the next host starts fresh.
+ * Returns null when no candidate admits the run, so the caller defers it. The
+ * slot count here only steers selection; the lease insert enforces the cap.
+ */
 export async function selectOverflowEnvironmentId(input: {
   primaryEnvironmentId: string;
   fallbackEnvironmentIds: string[];
@@ -80,7 +87,9 @@ export function environmentOverflowDeps(db: Db, input: {
         .limit(1);
       return lease?.environmentId ?? null;
     },
+    // Environments are instance-scoped, so their capacity spans every company.
     async countActiveLeases(environmentId) {
+      // ponytail: a lease stranded "active" by a crash holds its slot until cleanup releases it.
       const [row] = await db.select({ value: count() }).from(environmentLeases)
         .where(and(eq(environmentLeases.environmentId, environmentId), eq(environmentLeases.status, "active")));
       return Number(row?.value ?? 0);
