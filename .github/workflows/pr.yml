@@ -15,5 +15,5 @@ jobs:
   ci:
     if: github.event.action != 'labeled' || github.event.label.name == 'profile-ci'
     # Expanded policy qualified on attempt 1 in run 39474414257 (511 source-bound cases).
-    # Preserve the Stop commands qualified in run 39336767061 and their pinned harness.
-    uses: caniko/paperclip/.github/workflows/pr-trusted.yml@1c37302206955723ca010ddf22b073f306c83f86
+    # Preserve the Stop commands qualified in run 39336767061; harness 2acfb196e3 qualified on attempt 1 in run 40941483197.
+    uses: caniko/paperclip/.github/workflows/pr-trusted.yml@1339fe2ddeed9149bdb4ecb1e3a2144eed539e23

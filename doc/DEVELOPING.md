@@ -264,6 +264,20 @@ attempt 1 passed all 511 cases. The exact-pin regression follows this promotion;
 same-file duplicate-case rejection remain unchanged. This policy result is not
 overall producer or Atlas acceptance.
 
+The caller previously pinned `1c37302206955723ca010ddf22b073f306c83f86`. It now pins `1339fe2ddeed9149bdb4ecb1e3a2144eed539e23`, whose
+immutable Stop harness is `2acfb196e34fec515c42bc71c461d965bedd8352`. That revision
+asserts the post-#16965 interrupted-run UI (the muted runner-turn "Stopped" header
+replaces the suppressed native "Run cancelled" marker) and keeps the Stop fixture's
+provider socket open for the whole 120 second test. The independent
+[Stop run 40941483197](https://github.com/caniko/paperclip/actions/runs/40941483197)
+attempt 1 passed both cases with zero failures, errors or skips. Its archive
+`12926763672` has SHA-256 `56651ff0fbf5d309b46be4ed1e8ed73a6799067b823a4ff719b99ea3be7db21a`
+and 32 days retention; the receipt binds harness SHA-256
+`d4b21eacc13b1066ff920b61c5b0f381afbd7f9978a7d8e959981326ec9465f8` and verifier
+`1ff519a117b90a3f35b24016e151105885b471c16f66b6d0f33c7d6ac729b59a`. The earlier
+failed runs on the previous harness remain failed evidence. This is Stop-lane
+qualification, not full application acceptance.
+
 Disposable public-install verifiers prefix the Git revision identifier with `g`
 in their prerelease versions. This keeps all-numeric SHA prefixes with leading
 zeros valid under SemVer; a real loopback-registry npm-install regression covers
