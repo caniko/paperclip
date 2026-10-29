@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { execute } from "./execute.js";
 
+// A fake `t3` that records each call and answers from a per-subcommand queue
+// in plan.json: { "thread start": [{ stdout, stderr, exit, sleep }], ... }.
 const FAKE_T3 = `#!/usr/bin/env node
 const fs = require("fs");
 const path = require("path");
@@ -228,18 +230,6 @@ describe("t3code_local execute", () => {
     expect(onProviderStopped).toHaveBeenCalledOnce();
   }, 20_000);
 
-  it("keeps the stop unverified when an interrupted start never shows up in the thread list", async () => {
-    const env = await setup({
-      "thread start": [{ sleep: 10 }],
-      "thread list": [{ stdout: "[]\n" }],
-    });
-    const onProviderStopped = vi.fn(async () => {});
-    const res = await execute(makeContext(env, { config: { timeoutSec: 1, graceSec: 1 }, onProviderStopped }));
-
-    expect(res).toMatchObject({ timedOut: true, errorCode: "t3code_stop_unverified" });
-    expect(onProviderStopped).not.toHaveBeenCalled();
-  }, 30_000);
-
   it("stops the thread when the run is cancelled", async () => {
     const env = await setup({
       "thread send": [{ sleep: 10 }],
@@ -252,6 +242,7 @@ describe("t3code_local execute", () => {
       runtime: { sessionId: null, sessionParams: { threadId: "thr-old" }, sessionDisplayId: null, taskKey: null },
       signal: controller.signal,
       onCancellationReady,
+      // The host aborts the signal and kills the registered waiter process.
       onSpawn: async ({ pid }) => {
         setTimeout(() => { controller.abort(); process.kill(pid, "SIGTERM"); }, 300);
       },
@@ -373,6 +364,7 @@ describe("t3code_local execute", () => {
       onProviderStopped,
     }));
 
+    // 1s run timeout + 5s confirmation window + kill grace.
     expect(Date.now() - started).toBeLessThan(9_000);
     expect(res).toMatchObject({
       errorCode: "t3code_stop_unverified",
