@@ -1,6 +1,6 @@
 import { channel } from "node:diagnostics_channel";
 import {
-  acquireDeploymentLease, applyPendingMigrations, assertDeploymentSchemaCompatible,
+  acquireDeploymentLease, applyPendingMigrations, assertDeploymentSchemaCompatible, assertSameDeploymentDatabase,
   createDb, closeRegisteredClients, inspectMigrations, resolveMigrationConnection,
 } from "@paperclipai/db";
 import { loadConfig } from "../config.js";
@@ -35,6 +35,7 @@ export async function deploymentCommand(command: "plan" | "apply" | "check", des
       process.exit(1);
     });
     const migrationUrl = config.databaseMigrationUrl ?? url;
+    await assertSameDeploymentDatabase(url, migrationUrl);
     await assertDeploymentSchemaCompatible(migrationUrl);
     if (apply) await applyPendingMigrations(migrationUrl);
     else if ((await inspectMigrations(url)).status !== "upToDate") {
