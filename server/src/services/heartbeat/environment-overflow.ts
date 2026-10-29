@@ -1,10 +1,11 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { and, count, desc, eq, inArray, or, sql } from "drizzle-orm";
 import { environmentLeases, type Db } from "@paperclipai/db";
 import type { Environment, EnvironmentCapacity } from "@paperclipai/shared";
 import { parseObject } from "../../adapters/utils.js";
 
 const ADMISSION_TIMEOUT_MS = 10_000;
+const TASKKILL_TIMEOUT_MS = 5_000;
 
 export interface EnvironmentOverflowDeps {
   getEnvironment(id: string): Promise<Environment | null>;
@@ -15,8 +16,12 @@ export interface EnvironmentOverflowDeps {
 
 function killProcessTree(pid: number) {
   try {
-    if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
-    else process.kill(-pid, "SIGKILL");
+    if (process.platform !== "win32") return void process.kill(-pid, "SIGKILL");
+    const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    const bound = setTimeout(() => killer.kill(), TASKKILL_TIMEOUT_MS);
+    bound.unref();
+    killer.once("error", () => clearTimeout(bound));
+    killer.once("close", () => clearTimeout(bound));
   } catch { }
 }
 
