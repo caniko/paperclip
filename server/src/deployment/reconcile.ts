@@ -194,7 +194,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         update: (f) => routineSvc.update(getId("routine", key), f, actor) });
       add({ kind: "schedule", key, adopt: scheduleAdopt, companyId, enabled: true, fields: () => ({ ...schedule, routineId: getId("routine", key) }),
         create: async () => (await routineSvc.createTrigger(getId("routine", key), { ...schedule, enabled: true }, actor)).trigger.id,
-        update: () => routineSvc.updateTrigger(getId("schedule", key), { ...schedule, enabled: true }, actor) });
+        update: (f) => routineSvc.updateTrigger(getId("schedule", key), { ...schedule, ...(f.enabled === true ? { enabled: true } : {}) }, actor) });
     }
     for (const [key, b] of Object.entries(m.taskBridges).sort()) {
       const companyId = getId("company", m.agents[b.agent].company);
@@ -314,6 +314,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
             && !actions.get(spec)!.fields.includes("budgetMonthlyCents")) {
             delete updateFields.budgetMonthlyCents;
           }
+          if (binding && !binding.enabled && spec.kind === "schedule") updateFields.enabled = true;
           await spec.update(updateFields);
         }
         if (spec.kind === "agent") lifecycleAgents.add(spec.id);
