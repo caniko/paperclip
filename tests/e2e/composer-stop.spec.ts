@@ -406,9 +406,18 @@ for (const adapter of ["process", "paperclip_runner"] as const) {
         page.getByRole("button", { name: "Dismiss notification" }),
       ).toHaveCount(0);
       if (adapter === "paperclip_runner") {
+        // Upstream #16965 suppresses the native "Run cancelled" marker for an
+        // interrupted issue; the runner-turn header carries the stopped state.
+        const stoppedHeader = page
+          .getByTestId("task-chat-turn-status-header")
+          .filter({ hasText: /^Stopped/ })
+          .first();
+        await expect(stoppedHeader).toBeVisible();
+        await expect(stoppedHeader).toHaveClass(/text-muted-foreground/);
+        await expect(stoppedHeader).not.toHaveClass(/text-destructive/);
         await expect(
           page.getByRole("button", { name: /^Run cancelled/ }),
-        ).toHaveClass(/text-muted-foreground/);
+        ).toHaveCount(0);
       }
       await page.reload();
       await expect(
