@@ -1132,3 +1132,7 @@ and migration history remain so existing records, documents, and links are prese
 and future schema generation does not drop them. No removal migration or data
 cleanup runs. These tables remain part of normal database backups; the separate
 Cases feature is unaffected.
+
+## Migration ordering in PRs
+
+`ci / policy` rejects added migration SQL files numbered at or below the target branch's latest migration. The only exemption is a file whose path and git blob are identical to the same path on `paperclipai/paperclip` `master`, fetched by URL during the job, so upstream syncs can import upstream migrations at numbers the fork already used. If that fetch fails, no exemption applies.
