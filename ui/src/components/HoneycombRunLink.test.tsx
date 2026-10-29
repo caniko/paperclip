@@ -53,6 +53,8 @@ describe("HoneycombRunLink", () => {
     flushSync(() => {
       root.render(<HoneycombRunLink runId="abc" enabled />);
     });
+    // WebCrypto finishes off the JS event loop. A fixed number of timer turns
+    // does not prove that its result has reached React.
     await vi.waitFor(() => {
       expect(container.querySelector("a")?.textContent).toContain("View in Honeycomb");
     });
