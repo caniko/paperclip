@@ -1495,6 +1495,8 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
 
     expect(rootCommentWake).toBeNull();
     expect(mockAdapterExecute).not.toHaveBeenCalled();
+    await db.insert(authUsers).values({ id: "board-user", name: "Board", email: "board@example.test", createdAt: new Date(), updatedAt: new Date() }).onConflictDoNothing();
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "board-user", status: "active", membershipRole: "member" });
     mockAdapterExecute.mockImplementation(async () => {
       await db.update(issues).set({ status: "done" }).where(eq(issues.id, rootIssueId));
       return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
