@@ -1400,7 +1400,8 @@ describe("Daytona sandbox provider plugin", () => {
     expect(mockCreate).not.toHaveBeenCalled();
   });
 
-  it.each([undefined, "not-a-date", new Date(Date.now() - 60_000).toISOString(), new Date(Date.now() + 60 * 60_000).toISOString()])(
+  // Fixed instants keep each case title stable between collection and execution.
+  it.each([undefined, "not-a-date", "2000-01-01T00:00:00.000Z", "2999-01-01T00:00:00.000Z"])(
     "deletes a new sandbox whose configured creation ttl is not confirmed: %s", async autoDestroyAt => {
       process.env.DAYTONA_API_KEY = "host-key";
       const sandbox = createMockSandbox({ autoDestroyAt });

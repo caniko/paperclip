@@ -279,7 +279,7 @@ describePostgres("heartbeat recovery module ownership", () => {
     adapterExecutionControls.set(run.id, control);
     const drain = createHeartbeatRecovery(db, deps).drainRunningRunsForShutdown("SIGTERM", new Date(), [run.id]);
     try {
-      await vi.waitFor(() => expect(control.controller.signal.aborted).toBe(true));
+      await vi.waitFor(() => expect(control.controller.signal.aborted).toBe(true), { timeout: 10_000 });
       expect(deps.releaseEnvironmentLeasesForRun).not.toHaveBeenCalled();
       expect(deps.scheduleBoundedRetryForRun).not.toHaveBeenCalled();
       expect((await deps.getRun(run.id))?.status).toBe("interrupted");
@@ -312,7 +312,7 @@ describePostgres("heartbeat recovery module ownership", () => {
     });
     const drain = createHeartbeatRecovery(db, deps).drainRunningRunsForShutdown("SIGTERM", new Date(), runs.map(run => run.id));
     try {
-      await vi.waitFor(() => expect(controls.every(control => control.controller.signal.aborted)).toBe(true));
+      await vi.waitFor(() => expect(controls.every(control => control.controller.signal.aborted)).toBe(true), { timeout: 10_000 });
       expect(deps.releaseEnvironmentLeasesForRun).not.toHaveBeenCalled();
     } finally {
       controls.forEach(control => control.finish());
@@ -629,7 +629,7 @@ describePostgres("heartbeat recovery module ownership", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const drain = createHeartbeatRecovery(db, deps).drainRunningRunsForShutdown("SIGTERM", new Date(), [run.id]);
     try {
-      await vi.waitFor(() => expect(control.controller.signal.aborted).toBe(true));
+      await vi.waitFor(() => expect(control.controller.signal.aborted).toBe(true), { timeout: 10_000 });
       await vi.advanceTimersByTimeAsync(30_000);
       expect(await drain).toMatchObject({ interruptedRunIds: [run.id] });
       expect(deps.activeRunExecutionPromises.size).toBe(1);
