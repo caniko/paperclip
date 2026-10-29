@@ -112,6 +112,19 @@
         credentialFiles.gateway = "/run/user/1000/paperclip/gateway";
       };
     }).config;
+  oidcController =
+    (home {
+      programs.paperclip.package = clientPackages.supported;
+      services.paperclip = {
+        enable = true;
+        instance = "work";
+        operator.email = "operator@example.test";
+        oidc = {
+          discoveryUrl = "https://idm.example.test/oauth2/openid/paperclip/.well-known/openid-configuration";
+          clientId = "paperclip";
+        };
+      };
+    }).config;
   integrated = (machine {}).config;
   composed =
     (machine {
@@ -181,6 +194,9 @@
       && controller.services.paperclip.manifest == manifest
       && controller.services.paperclip.credentialFiles == {gateway = "/run/user/1000/paperclip/gateway";}
       && controller.services.paperclip.authSecretFile == "/home/operator/.local/share/paperclip/credentials/auth";
+    oidcLogin =
+      assertionsPass oidcController
+      && evaluates oidcController.xdg.configFile."paperclip/work/deployment.json".source.drvPath;
     storeControllerCredentialRejected =
       !(evaluates
         (home {

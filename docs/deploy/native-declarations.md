@@ -83,6 +83,29 @@ active owner membership for the bootstrap operator if no membership exists.
 Existing membership roles and statuses are preserved. Later reconciliation does
 not restore a removed membership; company access remains application-managed.
 
+### OpenID Connect board login
+
+Set `auth.oidc` in the application config to add a "Sign in with
+<displayName>" button next to the password form:
+
+```json
+{ "auth": { "oidc": {
+  "providerId": "kanidm", "displayName": "Kanidm",
+  "discoveryUrl": "https://idm.example.org/oauth2/openid/paperclip/.well-known/openid-configuration",
+  "clientId": "paperclip"
+} } }
+```
+
+The client secret is the `serverCredentials.oidc` file (or
+`PAPERCLIP_AUTH_OIDC_CLIENT_SECRET` outside declarative mode); the provider
+fields can also be set with `PAPERCLIP_AUTH_OIDC_PROVIDER_ID`,
+`PAPERCLIP_AUTH_OIDC_DISPLAY_NAME`, `PAPERCLIP_AUTH_OIDC_DISCOVERY_URL` and
+`PAPERCLIP_AUTH_OIDC_CLIENT_ID`. Register
+`<publicBaseUrl>/api/auth/callback/<providerId>` as the redirect URI. The flow
+uses PKCE with scopes `openid email profile`. It never creates accounts: a user
+signs in only when an existing account has the same email. The Home Manager
+module exposes this as `services.paperclip.oidc`.
+
 `remote-only` is reserved and refuses every command before credentials, adapter
 loading, or database changes. The supported profile is `trusted-local`.
 

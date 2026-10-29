@@ -39,11 +39,17 @@
       allowedHostnames = ["127.0.0.1" "localhost"];
       serveUi = true;
     };
-    auth = {
-      baseUrlMode = "explicit";
-      inherit (cfg) publicBaseUrl;
-      disableSignUp = true;
-    };
+    auth =
+      {
+        baseUrlMode = "explicit";
+        inherit (cfg) publicBaseUrl;
+        disableSignUp = true;
+      }
+      // lib.optionalAttrs (cfg.oidc != null) {
+        oidc = {
+          inherit (cfg.oidc) providerId displayName discoveryUrl clientId;
+        };
+      };
     storage = {
       provider = "local_disk";
       localDisk.baseDir = "${state}/data/storage";
@@ -61,10 +67,12 @@
     configFile = application;
     manifestFile = json.generate "paperclip-${cfg.instance}-manifest.json" cfg.manifest;
     inherit (cfg) credentialFiles;
-    serverCredentials = {
-      auth = cfg.authSecretFile;
-      encryption = cfg.encryptionKeyFile;
-    };
+    serverCredentials =
+      {
+        auth = cfg.authSecretFile;
+        encryption = cfg.encryptionKeyFile;
+      }
+      // lib.optionalAttrs (cfg.oidc != null) {oidc = cfg.oidc.secretFile;};
     embedded = {
       user = "paperclip";
       database = "paperclip";
@@ -126,6 +134,37 @@ in {
       example = {gateway = "/run/user/1000/paperclip/gateway";};
       description = "Protected runtime files for credential aliases bound by the manifest's agents, environments, and task bridges.";
     };
+    oidc = lib.mkOption {
+      default = null;
+      description = "OpenID Connect board login. Only a user with the same email can sign in; the callback is `<publicBaseUrl>/api/auth/callback/<providerId>`.";
+      type = lib.types.nullOr (lib.types.submodule {
+        options = {
+          providerId = lib.mkOption {
+            type = lib.types.strMatching "[a-z][a-z0-9-]{0,31}";
+            default = "kanidm";
+            description = "Provider identifier used in the callback path.";
+          };
+          displayName = lib.mkOption {
+            type = lib.types.str;
+            default = "Kanidm";
+            description = "Name shown on the sign-in button.";
+          };
+          discoveryUrl = lib.mkOption {
+            type = lib.types.str;
+            description = "OpenID Connect discovery document URL.";
+          };
+          clientId = lib.mkOption {
+            type = lib.types.str;
+            description = "OAuth client identifier.";
+          };
+          secretFile = lib.mkOption {
+            type = runtimePath;
+            default = "${credentials}/oidc";
+            description = "Protected runtime file holding the OAuth client secret.";
+          };
+        };
+      });
+    };
     authSecretFile = lib.mkOption {
       type = runtimePath;
       default = "${credentials}/auth";
@@ -182,7 +221,7 @@ in {
         message = "Paperclip persistent state must be outside the Nix store.";
       }
       {
-        assertion = lib.all (file: !lib.hasPrefix "/nix/store/" file) ([cfg.authSecretFile cfg.encryptionKeyFile cfg.databasePasswordFile cfg.operator.passwordFile] ++ lib.attrValues cfg.credentialFiles);
+        assertion = lib.all (file: !lib.hasPrefix "/nix/store/" file) ([cfg.authSecretFile cfg.encryptionKeyFile cfg.databasePasswordFile cfg.operator.passwordFile] ++ lib.attrValues cfg.credentialFiles ++ lib.optional (cfg.oidc != null) cfg.oidc.secretFile);
         message = "Paperclip credentials must be runtime files outside the Nix store.";
       }
       {

@@ -16,10 +16,12 @@ import {
   STORAGE_PROVIDERS,
   type BindMode,
   type AuthBaseUrlMode,
+  type AuthOidcConfig,
   type DeploymentExposure,
   type DeploymentMode,
   type SecretProvider,
   type StorageProvider,
+  authOidcConfigSchema,
   inferBindModeFromHost,
   resolveRuntimeBind,
   validateConfiguredBindMode,
@@ -74,6 +76,7 @@ export interface Config {
   authPublicBaseUrl: string | undefined;
   chatWebhookPublicBaseUrl: string | undefined;
   authDisableSignUp: boolean;
+  authOidc: AuthOidcConfig | undefined;
   databaseMode: DatabaseMode;
   databaseUrl: string | undefined;
   databaseMigrationUrl: string | undefined;
@@ -255,6 +258,13 @@ export function loadConfig(): Config {
     disableSignUpFromEnv !== undefined
       ? disableSignUpFromEnv === "true"
       : (fileConfig?.auth?.disableSignUp ?? false);
+  const oidcFromEnv = authOidcConfigSchema.safeParse({
+    providerId: process.env.PAPERCLIP_AUTH_OIDC_PROVIDER_ID,
+    displayName: process.env.PAPERCLIP_AUTH_OIDC_DISPLAY_NAME,
+    discoveryUrl: process.env.PAPERCLIP_AUTH_OIDC_DISCOVERY_URL,
+    clientId: process.env.PAPERCLIP_AUTH_OIDC_CLIENT_ID,
+  });
+  const authOidc = oidcFromEnv.success ? oidcFromEnv.data : fileConfig?.auth?.oidc;
   const allowedHostnamesFromEnvRaw = process.env.PAPERCLIP_ALLOWED_HOSTNAMES;
   const allowedHostnamesFromEnv = allowedHostnamesFromEnvRaw
     ? allowedHostnamesFromEnvRaw
@@ -396,6 +406,7 @@ export function loadConfig(): Config {
       process.env.PAPERCLIP_CHAT_WEBHOOK_PUBLIC_URL,
     ),
     authDisableSignUp,
+    authOidc,
     databaseMode: fileDatabaseMode,
     databaseUrl: deploymentServerCredential("database") ?? process.env.DATABASE_URL ?? fileDbUrl,
     databaseMigrationUrl: deploymentServerCredential("migration") ?? process.env.DATABASE_MIGRATION_URL,

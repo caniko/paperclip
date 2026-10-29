@@ -17,6 +17,7 @@ export const deploymentDescriptorSchema = z.object({
   credentialFiles: z.record(z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/), runtimeFile).default({}),
   serverCredentials: z.object({
     auth: runtimeFile.optional(),
+    oidc: runtimeFile.optional(),
     database: runtimeFile.optional(),
     migration: runtimeFile.optional(),
     encryption: runtimeFile.optional(),
@@ -36,7 +37,7 @@ export class UnqualifiedRemoteExecutionError extends Error {
   }
 }
 
-let serverCredentials: Partial<Record<"auth" | "database" | "migration", string>> = {};
+let serverCredentials: Partial<Record<"auth" | "oidc" | "database" | "migration", string>> = {};
 export function deploymentServerCredential(name: keyof typeof serverCredentials) {
   return process.env.PAPERCLIP_DECLARATIVE === "true" ? serverCredentials[name] : undefined;
 }
@@ -110,7 +111,7 @@ export function deploymentEnvironment(d: DeploymentDescriptor, inherited: NodeJS
     PAPERCLIP_MIGRATION_PROMPT: "never", PAPERCLIP_MIGRATION_AUTO_APPLY: "true",
   });
   serverCredentials = {};
-  for (const name of ["auth", "database", "migration"] as const) {
+  for (const name of ["auth", "oidc", "database", "migration"] as const) {
     const file = d.serverCredentials[name];
     if (file) serverCredentials[name] = readCredential(file).trimEnd();
   }
