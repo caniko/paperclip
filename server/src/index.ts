@@ -74,7 +74,7 @@ import { deliverReconciledExecutions, settleUnrecoverableExecutions } from "./se
 import { reconcileSafeNativeReplacements } from "./services/native-runtime/native-safe-replacement.js";
 import { reconcileDeploymentOnStartup } from "./deployment/startup.js";
 import { embeddedDeploymentIdentity } from "./deployment/runtime.js";
-import { acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
+import { acquireDeploymentLease, assertDeploymentSchemaCompatible, assertSameDeploymentDatabase } from "@paperclipai/db";
 import { reconcileAbandonedExecutionControl } from "./services/execution-control-reconciliation.js";
 import { executionControlSchedule, registerExecutionControlWork } from "./services/execution-control-work.js";
 import { connectionIntentDeliveryService } from "./services/connection-intent-delivery.js";
@@ -515,6 +515,7 @@ async function startServerWithDatabaseTeardown(
   if (startupConfig.databaseUrl) {
     await leaseDeployment(startupConfig.databaseUrl);
     const migrationUrl = startupConfig.databaseMigrationUrl ?? startupConfig.databaseUrl;
+    if (process.env.PAPERCLIP_DECLARATIVE === "true") await assertSameDeploymentDatabase(startupConfig.databaseUrl, migrationUrl);
     migrationSummary = await ensureMigrations(migrationUrl, "PostgreSQL");
 
     db = createDb(startupConfig.databaseUrl);

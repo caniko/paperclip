@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
-import { createDb } from "./client.js";
+import { assertSameDeploymentDatabase, createDb } from "./client.js";
 import { startEmbeddedPostgresTestDatabase } from "./test-embedded-postgres.js";
 import { agents, budgetPolicies, companies, deploymentResources, companySecrets, companySecretVersions } from "./schema/index.js";
 
@@ -57,4 +57,13 @@ it("keeps a declared budget limit enforced", async () => {
     windowKind: "lifetime", amount: 700 }).returning();
   await db.update(budgetPolicies).set({ amount: 800, isActive: false }).where(eq(budgetPolicies.id, lifetime.id));
   await db.update(budgetPolicies).set({ enforcementDeliveredVersion: 1 }).where(eq(budgetPolicies.id, policy.id));
+});
+
+it("refuses a migration connection that reaches another database", async () => {
+  const url = database.connectionString;
+  await assertSameDeploymentDatabase(url, url);
+  await assertSameDeploymentDatabase(url, `${url}?application_name=migration`);
+  const other = new URL(url);
+  other.pathname = "/postgres";
+  await expect(assertSameDeploymentDatabase(url, other.toString())).rejects.toThrow("leased database");
 });

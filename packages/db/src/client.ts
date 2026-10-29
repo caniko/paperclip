@@ -57,6 +57,24 @@ export async function acquireDeploymentLease(connection: string, onLost: () => v
   })();
 }
 
+async function databaseIdentity(url: string) {
+  const connection = createUtilitySql(url);
+  try {
+    const [row] = await connection<{ identity: string }[]>`
+      SELECT concat_ws('/', d.oid::text, d.datname, pg_postmaster_start_time()::text) AS identity
+      FROM pg_database d WHERE d.datname = current_database()`;
+    return row?.identity ?? null;
+  } finally {
+    await connection.end({ timeout: 1 });
+  }
+}
+
+export async function assertSameDeploymentDatabase(leaseUrl: string, migrationUrl: string) {
+  if (leaseUrl === migrationUrl) return;
+  const [leased, migrated] = await Promise.all([databaseIdentity(leaseUrl), databaseIdentity(migrationUrl)]);
+  if (!leased || leased !== migrated) throw new Error("The migration connection must reach the leased database");
+}
+
 export async function assertDeploymentSchemaCompatible(url: string) {
   const connection = createUtilitySql(url);
   try {
