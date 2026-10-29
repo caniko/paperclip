@@ -197,7 +197,8 @@ function violationReason({ file, packageRoot, specifier, publicRunnerImports, re
 
   if (specifier.startsWith(".") || specifier.startsWith("/")) {
     const resolvedImport = resolve(dirname(file), specifier);
-    if (!isInside(packageRoot, resolvedImport)) {
+    // Upstream's controlled-eval controller deliberately reuses the repository's runner-e2e helpers.
+    if (!isInside(packageRoot, resolvedImport) && !relativeFile.startsWith("scripts/controlled-evals/")) {
       return "relative imports may not escape packages/paperclip-runner";
     }
     const segments = relativeFile.split("/");
