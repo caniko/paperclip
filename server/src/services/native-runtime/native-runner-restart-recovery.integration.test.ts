@@ -1410,7 +1410,8 @@ describeEmbeddedPostgres("native runner restart recovery with real processes", (
     }
   });
 
-  it.each([null, process.pid])("claims sandbox recovery without interpreting remote PID %s locally", async (remotePid) => {
+  // Titles must not embed the runtime PID: qualification matches collection and execution titles.
+  it.each([["none", null], ["the controller PID", process.pid]] as const)("claims sandbox recovery without interpreting remote PID %s locally", async (_label, remotePid) => {
     const fixture = await seedRun(`remote-${remotePid ?? "warm"}`);
     await fixture.db.update(heartbeatRuns).set({
       processPid: remotePid,
