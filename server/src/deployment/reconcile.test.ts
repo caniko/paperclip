@@ -124,6 +124,14 @@ it("plans without writes, bootstraps once and preserves identities, pauses and s
   expect(JSON.stringify(plan)).not.toContain("fixture-only");
 }, 90000);
 
+it("rejects task bridges that share one token before writing any key", async () => {
+  const base = structuredClone(manifest);
+  base.companies.example.fields.name = "Duplicate bridges";
+  const declaration = { ...base, owner: "duplicate-bridges", taskBridges: { ...base.taskBridges, other: { ...base.taskBridges.tasks } } };
+  await expect(reconcile(declaration)).rejects.toThrow("Task bridge tokens must be unique");
+  expect(await db.select().from(companies).where(eq(companies.name, "Duplicate bridges"))).toHaveLength(0);
+}, 90000);
+
 it.each(["manual", "budget"])("reenables declarations without resuming %s pauses", async (pauseReason) => {
   const declaration = { ...structuredClone(manifest), owner: `enablement-${pauseReason}`, taskBridges: {} };
   declaration.companies.example.fields.name = `Enablement ${pauseReason}`;
@@ -144,12 +152,20 @@ it.each(["manual", "budget"])("reenables declarations without resuming %s pauses
     routines: { daily: { ...disabled.routines.daily, enabled: true } },
   };
   expect((await reconcile(enabled)).bindings).toEqual(first.bindings);
+  expect((await db.select().from(routineTriggers).where(eq(routineTriggers.id, first.bindings["schedule/daily"])))[0].enabled).toBe(true);
   expect((await db.select().from(agents).where(eq(agents.id, agentId)))[0])
     .toMatchObject({ status: "paused", pauseReason, spentMonthlyCents: 123 });
   expect((await db.select().from(routines).where(eq(routines.id, routineId)))[0].status).toBe("paused");
   await db.update(agents).set({ status: "idle", pauseReason: null }).where(eq(agents.id, agentId));
   await db.update(routines).set({ status: "active" }).where(eq(routines.id, routineId));
   expect((await reconcile(enabled)).differences).toEqual([]);
+  const scheduleId = first.bindings["schedule/daily"];
+  await db.update(routineTriggers).set({ enabled: false }).where(eq(routineTriggers.id, scheduleId));
+  const retimed = structuredClone(enabled);
+  retimed.routines.daily.schedule.cronExpression = "0 13 * * *";
+  await reconcile(retimed);
+  expect((await db.select().from(routineTriggers).where(eq(routineTriggers.id, scheduleId)))[0])
+    .toMatchObject({ enabled: false, cronExpression: "0 13 * * *" });
   expect((await db.select().from(agents).where(eq(agents.id, agentId)))[0].status).toBe("idle");
   expect((await db.select().from(routines).where(eq(routines.id, routineId)))[0].status).toBe("active");
 });
