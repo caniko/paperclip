@@ -1,6 +1,5 @@
 import { notifyChatRunMilestones } from "../chat-run-milestone-notifications.js";
 import { measureRunPhase } from "../execution-preparation-timing.js";
-import { acknowledgeReusedChatCompletionReply } from "../chat-completion-delivery.js";
 import { PROJECT_ACCESS_DENIED, ProjectAccessDeniedError } from "../project-access-denial.js";
 import { pendingCaseHandoffForRun } from "./case-handoff-lifecycle.js";
 import { NON_RETRYABLE_PREFLIGHT_FAILURE_CODES, isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
@@ -30,6 +29,7 @@ import { logActivity } from "../activity-log.js";
 import { isUnresolvedWorkspaceBaseRefError, readUnresolvedWorkspaceBaseRefDiagnostic, type UnresolvedWorkspaceBaseRefError } from "../workspace-runtime.js";
 import { runnerGoalService } from "../runner-goals.js";
 import { resolveChatRunPresentationAuthorizationReason } from "../chat-run-publications.js";
+import { acknowledgeReusedChatCompletionReply } from "../chat-completion-delivery.js";
 import { hasChatRunOwnedProviderInteraction } from "../chat-interaction-arbitration.js";
 import { readAcceptedTaskContinuationSummary } from "../heartbeat-run-summary.js";
 import { SANDBOX_PROVIDER_PLUGIN_NOT_READY_REASON } from "../recovery/stranded-notice.js";
@@ -881,15 +881,11 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
             },
           }));
         } else if (
-          issueId &&
-          !skipRunIssueComment &&
-          presentationDecision.commentAction === "reuse" &&
-          presentationDecision.commentId
+          issueId && !skipRunIssueComment &&
+          presentationDecision.commentAction === "reuse" && presentationDecision.commentId
         ) {
           await acknowledgeReusedChatCompletionReply(db, {
-            companyId: livenessRun.companyId,
-            issueId,
-            runId: livenessRun.id,
+            companyId: livenessRun.companyId, issueId, runId: livenessRun.id,
             commentId: presentationDecision.commentId,
           });
         } else if (presentationDecision.commentAction === "create") {

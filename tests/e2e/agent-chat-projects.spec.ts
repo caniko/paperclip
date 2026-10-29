@@ -473,6 +473,7 @@ test("plan approval hands the preserved revision to an assigned project task", a
     );
     expect(plan.body).toContain(original.body);
     expect(output.body).toContain(plan.body);
+    // Wait for the completion reporting turn, not just the handoff or task run.
     await idle(request, f.chatPath, 3);
     expect(
       (await json(await request.get(`/api/issues/${chat.id}/documents/plan`)))
