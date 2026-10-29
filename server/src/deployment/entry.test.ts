@@ -144,7 +144,7 @@ beforeAll(async () => {
       bootstrap: { email: "operator@example.test", name: "Entry operator", passwordFile: join(root, "password") },
     }),
   );
-}, 240000);
+}, 90000);
 afterAll(async () => {
   await stop();
   await database?.cleanup();
@@ -182,7 +182,7 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
           return 0;
         }
       },
-      { timeout: 120000, interval: 500 },
+      { timeout: 45000, interval: 500 },
     )
     .toBe("ok");
   const response = await fetch(`http://localhost:${port}/api/auth/sign-in/email`, {
@@ -216,7 +216,7 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
             .from(agents)
             .where(eq(agents.id, bindings["agent/worker"]))
         )[0],
-      { timeout: 120000, interval: 100 },
+      { timeout: 30000, interval: 100 },
     )
     .toEqual({ status: "idle", lifecycleState: "ready" });
   const createIssue = (company: string, project: string) =>
@@ -257,7 +257,7 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
   expect(output).toContain("set (runtime credential)");
   await stop();
   expect((await command("apply")).code).toBe(0);
-}, 240000);
+}, 120000);
 
 it("refuses HTTP port collisions instead of silently moving the instance", async () => {
   await stop();
@@ -269,7 +269,7 @@ it("refuses HTTP port collisions instead of silently moving the instance", async
   } finally {
     await new Promise<void>((resolve) => occupied.close(() => resolve()));
   }
-}, 240000);
+}, 30000);
 
 it("rejects manifest owner changes and omissions without leaving the old fleet unmanaged", async () => {
   await stop();
@@ -303,7 +303,7 @@ it("rejects manifest owner changes and omissions without leaving the old fleet u
   expect((await command("check")).code).toBe(2);
   expect((await command("apply")).code).toBe(0);
   expect((await command("check")).code).toBe(0);
-}, 240000);
+}, 60000);
 
 it("stops offline apply when its database lease is lost while reconciliation is blocked", async () => {
   await stop();
@@ -339,7 +339,7 @@ it("stops offline apply when its database lease is lost while reconciliation is 
         where locktype = 'advisory' and objid = 1735289202 and granted`);
           return Number(row?.count ?? 0);
         },
-        { timeout: 120000, interval: 100 },
+        { timeout: 30000, interval: 100 },
       )
       .toBe(1);
     const exited = once(applying, "exit");
@@ -359,7 +359,7 @@ it("stops offline apply when its database lease is lost while reconciliation is 
     writeFileSync(join(root, "manifest.json"), originalManifest);
   }
   expect((await command("check")).code).toBe(0);
-}, 240000);
+}, 60000);
 
 it("fails closed for the unqualified remote-only profile before publishing readiness", async () => {
   await stop();
@@ -376,7 +376,7 @@ it("fails closed for the unqualified remote-only profile before publishing readi
   } finally {
     writeFileSync(descriptorFile, original);
   }
-}, 240000);
+}, 30000);
 
 it("refuses missing credentials and failed binding publication without readiness", async () => {
   await stop();
@@ -404,7 +404,7 @@ it("refuses missing credentials and failed binding publication without readiness
     renameSync(held, bindings);
   }
   expect((await command("check")).code).toBe(0);
-}, 240000);
+}, 60000);
 
 it("exits the real server when its database lease is lost", async () => {
   child = launch("serve");
@@ -426,7 +426,7 @@ it("exits the real server when its database lease is lost", async () => {
           return 0;
         }
       },
-      { timeout: 120000, interval: 500 },
+      { timeout: 45000, interval: 500 },
     )
     .toBe("ok");
   const exited = once(child, "exit");
@@ -439,7 +439,7 @@ it("exits the real server when its database lease is lost", async () => {
   child = undefined;
   await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
   expect((await command("check")).code).toBe(0);
-}, 240000);
+}, 60000);
 
 it("refuses invalid provisioning before opening a listener", async () => {
   await stop();
@@ -448,7 +448,7 @@ it("refuses invalid provisioning before opening a listener", async () => {
   expect(failed.code).toBe(1);
   expect(failed.stderr).toContain("declarative startup failed");
   await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
-}, 240000);
+}, 30000);
 
 it("preserves embedded controller identity, login and encrypted credentials across restart and backup restoration", async () => {
   await stop();
@@ -504,7 +504,7 @@ it("preserves embedded controller identity, login and encrypted credentials acro
             return 0;
           }
         },
-        { timeout: 120000, interval: 500 },
+        { timeout: 45000, interval: 500 },
       )
       .toBe("ok");
     return logs;
@@ -609,4 +609,4 @@ it("preserves embedded controller identity, login and encrypted credentials acro
     if (previousKey === undefined) delete process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE;
     else process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = previousKey;
   }
-}, 240000);
+}, 120000);
