@@ -12,7 +12,7 @@ export async function startComposerProviderBridge({ socketPath, provider, callLo
   }
   const clients = new Map();
   const server = createServer({ allowHalfOpen: true }, socket => {
-    // ponytail: this fixture allows four clients, 1 MiB per session and 60s idle;
+    // ponytail: this fixture allows four clients, 1 MiB per session and 180s idle (the 120s acceptance test must outlive an idle unrelated run);
     // larger acceptance scenarios need explicitly reviewed bounds.
     if (clients.size >= 4) { socket.destroy(); return; }
     const child = spawn(provider, ["--state-file", join(stateDirectory, `${randomUUID()}.json`),
@@ -33,7 +33,7 @@ export async function startComposerProviderBridge({ socketPath, provider, callLo
     child.stdin.on("error", () => socket.destroy());
     // Keep the client slot until the process has exited, not merely disconnected.
     socket.once("close", () => child.kill("SIGTERM"));
-    socket.setTimeout(60_000, () => socket.destroy());
+    socket.setTimeout(180_000, () => socket.destroy());
     socket.pipe(child.stdin);
     child.stdout.pipe(socket);
   });
