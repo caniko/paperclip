@@ -327,9 +327,9 @@ test("the independent hosted Stop lane keeps the qualified prepared commands", (
   assert.match(independent, /timeout-minutes: 20/);
   assert.doesNotMatch(independent, /needs\.gate/);
   assert.match(readFileSync(prCallerWorkflow, "utf8"), /pr-trusted\.yml@1339fe2ddeed9149bdb4ecb1e3a2144eed539e23/);
-  // SHA-256 of the qualified 76e683f90 workflow; hosted checkouts can be shallow.
+  // SHA-256 of the workflow qualified in Stop run 40941483197 (head 1339fe2dde); hosted checkouts can be shallow.
   assert.equal(createHash("sha256").update(qualification).digest("hex"),
-    "de703c93259d13602c8d82a7c1945cdf454953cb680c5c0fbaf2d53e1e399654",
+    "b063f0ddf24c8c0bc10557200bb7bb2364d5edc5a8ee2059ef783a12ec7072a2",
     "policy promotion must preserve the independently qualified Stop workflow byte-for-byte");
 });
 
