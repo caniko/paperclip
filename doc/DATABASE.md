@@ -1535,3 +1535,7 @@ It uses disposable embedded PostgreSQL by default. A disposable local database
 named `review_wait_benchmark...` can be supplied through
 `PAPERCLIP_TEST_DATABASE_URL` to compare another PostgreSQL major version.
 DataRow bytes exclude response metadata and transport overhead.
+
+## Migration ordering in PRs
+
+`ci / policy` rejects added migration SQL files numbered at or below the target branch's latest migration. The only exemption is a file whose path and git blob are identical to the same path on `paperclipai/paperclip` `master`, fetched by URL during the job, so upstream syncs can import upstream migrations at numbers the fork already used. If that fetch fails, no exemption applies.

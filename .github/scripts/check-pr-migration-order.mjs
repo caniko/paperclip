@@ -14,7 +14,7 @@ function formatMigrationNumber(number) {
   return String(number).padStart(4, '0');
 }
 
-export function checkMigrationOrder(baseMigrationFiles, prMigrationFiles) {
+export function checkMigrationOrder(baseMigrationFiles, prMigrationFiles, upstreamIdenticalFiles = []) {
   const invalidFiles = [...baseMigrationFiles, ...prMigrationFiles]
     .filter((file) => !parseMigration(file));
 
@@ -39,7 +39,8 @@ export function checkMigrationOrder(baseMigrationFiles, prMigrationFiles) {
     { file: '(none)', number: -1 },
   );
   const outOfOrder = prMigrations.filter(
-    (migration) => migration.number <= latestBaseMigration.number,
+    (migration) => migration.number <= latestBaseMigration.number
+      && !upstreamIdenticalFiles.includes(migration.file),
   );
 
   if (outOfOrder.length === 0) {
@@ -71,6 +72,24 @@ function gitPaths(args) {
     .filter(Boolean);
 }
 
+function blobOrNull(rev, file) {
+  try {
+    return execFileSync('git', ['rev-parse', '--verify', '--quiet', `${rev}:${file}`], {
+      encoding: 'utf8',
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function upstreamIdenticalFiles(upstreamSha, headSha, files) {
+  if (!upstreamSha) return [];
+  return files.filter((file) => {
+    const upstreamBlob = blobOrNull(upstreamSha, file);
+    return upstreamBlob !== null && upstreamBlob === blobOrNull(headSha, file);
+  });
+}
+
 function escapeWorkflowCommand(message) {
   return message
     .replaceAll('%', '%25')
@@ -79,10 +98,14 @@ function escapeWorkflowCommand(message) {
 }
 
 function main() {
-  const [baseSha, headSha] = process.argv.slice(2);
+  const [baseSha, headSha, upstreamSha] = process.argv.slice(2);
   const shaPattern = /^[0-9a-f]{40}$/i;
-  if (!shaPattern.test(baseSha ?? '') || !shaPattern.test(headSha ?? '')) {
-    console.error('Usage: check-pr-migration-order.mjs <40-character base SHA> <40-character head SHA>');
+  if (
+    !shaPattern.test(baseSha ?? '')
+    || !shaPattern.test(headSha ?? '')
+    || (upstreamSha !== undefined && !shaPattern.test(upstreamSha))
+  ) {
+    console.error('Usage: check-pr-migration-order.mjs <40-character base SHA> <40-character head SHA> [40-character upstream master SHA]');
     process.exit(2);
   }
 
@@ -93,7 +116,11 @@ function main() {
     'diff', '--name-only', '--diff-filter=A', '-z', `${baseSha}...${headSha}`, '--',
     MIGRATIONS_DIRECTORY,
   ]).filter((file) => file.endsWith('.sql'));
-  const result = checkMigrationOrder(baseMigrationFiles, prMigrationFiles);
+  const result = checkMigrationOrder(
+    baseMigrationFiles,
+    prMigrationFiles,
+    upstreamIdenticalFiles(upstreamSha, headSha, prMigrationFiles),
+  );
 
   if (result.passed) {
     console.log(result.message);
