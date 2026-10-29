@@ -3801,7 +3801,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
                 </ol>
               </details>
             )}
-            {cancelRun.isError && (
+            {cancelRun.isError && ( // query-error-ok: mutation result, not a query
               <div role="alert" className="text-xs text-destructive">
                 {cancelRun.error instanceof Error ? cancelRun.error.message : "Failed to cancel run"}
               </div>
