@@ -63,6 +63,9 @@ it("refuses a migration connection that reaches another database", async () => {
   const url = database.connectionString;
   await assertSameDeploymentDatabase(url, url);
   await assertSameDeploymentDatabase(url, `${url}?application_name=migration`);
+  const tokyo = new URL(url);
+  tokyo.searchParams.set("options", "-c TimeZone=Asia/Tokyo -c DateStyle=SQL,DMY");
+  await assertSameDeploymentDatabase(url, tokyo.toString());
   const other = new URL(url);
   other.pathname = "/postgres";
   await expect(assertSameDeploymentDatabase(url, other.toString())).rejects.toThrow("leased database");

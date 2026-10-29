@@ -61,7 +61,7 @@ async function databaseIdentity(url: string) {
   const connection = createUtilitySql(url);
   try {
     const [row] = await connection<{ identity: string }[]>`
-      SELECT concat_ws('/', d.oid::text, d.datname, pg_postmaster_start_time()::text) AS identity
+      SELECT concat_ws('/', d.oid::text, d.datname, extract(epoch from pg_postmaster_start_time())::text) AS identity
       FROM pg_database d WHERE d.datname = current_database()`;
     return row?.identity ?? null;
   } finally {

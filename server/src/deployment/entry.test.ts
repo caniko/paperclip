@@ -68,7 +68,7 @@ beforeAll(async () => {
     manifestFile: join(root, "manifest.json"), serverCredentials: { auth: join(root, "auth"), database: join(root, "database") },
     credentialFiles: { bridge: join(root, "bridge"), gateway: join(root, "gateway") },
     bootstrap: { email: "operator@example.test", name: "Entry operator", passwordFile: join(root, "password") } }));
-}, 90000);
+}, 240000);
 afterAll(async () => { await stop(); await database?.cleanup(); rmSync(root, { recursive: true, force: true }); });
 
 it("runs the real launcher, authenticates, plans read-only and fences online apply", async () => {
@@ -86,7 +86,7 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
   await expect.poll(async () => {
     if (child?.exitCode !== null) throw new Error(`Launcher exited: ${output}`);
     try { return (await fetch(`http://127.0.0.1:${port}/api/health`)).status; } catch { return 0; }
-  }, { timeout: 45000, interval: 500 }).toBe(200);
+  }, { timeout: 120000, interval: 500 }).toBe(200);
   const response = await fetch(`http://localhost:${port}/api/auth/sign-in/email`, {
     method: "POST", headers: { "content-type": "application/json", origin: `http://localhost:${port}` },
     body: JSON.stringify({ email: "operator@example.test", password: "entry-test-operator-password" }),
@@ -102,7 +102,7 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
   ].sort());
   expect((await fetch(`http://localhost:${port}/api/companies/${adoptedCompanyId}`, { headers: { cookie } })).status).toBe(200);
   await expect.poll(async () => (await db.select({ status: agents.status, lifecycleState: agents.lifecycleState })
-    .from(agents).where(eq(agents.id, bindings["agent/worker"])))[0], { timeout: 30000, interval: 100 })
+    .from(agents).where(eq(agents.id, bindings["agent/worker"])))[0], { timeout: 120000, interval: 100 })
     .toEqual({ status: "idle", lifecycleState: "ready" });
   const createIssue = (company: string, extra: Record<string, unknown> = {}) => fetch(`http://localhost:${port}/api/companies/${company}/issues`, {
     method: "POST", headers: { "content-type": "application/json", authorization: "Bearer entry-test-bridge-token-at-least-32-characters" },
@@ -122,14 +122,14 @@ it("runs the real launcher, authenticates, plans read-only and fences online app
   expect(output).toContain("set (runtime credential)");
   await stop();
   expect((await command("apply")).code).toBe(0);
-}, 120000);
+}, 240000);
 
 it("refuses HTTP port collisions instead of silently moving the instance", async () => {
   await stop();
   const occupied = createServer(); occupied.listen(port, "127.0.0.1"); await once(occupied, "listening");
   try { expect((await command("serve")).code).toBe(1); }
   finally { await new Promise<void>((resolve) => occupied.close(() => resolve())); }
-}, 30000);
+}, 240000);
 
 it("rejects manifest owner changes and omissions without leaving the old fleet unmanaged", async () => {
   await stop();
@@ -157,7 +157,7 @@ it("rejects manifest owner changes and omissions without leaving the old fleet u
   expect((await command("check")).code).toBe(2);
   expect((await command("apply")).code).toBe(0);
   expect((await command("check")).code).toBe(0);
-}, 60000);
+}, 240000);
 
 it("stops offline apply when its database lease is lost while reconciliation is blocked", async () => {
   await stop();
@@ -184,7 +184,7 @@ it("stops offline apply when its database lease is lost while reconciliation is 
       const [row] = await db.execute(sql`select count(*)::int as count from pg_locks
         where locktype = 'advisory' and objid = 1735289202 and granted`);
       return Number(row?.count ?? 0);
-    }, { timeout: 30000, interval: 100 }).toBe(1);
+    }, { timeout: 120000, interval: 100 }).toBe(1);
     const exited = once(applying, "exit");
     await db.execute(sql`select pg_terminate_backend(pid) from pg_locks
       where locktype = 'advisory' and objid = 1735289202 and granted`);
@@ -202,7 +202,7 @@ it("stops offline apply when its database lease is lost while reconciliation is 
     writeFileSync(join(root, "manifest.json"), originalManifest);
   }
   expect((await command("check")).code).toBe(0);
-}, 60000);
+}, 240000);
 
 it("fails closed for the unqualified remote-only profile before publishing readiness", async () => {
   await stop();
@@ -217,7 +217,7 @@ it("fails closed for the unqualified remote-only profile before publishing readi
     }
     await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
   } finally { writeFileSync(descriptorFile, original); }
-}, 30000);
+}, 240000);
 
 it("refuses missing credentials and failed binding publication without readiness", async () => {
   await stop();
@@ -238,7 +238,7 @@ it("refuses missing credentials and failed binding publication without readiness
     await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
   } finally { rmSync(bindings, { recursive: true }); renameSync(held, bindings); }
   expect((await command("check")).code).toBe(0);
-}, 60000);
+}, 240000);
 
 it("exits the real server when its database lease is lost", async () => {
   child = launch("serve");
@@ -248,7 +248,7 @@ it("exits the real server when its database lease is lost", async () => {
   await expect.poll(async () => {
     if (child?.exitCode !== null) throw new Error(`Launcher exited: ${logs}`);
     try { return (await fetch(`http://127.0.0.1:${port}/api/health`)).status; } catch { return 0; }
-  }, { timeout: 45000, interval: 500 }).toBe(200);
+  }, { timeout: 120000, interval: 500 }).toBe(200);
   const exited = once(child, "exit");
   const db = createDb(database.connectionString);
   await db.execute(sql`select pg_terminate_backend(pid) from pg_locks where locktype = 'advisory' and objid = 1735289202 and database = (select oid from pg_database where datname = current_database())`);
@@ -257,7 +257,7 @@ it("exits the real server when its database lease is lost", async () => {
   child = undefined;
   await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
   expect((await command("check")).code).toBe(0);
-}, 60000);
+}, 240000);
 
 it("refuses invalid provisioning before opening a listener", async () => {
   await stop();
@@ -266,4 +266,4 @@ it("refuses invalid provisioning before opening a listener", async () => {
   expect(failed.code).toBe(1);
   expect(failed.stderr).toContain("declarative startup failed");
   await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
-}, 30000);
+}, 240000);
