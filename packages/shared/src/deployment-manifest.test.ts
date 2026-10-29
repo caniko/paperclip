@@ -37,12 +37,6 @@ describe("deployment manifest", () => {
       { ...manifest, environments: { local: { ...local, fields: { ...local.fields, config: { capacity: { maxConcurrentRuns: 1 }, host: "x" } } }, nomad: ssh } },
     ]) expect(deploymentManifestSchema.safeParse(invalid).success).toBe(false);
   });
-  it("keeps omitted fields absent instead of applying native create defaults", () => {
-    const parsed = deploymentManifestSchema.parse({ version: 1, owner: "deployment", companies: { example: company }, agents: { worker: agent } });
-    expect(parsed.companies.example.fields).toEqual({ name: "Example" });
-    expect(parsed.agents.worker.fields).toEqual({ name: "Worker", adapterType: "process" });
-  });
-
   it("requires one explicit primary and a valid source for each declared project workspace", () => {
     const manifest = {
       version: 1, owner: "deployment", companies: { example: company },

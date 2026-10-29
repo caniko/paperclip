@@ -1,6 +1,7 @@
 import { closeSync, constants, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute } from "node:path";
 
+/** Runtime credentials may be group-readable, but never public or store-backed. */
 export function readDeploymentCredential(file: string): string {
   try {
     if (!isAbsolute(file)) throw new Error();
@@ -17,6 +18,7 @@ export function readDeploymentCredential(file: string): string {
       closeSync(fd);
     }
   } catch {
+    // Do not include the path, file contents or filesystem/parser exceptions.
     throw new Error("Deployment credential is missing, invalid, oversized or publicly readable");
   }
 }
