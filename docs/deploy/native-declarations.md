@@ -106,6 +106,13 @@ uses PKCE with scopes `openid email profile`. It never creates accounts: a user
 signs in only when an existing account has the same email and the provider reports it as verified. The Home Manager
 module exposes this as `services.paperclip.oidc`.
 
+Behind a TLS-terminating proxy, set `services.paperclip.publicBaseUrl` to the
+public URL. Its hostname is added to `server.allowedHostnames` (extend with
+`services.paperclip.allowedHostnames`). The proxy must pass the original `Host`
+header. The descriptor's optional `apiUrl` (module option `localApiUrl`,
+default loopback on the controller port) is the `PAPERCLIP_API_URL` that local
+agents and runners receive, so they need not go through the proxy.
+
 `remote-only` is reserved and refuses every command before credentials, adapter
 loading, or database changes. The supported profile is `trusted-local`.
 

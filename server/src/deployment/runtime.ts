@@ -13,6 +13,7 @@ export const deploymentDescriptorSchema = z.object({
   instance: z.string().regex(/^[a-z][a-z0-9_-]{0,30}$/),
   executionProfile: z.enum(["trusted-local", "remote-only"]).optional(),
   configFile: z.string(),
+  apiUrl: z.string().url().optional(),
   manifestFile: z.string().optional(),
   credentialFiles: z.record(z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/), runtimeFile).default({}),
   serverCredentials: z.object({
@@ -110,6 +111,7 @@ export function deploymentEnvironment(d: DeploymentDescriptor, inherited: NodeJS
     PAPERCLIP_CONFIG: d.configFile, PAPERCLIP_DECLARATIVE: "true",
     PAPERCLIP_MIGRATION_PROMPT: "never", PAPERCLIP_MIGRATION_AUTO_APPLY: "true",
   });
+  if (d.apiUrl) env.PAPERCLIP_API_URL = d.apiUrl;
   serverCredentials = {};
   for (const name of ["auth", "oidc", "database", "migration"] as const) {
     const file = d.serverCredentials[name];

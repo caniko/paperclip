@@ -27,6 +27,13 @@ describe("declarative startup credentials", () => {
     expect(env).toMatchObject({ XDG_CONFIG_HOME: "/home/operator/.config", XDG_DATA_HOME: "/home/operator/.local/share",
       XDG_STATE_HOME: "/home/operator/.local/state", XDG_CACHE_HOME: "/home/operator/.cache", XDG_RUNTIME_DIR: "/run/user/1000" });
   });
+  it("pins the agent API URL from the descriptor and ignores the ambient one", () => {
+    const d = mkdtempSync(join(tmpdir(), "paperclip-credential-")); dirs.push(d);
+    const file = join(d, "secret"); writeFileSync(file, "x".repeat(32), { mode: 0o600 });
+    const base = { version: 1 as const, home: d, instance: "one", configFile: "/config.json", credentialFiles: {}, serverCredentials: { auth: file } };
+    expect(deploymentEnvironment({ ...base, apiUrl: "http://127.0.0.1:3117" }, { PAPERCLIP_API_URL: "https://elsewhere.example" }).PAPERCLIP_API_URL).toBe("http://127.0.0.1:3117");
+    expect(deploymentEnvironment(base, { PAPERCLIP_API_URL: "https://elsewhere.example" }).PAPERCLIP_API_URL).toBeUndefined();
+  });
   it("refuses public credentials with redacted errors", () => {
     const d = mkdtempSync(join(tmpdir(), "paperclip-credential-")); dirs.push(d);
     const file = join(d, "secret"); writeFileSync(file, "do-not-print", { mode: 0o644 });

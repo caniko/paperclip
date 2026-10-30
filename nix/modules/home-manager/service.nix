@@ -9,6 +9,12 @@
   runtimePath = lib.types.strMatching "^/[^[:space:]]+$";
   state = "${cfg.dataDir}/instances/${cfg.instance}";
   credentials = "${cfg.dataDir}/credentials";
+  publicHost = let
+    match = builtins.match "[a-z]+://([^/:?#[]+).*" cfg.publicBaseUrl;
+  in
+    if match == null
+    then ""
+    else builtins.head match;
   application = json.generate "paperclip-${cfg.instance}-config.json" {
     "$meta" = {
       version = 1;
@@ -36,7 +42,7 @@
       bind = "loopback";
       host = "127.0.0.1";
       inherit (cfg) port;
-      allowedHostnames = ["127.0.0.1" "localhost"];
+      allowedHostnames = lib.unique (["127.0.0.1" "localhost"] ++ lib.optional (publicHost != "") publicHost ++ cfg.allowedHostnames);
       serveUi = true;
     };
     auth =
@@ -64,6 +70,7 @@
     home = cfg.dataDir;
     inherit (cfg) instance;
     executionProfile = "trusted-local";
+    apiUrl = cfg.localApiUrl;
     configFile = application;
     manifestFile = json.generate "paperclip-${cfg.instance}-manifest.json" (cfg.manifest
       // lib.optionalAttrs (cfg.operatorKeys != {}) {
@@ -118,6 +125,16 @@ in {
       type = lib.types.str;
       default = "http://127.0.0.1:${toString cfg.port}";
       description = "Canonical browser and agent URL.";
+    };
+    allowedHostnames = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [];
+      description = "Extra hostnames accepted in the Host header. Loopback names and the publicBaseUrl hostname are always allowed.";
+    };
+    localApiUrl = lib.mkOption {
+      type = lib.types.str;
+      default = "http://127.0.0.1:${toString cfg.port}";
+      description = "API URL that local agents and runners receive as PAPERCLIP_API_URL, independent of publicBaseUrl.";
     };
     manifest = lib.mkOption {
       inherit (json) type;

@@ -124,6 +124,8 @@
           clientId = "paperclip";
         };
         operatorKeys.cli = "/run/user/1000/paperclip/operator-cli";
+        publicBaseUrl = "https://paperclip.vpn.example.test";
+        allowedHostnames = ["extra.example.test"];
       };
     }).config;
   integrated = (machine {}).config;
@@ -208,6 +210,11 @@
             operatorKeys.cli = "${builtins.storeDir}/public-key";
           };
         }).activationPackage.drvPath);
+    publicHostAndLocalApi =
+      assertionsPass oidcController
+      && evaluates oidcController.services.paperclip.deploymentFile.drvPath
+      && oidcController.services.paperclip.localApiUrl == "http://127.0.0.1:3100"
+      && oidcController.services.paperclip.allowedHostnames == ["extra.example.test"];
     operatorKeyAliasCollisionRejected =
       !(evaluates
         (home {
