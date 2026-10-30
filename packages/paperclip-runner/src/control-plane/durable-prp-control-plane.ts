@@ -1767,7 +1767,7 @@ export class DurablePrpControlPlane {
   // Set when the last authenticated Runner connection closes; cleared on the
   // next authentication. Diagnostic only: it never gates authority.
   #runnerDisconnectedAt: number | null = null;
-  #connectionProcessing = new Map<AuthorityConnection, Promise<void>>();
+  #connectionProcessing = new Map<PrpWireConnection, Promise<void>>();
   #pendingSemanticCalls = new Set<string>();
   #semanticCallbacksRetired = false;
   #semanticResultPersistenceFailed = false;
@@ -2549,10 +2549,10 @@ export class DurablePrpControlPlane {
           .then(() => this.#handleJson(connection, value))
           .catch(() => connection.close());
         const tail = processing;
-        this.#connectionProcessing.set(connection, tail);
+        this.#connectionProcessing.set(wire, tail);
         const release = () => {
-          if (this.#connectionProcessing.get(connection) === tail)
-            this.#connectionProcessing.delete(connection);
+          if (this.#connectionProcessing.get(wire) === tail)
+            this.#connectionProcessing.delete(wire);
         };
         void tail.then(release, release);
       },
