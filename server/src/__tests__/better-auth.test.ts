@@ -277,6 +277,14 @@ describe("Better Auth OIDC login", () => {
     expect(() => create({ authOidc: oidc })).toThrow(/client secret/);
   });
 
+  it("keeps password auth working when OIDC discovery fails", async () => {
+    vi.stubEnv("BETTER_AUTH_SECRET", "oidc-test-secret-oidc-test-secret");
+    vi.stubEnv("PAPERCLIP_AUTH_OIDC_CLIENT_SECRET", "client-secret");
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("offline"); }));
+    const auth = create({ authOidc: oidc });
+    await expect(auth.$context).resolves.toBeDefined();
+  });
+
   it("starts a PKCE sign-in and links only verified emails", async () => {
     vi.stubEnv("BETTER_AUTH_SECRET", "oidc-test-secret-oidc-test-secret");
     vi.stubEnv("PAPERCLIP_AUTH_OIDC_CLIENT_SECRET", "client-secret");

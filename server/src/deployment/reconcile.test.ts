@@ -150,6 +150,9 @@ it("provisions declared operator keys as board keys, refuses reuse and rotation,
   await expect(reconcile({ ...declaration, operatorKeys: { ops: { credential: "operator2" } } })).rejects.toThrow("requires a new declaration key");
   await expect(reconcileDeployment(db, declaration, { descriptor: { ...descriptor, bootstrap: undefined }, config, apply: false, singleOwner: false }))
     .rejects.toThrow("require an operator bootstrap identity");
+  const shared = { ...structuredClone(manifest), owner: "operator-keys-shared", routines: {}, operatorKeys: { ops: { credential: "bridge" } } };
+  await expect(reconcile(shared)).rejects.toThrow("cannot be shared");
+  await expect(reconcile({ ...declaration, owner: "operator-keys-orphan", companies: {} })).rejects.toThrow("declared company");
   await reconcile({ ...declaration, operatorKeys: {} });
   expect((await db.select().from(boardApiKeys).where(eq(boardApiKeys.id, key.id)))[0].revokedAt).not.toBeNull();
   const audit = await db.select().from(activityLog).where(eq(activityLog.entityId, key.id));

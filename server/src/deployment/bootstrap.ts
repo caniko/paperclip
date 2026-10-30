@@ -21,6 +21,9 @@ export async function bootstrapOperator(db: Db, config: Config, input?: Bootstra
       if (!admins.some((admin) => admin.userId === existing.id)) {
         throw new Error("Bootstrap refuses to adopt an existing non-administrator account");
       }
+      if (apply && config.authOidc && !existing.emailVerified) {
+        await tx.update(authUsers).set({ emailVerified: true }).where(eq(authUsers.id, existing.id));
+      }
       return existing.id;
     }
     if (admins.length) throw new Error("Bootstrap refuses to replace an existing administrator");
@@ -29,7 +32,7 @@ export async function bootstrapOperator(db: Db, config: Config, input?: Bootstra
     if (!apply) return null;
     const transactionDb = tx as unknown as Db;
     const { createBetterAuthInstance } = await import("../auth/better-auth.js");
-    const auth = createBetterAuthInstance(transactionDb, { ...config, authDisableSignUp: false }, [], { autoSignIn: false });
+    const auth = createBetterAuthInstance(transactionDb, { ...config, authDisableSignUp: false, authOidc: undefined }, [], { autoSignIn: false });
     const base = config.authPublicBaseUrl ?? "http://localhost:3100";
     const response = await auth.handler(new Request(new URL("/api/auth/sign-up/email", base), {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -40,6 +43,7 @@ export async function bootstrapOperator(db: Db, config: Config, input?: Bootstra
     if (!created) throw new Error("Local operator bootstrap did not create an account");
     const claim = await claimFirstInstanceAdmin(transactionDb, { userId: created.id });
     if (claim.status !== "claimed") throw new Error("Administrator changed during bootstrap");
+    if (config.authOidc) await tx.update(authUsers).set({ emailVerified: true }).where(eq(authUsers.id, created.id));
     return created.id;
   });
 }

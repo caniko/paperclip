@@ -325,6 +325,7 @@ export function createBetterAuthInstance(
         {
           providerId: oidc.providerId,
           discoveryUrl: oidc.discoveryUrl,
+          accountIssuer: oidc.discoveryUrl.replace(/\/\.well-known\/openid-configuration$/, ""),
           clientId: oidc.clientId,
           clientSecret: oidcSecret,
           scopes: ["openid", "email", "profile"],

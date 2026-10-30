@@ -78,6 +78,14 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     if (!credentials[k.credential] || credentials[k.credential].trim().length < 32) throw new Error("Operator key requires a runtime token of at least 32 characters");
   }
   if (Object.keys(m.operatorKeys).length && !options.descriptor.bootstrap) throw new Error("Declared operator keys require an operator bootstrap identity");
+  const workerAliases = new Set([
+    ...Object.values(m.agents).flatMap((a) => Object.values(a.credentials)),
+    ...Object.values(m.environments).flatMap((e) => e.credential ?? []),
+    ...Object.values(m.taskBridges).map((b) => b.credential),
+  ]);
+  if (Object.values(m.operatorKeys).some((k) => workerAliases.has(k.credential))) {
+    throw new Error("Operator key credentials cannot be shared with agents, environments or task bridges");
+  }
   stage = "database-preflight";
   const bridgeTokens = Object.values(m.taskBridges).map((b) => credentials[b.credential].trimEnd());
   if (new Set(bridgeTokens).size !== bridgeTokens.length) throw new Error("Task bridge tokens must be unique; use a new runtime token");
@@ -281,6 +289,9 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         create: async () => (await agentSvc!.createApiKey(getId("agent", b.agent), `deployment.${m.owner}.${key}`, scope, { responsibleUserId: actor.userId, token })).id,
         update: async () => { throw new Error("Task bridge rotation requires a new declaration key and removal of the old key"); } });
     }
+    const auditCompanies = [...new Set([...Object.keys(m.companies).map((c) => getId("company", c)),
+      ...owned.filter((b) => b.kind === "company").map((b) => b.resourceId)])];
+    if (Object.keys(m.operatorKeys).length && !auditCompanies.length) throw new Error("Operator keys require a declared company for audit records");
     for (const [key, k] of Object.entries(m.operatorKeys).sort()) {
       const token = credentials[k.credential].trimEnd();
       add({ kind: "operatorKey", key, companyId: null, enabled: true,
@@ -433,15 +444,13 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         if (spec.kind === "company" && actor.userId && !binding) {
           await tx.insert(companyMemberships).values({ companyId, principalType: "user", principalId: actor.userId, status: "active", membershipRole: "owner" }).onConflictDoNothing();
         }
-        const auditCompanies = spec.kind === "operatorKey" ? Object.keys(m.companies).map((c) => getId("company", c)) : [companyId];
-        for (const auditCompanyId of auditCompanies) await logActivity(tx, { companyId: auditCompanyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.reconciled", entityType: spec.kind, entityId: spec.id, details: { key: spec.key, fields: actions.get(spec)!.fields } }, publications);
+        for (const auditCompanyId of spec.kind === "operatorKey" ? auditCompanies : [companyId]) await logActivity(tx, { companyId: auditCompanyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.reconciled", entityType: spec.kind, entityId: spec.id, details: { key: spec.key, fields: actions.get(spec)!.fields } }, publications);
       }
       for (const binding of removed) {
         if (binding.kind === "agent") lifecycleAgents.add(binding.resourceId);
         await disableResource(tx, binding.kind as Kind, binding.resourceId, agentLifecycle!);
         await tx.update(deploymentResources).set({ enabled: false }).where(and(eq(deploymentResources.owner, m.owner), eq(deploymentResources.kind, binding.kind), eq(deploymentResources.key, binding.key)));
-        const auditCompanies = binding.kind === "operatorKey" ? Object.keys(m.companies).map((c) => getId("company", c)) : [binding.companyId ?? binding.resourceId];
-        for (const auditCompanyId of auditCompanies) await logActivity(tx, { companyId: auditCompanyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.disabled", entityType: binding.kind, entityId: binding.resourceId, details: { key: binding.key } }, publications);
+        for (const auditCompanyId of binding.kind === "operatorKey" ? auditCompanies : [binding.companyId ?? binding.resourceId]) await logActivity(tx, { companyId: auditCompanyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.disabled", entityType: binding.kind, entityId: binding.resourceId, details: { key: binding.key } }, publications);
       }
     }
     return {
