@@ -4666,3 +4666,22 @@ it("retires late semantic receipts without overwriting a successor journal or re
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+it("joins a frame that its wire delivers while attaching", async () => {
+  const root = mkdtempSync(resolve(tmpdir(), "runner-control-buffered-frame-"));
+  const core = new DurablePrpControlPlane({ stateDirectory: resolve(root, "control-plane"), identity, expectedRunnerVersion, expectedRunnerDigest });
+  const closeListeners: Array<(reason: { message: string }) => void> = [];
+  try {
+    core.attachWireConnection({
+      sendJson: () => undefined,
+      close: () => closeListeners.splice(0).forEach(listener => listener({ message: "closed" })),
+      onJson: listener => listener({ kind: "buffered-before-attach" }),
+      onClose: listener => { closeListeners.push(listener); },
+    });
+    await new Promise<void>(resolveTurn => setImmediate(resolveTurn));
+    await core.stop();
+    expect(() => core.retireSemanticToolCallbacks()).not.toThrow();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

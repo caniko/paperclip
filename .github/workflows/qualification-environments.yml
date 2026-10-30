@@ -183,6 +183,10 @@ jobs:
           set -euo pipefail
           if [ "$PROFILE" = runnerd ]; then
             export PAPERCLIP_WARM_TRANSITION_EXECUTION_EVIDENCE="$EVIDENCE/warm-transition-execution"
+            # Five minutes before the 45-minute cap, retain process, container and worker CPU evidence.
+            bash .github/scripts/runnerd-hang-diagnostics.sh "$EVIDENCE" 2400 < /dev/null > "$EVIDENCE/hang-diagnostics.log" 2>&1 &
+            watchdog=$!
+            trap 'kill "$watchdog" 2>/dev/null || true' EXIT
           fi
           node .github/scripts/run-qualification-profile.mjs "$PROFILE" "$EVIDENCE" 2>&1 | tee "$EVIDENCE/profile.log"
           python .github/scripts/verify_profile_evidence.py "$EVIDENCE"
