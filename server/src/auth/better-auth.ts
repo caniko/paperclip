@@ -288,7 +288,7 @@ export function createBetterAuthInstance(
       disableSignUp: config.authDisableSignUp,
       autoSignIn: options.autoSignIn ?? true,
     },
-    ...(oidc ? { account: { accountLinking: { enabled: true, trustedProviders: [oidc.providerId] } } } : {}),
+    ...(oidc ? { account: { accountLinking: { enabled: true } } } : {}),
     rateLimit: buildBetterAuthRateLimitOptions({
       deploymentMode: config.deploymentMode,
       deploymentExposure: config.deploymentExposure,

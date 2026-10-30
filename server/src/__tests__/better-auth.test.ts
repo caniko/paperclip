@@ -277,7 +277,7 @@ describe("Better Auth OIDC login", () => {
     expect(() => create({ authOidc: oidc })).toThrow(/client secret/);
   });
 
-  it("starts a PKCE sign-in and links only the trusted provider", async () => {
+  it("starts a PKCE sign-in and links only verified emails", async () => {
     vi.stubEnv("BETTER_AUTH_SECRET", "oidc-test-secret-oidc-test-secret");
     vi.stubEnv("PAPERCLIP_AUTH_OIDC_CLIENT_SECRET", "client-secret");
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({
@@ -288,7 +288,7 @@ describe("Better Auth OIDC login", () => {
     const auth = create({ authOidc: oidc });
 
     expect(auth.options.plugins?.map((plugin) => plugin.id)).toEqual(["generic-oauth"]);
-    expect(auth.options.account?.accountLinking).toEqual({ enabled: true, trustedProviders: ["kanidm"] });
+    expect(auth.options.account?.accountLinking).toEqual({ enabled: true });
 
 
     const provider = (await auth.$context).socialProviders.find((candidate) => candidate.id === "kanidm")!;

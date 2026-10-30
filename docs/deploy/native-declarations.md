@@ -103,7 +103,7 @@ fields can also be set with `PAPERCLIP_AUTH_OIDC_PROVIDER_ID`,
 `PAPERCLIP_AUTH_OIDC_CLIENT_ID`. Register
 `<publicBaseUrl>/api/auth/callback/<providerId>` as the redirect URI. The flow
 uses PKCE with scopes `openid email profile`. It never creates accounts: a user
-signs in only when an existing account has the same email. The Home Manager
+signs in only when an existing account has the same email and the provider reports it as verified. The Home Manager
 module exposes this as `services.paperclip.oidc`.
 
 `remote-only` is reserved and refuses every command before credentials, adapter
