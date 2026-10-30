@@ -120,7 +120,7 @@ in {
       description = "Canonical browser and agent URL.";
     };
     manifest = lib.mkOption {
-      type = json.type;
+      inherit (json) type;
       default =
         config.programs.paperclip.deployments.${
           cfg.instance
@@ -232,6 +232,10 @@ in {
       {
         assertion = lib.all (file: !lib.hasPrefix "/nix/store/" file) ([cfg.authSecretFile cfg.encryptionKeyFile cfg.databasePasswordFile cfg.operator.passwordFile] ++ lib.attrValues cfg.credentialFiles ++ lib.attrValues cfg.operatorKeys ++ lib.optional (cfg.oidc != null) cfg.oidc.secretFile);
         message = "Paperclip credentials must be runtime files outside the Nix store.";
+      }
+      {
+        assertion = lib.all (key: builtins.match "[a-z][a-z0-9_-]{0,53}" key != null && !(cfg.credentialFiles ? "operator-${key}")) (lib.attrNames cfg.operatorKeys);
+        message = "Paperclip operator key names must be 1-54 characters and must not collide with a credentialFiles alias named operator-<name>.";
       }
       {
         assertion = cfg.port != cfg.databasePort;

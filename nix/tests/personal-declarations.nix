@@ -208,6 +208,17 @@
             operatorKeys.cli = "${builtins.storeDir}/public-key";
           };
         }).activationPackage.drvPath);
+    operatorKeyAliasCollisionRejected =
+      !(evaluates
+        (home {
+          programs.paperclip.package = clientPackages.supported;
+          services.paperclip = {
+            enable = true;
+            operator.email = "operator@example.test";
+            credentialFiles.operator-cli = "/run/user/1000/paperclip/agent";
+            operatorKeys.cli = "/run/user/1000/paperclip/operator-cli";
+          };
+        }).activationPackage.drvPath);
     storeControllerCredentialRejected =
       !(evaluates
         (home {

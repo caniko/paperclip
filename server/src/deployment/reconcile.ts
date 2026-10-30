@@ -433,13 +433,15 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         if (spec.kind === "company" && actor.userId && !binding) {
           await tx.insert(companyMemberships).values({ companyId, principalType: "user", principalId: actor.userId, status: "active", membershipRole: "owner" }).onConflictDoNothing();
         }
-        if (spec.kind !== "operatorKey") await logActivity(tx, { companyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.reconciled", entityType: spec.kind, entityId: spec.id, details: { key: spec.key, fields: actions.get(spec)!.fields } }, publications);
+        const auditCompanies = spec.kind === "operatorKey" ? Object.keys(m.companies).map((c) => getId("company", c)) : [companyId];
+        for (const auditCompanyId of auditCompanies) await logActivity(tx, { companyId: auditCompanyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.reconciled", entityType: spec.kind, entityId: spec.id, details: { key: spec.key, fields: actions.get(spec)!.fields } }, publications);
       }
       for (const binding of removed) {
         if (binding.kind === "agent") lifecycleAgents.add(binding.resourceId);
         await disableResource(tx, binding.kind as Kind, binding.resourceId, agentLifecycle!);
         await tx.update(deploymentResources).set({ enabled: false }).where(and(eq(deploymentResources.owner, m.owner), eq(deploymentResources.kind, binding.kind), eq(deploymentResources.key, binding.key)));
-        if (binding.kind !== "operatorKey") await logActivity(tx, { companyId: binding.companyId ?? binding.resourceId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.disabled", entityType: binding.kind, entityId: binding.resourceId, details: { key: binding.key } }, publications);
+        const auditCompanies = binding.kind === "operatorKey" ? Object.keys(m.companies).map((c) => getId("company", c)) : [binding.companyId ?? binding.resourceId];
+        for (const auditCompanyId of auditCompanies) await logActivity(tx, { companyId: auditCompanyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.disabled", entityType: binding.kind, entityId: binding.resourceId, details: { key: binding.key } }, publications);
       }
     }
     return {

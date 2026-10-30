@@ -6,7 +6,7 @@ import { once } from "node:events";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, budgetPolicies, authAccounts, routines, routineTriggers, agentApiKeys, boardApiKeys, authUsers, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
+import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, budgetPolicies, authAccounts, routines, routineTriggers, agentApiKeys, boardApiKeys, authUsers, acquireDeploymentLease, assertDeploymentSchemaCompatible, activityLog } from "@paperclipai/db";
 import { reconcileDeployment } from "./reconcile.js";
 import { loadConfig } from "../config.js";
 import { secretService } from "../services/secrets.js";
@@ -152,6 +152,9 @@ it("provisions declared operator keys as board keys, refuses reuse and rotation,
     .rejects.toThrow("require an operator bootstrap identity");
   await reconcile({ ...declaration, operatorKeys: {} });
   expect((await db.select().from(boardApiKeys).where(eq(boardApiKeys.id, key.id)))[0].revokedAt).not.toBeNull();
+  const audit = await db.select().from(activityLog).where(eq(activityLog.entityId, key.id));
+  expect(audit.map((entry) => entry.action).sort()).toEqual(["deployment.disabled", "deployment.reconciled"]);
+  expect(JSON.stringify(audit)).not.toContain("fixture-only");
 }, 90000);
 
 it.each(["manual", "budget"])("reenables declarations without resuming %s pauses", async (pauseReason) => {
