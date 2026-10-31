@@ -94,6 +94,7 @@ export const deploymentManifestSchema = z.object({
     agent: key, project: key, credential: key,
     allowedAssignees: z.array(key).min(1).max(50),
   }).strict()).default({}),
+  operatorKeys: z.record(key, z.object({ credential: key }).strict()).default({}),
 }).strict().superRefine((m, ctx) => {
   const issue = (path: string[], message: string) => ctx.addIssue({ code: "custom", path, message });
   const primaries = new Map<string, number>();

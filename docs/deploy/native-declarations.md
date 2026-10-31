@@ -83,6 +83,36 @@ active owner membership for the bootstrap operator if no membership exists.
 Existing membership roles and statuses are preserved. Later reconciliation does
 not restore a removed membership; company access remains application-managed.
 
+### OpenID Connect board login
+
+Set `auth.oidc` in the application config to add a "Sign in with
+<displayName>" button next to the password form:
+
+```json
+{ "auth": { "oidc": {
+  "providerId": "kanidm", "displayName": "Kanidm",
+  "discoveryUrl": "https://idm.example.org/oauth2/openid/paperclip/.well-known/openid-configuration",
+  "clientId": "paperclip"
+} } }
+```
+
+The client secret is the `serverCredentials.oidc` file (or
+`PAPERCLIP_AUTH_OIDC_CLIENT_SECRET` outside declarative mode); the provider
+fields can also be set with `PAPERCLIP_AUTH_OIDC_PROVIDER_ID`,
+`PAPERCLIP_AUTH_OIDC_DISPLAY_NAME`, `PAPERCLIP_AUTH_OIDC_DISCOVERY_URL` and
+`PAPERCLIP_AUTH_OIDC_CLIENT_ID`. Register
+`<publicBaseUrl>/api/auth/callback/<providerId>` as the redirect URI. The flow
+uses PKCE with scopes `openid email profile`. It never creates accounts: a user
+signs in only when an existing account has the same email and the provider reports it as verified. The Home Manager
+module exposes this as `services.paperclip.oidc`.
+
+Behind a TLS-terminating proxy, set `services.paperclip.publicBaseUrl` to the
+public URL. Its hostname is added to `server.allowedHostnames` (extend with
+`services.paperclip.allowedHostnames`). The proxy must pass the original `Host`
+header. The descriptor's optional `apiUrl` (module option `localApiUrl`,
+default loopback on the controller port) is the `PAPERCLIP_API_URL` that local
+agents and runners receive, so they need not go through the proxy.
+
 `remote-only` is reserved and refuses every command before credentials, adapter
 loading, or database changes. The supported profile is `trusted-local`.
 
@@ -323,6 +353,16 @@ and routines pause; schedules and secrets disable; task-bridge keys revoke.
 Workspace removal is rejected until an explicit ownership handoff exists.
 Task-bridge rotation requires a new declaration key and token. Existing active
 routine schedules require explicit schedule adoption to avoid duplicates.
+
+### Operator board keys
+
+`operatorKeys.<key>.credential` names a runtime credential file whose token
+becomes a non-expiring board API key for the bootstrap operator, named
+`deployment.<owner>.<key>`. Declaring one requires `bootstrap`. Tokens need at
+least 32 characters and must be unique across operator keys and task bridges.
+Rotation needs a new declaration key and token; removing a declaration revokes
+its key. The Home Manager module maps `services.paperclip.operatorKeys.<key>` to
+a token file.
 
 Task bridges create issues only inside their declared project/parent boundary
 and assignee scope. They do not gain project-read API access. The create route

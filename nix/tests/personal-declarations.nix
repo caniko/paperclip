@@ -112,6 +112,22 @@
         credentialFiles.gateway = "/run/user/1000/paperclip/gateway";
       };
     }).config;
+  oidcController =
+    (home {
+      programs.paperclip.package = clientPackages.supported;
+      services.paperclip = {
+        enable = true;
+        instance = "work";
+        operator.email = "operator@example.test";
+        oidc = {
+          discoveryUrl = "https://idm.example.test/oauth2/openid/paperclip/.well-known/openid-configuration";
+          clientId = "paperclip";
+        };
+        operatorKeys.cli = "/run/user/1000/paperclip/operator-cli";
+        publicBaseUrl = "https://paperclip.vpn.example.test";
+        allowedHostnames = ["extra.example.test"];
+      };
+    }).config;
   integrated = (machine {}).config;
   composed =
     (machine {
@@ -181,6 +197,35 @@
       && controller.services.paperclip.manifest == manifest
       && controller.services.paperclip.credentialFiles == {gateway = "/run/user/1000/paperclip/gateway";}
       && controller.services.paperclip.authSecretFile == "/home/operator/.local/share/paperclip/credentials/auth";
+    oidcAndOperatorKeys =
+      assertionsPass oidcController
+      && evaluates oidcController.xdg.configFile."paperclip/work/deployment.json".source.drvPath;
+    storeOperatorKeyRejected =
+      !(evaluates
+        (home {
+          programs.paperclip.package = clientPackages.supported;
+          services.paperclip = {
+            enable = true;
+            operator.email = "operator@example.test";
+            operatorKeys.cli = "${builtins.storeDir}/public-key";
+          };
+        }).activationPackage.drvPath);
+    publicHostAndLocalApi =
+      assertionsPass oidcController
+      && evaluates oidcController.services.paperclip.deploymentFile.drvPath
+      && oidcController.services.paperclip.localApiUrl == "http://127.0.0.1:3100"
+      && oidcController.services.paperclip.allowedHostnames == ["extra.example.test"];
+    operatorKeyAliasCollisionRejected =
+      !(evaluates
+        (home {
+          programs.paperclip.package = clientPackages.supported;
+          services.paperclip = {
+            enable = true;
+            operator.email = "operator@example.test";
+            credentialFiles.operator-cli = "/run/user/1000/paperclip/agent";
+            operatorKeys.cli = "/run/user/1000/paperclip/operator-cli";
+          };
+        }).activationPackage.drvPath);
     storeControllerCredentialRejected =
       !(evaluates
         (home {

@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { and, eq, sql } from "drizzle-orm";
 import {
   type Db, deploymentResources, companies, projects, agents, routines,
-  routineTriggers, agentApiKeys, companySecrets, companySecretVersions, companyMemberships,
+  routineTriggers, agentApiKeys, boardApiKeys, companySecrets, companySecretVersions, companyMemberships,
   pluginManagedResources, builtInManagedResources,
   instanceSettings, projectWorkspaces, environments, budgetPolicies,
 } from "@paperclipai/db";
@@ -21,7 +21,7 @@ import type { Config } from "../config.js";
 import { verifyLocalEncryptedMaterials } from "../secrets/local-encrypted-provider.js";
 import { mergeProjectWorkspaceRuntimeConfig } from "../services/project-workspace-runtime-config.js";
 
-const tables = { company: companies, project: projects, workspace: projectWorkspaces, environment: environments, agent: agents, routine: routines, schedule: routineTriggers, secret: companySecrets, taskBridge: agentApiKeys };
+const tables = { company: companies, project: projects, workspace: projectWorkspaces, environment: environments, agent: agents, routine: routines, schedule: routineTriggers, secret: companySecrets, taskBridge: agentApiKeys, operatorKey: boardApiKeys };
 type Kind = keyof typeof tables;
 type Binding = typeof deploymentResources.$inferSelect;
 type Fields = Record<string, unknown>;
@@ -74,9 +74,23 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
   for (const b of Object.values(m.taskBridges)) {
     if (!credentials[b.credential] || credentials[b.credential].trim().length < 32) throw new Error("Task bridge requires a runtime token of at least 32 characters");
   }
+  for (const k of Object.values(m.operatorKeys)) {
+    if (!credentials[k.credential] || credentials[k.credential].trim().length < 32) throw new Error("Operator key requires a runtime token of at least 32 characters");
+  }
+  if (Object.keys(m.operatorKeys).length && !options.descriptor.bootstrap) throw new Error("Declared operator keys require an operator bootstrap identity");
+  const workerAliases = new Set([
+    ...Object.values(m.agents).flatMap((a) => Object.values(a.credentials)),
+    ...Object.values(m.environments).flatMap((e) => e.credential ?? []),
+    ...Object.values(m.taskBridges).map((b) => b.credential),
+  ]);
+  if (Object.values(m.operatorKeys).some((k) => workerAliases.has(k.credential))) {
+    throw new Error("Operator key credentials cannot be shared with agents, environments or task bridges");
+  }
   stage = "database-preflight";
   const bridgeTokens = Object.values(m.taskBridges).map((b) => credentials[b.credential].trimEnd());
   if (new Set(bridgeTokens).size !== bridgeTokens.length) throw new Error("Task bridge tokens must be unique; use a new runtime token");
+  const keyTokens = [...bridgeTokens, ...Object.values(m.operatorKeys).map((k) => credentials[k.credential].trimEnd())];
+  if (new Set(keyTokens).size !== keyTokens.length) throw new Error("Operator key tokens must be unique; use a new runtime token");
    const publications: ActivityPublication[] = [];
    const afterCommit: Array<() => Promise<void>> = [];
    const lifecycleAgents = new Set<string>();
@@ -275,6 +289,16 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         create: async () => (await agentSvc!.createApiKey(getId("agent", b.agent), `deployment.${m.owner}.${key}`, scope, { responsibleUserId: actor.userId, token })).id,
         update: async () => { throw new Error("Task bridge rotation requires a new declaration key and removal of the old key"); } });
     }
+    const auditCompanies = [...new Set([...Object.keys(m.companies).map((c) => getId("company", c)),
+      ...owned.filter((b) => b.kind === "company").map((b) => b.resourceId)])];
+    if (Object.keys(m.operatorKeys).length && !auditCompanies.length) throw new Error("Operator keys require a declared company for audit records");
+    for (const [key, k] of Object.entries(m.operatorKeys).sort()) {
+      const token = credentials[k.credential].trimEnd();
+      add({ kind: "operatorKey", key, companyId: null, enabled: true,
+        fields: () => ({ keyHash: createHash("sha256").update(token).digest("hex") }),
+        create: async () => (await services!.boardAuthService(tx).createNamedBoardApiKey({ userId: actor.userId!, name: `deployment.${m.owner}.${key}`, expiresAt: null, token })).id,
+        update: async () => { throw new Error("Operator key rotation requires a new declaration key and removal of the old key"); } });
+    }
     const differences: DeploymentDifference[] = [];
     if (!identity) differences.push({ kind: "instance", key: options.descriptor.instance, action: "create", fields: ["instance"] });
     else if (options.singleOwner && !identity.general.owner) {
@@ -289,7 +313,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       const binding = bindings.get(`${spec.kind}/${spec.key}`);
       if (spec.adopt && binding && spec.adopt !== binding.resourceId) throw new Error("Adoption cannot change a managed identity");
       if (binding && binding.companyId !== spec.companyId) throw new Error("Moving managed resources between companies is unsupported");
-      if (binding && !binding.enabled && ["taskBridge", "secret"].includes(spec.kind)) throw new Error("Removed credentials require a new declaration key");
+      if (binding && !binding.enabled && ["taskBridge", "operatorKey", "secret"].includes(spec.kind)) throw new Error("Removed credentials require a new declaration key");
       if (ledger.some((b) => b.kind === spec.kind && b.resourceId === spec.id && (b.owner !== m.owner || b.key !== spec.key))) throw new Error("Resource ownership conflict");
       const table = tables[spec.kind];
       const existing = await tx.select({ id: table.id }).from(table).where(eq(table.id, spec.id));
@@ -337,6 +361,10 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         const matches = await tx.select({ id: agentApiKeys.id }).from(agentApiKeys).where(eq(agentApiKeys.keyHash, spec.fields().keyHash as string));
         if (matches.length) throw new Error("Task bridge tokens must be unique; use a new runtime token");
       }
+      if (spec.kind === "operatorKey" && !binding) {
+        const matches = await tx.select({ id: boardApiKeys.id }).from(boardApiKeys).where(eq(boardApiKeys.keyHash, spec.fields().keyHash as string));
+        if (matches.length) throw new Error("Operator key tokens must be unique; use a new runtime token");
+      }
       if (spec.adopt && spec.companyId && spec.kind !== "environment") {
         const rows = await tx.execute(sql`select company_id from ${table} where id = ${spec.id}`);
         if (rows[0]?.company_id !== spec.companyId) throw new Error("Adopted resource belongs to a different company");
@@ -361,7 +389,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         }
       }
       const changed = changedFields(binding?.fields ?? {}, spec.fields());
-      if (binding && spec.kind === "taskBridge" && changed.length) throw new Error("Task bridge rotation requires a new declaration key and removal of the old key");
+      if (binding && (spec.kind === "taskBridge" || spec.kind === "operatorKey") && changed.length) throw new Error("Task bridge rotation requires a new declaration key and removal of the old key");
       if (!binding || changed.length || binding.enabled !== spec.enabled) {
         const action: DeploymentDifference = { kind: spec.kind, key: spec.key, action: !binding ? (spec.adopt ? "adopt" : "create") : "update", fields: changed };
         actions.set(spec, action); differences.push(action);
@@ -416,13 +444,13 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         if (spec.kind === "company" && actor.userId && !binding) {
           await tx.insert(companyMemberships).values({ companyId, principalType: "user", principalId: actor.userId, status: "active", membershipRole: "owner" }).onConflictDoNothing();
         }
-        await logActivity(tx, { companyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.reconciled", entityType: spec.kind, entityId: spec.id, details: { key: spec.key, fields: actions.get(spec)!.fields } }, publications);
+        for (const auditCompanyId of spec.kind === "operatorKey" ? auditCompanies : [companyId]) await logActivity(tx, { companyId: auditCompanyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.reconciled", entityType: spec.kind, entityId: spec.id, details: { key: spec.key, fields: actions.get(spec)!.fields } }, publications);
       }
       for (const binding of removed) {
         if (binding.kind === "agent") lifecycleAgents.add(binding.resourceId);
         await disableResource(tx, binding.kind as Kind, binding.resourceId, agentLifecycle!);
         await tx.update(deploymentResources).set({ enabled: false }).where(and(eq(deploymentResources.owner, m.owner), eq(deploymentResources.kind, binding.kind), eq(deploymentResources.key, binding.key)));
-        await logActivity(tx, { companyId: binding.companyId ?? binding.resourceId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.disabled", entityType: binding.kind, entityId: binding.resourceId, details: { key: binding.key } }, publications);
+        for (const auditCompanyId of binding.kind === "operatorKey" ? auditCompanies : [binding.companyId ?? binding.resourceId]) await logActivity(tx, { companyId: auditCompanyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.disabled", entityType: binding.kind, entityId: binding.resourceId, details: { key: binding.key } }, publications);
       }
     }
     return {
@@ -460,6 +488,8 @@ async function disableResource(db: Db, kind: Kind, id: string, lifecycle: Return
     await db.update(companies).set({ status: "paused" }).where(and(eq(companies.id, id), eq(companies.status, "active")));
   } else if (kind === "taskBridge") {
     await db.update(agentApiKeys).set({ revokedAt: new Date() }).where(eq(agentApiKeys.id, id));
+  } else if (kind === "operatorKey") {
+    await db.update(boardApiKeys).set({ revokedAt: new Date() }).where(eq(boardApiKeys.id, id));
   } else if (kind === "schedule") {
     await db.update(routineTriggers).set({ enabled: false }).where(eq(routineTriggers.id, id));
   } else if (kind === "secret") {

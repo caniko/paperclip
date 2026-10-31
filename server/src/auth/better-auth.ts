@@ -1,6 +1,7 @@
 import type { Request, RequestHandler } from "express";
 import type { IncomingHttpHeaders } from "node:http";
 import { betterAuth, type Auth } from "better-auth";
+import { genericOAuth } from "better-auth/plugins";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { toNodeHandler } from "better-auth/node";
 import type { Db } from "@paperclipai/db";
@@ -255,6 +256,11 @@ export function createBetterAuthInstance(
       "For local development, set BETTER_AUTH_SECRET=paperclip-dev-secret in your .env file.",
     );
   }
+  const oidc = config.authOidc;
+  const oidcSecret = deploymentServerCredential("oidc") ?? process.env.PAPERCLIP_AUTH_OIDC_CLIENT_SECRET;
+  if (oidc && !oidcSecret) {
+    throw new Error("OIDC login requires the oidc client secret credential (or PAPERCLIP_AUTH_OIDC_CLIENT_SECRET)");
+  }
   const disableSecureCookies = shouldDisableSecureAuthCookies({
     deploymentMode: config.deploymentMode,
     deploymentExposure: config.deploymentExposure,
@@ -282,6 +288,7 @@ export function createBetterAuthInstance(
       disableSignUp: config.authDisableSignUp,
       autoSignIn: options.autoSignIn ?? true,
     },
+    ...(oidc ? { account: { accountLinking: { enabled: true } } } : {}),
     rateLimit: buildBetterAuthRateLimitOptions({
       deploymentMode: config.deploymentMode,
       deploymentExposure: config.deploymentExposure,
@@ -311,6 +318,24 @@ export function createBetterAuthInstance(
         }
       : {}),
   };
+
+  if (oidc) {
+    const oidcPlugin = genericOAuth({
+      config: [
+        {
+          providerId: oidc.providerId,
+          discoveryUrl: oidc.discoveryUrl,
+          accountIssuer: oidc.discoveryUrl.replace(/\/\.well-known\/openid-configuration$/, ""),
+          clientId: oidc.clientId,
+          clientSecret: oidcSecret,
+          scopes: ["openid", "email", "profile"],
+          pkce: true,
+          disableSignUp: true,
+        },
+      ],
+    });
+    (authConfig as { plugins?: unknown[] }).plugins = [...(authConfig.plugins ?? []), oidcPlugin];
+  }
 
   if (!baseUrl) {
     delete (authConfig as { baseURL?: string }).baseURL;

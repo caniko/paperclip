@@ -9,6 +9,12 @@
   runtimePath = lib.types.strMatching "^/[^[:space:]]+$";
   state = "${cfg.dataDir}/instances/${cfg.instance}";
   credentials = "${cfg.dataDir}/credentials";
+  publicHost = let
+    match = builtins.match "[a-z]+://([^/:?#[]+).*" cfg.publicBaseUrl;
+  in
+    if match == null
+    then ""
+    else builtins.head match;
   application = json.generate "paperclip-${cfg.instance}-config.json" {
     "$meta" = {
       version = 1;
@@ -36,14 +42,20 @@
       bind = "loopback";
       host = "127.0.0.1";
       inherit (cfg) port;
-      allowedHostnames = ["127.0.0.1" "localhost"];
+      allowedHostnames = lib.unique (["127.0.0.1" "localhost"] ++ lib.optional (publicHost != "") publicHost ++ cfg.allowedHostnames);
       serveUi = true;
     };
-    auth = {
-      baseUrlMode = "explicit";
-      inherit (cfg) publicBaseUrl;
-      disableSignUp = true;
-    };
+    auth =
+      {
+        baseUrlMode = "explicit";
+        inherit (cfg) publicBaseUrl;
+        disableSignUp = true;
+      }
+      // lib.optionalAttrs (cfg.oidc != null) {
+        oidc = {
+          inherit (cfg.oidc) providerId displayName discoveryUrl clientId;
+        };
+      };
     storage = {
       provider = "local_disk";
       localDisk.baseDir = "${state}/data/storage";
@@ -58,13 +70,19 @@
     home = cfg.dataDir;
     inherit (cfg) instance;
     executionProfile = "trusted-local";
+    apiUrl = cfg.localApiUrl;
     configFile = application;
-    manifestFile = json.generate "paperclip-${cfg.instance}-manifest.json" cfg.manifest;
-    inherit (cfg) credentialFiles;
-    serverCredentials = {
-      auth = cfg.authSecretFile;
-      encryption = cfg.encryptionKeyFile;
-    };
+    manifestFile = json.generate "paperclip-${cfg.instance}-manifest.json" (cfg.manifest
+      // lib.optionalAttrs (cfg.operatorKeys != {}) {
+        operatorKeys = lib.mapAttrs (key: _: {credential = "operator-${key}";}) cfg.operatorKeys;
+      });
+    credentialFiles = cfg.credentialFiles // lib.mapAttrs' (key: file: lib.nameValuePair "operator-${key}" file) cfg.operatorKeys;
+    serverCredentials =
+      {
+        auth = cfg.authSecretFile;
+        encryption = cfg.encryptionKeyFile;
+      }
+      // lib.optionalAttrs (cfg.oidc != null) {oidc = cfg.oidc.secretFile;};
     embedded = {
       user = "paperclip";
       database = "paperclip";
@@ -108,8 +126,18 @@ in {
       default = "http://127.0.0.1:${toString cfg.port}";
       description = "Canonical browser and agent URL.";
     };
+    allowedHostnames = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [];
+      description = "Extra hostnames accepted in the Host header. Loopback names and the publicBaseUrl hostname are always allowed.";
+    };
+    localApiUrl = lib.mkOption {
+      type = lib.types.str;
+      default = "http://127.0.0.1:${toString cfg.port}";
+      description = "API URL that local agents and runners receive as PAPERCLIP_API_URL, independent of publicBaseUrl.";
+    };
     manifest = lib.mkOption {
-      type = json.type;
+      inherit (json) type;
       default =
         config.programs.paperclip.deployments.${
           cfg.instance
@@ -125,6 +153,43 @@ in {
       default = {};
       example = {gateway = "/run/user/1000/paperclip/gateway";};
       description = "Protected runtime files for credential aliases bound by the manifest's agents, environments, and task bridges.";
+    };
+    oidc = lib.mkOption {
+      default = null;
+      description = "OpenID Connect board login. Only a user with the same email can sign in; the callback is `<publicBaseUrl>/api/auth/callback/<providerId>`.";
+      type = lib.types.nullOr (lib.types.submodule {
+        options = {
+          providerId = lib.mkOption {
+            type = lib.types.strMatching "[a-z][a-z0-9-]{0,31}";
+            default = "kanidm";
+            description = "Provider identifier used in the callback path.";
+          };
+          displayName = lib.mkOption {
+            type = lib.types.str;
+            default = "Kanidm";
+            description = "Name shown on the sign-in button.";
+          };
+          discoveryUrl = lib.mkOption {
+            type = lib.types.str;
+            description = "OpenID Connect discovery document URL.";
+          };
+          clientId = lib.mkOption {
+            type = lib.types.str;
+            description = "OAuth client identifier.";
+          };
+          secretFile = lib.mkOption {
+            type = runtimePath;
+            default = "${credentials}/oidc";
+            description = "Protected runtime file holding the OAuth client secret.";
+          };
+        };
+      });
+    };
+    operatorKeys = lib.mkOption {
+      type = lib.types.attrsOf runtimePath;
+      default = {};
+      example = {cli = "/run/user/1000/paperclip/operator-cli";};
+      description = "Board API keys for the initial operator, by declaration key. Each runtime file holds a token of at least 32 characters; removing an entry revokes its key and rotation needs a new entry.";
     };
     authSecretFile = lib.mkOption {
       type = runtimePath;
@@ -182,8 +247,12 @@ in {
         message = "Paperclip persistent state must be outside the Nix store.";
       }
       {
-        assertion = lib.all (file: !lib.hasPrefix "/nix/store/" file) ([cfg.authSecretFile cfg.encryptionKeyFile cfg.databasePasswordFile cfg.operator.passwordFile] ++ lib.attrValues cfg.credentialFiles);
+        assertion = lib.all (file: !lib.hasPrefix "/nix/store/" file) ([cfg.authSecretFile cfg.encryptionKeyFile cfg.databasePasswordFile cfg.operator.passwordFile] ++ lib.attrValues cfg.credentialFiles ++ lib.attrValues cfg.operatorKeys ++ lib.optional (cfg.oidc != null) cfg.oidc.secretFile);
         message = "Paperclip credentials must be runtime files outside the Nix store.";
+      }
+      {
+        assertion = lib.all (key: builtins.match "[a-z][a-z0-9_-]{0,53}" key != null && !(cfg.credentialFiles ? "operator-${key}")) (lib.attrNames cfg.operatorKeys);
+        message = "Paperclip operator key names must be 1-54 characters and must not collide with a credentialFiles alias named operator-<name>.";
       }
       {
         assertion = cfg.port != cfg.databasePort;
@@ -202,7 +271,7 @@ in {
         Type = "exec";
         ExecStartPre = "${pkgs.coreutils}/bin/install -d -m 0700 ${lib.escapeShellArg cfg.dataDir}";
         ExecStart = "${cfg.package}/bin/paperclip-deployment ${descriptor}";
-        ExecStartPost = "${pkgs.curl}/bin/curl --fail --silent --output /dev/null --retry 30 --retry-delay 1 --retry-connrefused --max-time 2 http://127.0.0.1:${toString cfg.port}/api/health";
+        ExecStartPost = "${pkgs.curl}/bin/curl --fail --silent --output /dev/null --retry 1000 --retry-delay 1 --retry-max-time 110 --retry-connrefused --max-time 2 http://127.0.0.1:${toString cfg.port}/api/health";
         WorkingDirectory = config.home.homeDirectory;
         Environment = lib.mapAttrsToList (name: value: "${name}=${value}") {
           HOME = config.home.homeDirectory;

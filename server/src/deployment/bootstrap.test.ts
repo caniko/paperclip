@@ -61,6 +61,17 @@ describe("pre-listen operator bootstrap", () => {
     expect(await db.select().from(authUsers)).toHaveLength(1);
   }, 30_000);
 
+  it("marks the operator verified once OIDC login is configured", async () => {
+    const oidc = { providerId: "kanidm", displayName: "Kanidm", clientId: "paperclip",
+      discoveryUrl: "https://idm.example.test/oauth2/openid/paperclip/.well-known/openid-configuration" };
+    const [before] = await db.select().from(authUsers).where(eq(authUsers.email, input.email));
+    expect(before.emailVerified).toBe(false);
+    await bootstrapOperator(db, { ...config, authOidc: oidc }, input, false);
+    expect((await db.select().from(authUsers).where(eq(authUsers.email, input.email)))[0].emailVerified).toBe(false);
+    await bootstrapOperator(db, { ...config, authOidc: oidc }, input);
+    expect((await db.select().from(authUsers).where(eq(authUsers.email, input.email)))[0].emailVerified).toBe(true);
+  });
+
   it("refuses to replace an administrator or adopt a non-admin account", async () => {
     await db.insert(authUsers).values({ id: "non-admin", name: "Existing", email: "existing@example.test",
       createdAt: new Date(), updatedAt: new Date() });

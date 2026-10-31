@@ -4,6 +4,15 @@ import { deploymentManifestSchema } from "./deployment-manifest.js";
 const company = { fields: { name: "Example" } };
 const agent = { company: "example", fields: { name: "Worker", adapterType: "process", adapterConfig: { command: "true" } } };
 describe("deployment manifest", () => {
+  it("declares operator keys by credential alias only", () => {
+    const manifest = { version: 1, owner: "deployment", companies: { example: company } };
+    expect(deploymentManifestSchema.parse(manifest).operatorKeys).toEqual({});
+    expect(deploymentManifestSchema.parse({ ...manifest, operatorKeys: { ops: { credential: "operator" } } }).operatorKeys)
+      .toEqual({ ops: { credential: "operator" } });
+    for (const invalid of [{ ops: {} }, { ops: { credential: "operator", token: "secret" } }, { Ops: { credential: "operator" } }]) {
+      expect(deploymentManifestSchema.safeParse({ ...manifest, operatorKeys: invalid }).success).toBe(false);
+    }
+  });
   it("resolves company-owned SSH environments by declaration key without database IDs or key material", () => {
     const ssh = { company: "example", credential: "executor", fields: { name: "Atlas", driver: "ssh",
       config: { host: "atlas", port: 1337, username: "can", remoteWorkspacePath: "/work", knownHosts: "atlas ssh-ed25519 AAAA", strictHostKeyChecking: true } } };
