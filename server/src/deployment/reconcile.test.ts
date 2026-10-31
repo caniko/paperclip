@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, budgetPolicies, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
 import { reconcileDeployment } from "./reconcile.js";
 import { loadConfig } from "../config.js";
@@ -121,6 +121,19 @@ it("rejects task bridges that share one token before writing any key", async () 
   const declaration = { ...base, owner: "duplicate-bridges", taskBridges: { ...base.taskBridges, other: { ...base.taskBridges.tasks } } };
   await expect(reconcile(declaration)).rejects.toThrow("Task bridge tokens must be unique");
   expect(await db.select().from(companies).where(eq(companies.name, "Duplicate bridges"))).toHaveLength(0);
+}, 90000);
+
+it("reorganizes reporting lines whose old relationships would look cyclic", async () => {
+  const agent = (name: string, reportsTo: string | null) => ({ ...manifest.agents.worker, reportsTo, fields: { ...manifest.agents.worker.fields, name } });
+  const base = { ...structuredClone(manifest), owner: "reorg", routines: {}, taskBridges: {} };
+  base.companies.example.fields.name = "Reorg";
+  const before = { ...base, agents: { a: agent("Agent A", "b"), b: agent("Agent B", "c"), c: agent("Agent C", null) } };
+  const first = await reconcile(before);
+  const after = { ...base, agents: { a: agent("Agent A", null), b: agent("Agent B", "a"), c: agent("Agent C", "b") } };
+  await reconcile(after);
+  const rows = await db.select({ id: agents.id, reportsTo: agents.reportsTo }).from(agents).where(inArray(agents.id, ["a", "b", "c"].map((k) => first.bindings[`agent/${k}`])));
+  const parent = (k: string) => rows.find((r) => r.id === first.bindings[`agent/${k}`])!.reportsTo;
+  expect([parent("a"), parent("b"), parent("c")]).toEqual([null, first.bindings["agent/a"], first.bindings["agent/b"]]);
 }, 90000);
 
 it.each(["manual", "budget"])("reenables declarations without resuming %s pauses", async (pauseReason) => {
