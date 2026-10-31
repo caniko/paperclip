@@ -161,12 +161,14 @@ jobs:
           mkdir -p "$EVIDENCE/warm-fixtures/transient" "$EVIDENCE/warm-fixtures/managed"
           export PAPERCLIP_ATTACH_TRANSITION_FIXTURE_DIRECTORY="$EVIDENCE/warm-fixtures/transient"
           export PAPERCLIP_ATTACH_TRANSITION_FIXTURE_SCOPE=transient
-          pnpm --filter @paperclipai/paperclip-runner exec vitest run src/live/runnerd-codex-transport.test.ts -t '^recovers a warm attachment with a fresh controller and runner \((before-result|after-result|after-activation|before-confirmation|after-confirmation), routed=true, fault=none, followup=undefined\)$' --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter="$GITHUB_WORKSPACE/scripts/qualification-junit-reporter.mjs" --outputFile.junit="$EVIDENCE/transient-producer.junit" 2>&1 | tee "$EVIDENCE/transient-producer.log"
+          pnpm --filter @paperclipai/paperclip-runner exec vitest run src/live/runnerd-codex-transport.test.ts -t '^recovers a warm attachment with a fresh controller and runner \((before-result|after-result|after-activation|before-confirmation|after-confirmation), routed=true, fault=none, followup=undefined, external=undefined, prepared=undefined\)$' --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter="$GITHUB_WORKSPACE/scripts/qualification-junit-reporter.mjs" --outputFile.junit="$EVIDENCE/transient-producer.junit" 2>&1 | tee "$EVIDENCE/transient-producer.log"
           export PAPERCLIP_ATTACH_TRANSITION_FIXTURE_DIRECTORY="$EVIDENCE/warm-fixtures/managed"
           export PAPERCLIP_ATTACH_TRANSITION_FIXTURE_SCOPE=managed
-          pnpm --filter @paperclipai/paperclip-runner exec vitest run src/live/runnerd-codex-transport.test.ts -t '^recovers a warm attachment with a fresh controller and runner \(before-result, routed=true, fault=none, followup=undefined\)$' --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter="$GITHUB_WORKSPACE/scripts/qualification-junit-reporter.mjs" --outputFile.junit="$EVIDENCE/managed-producer.junit" 2>&1 | tee "$EVIDENCE/managed-producer.log"
+          pnpm --filter @paperclipai/paperclip-runner exec vitest run src/live/runnerd-codex-transport.test.ts -t '^recovers a warm attachment with a fresh controller and runner \(before-result, routed=true, fault=none, followup=undefined, external=undefined, prepared=undefined\)$' --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter="$GITHUB_WORKSPACE/scripts/qualification-junit-reporter.mjs" --outputFile.junit="$EVIDENCE/managed-producer.junit" 2>&1 | tee "$EVIDENCE/managed-producer.log"
           printf '%s\n' "PAPERCLIP_WARM_TRANSITION_FIXTURE_DIRECTORY=$EVIDENCE/warm-fixtures/transient" "PAPERCLIP_WARM_TRANSITION_MANAGED_FIXTURE_DIRECTORY=$EVIDENCE/warm-fixtures/managed" >> "$GITHUB_ENV"
       - name: Execute every source-mapped profile case once
+        # A hung runnerd scenario must end the step so the profile log and evidence still upload.
+        timeout-minutes: ${{ matrix.profile == 'runnerd' && 45 || 110 }}
         env:
           PROFILE: ${{ matrix.profile }}
           PORTABILITY_IMPORT_BENCH: ${{ matrix.profile == 'import-benchmark' && '1' || '' }}
@@ -181,6 +183,10 @@ jobs:
           set -euo pipefail
           if [ "$PROFILE" = runnerd ]; then
             export PAPERCLIP_WARM_TRANSITION_EXECUTION_EVIDENCE="$EVIDENCE/warm-transition-execution"
+            # Five minutes before the 45-minute cap, retain process, container and worker CPU evidence.
+            bash .github/scripts/runnerd-hang-diagnostics.sh "$EVIDENCE" 2400 < /dev/null > "$EVIDENCE/hang-diagnostics.log" 2>&1 &
+            watchdog=$!
+            trap 'kill "$watchdog" 2>/dev/null || true' EXIT
           fi
           node .github/scripts/run-qualification-profile.mjs "$PROFILE" "$EVIDENCE" 2>&1 | tee "$EVIDENCE/profile.log"
           python .github/scripts/verify_profile_evidence.py "$EVIDENCE"

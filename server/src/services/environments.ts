@@ -1,3 +1,4 @@
+import { writeEnvironmentCleanup, notifyEnvironmentCleanup } from "./environment-cleanup-notifications.js";
 import { withoutCleanupVerification } from "./cleanup-verification-proof.js";
 import { randomUUID } from "node:crypto";
 
@@ -1716,7 +1717,7 @@ export function environmentService(db: Db) {
         : sql`${environmentLeases.metadata} - 'remoteExecutionTermination'`;
       const cleanupSettled = options?.expectedPendingCleanupAttemptId && options.cleanupStatus === "success"
         && status !== "pending_cleanup";
-      const row = await db
+      const row = await writeEnvironmentCleanup(db, tx => tx
         .update(environmentLeases)
         .set({
           status,
@@ -1738,7 +1739,7 @@ export function environmentService(db: Db) {
               sql`${environmentLeases.metadata}->>'pendingCleanupAttemptId' = ${options.expectedPendingCleanupAttemptId}`)
           : undefined))
         .returning()
-        .then((rows) => rows[0] ?? null);
+        .then((rows) => rows[0] ?? null));
       return row ? toEnvironmentLease(row) : null;
     },
 
@@ -1787,6 +1788,7 @@ export function environmentService(db: Db) {
           .where(eq(environments.id, input.environmentId))
           .for("update");
         const environmentIdForRow = environmentRows[0]?.id ?? null;
+        await notifyEnvironmentCleanup(tx);
         return tx
           .insert(environmentLeases)
           .values({
@@ -1822,7 +1824,7 @@ export function environmentService(db: Db) {
       id: string,
       metadata: Record<string, unknown> | null,
     ): Promise<EnvironmentLease | null> => {
-      const row = await db
+      const row = await writeEnvironmentCleanup(db, tx => tx
         .update(environmentLeases)
         .set({
           metadata: preserveAdapterExecutionMetadata(withoutCleanupVerification(metadata)),
@@ -1831,7 +1833,7 @@ export function environmentService(db: Db) {
         })
         .where(eq(environmentLeases.id, id))
         .returning()
-        .then((rows) => rows[0] ?? null);
+        .then((rows) => rows[0] ?? null));
       return row ? toEnvironmentLease(row) : null;
     },
 
@@ -1840,7 +1842,7 @@ export function environmentService(db: Db) {
       status: Extract<EnvironmentLeaseStatus, "released" | "expired" | "failed"> = "released",
     ): Promise<EnvironmentLease[]> => {
       const now = new Date();
-      const rows = await db
+      const rows = await writeEnvironmentCleanup(db, tx => tx
         .update(environmentLeases)
         .set({
           status,
@@ -1855,7 +1857,7 @@ export function environmentService(db: Db) {
             leaseAdapterExecutionNotHeldCondition(),
           ),
         )
-        .returning();
+        .returning());
       return rows.map(toEnvironmentLease);
     },
   };

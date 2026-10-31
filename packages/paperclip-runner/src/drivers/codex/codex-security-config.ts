@@ -257,11 +257,10 @@ export function createIsolatedCodexAppServerArgs(
   readOnlyRoots: string[] = [],
   /** Server-registered run copy, never an environment/config-supplied root. */
   instructionWorkingCopyRoot?: string,
-  // Native runner profiles persist these values and supply them on each
-  // thread/start and thread/resume instead of exceeding the runner's argv cap.
+  protectedPaths: string[] = [],
+  disableWebSearch = false,
   commandEnvironmentTransport: "argv" | "thread" = "argv",
   persistedCommandEnvironment?: Record<string, unknown>,
-  protectedPaths: string[] = [],
 ): string[] {
   const explicitSource = source;
   source ??= process.env;
@@ -281,8 +280,6 @@ export function createIsolatedCodexAppServerArgs(
   // Selected task values are inherited, never serialized into configuration argv.
   for (const key of configuredEnvironmentKeys(explicitSource)) delete commandEnvironment[key];
   if (instructionWorkingCopyRoot && source.AGENT_HOME === instructionWorkingCopyRoot) commandEnvironment.AGENT_HOME = instructionWorkingCopyRoot;
-  // Run attachment keeps the base map even when the current environment omits
-  // its keys. AGENT_HOME and credentials must still come from the current run.
   const persistedKeys = commandEnvironmentTransport === "thread"
     ? ["PATH", "PATHEXT", "SystemRoot", "WINDIR", "LANG", "LC_ALL", "HOME", "ZDOTDIR", "BASH_ENV"]
       .filter((key) => typeof persistedCommandEnvironment?.[key] === "string")
@@ -370,6 +367,7 @@ export function createIsolatedCodexAppServerArgs(
     ...(externalRunnerSandbox
       ? ["--dangerously-bypass-approvals-and-sandbox"]
       : []),
+    ...(disableWebSearch ? ["-c", 'web_search="disabled"'] : []),
     "app-server",
   ];
 }

@@ -1,3 +1,4 @@
+import { notifyExecutionRunWork } from "./execution-control-notifications.js";
 import { hasRequiredWorkspaceRecovery, preserveWorkspaceRestoreRecoveryMetadata, LEGACY_WORKSPACE_RECOVERY_SCHEMA } from "./workspace-restore-recovery-state.js";
 import { hasUnrestoredRemoteWorkspace, preserveLegacyWorkspaceRestoreSources, type LegacyWorkspaceRestoreSource } from "./legacy-workspace-restore-recovery.js";
 import { isPreDispatchReviewWaitVerified } from "./pre-dispatch-review-wait.js";
@@ -5,8 +6,9 @@ import { isPreDispatchExecutionWaitVerified } from "./pre-dispatch-execution-wai
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { normalizeMaxTurnStopReason } from "./heartbeat-stop-metadata.js";
 import { claimedAdapterType, hasConversationContinuationPolicy } from "./conversation-continuation.js";
+import { canonicalExecutionUuid } from "./execution-identity.js";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
 import { environmentLeases, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations, type Db } from "@paperclipai/db";
 import { issueRecoveryActionService } from "./issue-recovery-actions.js";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
@@ -14,10 +16,28 @@ import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { logActivity } from "./activity-log.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
 import { issueService } from "./issues.js";
-import { adapterExecutionOwnershipNotHeldCondition, lockRunForAdapterSettlement } from "./adapter-execution-ownership.js";
+import { adapterExecutionOwnershipNotHeldCondition } from "./adapter-execution-ownership.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 export const LEGACY_RECOVERY_CAUSE = "legacy_execution_requires_reconciliation";
+
+const unusedReconciliationContextKeys = [
+  "executionContinuation", "paperclipWake", "paperclipWakeComment",
+  "paperclipTaskMarkdown", "paperclipTaskMarkdownCompact", "paperclipTaskAssignment",
+  "paperclipTaskAssignmentCompact", "paperclipWorkspace", "paperclipEnvironment", "paperclipContinuationSummary",
+] as const;
+
+export const legacyReconciliationRunFields = {
+  ...getTableColumns(heartbeatRuns),
+  contextSnapshot: sql<Run["contextSnapshot"]>`case
+    when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
+      then ${heartbeatRuns.contextSnapshot} - ARRAY[${sql.join(unusedReconciliationContextKeys.map(key => sql`${key}`), sql`, `)}]::text[]
+    else ${heartbeatRuns.contextSnapshot} end`,
+  runnerProfileJson: sql<Run["runnerProfileJson"]>`case
+    when ${heartbeatRuns.runtimeMode} = 'native' and jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object'
+      then ${heartbeatRuns.runnerProfileJson} - 'nativeExecutionInput'
+    else ${heartbeatRuns.runnerProfileJson} end`,
+};
 
 /** Error families describe availability, not whether earlier actions happened. */
 export function legacyExecutionNeedsReconciliation(
@@ -99,22 +119,26 @@ export async function terminalizeLegacyExecution(input: {
           )
           .for("no key update")
       : [];
-    await lockRunForAdapterSettlement(tx, run.id);
-    const [current] = await tx.select().from(heartbeatRuns).where(and(
+    // Same lock as lockRunForAdapterSettlement, taken by the one read of the run row.
+    const [current] = await tx.select({ runtimeMode: heartbeatRuns.runtimeMode, status: heartbeatRuns.status,
+      resultJson: heartbeatRuns.resultJson, executionStatusDeliveryId: heartbeatRuns.executionStatusDeliveryId,
+    }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
-    ));
+    )).for("no key update");
     if (!current || (current.runtimeMode !== "legacy" && !(input.recordRestoreFailureOnly && current.runtimeMode === "native")) ||
         (!input.recordRestoreFailureOnly && !(input.fromStatuses ?? [run.status]).includes(current.status))) return null;
     if (patch?.resultJson !== undefined) patch = { ...patch,
       resultJson: preserveWorkspaceRestoreRecoveryMetadata(current.resultJson,
         input.recordRestoreFailureOnly ? { ...current.resultJson, ...patch.resultJson } : patch.resultJson),
     };
+    await notifyExecutionRunWork(tx);
     let [updated] = await tx
       .update(heartbeatRuns)
       .set({
         status: input.recordRestoreFailureOnly ? current.status : status,
         ...patch,
-        executionStatusDeliveryId: randomUUID(),
+        executionStatusDeliveryId: input.recordRestoreFailureOnly || current.status !== status || Object.keys(patch ?? {}).length > 0
+          ? randomUUID() : current.executionStatusDeliveryId,
         updatedAt: new Date(),
       })
       .where(
@@ -131,10 +155,16 @@ export async function terminalizeLegacyExecution(input: {
     const retainedLeaseIds = await preserveLegacyWorkspaceRestoreSources(tx as unknown as Db,
       input.recordRestoreFailureOnly ? { ...updated, status: "failed" } : updated, input.workspaceRestoreSource);
     if (retainedLeaseIds.length) {
-      [updated] = await tx.update(heartbeatRuns).set({ resultJson: {
+      const retainedResult = {
         ...updated.resultJson,
-        workspaceRestoreRecovery: { schema: LEGACY_WORKSPACE_RECOVERY_SCHEMA, leaseIds: retainedLeaseIds },
-      } }).where(and(eq(heartbeatRuns.id, updated.id), eq(heartbeatRuns.companyId, updated.companyId))).returning();
+        workspaceRestoreRecovery: { schema: LEGACY_WORKSPACE_RECOVERY_SCHEMA, leaseIds: [...retainedLeaseIds].sort() },
+      };
+      const [retained] = await tx.update(heartbeatRuns).set({
+        resultJson: retainedResult,
+        executionStatusDeliveryId: randomUUID(),
+      }).where(and(eq(heartbeatRuns.id, updated.id), eq(heartbeatRuns.companyId, updated.companyId),
+        sql`${heartbeatRuns.resultJson} is distinct from ${JSON.stringify(retainedResult)}::jsonb`)).returning();
+      if (retained) updated = retained;
     }
     const needsRecovery = input.recordRestoreFailureOnly
       ? retainedLeaseIds.length > 0 || hasRequiredWorkspaceRecovery(updated.resultJson)
@@ -200,8 +230,10 @@ export async function terminalizeLegacyExecution(input: {
       (!["done", "cancelled"].includes(task.status) || retainedLeaseIds.length > 0)
     ) {
       // Periodic stranded-work checks may revisit this terminal run before its
-      // reconciled continuation is dispatched. Preserve the recorded decision
-      // and an existing unsafe-workspace hold instead of creating another one.
+      // reconciled or explicitly requested continuation is dispatched. Preserve
+      // its recorded decision instead of creating another hold. The explicit
+      // receipt must identify an actual successor under the same task/agent;
+      // retained user intent remains authoritative after that successor finishes.
       const [reconciled] = await tx.select({ id: issueRecoveryActions.id })
         .from(issueRecoveryActions).where(and(
           eq(issueRecoveryActions.companyId, run.companyId),
@@ -212,6 +244,20 @@ export async function terminalizeLegacyExecution(input: {
           ] : []),
           or(
             sql`${issueRecoveryActions.evidence}->'executionReconciliation'->>'runId' = ${run.id}`,
+            and(
+              sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
+              sql`exists (
+                select 1 from heartbeat_runs successor
+                where successor.id = ${canonicalExecutionUuid(sql`${issueRecoveryActions.evidence}->'explicitUserContinuation'->>'runId'`)}
+                  and successor.company_id = ${run.companyId} and successor.agent_id = ${run.agentId}
+                  and coalesce(successor.native_issue_id::text, successor.issue_id::text,
+                    successor.context_snapshot->>'issueId') = ${task.id}
+                  and successor.context_snapshot->>'previousRunId' = ${issueRecoveryActions.evidence}->'explicitUserContinuation'->>'previousRunId'
+                  and successor.context_snapshot->'explicitUserContinuation'->>'previousRunId' = ${issueRecoveryActions.evidence}->'explicitUserContinuation'->>'previousRunId'
+                  and successor.context_snapshot->'explicitUserContinuation'->>'commentId' is not distinct from
+                    ${issueRecoveryActions.evidence}->'explicitUserContinuation'->>'commentId'
+              )`,
+            ),
             and(
               sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
               or(sql`${issueRecoveryActions.evidence}->>'workspaceRestoreFailure' = 'restore_unsafe_archive'`,

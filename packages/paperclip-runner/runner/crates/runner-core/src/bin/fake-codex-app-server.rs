@@ -3,7 +3,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -651,6 +651,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let require_codex_home_auth = args
         .iter()
         .any(|value| value == "--require-codex-home-auth");
+    if args
+        .iter()
+        .any(|value| value == "--require-otel-environment")
+    {
+        for (name, expected) in [
+            (
+                "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+                "authorization=Bearer%20logs-fixture",
+            ),
+            (
+                "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+                "authorization=Bearer%20traces-fixture",
+            ),
+        ] {
+            assert_eq!(std::env::var(name).as_deref(), Ok(expected));
+        }
+        assert!(std::env::var_os("OTEL_EXPORTER_OTLP_HEADERS").is_none());
+        assert!(std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT").is_none());
+    }
     let durable_turn_ids = args.iter().any(|value| value == "--durable-turn-ids");
     let hold_first_durable_turn = args
         .iter()
@@ -661,6 +680,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let expected_native_task_context_file = argument(&args, "--expected-native-task-context-file");
     let emit_tool_call = args.iter().any(|value| value == "--emit-tool-call");
     let completion_result_file = argument(&args, "--completion-result-file");
+    let terminal_result = argument(&args, "--terminal-result-file")
+        .map(|path| -> Result<Value, Box<dyn std::error::Error>> {
+            Ok(serde_json::from_str(&fs::read_to_string(path)?)?)
+        })
+        .transpose()?;
     let replay_completed_tool_call = args
         .iter()
         .any(|value| value == "--replay-completed-tool-call");
@@ -703,6 +727,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let complete_read_only_probes = args
         .iter()
         .any(|value| value == "--complete-read-only-probes");
+    let held_output_count = argument(&args, "--held-output-count")
+        .map(|value| value.parse::<usize>())
+        .transpose()?
+        .unwrap_or(64);
+    if !(1..=4096).contains(&held_output_count) {
+        return Err("--held-output-count must be between 1 and 4096".into());
+    }
     let exit_after_turn_start = args.iter().any(|value| value == "--exit-after-turn-start");
     let exit_after_turn_completion = args
         .iter()
@@ -990,6 +1021,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 log_call(call_log.as_deref(), "discovery:success")?;
                 finish_turn(&state_path, &mut state, "completed")?;
             }
+            continue;
+        }
+        if message.get("method").is_none()
+            && message.get("id") == Some(&json!("terminal-result-request"))
+        {
+            let success = message.pointer("/result/success") == Some(&json!(true));
+            log_call(
+                call_log.as_deref(),
+                if success {
+                    "terminal-result:accepted"
+                } else {
+                    "terminal-result:rejected"
+                },
+            )?;
+            finish_turn(
+                &state_path,
+                &mut state,
+                if success { "completed" } else { "failed" },
+            )?;
             continue;
         }
         if message.get("method").is_none() && message.get("id") == Some(&json!("tool-request-1")) {
@@ -1765,6 +1815,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "arguments":{"query":{"PRIVATE_QUERY":"private search"}}
                         }}),
                     )?;
+                } else if let Some(result) = &terminal_result {
+                    send(json!({
+                        "id": "terminal-result-request", "method": "item/tool/call",
+                        "params": { "threadId": state.thread_id, "turnId": provider_turn_id,
+                            "callId": "terminal-result-call", "tool": "paperclip_finish", "arguments": result }
+                    }))?;
                 } else if emit_tool_call {
                     send(json!({
                         "id": "tool-request-1",
@@ -1794,6 +1850,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     finish_turn(&state_path, &mut state, "completed")?;
                 } else if emit_split_event_burst {
                     send_split_event_burst(&state, split_event_prefix_count)?;
+                } else if hold_turn && args.iter().any(|arg| arg == "--held-output") {
+                    if let Some(release_file) = argument(&args, "--held-output-release-file") {
+                        let deadline = Instant::now() + Duration::from_secs(60);
+                        while !Path::new(&release_file).exists() {
+                            if Instant::now() >= deadline {
+                                return Err("held output was not released within 60 seconds".into());
+                            }
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                    }
+                    for index in 0..held_output_count {
+                        send(json!({"method": "item/agentMessage/delta", "params": {
+                            "threadId": state.thread_id, "turnId": provider_turn_id,
+                            "itemId": "held-output", "delta": format!("still computing {index} ")
+                        }}))?;
+                    }
                 } else if emit_question {
                     send_question(&state)?;
                 } else if !hold_turn {

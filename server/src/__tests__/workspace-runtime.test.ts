@@ -1987,9 +1987,6 @@ process.stderr.write(${JSON.stringify(stderr)}, () => { process.exitCode = ${cod
     const sharedEnvPath = path.join(sharedConfigDir, ".env");
 
     // Keep this server-side fixture on provision-worktree.sh's config writer path;
-    // CLI/database seeding is covered by the CLI worktree tests. Include only
-    // required tools (including Git hook stdin/temporary-file handling), so
-    // pnpm/paperclipai stay absent even on non-FHS hosts.
     await fs.symlink(process.execPath, path.join(isolatedBin, "node"));
     for (const command of ["bash", "sh", "git", "env", "dirname", "basename", "mkdir", "find", "sed", "ln", "rm", "mktemp", "cat"]) {
       const { stdout } = await execFileAsync("sh", ["-c", 'command -v "$1"', "sh", command]);
@@ -2163,7 +2160,6 @@ process.stderr.write(${JSON.stringify(stderr)}, () => { process.exitCode = ${cod
       expect(reusedConfigContents.server.port).toBe(preservedPort);
       expect(reusedConfigContents.database.embeddedPostgresDataDir).toBe(path.join(expectedInstanceRoot, "db"));
       expect(reusedEnvContents).toContain('PAPERCLIP_WORKTREE_COLOR="#112233"');
-      // A failed process substitution can still leave the shell exit code at zero.
       const provisions = operations.filter((entry) => entry.phase === "workspace_provision");
       expect(provisions).toHaveLength(2);
       for (const operation of provisions) {
@@ -7518,7 +7514,7 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
     const blockerScript = [
       "const net=require('node:net');",
       "const port=Number(process.argv[1]);",
-      "net.createServer((socket)=>socket.destroy()).listen(port,'127.0.0.1');",
+      "net.createServer((socket)=>socket.destroy()).listen(port,'127.0.0.1',()=>process.send({ready:true}));",
     ].join("");
     const raceScript = [
       "const fs=require('node:fs');",
@@ -7531,8 +7527,10 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
       "const start=()=>http.createServer((_req,res)=>res.end('ok')).listen(port,'127.0.0.1');",
       "if(!fs.existsSync(marker)){",
       "fs.writeFileSync(marker,String(port));",
-      "const blocker=spawn(process.execPath,['-e',blockerScript,String(port)],{detached:true,stdio:'ignore'});",
-      "fs.writeFileSync(pidFile,String(blocker.pid));blocker.unref();setTimeout(start,200);",
+      "const blocker=spawn(process.execPath,['-e',blockerScript,String(port)],{detached:true,stdio:['ignore','ignore','ignore','ipc']});",
+      "fs.writeFileSync(pidFile,String(blocker.pid));",
+      "const readyDeadline=setTimeout(()=>{throw new Error('Fixture blocker did not become ready');},5000);",
+      "blocker.once('message',(message)=>{if(message?.ready!==true)throw new Error('Invalid fixture readiness message');clearTimeout(readyDeadline);blocker.disconnect();blocker.unref();start();});",
       "}else{start();}",
       "setInterval(()=>{},1000);",
     ].join("");

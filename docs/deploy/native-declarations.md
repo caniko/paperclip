@@ -354,9 +354,10 @@ local encrypted material without recording secret-access timestamps. Preserve
 that key, runtime credentials, storage, and the migration journal in backups.
 Application generation rollback is not database rollback.
 
-Migration `0355_sweet_titanium_man` follows upstream `0354`. It retains
+Migration `0398_sweet_titanium_man` follows upstream `0397`. It retains
 the earlier fork's `0289_messy_vivisector` SQL hash, so the applied journal
-entry and guards survive while the upstream `0289`–`0294` gap is filled. The
+entry and guards survive while the upstream `0289`–`0397` gap is filled.
+`0401_deployment_budget_guard` adds the guard for owned budget policies. The
 embedded PostgreSQL upgrade fixture checks retained ciphertext, ownership,
 and history. Older fork-only `0284_bizarre_mastermind` /
 `0285_deployment_workspaces` databases are not upgrade-qualified; unknown

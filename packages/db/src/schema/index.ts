@@ -33,6 +33,11 @@ export { projectAccessMembers } from "./project_access_members.js";
 export { documentMemberships } from "./document_memberships.js";
 export { projectWorkspaces } from "./project_workspaces.js";
 export { executionWorkspaces } from "./execution_workspaces.js";
+export {
+  executionWorkspaceRestorePoints,
+  EXECUTION_WORKSPACE_RESTORE_POINT_STATUSES,
+  type ExecutionWorkspaceRestorePointStatus,
+} from "./execution_workspace_restore_points.js";
 export { executionWorkspaceRuntimeLeases } from "./execution_workspace_runtime_leases.js";
 export { environments } from "./environments.js";
 export { environmentLeases } from "./environment_leases.js";
@@ -72,6 +77,8 @@ export { routines, routineRevisions, routineTriggers, routineWebhookTestReceipts
 export { pipelines, pipelineStages, pipelineTransitions } from "./pipelines.js";
 export {
   cases,
+  caseHandoffs,
+  caseAccessSources,
   caseAttachments,
   caseDocuments,
   caseEvents,
@@ -137,6 +144,7 @@ export { providerTraceRecords } from "./provider_trace_records.js";
 export { completionContracts } from "./completion_contracts.js";
 export { nativeRunResults } from "./native_run_results.js";
 export { nativeRunFinalizations } from "./native_run_finalizations.js";
+export { nativeRunnerCheckpoints } from "./native_runner_checkpoints.js";
 export { workAssessments } from "./work_assessments.js";
 export { statusDecisions } from "./status_decisions.js";
 export { statusDecisionEffects } from "./status_decision_effects.js";
@@ -256,3 +264,6 @@ export { executionWorkspaceRepositoryRoots } from "./execution_workspace_reposit
 export { executionWorkspaceRepositoryAccess } from "./execution_workspace_repository_access.js";
 export * from "./fast_responses.js";
 export { companyObservability } from "./company_observability.js";
+
+export * from "./prompt_injection_prevention.js";
+export { workflows } from "./workflows.js";

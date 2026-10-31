@@ -46,6 +46,12 @@ specifications are internal to built-in execution; they are not a plugin wire
 contract. Existing flat transport options remain compatible through this shared
 interface. This refactor does not add Launcher APIs or change harness capabilities.
 
+An execution owner can supply `prepareLaunch`, a Runner artifact identity, and
+process and connection hooks. Core supplies the launch requirements. The owner
+returns a provider descriptor bound to those requirements. Core checks the policy
+and assigned resources. See [Runner launch preparation](../../doc/runner-launch-preparation.md)
+for the contract and recovery record.
+
 Connection continuations inspect the harness descriptor's optional
 `toolRefreshOnResume` capability. Native Codex, Claude Managed Agents, AgentCore,
 OpenCode, and qualified Claude/Codex/Grok ACPX profiles expose it; unqualified
@@ -185,6 +191,14 @@ It validates the exact model, session identity, tool catalog, structured input,
 and terminal settlement at the process boundary. Copilot and Pi remain gated.
 Verified distributions are build-owned; no provider accepts an arbitrary executable.
 See [the rich ACP capability report](../../doc/architecture/runner-rich-acp-capabilities.md).
+
+If the controller sends assigned MCP tools in the PRP catalog, the sidecar uses
+its authenticated tool bridge.
+Isolated provider admission accepts this route without a separate native MCP endpoint.
+Direct runtime-host callers must supply the native gateway binding unless they select
+PRP tool delivery and supply the semantic tool bridge.
+PRP delivery keeps the controller's exact operation names, including compact MCP catalog tools.
+The selected permission and read-only policies still apply.
 
 Install Cursor explicitly with `paperclipai runtime setup cursor`; npm installation
 does not download it. Run setup as the OS user that runs Paperclip (the service
@@ -373,6 +387,13 @@ agent-wide setting. No automatic decision policy selects it. The model must
 support disabling reasoning; other runner providers reject an explicit selection
 before starting work. Native sessions expose support through the
 `perTurnReasoning` capability.
+
+For the native `openrouter/` route, the parent-held provider proxy retains the
+upstream OpenRouter key. The child config keeps the selected `openrouter` provider
+and exact model, using a random loopback token restricted to that model's chat
+completions endpoint. The proxy and token expire when the session closes. The
+local token remains a credential and is redacted from diagnostics; this does not
+claim isolation for every child credential or persisted value.
 
 OpenCode's proxy sends agent instructions once per turn through the system prompt. The
 task envelope retains task-specific constraints and the completion contract,
@@ -783,6 +804,20 @@ fit the compacted bound produces a diagnostic; the event stream continues.
 Tool output and error fields have reserved retention space and size records,
 so large input values cannot consume their output tails or make excerpts look
 complete. A separator split between reads does not count against the frame limit.
+### OpenCode MCP tool results
+
+The Runner-owned MCP bridge sends complete JSON tool results up to 1 MiB of
+UTF-8 output. It does not slice JSON text. This includes the native server's
+bounded 500 KB app-tool results and saved-result pages. OpenCode can put a long
+result in its own output file; that file must still contain the complete JSON.
+The existing `read_tool_result` artifact protocol handles larger app results.
+
+Serialization has a bounded traversal budget and checks escaped UTF-8 output.
+If delivery exceeds the limit, the bridge reports an error without a partial
+success value. The action may already have completed. Reconcile its saved
+result or receipt instead of repeating it. Replaying the same MCP call identity
+reuses the original handler execution, including when delivery failed.
+
 ## Preconfigured home
 
 Set `homeMode: "preconfigured"` in a `paperclip_runner` agent's adapter config
@@ -804,7 +839,10 @@ rules and hooks apply. Native Codex tools can read and modify the execution home
 (read-only for planning); credentials in that home are not isolated from tools.
 Native Codex separately denies Runner-owned protocol state; ACPX Claude retains
 its existing provider trust boundary. Execution is unattended: native Codex uses `never`, and
-ACPX rejects requests for approval. The initial ACPX mode requires the Runner
+ACPX rejects requests for approval. When Claude starts in its home directory,
+its native user settings retain user trust even if the SDK also reports that
+same file as project settings. Other project settings keep the native trust filter.
+The initial ACPX mode requires the Runner
 setting `acpxPermissionMode: "approve-all"` (its default); other Runner modes are
 unqualified here and fail before launch. Local permission rules still apply.
 Preconfigured ACPX read-only/planning tasks also fail before provider launch

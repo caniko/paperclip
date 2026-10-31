@@ -283,7 +283,7 @@ describe("Codex security configuration", () => {
     });
     expect(codexCommandEnvironment({ AGENT_HOME: "/arbitrary" }, root)).not.toHaveProperty("AGENT_HOME");
     expect(codexCommandEnvironment({ AGENT_HOME: root })).not.toHaveProperty("AGENT_HOME");
-    const args = createIsolatedCodexAppServerArgs({ AGENT_HOME: root }, [], root, "thread");
+    const args = createIsolatedCodexAppServerArgs({ AGENT_HOME: root }, [], root, [], false, "thread");
     expect(args).toContain('shell_environment_policy.include_only=["AGENT_HOME"]');
     expect(args.some((arg) => arg.startsWith("shell_environment_policy.set="))).toBe(false);
   });
@@ -311,7 +311,7 @@ describe("Codex security configuration", () => {
       GH_TOKEN: "stale-credential", PAPERCLIP_API_KEY: "persisted-secret",
     };
     const source = { AGENT_HOME: "/agent-files/current", OPENAI_API_KEY: "ambient-secret" };
-    const args = createIsolatedCodexAppServerArgs(source, [], root, "thread", persisted);
+    const args = createIsolatedCodexAppServerArgs(source, [], root, [], false, "thread", persisted);
     const allowlist = JSON.parse(args.find((arg) => arg.startsWith("shell_environment_policy.include_only="))!.split("=", 2)[1]!);
     expect(allowlist).toEqual([
       ...(root ? ["AGENT_HOME"] : []), "BASH_ENV", "HOME", "LANG", "LC_ALL", "PATH", "PATHEXT", "SystemRoot", "WINDIR", "ZDOTDIR",
@@ -319,8 +319,8 @@ describe("Codex security configuration", () => {
     expect(args.some((arg) => arg.startsWith("shell_environment_policy.set="))).toBe(false);
     expect(args.join("\n")).not.toContain("secret");
     expect(args.join("\n")).not.toContain("stale-credential");
-    expect(createIsolatedCodexAppServerArgs(source, [], root, "argv", persisted))
-      .toEqual(createIsolatedCodexAppServerArgs(source, [], root, "argv"));
+    expect(createIsolatedCodexAppServerArgs(source, [], root, [], false, "argv", persisted))
+      .toEqual(createIsolatedCodexAppServerArgs(source, [], root, [], false, "argv"));
   });
 
   it("preserves target DNS symlink resources without opening all of /run", () => {

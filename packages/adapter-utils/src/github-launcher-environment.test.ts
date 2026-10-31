@@ -12,6 +12,7 @@ import { syncRemoteTextFilesWithHashSkip } from "./sandbox-callback-bridge.js";
 import {
   ensureAdapterExecutionTargetCommandResolvable,
   prepareGitHubOperationLaunchers,
+  cleanupGitHubOperationLaunchers,
   prepareGitHubExecutionEnvironment,
   runAdapterExecutionTargetProcess,
 } from "./execution-target.js";
@@ -24,13 +25,11 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function sandbox(layout: string, hashTools: "host" | "none" = "host", concurrent?: boolean) {
+async function sandbox(layout: string, concurrent?: boolean, hashTools: "host" | "none" = "host") {
   const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-launcher-env-"));
   roots.push(root);
   const bin = path.join(root, layout);
   await mkdir(bin, { recursive: true });
-  // Materialize only the fixture's tools. A host PATH would leak controller
-  // CLIs, while FHS-only directories omit installed tools on systems like NixOS.
   const tools = path.join(root, "system-tools");
   await mkdir(tools);
   for (const command of ["sh", "bash", "env", "git", "mkdir", "cp", "rm", "mv", "cat", "base64", "awk", "sleep", "chmod", "readlink", "dirname", "basename"]) {
@@ -83,7 +82,7 @@ async function sandbox(layout: string, hashTools: "host" | "none" = "host", conc
 
 describe("managed GitHub launcher environment", () => {
   it.for(["host", "none"] as const)("stages and re-stages launchers with %s hash tools", async (hashTools, context) => {
-    const fixture = await sandbox("usr/bin", hashTools);
+    const fixture = await sandbox("usr/bin", undefined, hashTools);
     if (hashTools === "host" && !fixture.hashCommand) context.skip("Neither sha256sum nor shasum is installed");
     const probe = await fixture.runner.execute({ command: "sh", args: ["-c", "command -v sha256sum || command -v shasum"] });
     expect(probe.exitCode === 0).toBe(hashTools === "host");
@@ -93,16 +92,16 @@ describe("managed GitHub launcher environment", () => {
     const env = await prepare();
     fixture.runner.execute.mockClear();
     await prepare();
-    const uploads: Awaited<ReturnType<CommandManagedRuntimeRunner["execute"]>>[] = await Promise.all(fixture.runner.execute.mock.calls.flatMap(([input], index) =>
+    const uploads = await Promise.all(fixture.runner.execute.mock.calls.flatMap(([input], index) =>
       input.stdin?.includes("hash_file()")
         ? [fixture.runner.execute.mock.results[index]!.value]
         : []));
     expect(uploads.length).toBeGreaterThan(0);
     for (const result of uploads) {
       expect(result.exitCode, result.stderr).toBe(0);
-      const files = result.stdout.trim().split("\n").map((line) => JSON.parse(line));
-      expect(files.length).toBeGreaterThan(0);
-      for (const file of files) expect(file.uploaded).toBe(hashTools === "none");
+      const rows = result.stdout.trim().split("\n").map((line: string) => JSON.parse(line));
+      expect(rows.length).toBeGreaterThan(0);
+      for (const row of rows) expect(row.uploaded).toBe(hashTools === "none");
       if (hashTools === "none") expect(result.stderr).toContain("sha verify skipped: no sha256sum/shasum on remote");
       else expect(result.stderr).toBe("");
     }
@@ -118,8 +117,7 @@ describe("managed GitHub launcher environment", () => {
     if (!fixture.hashCommand) context.skip("Neither sha256sum nor shasum is installed");
     const execute = fixture.runner.execute.getMockImplementation()!;
     fixture.runner.execute.mockImplementation((input) => execute({
-      ...input, stdin: input.stdin?.replace(/\n[A-Za-z0-9+/]+=*\n(?=PAPERCLIP_TEXT_)/,
-        `\n${Buffer.from("corrupt upload").toString("base64")}\n`),
+      ...input, ...(input.stdin ? { stdin: input.stdin.replace(/(<<'PAPERCLIP_TEXT_\d+_\w+'\n)[^\n]*\n/g, `$1${Buffer.from("corrupt upload").toString("base64")}\n`) } : {}),
     }));
     await expect(prepareGitHubOperationLaunchers({
       runId: "run-corrupt", target: fixture.target, cwd: fixture.root, env: {},
@@ -127,7 +125,7 @@ describe("managed GitHub launcher environment", () => {
   });
 
   it("stages the complete remote launcher set in one control command", async () => {
-    const fixture = await sandbox("tools with 'quotes'/bin", "host", true);
+    const fixture = await sandbox("tools with 'quotes'/bin", true);
     const env = await prepareGitHubOperationLaunchers({
       runId: "single-control-stage", target: fixture.target, cwd: fixture.root,
       env: githubBrokerEnvironment({ PATH: fixture.remotePath }, { url: "", token: "" }),
@@ -140,7 +138,7 @@ describe("managed GitHub launcher environment", () => {
   });
 
   it("uses one bounded control command and preserves the staged environment", async () => {
-    const fixture = await sandbox("tools with 'quotes'/bin", "host", true);
+    const fixture = await sandbox("tools with 'quotes'/bin", true);
     const execute = fixture.runner.execute.getMockImplementation()!;
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -182,7 +180,7 @@ describe("managed GitHub launcher environment", () => {
   });
 
   it("settles failed upload batches before rejecting and starting no later files", async () => {
-    const fixture = await sandbox("usr/bin", "host", true);
+    const fixture = await sandbox("usr/bin", true);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let started = 0;
@@ -214,7 +212,7 @@ describe("managed GitHub launcher environment", () => {
   });
 
   it("keeps concurrent staging of the same remote launcher directory coherent", async () => {
-    const fixture = await sandbox("usr/bin", "host", true);
+    const fixture = await sandbox("usr/bin", true);
     const input = { runId: "same-directory", target: fixture.target, cwd: fixture.root,
       env: githubBrokerEnvironment({ PATH: fixture.remotePath }, { url: "", token: "" }) };
     const [first, second] = await Promise.all([prepareGitHubOperationLaunchers(input), prepareGitHubOperationLaunchers(input)]);
@@ -226,7 +224,7 @@ describe("managed GitHub launcher environment", () => {
   });
 
   it.each([undefined, false])("keeps providers without a concurrent capability serial (%s)", async (concurrent) => {
-    const fixture = await sandbox("usr/bin", "host", concurrent);
+    const fixture = await sandbox("usr/bin", concurrent);
     const execute = fixture.runner.execute.getMockImplementation()!;
     let active = 0;
     let maximum = 0;
@@ -370,6 +368,14 @@ describe("managed GitHub launcher environment", () => {
     }
   });
 
+  it("keeps task-only startup free of command probes and host credentials", async () => {
+    const target = { kind: "remote" as const, transport: "sandbox" as const, providerKey: "plugin", remoteCwd: "/project", runnerTask: async () => ({}) };
+    await expect(prepareGitHubExecutionEnvironment({ target, cwd: "/absent-controller-path", env: {}, hostCredentials: false, networkAccess: true }))
+      .resolves.toMatchObject({ PAPERCLIP_GITHUB_AUTH_MODE: "managed", PAPERCLIP_GIT_METADATA_ROOTS: "[]", PAPERCLIP_RUNNER_NETWORK_ACCESS: "enabled" });
+    await expect(prepareGitHubExecutionEnvironment({ target, cwd: "/absent-controller-path", env: {}, hostCredentials: true, networkAccess: true }))
+      .rejects.toThrow("cannot import host GitHub credentials");
+  });
+
   it.each([false, true])("probes the remote workspace when the controller cwd is absent (host credentials: %s)", async (hostCredentials) => {
     const fixture = await sandbox("usr/bin");
     const env = await prepareGitHubExecutionEnvironment({
@@ -484,8 +490,6 @@ describe("managed GitHub launcher environment", () => {
         expect(result.stdout).toBe(env.PATH);
       }
       // The wrappers' Node interpreter and underlying commands are still reachable.
-      // BASH_ENV must restore the managed wrappers without host system profiles
-      // replacing the fake provider's PATH. Start with only its base tools.
       const github = await fixture.runner.execute({ command: "bash",
         args: ["--noprofile", "--norc", "-c", "command -v git; command -v gh; git; gh"],
         env: { ...env, PATH: fixture.remotePath } });

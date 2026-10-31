@@ -21,7 +21,7 @@ import {
 type TestSql = ReturnType<typeof connectPostgres>;
 type JournalEntry = { idx: number; version: string; when: number; tag: string; breakpoints: boolean };
 type Journal = { version: string; dialect: string; entries: JournalEntry[] };
-const nativeFile = "0355_sweet_titanium_man.sql";
+const nativeFile = "0398_sweet_titanium_man.sql";
 const nativeHash = "ac20d3f6626b23aaf07e7bc7f6502bbcd728a2808d4b4adb56b2116bb30e6412";
 // Authentic entry and SQL from 843bb5b, whose upstream prefix through 0288 is unchanged.
 const oldEntry: JournalEntry = {
@@ -32,81 +32,14 @@ const oldEntry: JournalEntry = {
   breakpoints: true,
 };
 const oldSqlUrl = new URL("./__tests__/fixtures/deployment-history/0289_messy_vivisector.sql", import.meta.url);
-const pendingFiles = [
-  "0289_drop_user_keyboard_shortcuts.sql",
-  "0290_browser_use_cloud.sql",
-  "0291_conscious_secret_warriors.sql",
-  "0292_powerful_devos.sql",
-  "0293_broad_rattler.sql",
-  "0294_chilly_marvel_apes.sql",
-  "0295_public_captain_cross.sql",
-  "0296_stiff_thaddeus_ross.sql",
-  "0297_foamy_swordsman.sql",
-  "0298_connection_agent_instructions.sql",
-  "0299_absent_ser_duncan.sql",
-  "0300_chunky_chamber.sql",
-  "0301_lumpy_maria_hill.sql",
-  "0302_colossal_otto_octavius.sql",
-  "0303_supreme_garia.sql",
-  "0304_curvy_shadow_king.sql",
-  "0305_chubby_vin_gonzales.sql",
-  "0306_familiar_titania.sql",
-  "0307_cool_naoko.sql",
-  "0308_whole_steel_serpent.sql",
-  "0309_loving_the_hood.sql",
-  "0310_agent_commentary.sql",
-  "0311_mcp_file_transfers.sql",
-  "0312_easy_eternity.sql",
-  "0313_private_task_access.sql",
-  "0314_private_task_draft_assets.sql",
-  "0315_rapid_emma_frost.sql",
-  "0316_premium_slayback.sql",
-  "0317_messy_famine.sql",
-  "0318_strong_blacklash.sql",
-  "0319_heavy_captain_midlands.sql",
-  "0320_daily_onslaught.sql",
-  "0321_acoustic_human_fly.sql",
-  "0322_reflective_kree.sql",
-  "0323_petite_shockwave.sql",
-  "0324_long_franklin_storm.sql",
-  "0325_aberrant_machine_man.sql",
-  "0326_blushing_screwball.sql",
-  "0327_sad_proteus.sql",
-  "0328_chunky_mentallo.sql",
-  "0329_free_wolf_cub.sql",
-  "0330_spooky_white_tiger.sql",
-  "0331_panoramic_spyke.sql",
-  "0332_little_night_nurse.sql",
-  "0333_normal_wild_pack.sql",
-  "0334_rare_slipstream.sql",
-  "0335_absurd_bulldozer.sql",
-  "0336_big_crystal.sql",
-  "0337_exotic_proemial_gods.sql",
-  "0338_absurd_vengeance.sql",
-  "0339_luxuriant_iron_monger.sql",
-  "0340_open_warlock.sql",
-  "0341_abnormal_bucky.sql",
-  "0342_dry_shen.sql",
-  "0343_new_mentor.sql",
-  "0344_wide_blue_marvel.sql",
-  "0345_luxuriant_carmella_unuscione.sql",
-  "0346_cloudy_whiplash.sql",
-  "0347_flippant_imperial_guard.sql",
-  "0348_agent_skill_runtime_hooks.sql",
-  "0349_oval_dragon_lord.sql",
-  "0350_friendly_rhodey.sql",
-  "0351_hard_albert_cleary.sql",
-  "0352_special_warbound.sql",
-  "0353_skinny_gamma_corps.sql",
-  "0354_agent_connection_assignment_hooks.sql",
-  "0356_perpetual_manta.sql",
-  "0357_deployment_environments.sql",
-  "0358_agent_tool_definition_hooks.sql",
-  "0359_agent_connector_access_hooks.sql",
-  "0360_sticky_wendell_vaughn.sql",
-  "0361_issue_assignment_status_version.sql",
-  "0362_commentary_view_human_defaults.sql",
-];
+const journal = JSON.parse(
+  await readFile(new URL("./migrations/meta/_journal.json", import.meta.url), "utf8"),
+) as Journal;
+// Every journaled migration after the retained fork entry's old position, except the
+// retained fork migration itself, is pending on a database with the old history.
+const pendingFiles = journal.entries
+  .filter((entry) => entry.idx >= oldEntry.idx && `${entry.tag}.sql` !== nativeFile)
+  .map((entry) => `${entry.tag}.sql`);
 const browserTables = ["browser_use_browsers", "browser_use_runs", "browser_use_sessions", "browser_use_settings"];
 const guardedTables = [
   "agent_api_keys",
@@ -121,9 +54,7 @@ const guardedTables = [
 ];
 const sha256 = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
 const migrationUrl = (file: string) => new URL(`./migrations/${file}`, import.meta.url);
-const journal = JSON.parse(
-  await readFile(new URL("./migrations/meta/_journal.json", import.meta.url), "utf8"),
-) as Journal;
+
 const support = await getEmbeddedPostgresTestSupport();
 const describePostgres = support.supported ? describe : describe.skip;
 if (!support.supported)
@@ -202,7 +133,7 @@ async function readHistory(sql: TestSql) {
     SELECT id, hash, created_at::text FROM drizzle.__drizzle_migrations ORDER BY id`;
 }
 
-async function readSchema(sql: TestSql, expectedGuards = [...guardedTables, "environments"].sort()) {
+async function readSchema(sql: TestSql, expectedGuards = [...guardedTables, "budget_policies", "environments"].sort()) {
   const tables = await sql<{ table_name: string }[]>`SELECT table_name FROM information_schema.tables
     WHERE table_schema = 'public' AND table_name = ANY(${sql.array([...browserTables, "deployment_resources"])}::text[]) ORDER BY table_name`;
   const [keyboard] = await sql`SELECT EXISTS (SELECT 1 FROM information_schema.columns
@@ -303,7 +234,7 @@ function upgradedRows(before: Awaited<ReturnType<typeof preservedRows>>) {
               : {}),
           }
         : index === 5
-          ? { ...row, ai_session_epoch: 0, owner_agent_id: null, owner_plugin_id: null }
+          ? { ...row, ai_session_epoch: 0, owner_agent_id: null, owner_plugin_id: null, owner_project_id: null }
           : row,
     ),
   );

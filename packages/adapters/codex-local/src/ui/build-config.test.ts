@@ -36,6 +36,22 @@ function makeValues(overrides: Partial<CreateConfigValues> = {}): CreateConfigVa
 }
 
 describe("buildCodexLocalConfig", () => {
+  it("preserves explicitly disabled hosted search in native Codex configuration", () => {
+    expect(buildPaperclipRunnerConfig(makeValues({ search: false }))).toHaveProperty("search", false);
+    expect(buildPaperclipRunnerConfig(makeValues({ search: true }))).not.toHaveProperty("search");
+  });
+
+  describe("qualified Copilot config", () => {
+    it("round-trips Copilot with the exact selected model", () => {
+      const first = buildPaperclipRunnerConfig(makeValues({ model: "gpt-5.6-luna", adapterSchemaValues: { provider: "acpx", acpxAgent: "copilot" } }));
+      const reopened = buildPaperclipRunnerConfig(makeValues({ model: "", adapterSchemaValues: JSON.parse(JSON.stringify(first)) }));
+      expect(reopened).toMatchObject({ provider: "acpx", acpxAgent: "copilot", model: "gpt-5.6-luna" });
+    });
+    it.each(["", "auto", "default", "Auto", "DEFAULT"])("rejects a missing or implicit Copilot model (%s)", model => {
+      expect(() => buildPaperclipRunnerConfig(makeValues({ model, adapterSchemaValues: { provider: "acpx", acpxAgent: "copilot" } }))).toThrow("Select an available Copilot model");
+    });
+  });
+
   it.each([undefined, "approve-all", "approve-paperclip", "approve-reads", "deny-all"])(
     "defaults Grok to full auto while preserving an explicit %s permission mode",
     (acpxPermissionMode) => {
@@ -160,7 +176,6 @@ describe("buildPaperclipRunnerConfig", () => {
       "engine",
       "agentCommand",
       "stateDir",
-      "search",
       "fastMode",
       "dangerouslyBypassApprovalsAndSandbox",
       "command",
@@ -245,16 +260,7 @@ describe("buildPaperclipRunnerConfig", () => {
     expect(config).not.toHaveProperty("acpxAgent");
   });
 
-  it.each(["copilot"])("rejects unavailable ACPX %s without selecting another provider", (acpxAgent) => {
-    expect(() => buildPaperclipRunnerConfig(makeValues({
-      adapterType: "paperclip_runner",
-      model: "explicit-provider-model",
-      adapterSchemaValues: {
-        provider: "acpx",
-        acpxAgent,
-      },
-    }))).toThrow(/is not enabled for production/);
-  });
+
 
   it.each(["agent", "plan", "ask"])("preserves Cursor's explicit model and %s mode", (mode) => {
     expect(buildPaperclipRunnerConfig(makeValues({

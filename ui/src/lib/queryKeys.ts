@@ -222,6 +222,7 @@ export const queryKeys = {
       ["team-catalog", "installed", companyId] as const,
   },
   agents: {
+    projectAccess: (id: string) => ["agents", "detail", id, "project-access"] as const,
     identity: (id: string) => ["agents", "identity", id] as const,
     list: (companyId: string) => ["agents", companyId] as const,
     detail: (id: string) => ["agents", "detail", id] as const,
@@ -511,6 +512,7 @@ export const queryKeys = {
     accessMembers: (id: string) => ["projects", "access-members", id] as const,
   },
   cases: {
+    handoffs: (id: string) => ["cases", "handoffs", id] as const,
     list: (companyId: string) => ["cases", companyId] as const,
     detail: (id: string) => ["cases", "detail", id] as const,
     documents: (id: string) => ["cases", "documents", id] as const,

@@ -5,7 +5,7 @@ import {
   type Db, deploymentResources, companies, projects, agents, routines,
   routineTriggers, agentApiKeys, companySecrets, companySecretVersions, companyMemberships,
   pluginManagedResources, builtInManagedResources,
-  instanceSettings, projectWorkspaces, environments,
+  instanceSettings, projectWorkspaces, environments, budgetPolicies,
 } from "@paperclipai/db";
 import { LOCAL_ENVIRONMENT_ADOPT, deploymentManifestSchema, type DeploymentManifest, type Environment } from "@paperclipai/shared";
 import type { createAgentLifecycleInTransaction } from "../services/agent-lifecycle.js";
@@ -60,7 +60,6 @@ async function validateAdapters(manifest: DeploymentManifest, credentials: Recor
   }
 }
 
-/** One process-local reconciler for startup, plan, apply and check. No HTTP bypass. */
 export async function reconcileDeployment(db: Db, raw: unknown, options: {
   apply: boolean; descriptor: DeploymentDescriptor; config: Config; singleOwner: boolean;
 }) {
@@ -76,6 +75,8 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     if (!credentials[b.credential] || credentials[b.credential].trim().length < 32) throw new Error("Task bridge requires a runtime token of at least 32 characters");
   }
   stage = "database-preflight";
+  const bridgeTokens = Object.values(m.taskBridges).map((b) => credentials[b.credential].trimEnd());
+  if (new Set(bridgeTokens).size !== bridgeTokens.length) throw new Error("Task bridge tokens must be unique; use a new runtime token");
    const publications: ActivityPublication[] = [];
    const afterCommit: Array<() => Promise<void>> = [];
    const lifecycleAgents = new Set<string>();
@@ -86,7 +87,6 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
    const result = await db.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
     if (!options.apply) await tx.execute(sql`set transaction read only`);
-    // Serialize all owners, including adoption across different manifests.
     await tx.execute(sql`select pg_advisory_xact_lock(1735289201)`);
     if (options.apply) await tx.execute(sql`select set_config('paperclip.deployment_apply', 'on', true)`);
     const [identity] = await tx.select().from(instanceSettings).where(eq(instanceSettings.singletonKey, "deployment"));
@@ -111,8 +111,6 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     }
     const owned = ledger.filter((b) => b.owner === m.owner);
     if (options.apply && (Object.keys(m.projectWorkspaces).length || owned.some((b) => b.kind === "workspace"))) {
-      // Native primary selection updates sibling rows. Prevent a UI/API writer
-      // from inserting or changing a sibling between ownership validation and apply.
       await tx.execute(sql`lock table project_workspaces in share row exclusive mode`);
     }
     const bindings = new Map(owned.map((b) => [`${b.kind}/${b.key}`, b]));
@@ -144,7 +142,12 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     const add = (spec: Omit<Spec, "id">) => specs.push({ ...spec, id: getId(spec.kind, spec.key, spec.adopt) });
     for (const [key, c] of Object.entries(m.companies).sort()) {
       add({ kind: "company", key, adopt: c.adopt, companyId: null, enabled: true, fields: () => c.fields,
-        create: async (f) => (await companySvc!.create({ ...c.fields, ...f, id: getId("company", key), defaultResponsibleUserId: actor.userId }, { provisionBundledAgents: false })).id,
+        create: async (f) => {
+          const { budgetMonthlyCents, ...rest } = { ...c.fields, ...f };
+          const created = await companySvc!.create({ ...rest, id: getId("company", key), defaultResponsibleUserId: actor.userId }, { provisionBundledAgents: false });
+          if (budgetMonthlyCents) await companySvc!.update(created.id, { budgetMonthlyCents });
+          return created.id;
+        },
         update: (f) => companySvc!.update(getId("company", key), f) });
     }
     for (const [key, p] of Object.entries(m.projects).sort()) {
@@ -192,8 +195,6 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
           await syncRefs(updated);
         } });
     }
-    // Native services auto-select the first workspace and repair missing primaries.
-    // Apply the declared primary first so those repairs never choose a different row.
     const workspaceEntries = Object.entries(m.projectWorkspaces).sort(([a, x], [b, y]) =>
       Number(y.fields.isPrimary) - Number(x.fields.isPrimary) || a.localeCompare(b));
     for (const [key, w] of workspaceEntries) {
@@ -224,8 +225,6 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       for (const [field, credential] of Object.entries(a.credentials).sort()) {
         const secretKey = `${key}.${field}`;
         const value = credentials[credential];
-        // A digest is private database bookkeeping, never exported in a plan.
-        // Runtime sources are expected to contain high-entropy worker keys.
         const digest = createHash("sha256").update(value).digest("hex");
         add({ kind: "secret", key: secretKey, companyId, enabled: true, fields: () => ({ digest }),
           create: async () => (await secrets!.create(companyId, { name: `deployment.${m.owner}.${secretKey}`, provider: "local_encrypted", value })).id,
@@ -243,7 +242,12 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
           ...(a.overflowEnvironments !== undefined ? { fallbackEnvironmentIds: a.overflowEnvironments.map((k) => getId("environment", k)) } : {}) };
       };
       add({ kind: "agent", key, adopt: a.adopt, companyId, enabled: a.enabled, fields,
-        create: async (f) => (await agentLifecycle!.requestHire(companyId, { ...a.fields, ...withFallbacks(f), id: getId("agent", key), status: a.enabled ? "idle" : "paused", ...(a.enabled ? {} : { pauseReason: "deployment" }) }, { runnerResolved: true, responsibleUserId: actor.userId, createdByUserId: actor.userId })).id,
+        create: async (f) => {
+          const { budgetMonthlyCents, ...rest } = { ...a.fields, ...withFallbacks(f) };
+          const created = await agentLifecycle!.requestHire(companyId, { ...rest, id: getId("agent", key), status: a.enabled ? "idle" : "paused", ...(a.enabled ? {} : { pauseReason: "deployment" }) }, { runnerResolved: true, responsibleUserId: actor.userId, createdByUserId: actor.userId });
+          if (budgetMonthlyCents) await agentLifecycle!.updateConfiguration(created.id, { budgetMonthlyCents });
+          return created.id;
+        },
         update: async (f) => {
           const { companyId: _companyId, ...configuration } = f;
           const [current] = configuration.fallbackEnvironmentIds === undefined ? []
@@ -260,7 +264,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         update: (f) => routineSvc!.update(getId("routine", key), f, actor) });
       add({ kind: "schedule", key, adopt: scheduleAdopt, companyId, enabled: true, fields: () => ({ ...schedule, routineId: getId("routine", key) }),
         create: async () => (await routineSvc!.createTrigger(getId("routine", key), { ...schedule, enabled: true }, actor)).trigger.id,
-        update: () => routineSvc!.updateTrigger(getId("schedule", key), schedule, actor) });
+        update: (f) => routineSvc!.updateTrigger(getId("schedule", key), { ...schedule, ...(f.enabled === true ? { enabled: true } : {}) }, actor) });
     }
     for (const [key, b] of Object.entries(m.taskBridges).sort()) {
       const companyId = getId("company", m.agents[b.agent].company);
@@ -278,7 +282,6 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     }
     const actions = new Map<Spec, DeploymentDifference>();
     const claimed = new Set<string>();
-    // Read and validate ALL existing identities before the first application write.
     for (const spec of specs) {
       const resource = `${spec.kind}/${spec.id}`;
       if (claimed.has(resource)) throw new Error("Duplicate resource ownership in deployment manifest");
@@ -395,12 +398,16 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
             && !actions.get(spec)!.fields.includes("budgetMonthlyCents")) {
             delete updateFields.budgetMonthlyCents;
           }
+          if (binding && !binding.enabled && spec.kind === "schedule") updateFields.enabled = true;
           await spec.update(updateFields);
         }
-        if (spec.kind === "agent") {
-          lifecycleAgents.add(spec.id);
-          if ((binding || spec.adopt) && spec.companyId && "budgetMonthlyCents" in fields &&
-              actions.get(spec)!.fields.includes("budgetMonthlyCents")) budgetCompanies.add(spec.companyId);
+        if (spec.kind === "agent") lifecycleAgents.add(spec.id);
+        if ((spec.kind === "agent" || spec.kind === "company") && "budgetMonthlyCents" in fields &&
+            actions.get(spec)!.fields.includes("budgetMonthlyCents")) {
+          budgetCompanies.add(spec.companyId ?? spec.id);
+          await tx.update(budgetPolicies).set({ hardStopEnabled: true, isActive: Number(fields.budgetMonthlyCents) > 0, enforcementVersion: sql`${budgetPolicies.enforcementVersion} + 1` })
+            .where(and(eq(budgetPolicies.scopeType, spec.kind), eq(budgetPolicies.scopeId, spec.id),
+              eq(budgetPolicies.metric, "billed_cents"), eq(budgetPolicies.windowKind, "calendar_month_utc")));
         }
         if (!spec.enabled) await disableResource(tx, spec.kind, spec.id, agentLifecycle!);
         const next = { owner: m.owner, kind: spec.kind, key: spec.key, resourceId: spec.id, companyId: spec.companyId, fields: spec.fields(), enabled: spec.enabled };

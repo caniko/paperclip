@@ -117,6 +117,39 @@ describe("closeRegisteredClients", () => {
     }
   });
 
+  it("can close one owned database without ending its sibling's clients on the same host", async () => {
+    const started = await startFakePostgresServer();
+    server = started.server;
+    const url = `postgres://test:test@127.0.0.1:${started.port}/first`;
+    const first = createDb(url), sibling = createDb(url.replace(/first$/, "second"));
+    const reservedFirst = await first.$client.reserve(), reservedSibling = await sibling.$client.reserve();
+    try {
+      await closeRegisteredClients(url, { scope: "database" });
+      expect(await reservedFirst`select 1`.catch((error: unknown) => error)).toBeInstanceOf(Error);
+      expect(await reservedSibling`select 1`).toEqual([]);
+    } finally {
+      reservedFirst.release(); reservedSibling.release();
+      await closeRegisteredClients(url);
+      for (const socket of started.backendSockets) socket.destroy();
+    }
+  });
+
+  it("does not close TCP clients when closing a socket URI with the same authority", async () => {
+    const started = await startFakePostgresServer();
+    server = started.server;
+    const tcpUrl = `postgres://test:test@127.0.0.1:${started.port}/test`;
+    const db = createDb(tcpUrl, { connectTimeoutSeconds: 5 });
+    try {
+      await db.$client`select 1`;
+      await closeRegisteredClients(`${tcpUrl}?host=/other/postgres`);
+      await expect(db.$client`select 1`).resolves.toEqual([]);
+      await closeRegisteredClients(`postgres://test@localhost:${started.port}/test?host=127.0.0.1`);
+      await expect(db.$client`select 1`).rejects.toMatchObject({ code: "CONNECTION_ENDED" });
+    } finally {
+      await closeRegisteredClients(tcpUrl);
+    }
+  });
+
   it("does not throw when createDb receives a URL that new URL() cannot parse", async () => {
     let db: ReturnType<typeof createDb> | undefined;
     expect(() => {

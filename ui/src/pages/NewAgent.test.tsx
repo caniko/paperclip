@@ -2,6 +2,7 @@
 import { act } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { queryKeys } from "@/lib/queryKeys";
+import { ApiError } from "@/api/client";
 import {
   api, envApi, settings, secrets, state, managedApi, adapterApi,
   root, container, cache, settle, click, fill, render, connect, pass,
@@ -9,6 +10,279 @@ import {
 } from "./NewAgent.test-support";
 
 describe("New agent setup", () => {
+  it.each([
+    ["claude_local", "Claude", "plugin"], ["codex_local", "OpenAI", "plugin"],
+    ["claude_local", "Claude", "sandbox"], ["codex_local", "OpenAI", "sandbox"],
+    ["claude_local", "Claude", "kubernetes"], ["codex_local", "OpenAI", "kubernetes"],
+  ] as const)("connects an inherited %s draft through the saved %s account under %s policy", async (adapter, provider, policy) => {
+    const id = "00000000-0000-4000-8000-000000000093";
+    const draft = { id, companyId: "company-1", name: "Atlas", role: "general", adapterType: "paperclip_runner",
+      adapterConfig: adapter === "claude_local" ? { provider: "acpx", acpxAgent: "claude" } : { provider: "codex" },
+      runtimeConfig: {}, lifecycleState: "paused", pauseReason: "setup", defaultEnvironmentId: null, status: "paused" };
+    state.params = new URLSearchParams({ name: "Atlas", adapterType: adapter, runner: "auto", setupAgentId: id });
+    api.get.mockResolvedValue(draft);
+    api.update.mockImplementation(async (_id, patch) => ({ ...draft, ...patch }));
+    settings.get.mockResolvedValue({ defaultEnvironmentId: "remote" });
+    settings.getExperimental.mockResolvedValue({ enableManagedSandboxOnly: policy !== "kubernetes" });
+    settings.getGeneral.mockResolvedValue({ executionMode: policy === "kubernetes" ? "kubernetes" : "any" });
+    envApi.list.mockResolvedValue([{ id: "remote", name: "Remote", status: "active",
+      driver: policy === "plugin" ? "plugin" : "sandbox", config: policy === "plugin" ? {} : { provider: policy === "sandbox" ? "daytona" : "kubernetes" } }]);
+    managedApi.list.mockResolvedValue({ currentUserId: "user-1", connections: [{
+      id: "00000000-0000-4000-8000-000000000021", grantId: "00000000-0000-4000-8000-000000000022",
+      companyId: "company-1", provider: adapter === "claude_local" ? "anthropic" : "openai", method: "subscription",
+      name: "Saved subscription", ownership: "shared", isDefault: false, status: "connected",
+    }] } as any);
+    await renderCurrentParams();
+    await click("AdvancedCustom Gateway");
+    expect(container.querySelector('[role="combobox"][aria-label="Connection"]')).toBeTruthy();
+    await click(`${provider}API key`);
+    expect(container.querySelector('[aria-label="API key"]')).toBeTruthy();
+    await click(`${provider}Subscription`);
+    await click("Use saved subscription");
+    expect(container.textContent).toContain("Configure your agent");
+    expect(api.testEnvironment).toHaveBeenCalledExactlyOnceWith("company-1", adapter, expect.objectContaining({ agentId: id, environmentId: "remote" }));
+    await click("Finish setup");
+    expect(api.hire).toHaveBeenCalledExactlyOnceWith("company-1", expect.objectContaining({ setupAgentId: id, defaultEnvironmentId: "remote" }));
+    expect(api.create).not.toHaveBeenCalled();
+  });
+
+  it("retains the selected account while a company requires approval before preparing the computer", async () => {
+    settings.get.mockResolvedValue({ defaultEnvironmentId: "computer" });
+    envApi.list.mockResolvedValue([{ id: "computer", name: "Agent computer", status: "active", driver: "plugin", config: {} }]);
+    api.testEnvironment.mockResolvedValue({ ...pass, status: "warn", checks: [{
+      code: "environment_agent_approval_required", level: "warn", message: "Verification follows hire approval",
+    }] });
+    await render("codex_local");
+    await click("OpenAIAPI key");
+    await fill("API key", "setup-test-key");
+    await click("Connect");
+    expect(container.textContent).toContain("Configure your agent");
+    await click("Finish setup");
+    expect(api.hire).toHaveBeenCalledWith("company-1", expect.objectContaining({
+      setupAgentId: api.create.mock.calls[0][1].setupId,
+      runtimeConfig: expect.objectContaining({ aiConnection: expect.objectContaining({ provider: "openai" }) }),
+    }));
+    expect(api.testEnvironment).toHaveBeenCalledTimes(1);
+    expect(envApi.probe).not.toHaveBeenCalled();
+  });
+
+  it("keeps the account on an environment save failure and blocks probes until the selection is saved", async () => {
+    envApi.list.mockResolvedValue([
+      { id: "local-1", name: "Local", status: "active", driver: "local", config: {} },
+      { id: "computer", name: "Agent computer", status: "active", driver: "plugin", config: {} },
+    ]);
+    await render("codex_local");
+    await click("OpenAIAPI key");
+    await fill("API key", "setup-test-key");
+    await click("Connect");
+    const originalBinding = api.testEnvironment.mock.calls[0][2].aiConnection;
+    const probes = api.testEnvironment.mock.calls.length;
+    let finishDiscovery!: (adapters: typeof state.adapters) => void;
+    adapterApi.list.mockImplementationOnce(() => new Promise(resolve => { finishDiscovery = resolve; }));
+    api.update.mockRejectedValueOnce(new Error("Environment save unavailable"));
+    const select = container.querySelector<HTMLSelectElement>('[aria-label="Environment"]')!;
+    await act(async () => { select.value = "computer"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+    await settle();
+    expect(container.textContent).toContain("Configure your agent");
+    expect(container.textContent).toContain("Environment save unavailable");
+    await act(async () => finishDiscovery(state.adapters.map((adapter: any) => adapter.type === "codex_local"
+      ? { ...adapter, defaultRunner: "paperclip", supportedRunners: ["paperclip", "legacy"] } : adapter)));
+    await settle();
+    expect(container.textContent).toContain("Environment save unavailable");
+    await click("Run test");
+    expect(api.testEnvironment).toHaveBeenCalledTimes(probes);
+    await click("Retry saving environment");
+    await click("Run test");
+    expect(api.testEnvironment).toHaveBeenLastCalledWith("company-1", expect.any(String), expect.objectContaining({
+      environmentId: "computer", aiConnection: originalBinding,
+    }));
+  });
+
+  it("ignores a detail read that completes after a newer environment save", async () => {
+    envApi.list.mockResolvedValue([
+      { id: "local-1", name: "Local", status: "active", driver: "local", config: {} },
+      { id: "computer", name: "Agent computer", status: "active", driver: "plugin", config: {} },
+    ]);
+    await render("codex_local");
+    await click("OpenAIAPI key");
+    await fill("API key", "setup-test-key");
+    await click("Connect");
+    const id = api.create.mock.calls[0][1].setupId;
+    state.params.set("setupAgentId", id);
+    await renderCurrentParams();
+    const key = queryKeys.agents.detail(id);
+    const oldDraft = cache.getQueryData(key);
+    let finishRead!: (agent: unknown) => void;
+    api.get.mockImplementationOnce(() => new Promise(resolve => { finishRead = resolve; }));
+    await act(async () => { void cache.refetchQueries({ queryKey: key }); });
+    expect(finishRead).toBeTypeOf("function");
+    const select = container.querySelector<HTMLSelectElement>('[aria-label="Environment"]')!;
+    await act(async () => { select.value = "computer"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+    await settle();
+    await act(async () => finishRead(oldDraft));
+    await settle();
+    expect(cache.getQueryData(key)).toMatchObject({ defaultEnvironmentId: "computer" });
+    await click("Run test");
+    expect(api.testEnvironment).toHaveBeenLastCalledWith("company-1", expect.any(String), expect.objectContaining({ agentId: id, environmentId: "computer" }));
+    await click("Finish setup");
+    expect(api.hire).toHaveBeenCalledWith("company-1", expect.objectContaining({ setupAgentId: id, defaultEnvironmentId: "computer" }));
+  });
+
+  it.each([null, "computer"])("waits for background preparation and tests the same saved computer (environment=%s)", async (defaultEnvironmentId) => {
+    const id = "00000000-0000-4000-8000-000000000092";
+    const draft = { id, companyId: "company-1", name: "Atlas", adapterType: "paperclip_runner", adapterConfig: { provider: "codex" },
+      runtimeConfig: {}, lifecycleState: "preparing", pauseReason: "setup", defaultEnvironmentId, status: "paused" };
+    state.params = new URLSearchParams({ name: "Atlas", adapterType: "codex_local", setupAgentId: id });
+    api.get.mockResolvedValue(draft);
+    settings.get.mockResolvedValue({ defaultEnvironmentId: "computer" });
+    settings.getExperimental.mockResolvedValue({ enableManagedSandboxOnly: true });
+    envApi.list.mockResolvedValue([{ id: "computer", name: "Agent computer", status: "active", driver: "plugin", config: {} }]);
+    await renderCurrentParams();
+    expect(container.textContent).toContain("Preparing your agent computer");
+    await click("OpenAIAPI key");
+    expect(api.testEnvironment).not.toHaveBeenCalled();
+    api.get.mockResolvedValue({ ...draft, lifecycleState: "verifying" });
+    await act(async () => { await cache.invalidateQueries({ queryKey: queryKeys.agents.detail(id) }); });
+    await settle();
+    expect(container.textContent).not.toContain("Preparing your agent computer");
+    await click("OpenAIAPI key");
+    await fill("API key", "setup-test-key");
+    await click("Connect");
+    expect(api.testEnvironment).toHaveBeenCalledWith("company-1", expect.any(String), expect.objectContaining({ agentId: id, environmentId: "computer" }));
+    expect(api.create).not.toHaveBeenCalled();
+  });
+
+  it("creates an inactive record before connecting and finishes that same agent", async () => {
+    await render("codex_local");
+    expect(api.create).toHaveBeenCalledTimes(1);
+    const setupId = api.create.mock.calls[0][1].setupId;
+    expect(api.create.mock.calls[0][1]).toMatchObject({ name: "Atlas", runtimeConfig: { heartbeat: { enabled: false } } });
+    expect(state.navigate).toHaveBeenCalledWith(expect.stringContaining(`setupAgentId=${setupId}`), { replace: true });
+    expect(api.hire).not.toHaveBeenCalled();
+    expect(api.testEnvironment).not.toHaveBeenCalled();
+    await click("OpenAIAPI key");
+    await fill("API key", "setup-test-key");
+    await click("Connect");
+    expect(api.testEnvironment.mock.calls[0][2].agentId).toBe(setupId);
+    expect(api.update).toHaveBeenCalledWith(setupId, expect.objectContaining({ runtimeConfig: expect.objectContaining({ aiConnection: expect.anything() }) }), "company-1");
+    await click("Finish setup");
+    expect(api.hire.mock.calls[0][1].setupAgentId).toBe(setupId);
+    expect(api.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes a name-only draft at adapter selection without creating another record", async () => {
+    const setupId = "00000000-0000-4000-8000-000000000091";
+    state.params = new URLSearchParams({ name: "Atlas", adapterType: "process", setupAgentId: setupId });
+    api.get.mockResolvedValue({ id: setupId, companyId: "company-1", name: "Atlas", adapterType: "process", adapterConfig: {}, runtimeConfig: {}, metadata: { setupAdapterPending: true }, pauseReason: "setup", status: "paused" });
+    await renderCurrentParams();
+    await settle();
+    expect(document.body.textContent).toContain("Choose an adapter");
+    expect(api.create).not.toHaveBeenCalled();
+    expect(api.testEnvironment).not.toHaveBeenCalled();
+    await act(async () => document.querySelector<HTMLInputElement>('input[name="new-agent-adapter"][value="codex_local"]')!.click());
+    await act(async () => [...document.querySelectorAll("button")].find(button => button.textContent?.trim() === "Configure agent")!.click());
+    await settle();
+    expect(api.update).toHaveBeenCalledWith(setupId, expect.objectContaining({ adapterType: "codex_local", metadata: { setupAdapterPending: false } }), "company-1");
+    expect(state.navigate).toHaveBeenLastCalledWith(expect.stringContaining(`setupAgentId=${setupId}`), { replace: true });
+    expect(api.create).not.toHaveBeenCalled();
+  });
+
+  it("retries early creation with the same identity before offering authentication", async () => {
+    api.create.mockRejectedValueOnce(new Error("Creation unavailable"));
+    await render("codex_local");
+    expect(container.textContent).toContain("Creation unavailable");
+    expect(container.textContent).not.toContain("Complete subscription login");
+    await click("Retry");
+    expect(api.create).toHaveBeenCalledTimes(2);
+    expect(api.create.mock.calls[1][1].setupId).toBe(api.create.mock.calls[0][1].setupId);
+    expect(container.textContent).toContain("Connect a model");
+  });
+
+  it("resumes a saved setup record and its configuration after navigation", async () => {
+    await render("codex_local");
+    await click("OpenAIAPI key");
+    await fill("API key", "setup-test-key");
+    await click("Connect");
+    await fill("Model", "gpt-5.4");
+    await click("Save & exit");
+    const setupId = api.create.mock.calls[0][1].setupId;
+    expect(state.navigate).toHaveBeenLastCalledWith("/agents/all");
+    await act(async () => root.render(null));
+    cache.clear();
+    state.params = new URLSearchParams({ name: "Atlas", adapterType: "codex_local", setupAgentId: setupId });
+    await renderCurrentParams();
+    await settle();
+    expect(container.textContent).toContain("Configure your agent");
+    expect(container.textContent).not.toContain("Your agent is ready");
+    expect((container.querySelector('[aria-label="Model"]') as HTMLInputElement).value).toBe("gpt-5.4");
+    await click("Finish setup");
+    expect(api.hire.mock.calls[0][1]).toMatchObject({ setupAgentId: setupId, adapterConfig: { model: "gpt-5.4" } });
+    expect(api.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains the first agent's role when finishing its setup", async () => {
+    api.list.mockResolvedValue([]);
+    await render("codex_local");
+    await connect("OpenAI");
+    api.list.mockResolvedValue([{ id: api.create.mock.calls[0][1].setupId, role: "ceo", status: "paused" }]);
+    await act(async () => { await cache.invalidateQueries({ queryKey: queryKeys.agents.list("company-1") }); });
+    await settle();
+    await click("Finish setup");
+    expect(api.hire.mock.calls[0][1].role).toBe("ceo");
+  });
+
+  it("keeps the setup identity when finalization fails and is retried", async () => {
+    await render("codex_local");
+    await connect("OpenAI");
+    api.hire.mockRejectedValueOnce(new Error("Hire unavailable"));
+    await click("Finish setup");
+    expect(container.textContent).toContain("Hire unavailable");
+    await click("Finish setup");
+    expect(api.hire).toHaveBeenCalledTimes(2);
+    expect(api.hire.mock.calls[1][1].setupAgentId).toBe(api.hire.mock.calls[0][1].setupAgentId);
+    expect(api.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries the existing Claude stored-login authorization into a saved setup", async () => {
+    api.getClaudeOAuthTokenStatus.mockResolvedValue({ secretId: "stored-oauth", latestVersion: 1 });
+    await render("claude_local");
+    await click("ClaudeSubscription");
+    await click("Use saved subscription");
+    expect(api.update.mock.calls[0][1].applyStoredClaudeLogin).toBe(true);
+  });
+
+  it("saves a typed gateway key as a secret and restores it without re-entry", async () => {
+    await render("hermes_gateway");
+    await fill("Hermes API base URL", "https://hermes.example.test");
+    await fill("API_SERVER_KEY", "saved-gateway-key");
+    await click("Save & exit");
+    const setupId = api.create.mock.calls[0][1].setupId;
+    expect(api.update.mock.calls.at(-1)![1].adapterConfig.apiKey).toMatchObject({ type: "secret_ref", secretId: "org-secret-1" });
+    expect(JSON.stringify(api.update.mock.calls)).not.toContain("saved-gateway-key");
+    await act(async () => root.render(null));
+    cache.clear();
+    state.params = new URLSearchParams({ name: "Atlas", adapterType: "hermes_gateway", setupAgentId: setupId });
+    await renderCurrentParams();
+    await settle();
+    await click("Finish setup");
+    expect(api.hire.mock.calls[0][1].adapterConfig.apiKey).toMatchObject({ type: "secret_ref", secretId: "org-secret-1" });
+    expect(secrets.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains an unfinished legacy harness when the current target defaults to Paperclip Runner", async () => {
+    await render("codex_local");
+    const setupId = api.create.mock.calls[0][1].setupId;
+    await act(async () => root.render(null));
+    cache.clear();
+    state.adapters = state.adapters.map((adapter: any) => adapter.type === "codex_local" ? { ...adapter, defaultRunner: "paperclip", supportedRunners: ["paperclip", "legacy"] } : adapter);
+    state.params = new URLSearchParams({ name: "Atlas", adapterType: "codex_local", setupAgentId: setupId });
+    await renderCurrentParams();
+    await settle();
+    await connect("OpenAI");
+    await click("Finish setup");
+    expect(api.hire.mock.calls[0][1]).toMatchObject({ adapterType: "codex_local", runner: "legacy" });
+  });
+
   it.each([
     ["paperclip", "Connect", "image"], ["legacy", "Connect", "image"],
     ["paperclip", "Finish setup", "image"], ["legacy", "Finish setup", "image"],
@@ -61,6 +335,7 @@ describe("New agent setup", () => {
     expect(calls).toEqual(["discovery-before", "platform", "discovery-after", "adapter"]);
     expect(envApi.probe).toHaveBeenCalledExactlyOnceWith("sandbox-1", "company-1");
     expect(api.testEnvironment).toHaveBeenCalledTimes(1);
+    expect(api.testEnvironment.mock.calls[0][2]).toMatchObject({ agentId: api.create.mock.calls[0][1].setupId, runner: measured });
     expect(api.hire).toHaveBeenCalledTimes(1);
     const tested = api.testEnvironment.mock.calls[0][2].adapterConfig;
     const saved = api.hire.mock.calls[0][1];
@@ -218,7 +493,7 @@ describe("New agent setup", () => {
     const environment = container.querySelector<HTMLSelectElement>('select[aria-label="Environment"]')!;
     await act(async () => { environment.value = "linux-ssh"; environment.dispatchEvent(new Event("change", { bubbles: true })); });
     await settle();
-    await connect("OpenAI");
+    expect(container.textContent).toContain("Configure your agent");
     await click("Finish setup");
     expect(api.testEnvironment).toHaveBeenLastCalledWith("company-1", "codex_local", expect.objectContaining({ environmentId: "linux-ssh", runner: "legacy" }));
     expect(api.hire.mock.calls[0][1]).toMatchObject({ adapterType: "codex_local", runner: "legacy" });
@@ -261,7 +536,6 @@ describe("New agent setup", () => {
     await act(async () => (container.querySelector("summary") as HTMLElement).click());
     expect(container.querySelector('[aria-label="Runner"]')?.textContent).toBe("Legacy runner (default)");
     expect(adapterApi.list).toHaveBeenCalledWith({ companyId: "company-1", environmentId: "local-1" });
-    await connect("OpenAI");
     await click("Finish setup");
     expect(api.testEnvironment).toHaveBeenCalledTimes(2);
     expect(api.testEnvironment).toHaveBeenLastCalledWith("company-1", "codex_local", expect.objectContaining({ environmentId: "local-1" }));
@@ -317,6 +591,69 @@ describe("New agent setup", () => {
     expect(api.testEnvironment).toHaveBeenLastCalledWith("company-1", "codex_local", expect.objectContaining({ runner: "paperclip" }));
     expect(api.hire.mock.calls[0][1]).toMatchObject({ adapterType: "codex_local", runner: "paperclip" });
   });
+  it("keeps saved-token Copilot discovery passive while new-agent setup is idle", async () => {
+    api.adapterModels.mockResolvedValue([{ id: "gpt-5.6-luna", label: "Copilot Luna" }]);
+    await render("paperclip_runner", "copilot");
+    await vi.waitFor(() => expect(api.adapterModels).toHaveBeenLastCalledWith("company-1", "paperclip_runner", expect.objectContaining({ environmentId: "local-1", acpxAgent: "copilot" })));
+    await settle();
+    const initialDiscoveries = api.adapterModels.mock.calls.length;
+    await act(async () => { await cache.invalidateQueries({ type: "active" }, { cancelRefetch: false }); });
+    await settle();
+    expect(api.adapterModels).toHaveBeenCalledTimes(initialDiscoveries);
+  });
+  it("refuses an undiscovered Copilot model before hiring with a saved connection", async () => {
+    api.adapterModels.mockResolvedValue([{ id: "gpt-5.6-luna", label: "GPT" }]);
+    await render("paperclip_runner", "copilot");
+    await fill("Model", "unavailable-copilot-model");
+    await click("Finish setup");
+    expect(api.hire).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("select an available model");
+  });
+  it("preserves the authenticated Copilot model when hiring with a saved connection", async () => {
+    api.adapterModels.mockResolvedValue([{ id: "gpt-5.6-luna", label: "GPT" }]);
+    await render("paperclip_runner", "copilot");
+    await fill("Model", "gpt-5.6-luna");
+    await click("Finish setup");
+    expect(api.hire).toHaveBeenCalledWith("company-1", expect.objectContaining({
+      adapterType: "paperclip_runner", adapterConfig: expect.objectContaining({ provider: "acpx", acpxAgent: "copilot", model: "gpt-5.6-luna" }),
+      runtimeConfig: expect.objectContaining({ aiConnection: { provider: "github", method: "api_key", mode: "responsible_user" } }),
+    }));
+  });
+  it("discovers models after the first Copilot token becomes the responsible user's default", async () => {
+    let defaultSaved = false;
+    managedApi.setDefault.mockImplementation(async () => { defaultSaved = true; return {}; });
+    api.adapterModels.mockImplementation(async () => {
+      if (!defaultSaved) throw new ApiError("Connect Copilot first", 422, null);
+      return [{ id: "gpt-5.6-luna", label: "GPT" }];
+    });
+    await render("paperclip_runner", "copilot");
+    const beforeConnection = api.adapterModels.mock.calls.length;
+    expect(beforeConnection).toBeGreaterThan(0);
+    const trigger = document.querySelector('[role="combobox"][aria-label="Connection"]')!;
+    await act(async () => trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
+    await settle();
+    const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(item => item.textContent?.includes("Connect an account"));
+    expect(option).toBeDefined();
+    await act(async () => option!.click());
+    await settle();
+    const input = document.querySelector<HTMLInputElement>('[aria-label="API key"]')!;
+    expect(input).toBeTruthy();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "github_pat_fixture_first");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const save = [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find(button => button.textContent?.trim() === "Connect")!;
+    expect(save).toBeTruthy();
+    await act(async () => save.click());
+    await settle();
+    expect(managedApi.setDefault).toHaveBeenCalledWith("company-1", "managed-grant");
+    expect(api.adapterModels).toHaveBeenCalledTimes(beforeConnection + 1);
+    expect(api.adapterModels.mock.invocationCallOrder[beforeConnection]).toBeGreaterThan(managedApi.setDefault.mock.invocationCallOrder[0]);
+    expect(api.adapterModels).toHaveBeenLastCalledWith("company-1", "paperclip_runner", expect.objectContaining({
+      provider: "acpx", acpxAgent: "copilot", aiConnection: { provider: "github", method: "api_key", mode: "responsible_user" },
+    }));
+  });
+
   it("creates Dot through its independent choice without CLI or model setup, then routes to pairing", async () => {
     settings.getExperimental.mockResolvedValue({ enableNativeRunner: false, enableOpenAiDot: true, enablePublicMcp: true });
     await render("paperclip_runner", "openai_dot");
@@ -363,7 +700,8 @@ describe("New agent setup", () => {
       select.dispatchEvent(new Event("change", { bubbles: true }));
     });
     await settle();
-    expect(container.querySelector('select[aria-label="Environment"]')).toBeNull();
+    expect(container.querySelector('select[aria-label="Environment"]')).not.toBeNull();
+    await click("Connect model");
     await click("Complete subscription login");
     await click("Finish setup");
     expect(api.hire.mock.calls[0][1]).toMatchObject({ defaultEnvironmentId: "login-env", runtimeConfig: { aiConnection: { method: "subscription" } } });
@@ -403,10 +741,8 @@ describe("New agent setup", () => {
       select.dispatchEvent(new Event("change", { bubbles: true }));
     });
     await settle();
-    if (container.querySelector('[role="radiogroup"][aria-label="Connection type"]')) {
-      await click("GrokAPI key");
-      await click("Use saved API key");
-    }
+    expect(container.textContent).toContain("Configure your agent");
+    await click("Run test");
     expect(api.testEnvironment).toHaveBeenCalledWith("company-1", "paperclip_runner", expect.objectContaining({ environmentId: "grok-sandbox" }));
     await click("Finish setup");
     expect(api.hire.mock.calls[0][1].defaultEnvironmentId).toBe("grok-sandbox");
@@ -548,15 +884,62 @@ describe("New agent setup", () => {
     expect(container.textContent).toContain("Enter the Kimi API model name");
     await fill("Kimi API model name", "kimi-for-coding");
     await fill("Kimi API base URL", "https://api.kimi.com/coding/v1");
+    const persist = api.update.getMockImplementation()!;
+    api.update.mockImplementationOnce(async (...args) => {
+      const saved = await persist(...args);
+      return { ...saved, adapterConfig: { ...saved.adapterConfig, env: Object.fromEntries(
+        Object.entries(saved.adapterConfig.env).map(([key, binding]) => [key,
+          (binding as { type: string }).type === "plain" ? { type: "plain", value: "***REDACTED***" } : binding]),
+      ) } };
+    });
     await click("Finish setup");
     const config = api.hire.mock.calls[0][1].adapterConfig;
     expect(config).not.toHaveProperty("model");
     expect(config.env).toMatchObject({
       KIMI_MODEL_NAME: { type: "plain", value: "kimi-for-coding" },
+      KIMI_MODEL_PROVIDER_TYPE: { type: "plain", value: "kimi" },
       KIMI_MODEL_BASE_URL: { type: "plain", value: "https://api.kimi.com/coding/v1" },
       KIMI_MODEL_API_KEY: { type: "secret_ref", secretId: "org-secret-1" },
     });
   });
+  it("restores saved Kimi API settings even when the API redacts plain environment values", async () => {
+    await render("kimi_local");
+    await fill("KIMI_MODEL_API_KEY", "kimi-test-key");
+    await fill("Kimi API model name", "kimi-for-coding");
+    await act(async () => {
+      const protocol = container.querySelector('[aria-label="Kimi API protocol"]') as HTMLSelectElement;
+      protocol.value = "openai";
+      protocol.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await fill("Kimi API base URL", "https://kimi.example.test/v1");
+    await click("Save & exit");
+    const setupId = api.create.mock.calls[0][1].setupId;
+    const get = api.get.getMockImplementation()!;
+    api.get.mockImplementation(async (...args) => {
+      const saved = await get(...args);
+      return { ...saved, adapterConfig: { ...saved.adapterConfig, env: Object.fromEntries(
+        Object.entries(saved.adapterConfig.env).map(([key, binding]) => [key,
+          (binding as { type: string }).type === "plain" ? { type: "plain", value: "***REDACTED***" } : binding]),
+      ) } };
+    });
+    await act(async () => root.render(null));
+    cache.clear();
+    state.params = new URLSearchParams({ name: "Atlas", adapterType: "kimi_local", setupAgentId: setupId });
+    await renderCurrentParams();
+    await settle();
+    expect((container.querySelector('[aria-label="Kimi API model name"]') as HTMLInputElement).value).toBe("kimi-for-coding");
+    expect((container.querySelector('[aria-label="Kimi API protocol"]') as HTMLSelectElement).value).toBe("openai");
+    await click("Save & exit");
+    expect(api.update.mock.calls.at(-1)![1].adapterConfig.env).toMatchObject({
+      KIMI_MODEL_NAME: { type: "plain", value: "kimi-for-coding" },
+      KIMI_MODEL_PROVIDER_TYPE: { type: "plain", value: "openai" },
+      KIMI_MODEL_BASE_URL: { type: "plain", value: "https://kimi.example.test/v1" },
+    });
+    await click("Finish setup");
+    expect(api.hire.mock.calls[0][1].adapterConfig.env).toMatchObject({ KIMI_MODEL_NAME: { type: "plain", value: "kimi-for-coding" } });
+    expect(secrets.create).toHaveBeenCalledTimes(1);
+  });
+
   it("configures Hermes Gateway URL and its top-level secret reference", async () => {
     await render("hermes_gateway");
     expect(container.querySelector('[aria-label="Model"]')).toBeNull();
@@ -641,7 +1024,7 @@ describe("New agent setup", () => {
       expect(container.textContent).toContain("Your agent is ready");
       await click("Assign Atlas a Task");
       expect(state.openNewIssue).toHaveBeenCalledWith({
-        assigneeAgentId: "new-agent",
+        assigneeAgentId: api.create.mock.calls[0][1].setupId,
         status: "todo",
       });
     },
@@ -781,6 +1164,78 @@ describe("New agent setup", () => {
       expect(secrets.create).toHaveBeenCalledTimes(1);
     },
   );
+  it("resumes an empty native Pi draft with account selection and exact thinking controls", async () => {
+    const id = "00000000-0000-4000-8000-000000000093";
+    settings.getExperimental.mockResolvedValue({ enableNativeRunner: false });
+    state.params = new URLSearchParams({ name: "Pi", adapterType: "pi_local", setupAgentId: id });
+    state.adapters = state.adapters.map((adapter: any) => adapter.type === "pi_local"
+      ? { ...adapter, supportedRunners: ["paperclip", "legacy"], defaultRunner: "paperclip" } : adapter);
+    api.get.mockResolvedValue({ id, companyId: "company-1", name: "Pi", adapterType: "paperclip_runner", adapterConfig: { provider: "acpx", acpxAgent: "pi", model: "", piThinkingLevel: "max" }, runtimeConfig: {}, pauseReason: "setup", status: "paused" });
+    await renderCurrentParams();
+    await settle();
+    expect(container.querySelector('[role="combobox"][aria-label="Connection"]')).not.toBeNull();
+    expect((container.querySelector('[aria-label="Model"]') as HTMLInputElement).value).toBe("");
+    const thinking = container.querySelector('[aria-label="Thinking effort"]') as HTMLSelectElement;
+    expect(thinking.value).toBe("max");
+    expect([...thinking.options].map(option => option.value)).toEqual(["", "off", "low", "high", "max"]);
+    expect(container.querySelector('[aria-label="OPENROUTER_API_KEY"]')).toBeNull();
+  });
+
+  it.each(["auto", "legacy"] as const)("keeps OpenCode %s selection consistent between testing and hiring", async runner => {
+    settings.getExperimental.mockResolvedValue({ enableNativeRunner: false });
+    state.adapters = state.adapters.map((adapter: any) => adapter.type === "opencode_local"
+      ? { ...adapter, supportedRunners: ["paperclip", "legacy"], defaultRunner: "paperclip" } : adapter);
+    await render("opencode_local");
+    const model = "openrouter/anthropic/claude-sonnet-4.6";
+    await fill("Model", model);
+    const select = container.querySelector<HTMLButtonElement>('[aria-label="Runner"]')!;
+    expect(select.textContent).toContain("Paperclip Runner");
+    if (runner === "legacy") {
+      await act(async () => select.click());
+      await act(async () => document.querySelector<HTMLButtonElement>('[role="option"][data-value="legacy"]')!.click());
+    }
+    await click("Run test");
+    await click("Finish setup");
+    expect(api.testEnvironment).toHaveBeenCalledWith("company-1", "opencode_local", expect.objectContaining({ adapterConfig: expect.objectContaining({ model }), ...(runner === "legacy" ? { runner } : {}) }));
+    expect(api.hire).toHaveBeenCalledWith("company-1", expect.objectContaining({ adapterType: "opencode_local", adapterConfig: expect.objectContaining({ model }), ...(runner === "legacy" ? { runner } : {}) }));
+    if (runner === "auto") expect(api.hire.mock.calls[0][1]).not.toHaveProperty("runner");
+  });
+
+  it("retains automatic OpenCode selection while the first draft request is in flight", async () => {
+    let release!: () => void;
+    const originalCreate = api.create.getMockImplementation()!;
+    api.create.mockImplementation(async (...args) => {
+      await new Promise<void>(resolve => { release = resolve; });
+      return originalCreate(...args);
+    });
+    await render("opencode_local");
+    const url = state.navigate.mock.calls[0][0] as string;
+    state.params = new URLSearchParams(url.split("?")[1]);
+    expect(state.params.get("runner")).toBe("auto");
+    await renderCurrentParams();
+    expect(api.create).toHaveBeenCalledOnce();
+    await act(async () => release());
+    await settle();
+    expect(api.create.mock.calls[0][1].runner).toBe("auto");
+    expect(api.create).toHaveBeenCalledOnce();
+  });
+
+  it.each(["opencode_local", "paperclip_runner"])("resumes OpenCode's saved %s setup after a default change", async adapterType => {
+    const id = "00000000-0000-4000-8000-000000000092";
+    state.params = new URLSearchParams({ name: "OpenCode", adapterType: "opencode_local", setupAgentId: id });
+    state.adapters = state.adapters.map((adapter: any) => adapter.type === "opencode_local"
+      ? { ...adapter, supportedRunners: ["paperclip", "legacy"], defaultRunner: "paperclip" } : adapter);
+    const savedPolicy = adapterType === "paperclip_runner"
+      ? { provider: "opencode", opencodePermissionMode: "ask", lifecycleMode: "persistent", idleTimeoutMs: 30000 }
+      : { command: "custom-opencode", dangerouslySkipPermissions: false };
+    api.get.mockResolvedValue({ id, companyId: "company-1", name: "OpenCode", adapterType, adapterConfig: { ...savedPolicy, model: "openrouter/anthropic/claude-sonnet-4.6" }, runtimeConfig: {}, pauseReason: "setup", status: "paused" });
+    await renderCurrentParams();
+    await settle();
+    await click("Finish setup");
+    expect(api.hire.mock.calls[0][1].runner).toBe(adapterType === "paperclip_runner" ? "paperclip" : "legacy");
+    expect(api.hire.mock.calls[0][1]).toMatchObject({ adapterType, adapterConfig: savedPolicy });
+  });
+
   it("connects OpenRouter before testing and hiring OpenCode without copying credentials into the agent", async () => {
     await render("opencode_local");
     const model = "openrouter/anthropic/claude-sonnet-4.6";
@@ -889,11 +1344,11 @@ describe("New agent setup", () => {
     await act(async () => root.render(null));
     expect(secrets.createUserSecretDefinition).not.toHaveBeenCalled();
   });
-  it("removes the staged credential when hiring fails", async () => {
+  it("removes the staged credential when saving setup fails", async () => {
     await render();
     await fill("Model", "openrouter/anthropic/claude-sonnet-4.6");
     await fill("OPENROUTER_API_KEY", "new-key");
-    api.hire.mockRejectedValueOnce(new Error("Creation rejected"));
+    api.update.mockRejectedValueOnce(new ApiError("Creation rejected", 422, null));
     await click("Finish setup");
     expect(secrets.remove).toHaveBeenCalledWith("org-secret-1");
     expect(container.textContent).toContain("Creation rejected");
@@ -902,11 +1357,41 @@ describe("New agent setup", () => {
     await render();
     await fill("Model", "openrouter/anthropic/claude-sonnet-4.6");
     await fill("OPENROUTER_API_KEY", "new-key");
-    api.hire.mockRejectedValueOnce(new Error("Agent quota exceeded"));
+    api.update.mockRejectedValueOnce(new ApiError("Agent quota exceeded", 422, null));
     secrets.remove.mockRejectedValueOnce(new Error("Cleanup unavailable"));
     await click("Finish setup");
     expect(container.textContent).toContain("Agent quota exceeded");
     expect(container.textContent).toContain("Could not remove an unused setup credential");
+  });
+  it("retains the credential on the setup record when the hire response is lost", async () => {
+    await render();
+    await fill("Model", "openrouter/anthropic/claude-sonnet-4.6");
+    await fill("OPENROUTER_API_KEY", "new-key");
+    api.hire.mockRejectedValueOnce(new Error("Response lost"));
+    await click("Finish setup");
+    expect(secrets.remove).not.toHaveBeenCalled();
+    expect(api.update.mock.calls.at(-1)![1].adapterConfig.env.OPENROUTER_API_KEY).toMatchObject({ type: "secret_ref" });
+    await click("Finish setup");
+    expect(secrets.create).toHaveBeenCalledTimes(1);
+    expect(api.hire).toHaveBeenCalledTimes(2);
+  });
+  it.each(["Save & exit", "Finish setup"])("retains a saved key when the %s PATCH response is lost", async action => {
+    await render("hermes_gateway");
+    await fill("Hermes API base URL", "https://hermes.example.test");
+    await fill("API_SERVER_KEY", "uncertain-save-key");
+    const persist = api.update.getMockImplementation()!;
+    api.update.mockImplementationOnce(async (...args) => {
+      await persist(...args);
+      throw new Error("Save response lost");
+    });
+    await click(action);
+    expect(container.textContent).toContain("Save response lost");
+    expect(secrets.remove).not.toHaveBeenCalled();
+    const setupId = api.create.mock.calls[0][1].setupId;
+    expect((await api.get(setupId)).adapterConfig.apiKey).toMatchObject({ type: "secret_ref", secretId: "org-secret-1" });
+    await click("Finish setup");
+    expect(api.hire.mock.calls[0][1].adapterConfig.apiKey).toMatchObject({ type: "secret_ref", secretId: "org-secret-1" });
+    expect(secrets.create).toHaveBeenCalledTimes(1);
   });
   it("requires an explicit provider/model for Pi", async () => {
     await render();

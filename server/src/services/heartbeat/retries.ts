@@ -1,4 +1,5 @@
 import { deriveTaskKeyWithHeartbeatFallback } from "./run-state.js";
+import { infrastructureRetryDelayMs } from "../system-recovery-state.js";
 import {
   WORKSPACE_VALIDATION_FAILURE_CODE,
   isWorkspaceValidationFailedRun,
@@ -33,6 +34,7 @@ import type { Db } from "@paperclipai/db";
 import {
   agents,
   agentWakeupRequests,
+  chatCompletionDeliveries,
   executionWorkspaces,
   heartbeatRuns,
   issues,
@@ -74,6 +76,7 @@ type PlanApprovalResumeFailure = {
 
 /** The retry module owns scheduling writes; the service owns lifecycle effects. */
 export interface HeartbeatRetryDependencies {
+  hasCaseHandoffForRun: (run: Pick<HeartbeatRun, "id" | "companyId">) => Promise<boolean>;
   runDispatch: Pick<ReturnType<typeof createRunDispatch>,
     "evaluateScheduledRetryGate" | "promoteDueScheduledRetries" | "promoteScheduledRetry">;
   getAgent: (agentId: string) => Promise<typeof agents.$inferSelect | null | undefined>;
@@ -112,10 +115,8 @@ export interface HeartbeatRetryDependencies {
 }
 
 export const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS = [
-  30_000, 30_000,
+  30_000, 60_000,
 ] as const;
-
-const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_JITTER_RATIO = 0;
 
 const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON = "transient_failure";
 
@@ -372,10 +373,7 @@ export function computeBoundedTransientHeartbeatRetrySchedule(
   if (!Number.isInteger(attempt) || attempt <= 0) return null;
   const baseDelayMs = BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS[attempt - 1];
   if (typeof baseDelayMs !== "number") return null;
-  const sample = Math.min(1, Math.max(0, random()));
-  const jitterMultiplier =
-    1 + (sample * 2 - 1) * BOUNDED_TRANSIENT_HEARTBEAT_RETRY_JITTER_RATIO;
-  const delayMs = Math.max(1_000, Math.round(baseDelayMs * jitterMultiplier));
+  const delayMs = infrastructureRetryDelayMs(attempt, random());
   return {
     attempt,
     baseDelayMs,
@@ -398,6 +396,7 @@ function readNonEmptyString(value: unknown): string | null {
 /** Retry persistence uses the service database and explicit lifecycle callbacks. */
 export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDependencies) {
   const {
+    hasCaseHandoffForRun,
     appendRunEvent,
     escalatePlanApprovalResumeFailureNeedsAttention,
     getAgentInvokability,
@@ -427,6 +426,8 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
       delayMs?: number;
     },
   ) {
+    if (await hasCaseHandoffForRun(run)) return { outcome: "not_scheduled" as const,
+      reason: "The durable case handoff owns successor work.", issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
     if (["openai_dot", "muse"].includes(String(parseObject(agent.adapterConfig).provider))
         || ["openai_dot", "muse"].includes(String(parseObject(parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput).provider).kind))) {
       return { outcome: "not_scheduled" as const, reason: "Dot external execution must be reconciled before a new assignment; Paperclip cannot confirm its external stop.", issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
@@ -436,7 +437,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
         reason: "Repair the invalid tool definitions before starting a new attempt.",
         issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
     }
-    if (Array.isArray(run.contextSnapshot?.chatCompletionDeliveryIds) &&
+    if (opts?.retryReason !== WORKSPACE_BUSY_RETRY_REASON && Array.isArray(run.contextSnapshot?.chatCompletionDeliveryIds) &&
         run.contextSnapshot.chatCompletionDeliveryIds.some(id => typeof id === "string")) {
       return { outcome: "not_scheduled" as const, reason: "The completion outbox owns this reply's retry budget and publication identity.",
         errorCode: "chat_completion_outbox_owns_retry" as const, issueId: readNonEmptyString(run.contextSnapshot.issueId) };
@@ -1095,6 +1096,10 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
             updatedAt: now,
           })
           .where(eq(agentWakeupRequests.id, wakeupRequest.id));
+        if (retryReason === WORKSPACE_BUSY_RETRY_REASON) {
+          await tx.update(chatCompletionDeliveries).set({ targetRunId: scheduledRun.id })
+            .where(and(eq(chatCompletionDeliveries.companyId, run.companyId), eq(chatCompletionDeliveries.targetRunId, run.id)));
+        }
 
         let detachWorkspaceFromIssue = false;
         if (issueId && shouldQuarantineWorkspaceForRetry) {
@@ -1630,6 +1635,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
   ) {
+    if (await hasCaseHandoffForRun(run)) return null;
     if (!run.wakeupRequestId) return null;
     if (!isResolvedInteractionContinuationWakeContext(run.contextSnapshot))
       return null;

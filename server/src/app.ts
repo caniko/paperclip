@@ -1,3 +1,5 @@
+import { finishServiceShutdown } from "./shutdown.js";
+import { promptInjectionPreventionRoutes } from "./routes/prompt-injection-prevention.js";
 import { voiceSessionRoutes, voiceWebhookRoutes } from "./routes/voice-sessions.js";
 import { eq } from "drizzle-orm";
 import { chatEndpoints } from "@paperclipai/db";
@@ -106,6 +108,8 @@ import { projectRoutes } from "./routes/projects.js";
 import { issueRoutes } from "./routes/issues.js";
 import { issueTreeControlRoutes } from "./routes/issue-tree-control.js";
 import { caseRoutes } from "./routes/cases.js";
+import { caseHandoffRoutes } from "./routes/case-handoffs.js";
+import { workflowRoutes } from "./routes/workflows.js";
 import { fileResourceRoutes } from "./routes/file-resources.js";
 import { routineRoutes } from "./routes/routines.js";
 import { environmentRoutes } from "./routes/environments.js";
@@ -191,7 +195,8 @@ import { createToolGatewayService } from "./services/tool-gateway.js";
 import { toolAccessService } from "./services/tool-access.js";
 import { chatChannelService } from "./services/chat-channels.js";
 import { deliverNativeQuestionResponse } from "./services/native-runtime/native-question-bridge.js";
-import { enqueueChatRunMilestones } from "./services/chat-run-publications.js";
+import { nativeChatProgressWork } from "./services/chat-native-progress-work.js";
+import { chatRunMilestoneWork } from "./services/chat-run-milestone-work.js";
 import {
   createCoalescedAsyncTrigger,
   isChatPublicationCommitSignal,
@@ -317,10 +322,8 @@ export function shouldEnablePrivateHostnameGuard(opts: {
 }
 
 type ChatReconciliationLane =
-  | "provider runtimes"
   | "deliveries"
   | "GitHub webhook recovery"
-  | "run milestones"
   | "publications"
   | "Slack file receipts"
   | "Slack session status";
@@ -331,10 +334,8 @@ type ChatReconciliationLane =
  * next publication sweep for every endpoint.
  */
 export function createChatReconciliationCoordinator(input: {
-  reconcileProviderRuntimes: () => Promise<unknown>;
   processPendingDeliveries: () => Promise<unknown>;
   processFailedGitHubWebhookDeliveries?: () => Promise<unknown>;
-  projectRunMilestones: () => Promise<number>;
   flushPublications: () => Promise<unknown>;
   processPendingSlackFileUploadReceipts?: () => Promise<unknown>;
   processPendingSlackSessionSyncs?: () => Promise<unknown>;
@@ -345,16 +346,6 @@ export function createChatReconciliationCoordinator(input: {
   const publicationReconciliation = createCoalescedAsyncTrigger({
     run: input.flushPublications,
     onError: (error) => input.onError("publications", error),
-  });
-  const milestoneReconciliation = createCoalescedAsyncTrigger({
-    run: async () => {
-      const inserted = await input.projectRunMilestones();
-      // Existing final/question publications never wait on this optional
-      // projection. Newly committed milestones get a bounded dispatch wake;
-      // an empty/contended pass does not create a self-sustaining loop.
-      if (inserted > 0) publicationReconciliation.notify();
-    },
-    onError: (error) => input.onError("run milestones", error),
   });
   const start = (
     lane: ChatReconciliationLane,
@@ -373,7 +364,6 @@ export function createChatReconciliationCoordinator(input: {
   return {
     reconcile() {
       if (stopped) return;
-      start("provider runtimes", input.reconcileProviderRuntimes);
       start("deliveries", input.processPendingDeliveries);
       if (input.processFailedGitHubWebhookDeliveries) {
         start(
@@ -381,27 +371,21 @@ export function createChatReconciliationCoordinator(input: {
           input.processFailedGitHubWebhookDeliveries,
         );
       }
-      milestoneReconciliation.poll();
       publicationReconciliation.poll();
       if (input.processPendingSlackFileUploadReceipts) start("Slack file receipts", input.processPendingSlackFileUploadReceipts);
       if (input.processPendingSlackSessionSyncs) start("Slack session status", input.processPendingSlackSessionSyncs);
     },
     notifyPublications() {
-      milestoneReconciliation.notify();
       publicationReconciliation.notify();
     },
     stop() {
       stopped = true;
-      milestoneReconciliation.stop();
       publicationReconciliation.stop();
     },
     async drain() {
       await Promise.allSettled([
         ...inFlight.values(),
-        milestoneReconciliation.drain(),
       ]);
-      // Projecting the final batch can notify dispatch after an earlier drain
-      // would have returned. Join dispatch only after its producer has drained.
       await publicationReconciliation.drain();
     },
   };
@@ -624,7 +608,6 @@ export async function createApp(
   app.use(cloudWarmStandbyMiddleware(isWarmStandby, health, staticUi));
   app.use("/api/customer-success/v1", customerSuccessRoutes(db, opts.storageService));
   app.use(museTransportRoutes(db, opts.authPublicBaseUrl));
-  const stopMuseMaintenance = startMuseMaintenance(db);
   app.use(publicMcpIngress);
   // Connection-intent tools carry their own short-lived, run-bound bearer and
   // must be reachable by remote adapters that intentionally do not receive an
@@ -702,16 +685,16 @@ export async function createApp(
   app.get("/api/chat-github/manifest/callback", async (req, res) => {
     res.set("Cache-Control", "no-store");
     res.set("Referrer-Policy", "no-referrer");
-    const redirect = await chatChannels.githubWizard.directCallback(String(req.query.state ?? ""), String(req.query.code ?? ""));
+    const redirect = await chatChannels.githubWizard.directCallback(String(req.query.state ?? ""), String(req.query.code ?? ""), req.actor);
     res.redirect(303, redirect);
   });
   app.get("/api/chat-github/cloud/callback", async (req, res) => {
     res.set("Cache-Control", "no-store"); res.set("Referrer-Policy", "no-referrer");
-    res.redirect(303, await chatChannels.githubWizard.cloudCallback(String(req.query.state ?? ""), String(req.query.registration ?? ""), typeof req.query.claim === "string" ? req.query.claim : undefined));
+    res.redirect(303, await chatChannels.githubWizard.cloudCallback(String(req.query.state ?? ""), String(req.query.registration ?? ""), typeof req.query.claim === "string" ? req.query.claim : undefined, req.actor));
   });
   app.get("/api/chat-github/identity/callback", async (req, res) => {
     res.set("Cache-Control", "no-store"); res.set("Referrer-Policy", "no-referrer");
-    res.redirect(303, await chatChannels.githubWizard.identityCallback(String(req.query.state ?? ""), String(req.query.code ?? "")));
+    res.redirect(303, await chatChannels.githubWizard.identityCallback(String(req.query.state ?? ""), String(req.query.code ?? ""), req.actor));
   });
   const managedAutoInstallKeys = opts.managedPluginAutoInstall ?? null;
   const bundledCatalogRoot =
@@ -852,6 +835,8 @@ export async function createApp(
   api.use(taskWorkspaceRoutes(db));
   api.use(projectRoutes(db));
   api.use(caseRoutes(db, opts.storageService));
+  api.use(caseHandoffRoutes(db));
+  api.use(workflowRoutes(db));
   api.use(issueTreeControlRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(fileResourceRoutes(db));
   api.use(routineRoutes(db, { pluginWorkerManager: workerManager }));
@@ -929,6 +914,7 @@ export async function createApp(
   });
   const toolActionDeliveries = toolActionDeliveryService(db, heartbeatService(db, { pluginWorkerManager: workerManager }));
   const toolGateway = createToolGatewayService(db, {
+    budgetHooks: { cancelWorkForScope: heartbeatService(db, { pluginWorkerManager: workerManager }).cancelBudgetScopeWork },
     onToolActionSettled: (id) => toolActionDeliveries.deliver(id),
     pluginToolDispatcher: toolDispatcher,
     deploymentMode: opts.deploymentMode,
@@ -954,7 +940,8 @@ export async function createApp(
   api.use(decisionModelRoutes(db));
   api.use(agentObservabilityRoutes(db, { deploymentMode: opts.deploymentMode, deploymentExposure: opts.deploymentExposure }));
   api.use(fastResponseRoutes(db));
-  api.use(aiConnectionRoutes(db, { deploymentMode: opts.deploymentMode, deploymentExposure: opts.deploymentExposure, trustedLocalStdioRuntimeHost }));
+  api.use(promptInjectionPreventionRoutes(db));
+  api.use(aiConnectionRoutes(db, { deploymentMode: opts.deploymentMode, deploymentExposure: opts.deploymentExposure, trustedLocalStdioRuntimeHost, pluginWorkerManager: workerManager }));
   api.use(
     toolAccessRoutes(db, {
       deploymentMode: opts.deploymentMode,
@@ -1076,13 +1063,11 @@ export async function createApp(
     publicMcpEvents = createPublicMcpEvents(db, publicMcpOAuth, dispatch, {
       isBackgroundWorkEnabled: () => !isWarmStandby() && !isIdleTaskDrainActive(),
     });
-    publicMcpEvents.start();
     const transfers = createPublicMcpTransfers(db, publicMcpOAuth, dispatch, opts.storageService);
     publicMcpIngress.use(transfers.router);
     publicMcpIngress.use(publicMcpIngressRoutes(publicMcpOAuth, createPublicMcpExecutor(db, publicMcpOAuth, dispatch, transfers), publicMcpEvents));
     const dotOAuth = createPublicMcpOAuth(db, { ...publicMcpOAuth.config, resource: publicMcpOAuth.config.origin + "/mcp/runner" });
     dotMcpEvents = createPublicMcpEvents(db, dotOAuth, dispatch, { enableDotRunner: true, isBackgroundWorkEnabled: () => !isWarmStandby() && !isIdleTaskDrainActive() });
-    dotMcpEvents.start();
     const grokTransfers = createPublicMcpTransfers(db, dotOAuth, dispatch, opts.storageService, { pathPrefix: "/mcp/runner/files",
       agentSession: { authorize: (principal, sessionId, taskId, write, database) => dotRunnerBroker(database ?? db).authorizeFileSession(principal, sessionId, taskId, write) } });
     publicMcpIngress.use(grokTransfers.router);
@@ -1090,7 +1075,6 @@ export async function createApp(
     api.use(publicMcpManagementRoutes(publicMcpOAuth, dotOAuth));
     api.use(dotRunnerRoutes(db, publicMcpOAuth.config.origin + "/mcp/runner"));
     api.use(grokBotRoutes(db, publicMcpOAuth.config.origin + "/mcp/runner"));
-    grokDispatcher.start();
   }
 
   api.use(museBoardRoutes(db, opts.authPublicBaseUrl));
@@ -1264,7 +1248,6 @@ export async function createApp(
   app.use(errorHandler);
 
   jobCoordinator.start();
-  scheduler.start();
   const deliveryWork = createDeliveryWorkCoordinator({
     owner: db,
     canRun: () => !isWarmStandby() && !isIdleTaskDrainActive(),
@@ -1272,6 +1255,18 @@ export async function createApp(
     onError: (err, queue) => logger.error({ err, queue }, "Delivery reconciliation failed"),
   });
   app.locals.deliveryWork = deliveryWork;
+  await scheduler.start(deliveryWork);
+  const agentLifecycleDelivery = deliveryWork.register(DELIVERY_QUEUES.agentLifecycle, {
+    retryMs: 1_000,
+    run: () => agentLifecycle.sweep(),
+    hasPending: () => agentLifecycle.hasPending(),
+    nextRunAt: () => agentLifecycle.nextRunAt(),
+  });
+  agentLifecycle.setWake(agentLifecycleDelivery.wake);
+  publicMcpEvents?.start(deliveryWork);
+  dotMcpEvents?.start(deliveryWork);
+  if (publicMcpOAuth) grokDispatcher.start(deliveryWork);
+  const stopMuseMaintenance = startMuseMaintenance(db, deliveryWork);
   const resourceLifecycleDelivery = registerPluginLifecycleDelivery(deliveryWork, db, workerManager, lifecycle);
   await resourceLifecycleDelivery.ready;
   if (opts.feedbackExportService) {
@@ -1283,24 +1278,29 @@ export async function createApp(
   }
   registerChatDeliveryWork(deliveryWork, chatChannels, () => !isIdleTaskDrainActive());
   registerChatActionWork(deliveryWork, chatChannels, () => !isIdleTaskDrainActive());
+  chatChannels.voice.registerReportWork(deliveryWork, () => !isWarmStandby() && !isIdleTaskDrainActive());
+  chatChannels.voice.registerRecoveryWork(deliveryWork, () => !isWarmStandby() && !isIdleTaskDrainActive());
+  chatChannels.voice.registerReplyWork(deliveryWork, () => !isWarmStandby() && !isIdleTaskDrainActive());
+  chatChannels.voice.inbound.registerCleanupWork(deliveryWork, () => !isWarmStandby() && !isIdleTaskDrainActive());
+  chatChannels.voice.inbound.registerRetentionWork(deliveryWork, () => !isWarmStandby() && !isIdleTaskDrainActive());
+  chatChannels.registerReceiverWork(deliveryWork, () => !isWarmStandby() && !isIdleTaskDrainActive());
+  chatChannels.registerTeamsConsentExpiryWork(deliveryWork, () => !isWarmStandby() && !isIdleTaskDrainActive());
+  chatChannels.registerTeamsAttemptRecoveryWork(deliveryWork, () => !isWarmStandby() && !isIdleTaskDrainActive());
+  chatChannels.registerCommandWork(deliveryWork, () => !isWarmStandby() && !isIdleTaskDrainActive());
+  nativeChatProgressWork(db).register(deliveryWork, () => !isWarmStandby() && !isIdleTaskDrainActive());
+  chatRunMilestoneWork(db, opts.authPublicBaseUrl).register(
+    deliveryWork, () => !isWarmStandby() && !isIdleTaskDrainActive(),
+  );
   emailChannels.start();
   const reconcileChatPublicationMaintenance = async () => {
     await chatChannels.processPublicationMaintenance();
   };
   const chatReconciliation = createChatReconciliationCoordinator({
-    reconcileProviderRuntimes: async () => {
-      await chatChannels.reconcileProviderRuntimes();
-      await chatChannels.voice.reconcile();
-    },
     // Chat delivery, action, and Telegram discovery workers now own these
     // duties. Keep the coordinator's other maintenance lanes independent.
     processPendingDeliveries: async () => undefined,
     processFailedGitHubWebhookDeliveries: () =>
       chatChannels.processFailedGitHubWebhookDeliveries(),
-    projectRunMilestones: () =>
-      enqueueChatRunMilestones(db, {
-        publicBaseUrl: opts.authPublicBaseUrl,
-      }),
     flushPublications: () => reconcileChatPublicationMaintenance(),
     onError: (lane, err) => {
       logger.error({ err, lane }, `Failed to reconcile chat ${lane}`);
@@ -1312,7 +1312,8 @@ export async function createApp(
         chatReconciliation.notifyPublications();
     },
   );
-  // Provider/action maintenance and milestone projection still use this cadence.
+  // Remaining publication maintenance still uses this cadence. Lifecycle and
+  // native progress projection have independent commit/deadline workers.
   // Inbox, outbox, and file receipt queues have independent commit/deadline wakes.
   let chatPublicationTimer: ReturnType<typeof setInterval> | null = setInterval(
     () => {
@@ -1434,20 +1435,17 @@ export async function createApp(
       logger.error({ err }, "Failed to load ready plugins on startup");
     });
   app.locals.bundledPluginsStartup = trackIdleWork(bundledPluginsStartup);
-  void bundledPluginsStartup.then(() => { lifecyclePluginsReady = true; resourceLifecycleDelivery.wake(); return agentLifecycle.sweep(); }).catch(() => logger.warn("Agent lifecycle recovery failed; retrying."));
+  void bundledPluginsStartup.then(() => { lifecyclePluginsReady = true; resourceLifecycleDelivery.wake(); agentLifecycleDelivery.wake(); }).catch(() => logger.warn("Agent lifecycle recovery failed; retrying."));
   // The shutdown hook runs at most once. It caches the in-flight promise, so a
   // second caller (for example the `exit` handler) awaits the same completion
   // instead of starting a second teardown.
   let appServicesShutdown: Promise<void> | null = null;
   const shutdownAppServices = (): Promise<void> => {
     if (appServicesShutdown) return appServicesShutdown;
-    appServicesShutdown = (async () => {
-      // The scheduler tick queries the database. Stop it here, inside the
-      // awaited teardown, so no tick runs after the caller ends the pool.
-      scheduler.stop();
+    appServicesShutdown = finishServiceShutdown(() => scheduler.stop(), async () => {
       await agentLifecycle.stop();
       await publicMcpEvents?.stop();
-      await dotMcpEvents?.stop(); grokDispatcher.stop();
+      await dotMcpEvents?.stop();
       jobCoordinator.stop();
       resourceLifecycleDelivery.dispose();
       await deliveryWork.stop();
@@ -1479,7 +1477,7 @@ export async function createApp(
       // caller stops the database and the provider. A lease release that
       // fails stays a durable record for the startup reaper.
       await setupTokenLoginService?.shutdown();
-    })();
+    });
     return appServicesShutdown;
   };
   app.locals.paperclipShutdown = shutdownAppServices;

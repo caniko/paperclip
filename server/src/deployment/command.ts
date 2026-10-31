@@ -1,6 +1,6 @@
 import { channel } from "node:diagnostics_channel";
 import {
-  acquireDeploymentLease, applyPendingMigrations, assertDeploymentSchemaCompatible,
+  acquireDeploymentLease, applyPendingMigrations, assertDeploymentSchemaCompatible, assertSameDeploymentDatabase,
   createDb, closeRegisteredClients, inspectMigrations, resolveMigrationConnection,
 } from "@paperclipai/db";
 import { loadConfig } from "../config.js";
@@ -30,16 +30,12 @@ export async function deploymentCommand(command: "plan" | "apply" | "check", des
     }
     if (!url) throw new Error("Missing database connection");
     connectionUrl = url;
-    // An offline apply cannot change resources underneath a running server.
-    // Read-only checks may run concurrently with it.
     if (apply) release = await acquireDeploymentLease(url, () => {
-      // The lease lives on a separate connection from migrations and the apply
-      // transaction. Once it is gone another controller can start immediately.
-      // Exit rather than letting either connection continue without ownership.
       console.error("Declarative database lease was lost; aborting offline apply");
       process.exit(1);
     });
     const migrationUrl = config.databaseMigrationUrl ?? url;
+    await assertSameDeploymentDatabase(url, migrationUrl);
     await assertDeploymentSchemaCompatible(migrationUrl);
     if (apply) await applyPendingMigrations(migrationUrl);
     else if ((await inspectMigrations(url)).status !== "upToDate") {

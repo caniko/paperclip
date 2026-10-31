@@ -11,8 +11,6 @@ import { redactSensitiveText } from "../redaction.js";
 export const RAILWAY_SSH_SECRET_PATH = "railway.ssh_private_key";
 
 async function systemOpenSshCommand(command: "ssh" | "ssh-keygen"): Promise<string> {
-  // Credential-bearing commands must not search an ambient or workspace PATH.
-  // NixOS exposes its administrator-selected packages through the system profile.
   for (const directory of ["/usr/bin", "/bin", "/run/current-system/sw/bin"]) {
     const executable = path.join(directory, command);
     try {

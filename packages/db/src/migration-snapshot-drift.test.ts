@@ -16,16 +16,12 @@ const migrationsDir = fileURLToPath(new URL("./migrations", import.meta.url));
 const schemaDir = fileURLToPath(new URL("./schema", import.meta.url));
 
 async function readNewestSnapshot(): Promise<{ file: string; snapshot: Record<string, unknown> }> {
-  // SQL-only migrations may follow the newest schema snapshot.
-  const file = (await readdir(path.join(migrationsDir, "meta")))
-    .filter((name) => /^\d+_snapshot\.json$/.test(name))
-    .sort((a, b) => parseInt(a, 10) - parseInt(b, 10))
-    .at(-1);
-  if (!file) throw new Error("migration snapshot is missing");
-  const snapshot = JSON.parse(await readFile(path.join(migrationsDir, "meta", file), "utf8")) as Record<
-    string,
-    unknown
-  >;
+  // SQL-only migrations can advance the journal without changing the schema snapshot.
+  const files = (await readdir(path.join(migrationsDir, "meta")))
+    .filter(file => /^\d+_snapshot\.json$/.test(file)).sort();
+  const file = files.at(-1);
+  if (!file) throw new Error("migration metadata has no schema snapshots");
+  const snapshot = JSON.parse(await readFile(path.join(migrationsDir, "meta", file), "utf8")) as Record<string, unknown>;
   return { file, snapshot };
 }
 

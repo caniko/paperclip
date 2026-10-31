@@ -29,6 +29,7 @@ describe("SSH authentication selection", () => {
   it("does not authenticate with an agent key when the supplied key is rejected", async (context) => {
     const support = await getSshEnvLabSupport();
     if (!support.supported) context.skip(support.reason ?? "SSH fixture unavailable");
+    if (process.getuid?.() === 0) context.skip("The SSH fixture disables root login, so it cannot authenticate as root");
     for (const command of ["ssh-agent", "ssh-add"]) {
       if (!(await commandAvailable(command))) context.skip(`Missing required command: ${command}`);
     }
@@ -60,7 +61,6 @@ describe("SSH authentication selection", () => {
           env: {},
         });
         try {
-          // Exclude the developer's SSH config from this disposable fixture.
           return await execFileAsync(target.command, ["-F", "/dev/null", ...target.args], { env, timeout: 5_000 });
         } finally {
           await target.cleanup();
@@ -109,7 +109,6 @@ describe("SSH authentication selection", () => {
       root = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-auth-"));
       const config = path.join(root, "config");
       await writeFile(config, "Host *\n  IdentityAgent /ambient/agent.sock\n  IdentitiesOnly no\n");
-      // -G evaluates the actual OpenSSH option precedence without connecting.
       const { stdout } = await execFileAsync(target.command, ["-G", "-F", config, ...target.args], { timeout: 5_000 });
       expect(stdout).toMatch(explicit ? /^identityagent none$/m : /^identityagent \/ambient\/agent.sock$/m);
       expect(stdout).toMatch(explicit ? /^identitiesonly yes$/m : /^identitiesonly no$/m);

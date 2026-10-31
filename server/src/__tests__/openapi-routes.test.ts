@@ -14,11 +14,14 @@ const ROUTES_DIR = path.resolve(__dirname, "../routes");
 
 const apiPrefixes: Record<string, string> = {
   "cases.ts": "/api",
+  "case-handoffs.ts": "/api",
+  "workflows.ts": "/api",
   "smoke-lab.ts": "/api",
   "access.ts": "/api",
   "activity.ts": "/api",
   "adapters.ts": "/api",
   "agents.ts": "/api",
+  "agent-project-access.ts": "/api",
   "agent-commentary.ts": "/api",
   "agent-avatars.ts": "/api",
   "agent-profile-avatar.ts": "/api",
@@ -27,6 +30,7 @@ const apiPrefixes: Record<string, string> = {
   "decision-models.ts": "/api",
   "agent-observability.ts": "/api",
   "fast-responses.ts": "/api",
+  "prompt-injection-prevention.ts": "/api",
   "attention.ts": "/api",
   "approvals.ts": "/api",
   "assets.ts": "/api",
@@ -313,8 +317,16 @@ describe("openapi routes", () => {
   it("removes Pipelines discovery while retaining Cases and Routines", () => {
     const spec = buildOpenApiSpec() as any;
     const paths = Object.keys(spec.paths);
-    expect(paths.filter((path) => /pipelines|review-cases|case-events|\{caseId\}/.test(path))).toEqual([]);
+    expect(paths.filter((path) => /pipelines|review-cases|case-events/.test(path))).toEqual([]);
+    // Standalone handoffs also use caseId; that parameter name no longer
+    // identifies a removed Pipeline operation. Retain only their live paths.
+    expect(paths.filter((path) => path.startsWith("/api/cases/{caseId}")).sort()).toEqual([
+      "/api/cases/{caseId}/handoffs",
+      "/api/cases/{caseId}/handoffs/{handoffId}/cancel",
+      "/api/cases/{caseId}/handoffs/{handoffId}/retry",
+    ]);
     expect(spec.paths["/api/companies/{companyId}/cases"].post).toBeDefined();
+    expect(spec.paths["/api/companies/{companyId}/case-handoffs"].post).toBeDefined();
     expect(spec.paths["/api/cases/{id}"].get).toBeDefined();
     expect(spec.paths["/api/routines/{id}/run"].post).toBeDefined();
   });
@@ -395,13 +407,13 @@ describe("openapi routes", () => {
     expect(operation.responses["503"]).toBeDefined();
   });
 
-  it("documents board-only pool management with revision-checked deletion", () => {
+  it("documents delegated pool management with revision-checked deletion", () => {
     const { spec } = loadSpecRoutes();
     const pools = spec.paths["/api/companies/{companyId}/ai-connection-pools"];
     const remove = spec.paths["/api/companies/{companyId}/ai-connection-pools/{poolId}"].delete;
     const inspection = spec.paths["/api/companies/{companyId}/ai-connection-pools/{poolId}/inspection"].get;
     for (const operation of [pools.get, pools.post, remove, inspection]) {
-      expect(operation.security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+      expect(operation.security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }, { AgentBearerAuth: [] }]);
     }
     expect(remove.requestBody.required).toBe(true);
     expect(remove.requestBody.content["application/json"].schema).toMatchObject({
@@ -604,7 +616,7 @@ describe("openapi routes", () => {
     ).not.toContain("sessionToken");
   });
 
-  it("publishes the complete board contract for chat channels", () => {
+  it("publishes delegated chat configuration and human-only confirmation boundaries", () => {
     const { spec } = loadSpecRoutes();
     const boardSecurity = [{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }];
     const operations = [
@@ -666,6 +678,13 @@ describe("openapi routes", () => {
       ],
     ] as const;
 
+    const humanOnly = new Set([
+      "/api/chat-endpoints/{endpointId}/deliveries/{deliveryId}/replay",
+      "/api/chat-endpoints/{endpointId}/publications/{publicationId}/replay",
+      "/api/chat-endpoints/{endpointId}/conversations/{conversationId}/publications",
+      "/api/chat-endpoints/{endpointId}/github/identity", "/api/chat-identity-links/preview", "/api/chat-identity-links/confirm",
+      "/api/chat-endpoints/{endpointId}/publications/{publicationId}/resolve", "/api/chat-endpoints/{endpointId}/actions/{actionId}/resolve",
+    ]);
     for (const [method, routePath] of operations) {
       const operation = spec.paths[routePath]?.[method];
       expect(
@@ -674,10 +693,10 @@ describe("openapi routes", () => {
       ).toBeDefined();
       expect(
         operation.security,
-        `${method.toUpperCase()} ${routePath} is board-only`,
-      ).toEqual(boardSecurity);
+        `${method.toUpperCase()} ${routePath} retains its actor boundary`,
+      ).toEqual(humanOnly.has(routePath) ? boardSecurity : [...boardSecurity, { AgentBearerAuth: [] }]);
       expect(operation["x-paperclip-authorization"]).toEqual({
-        actor: "board",
+        actor: humanOnly.has(routePath) ? "board" : "board_or_agent",
       });
       expect(operation.tags).toContain("chat-channels");
     }
@@ -735,6 +754,9 @@ describe("openapi routes", () => {
     ).toEqual(["current", "stale", "unverified"]);
 
     const setup = spec.paths["/api/chat-endpoints/{endpointId}/setup"].post;
+    const setupResponse = setup.responses["200"].content["application/json"].schema;
+    expect((setupResponse.oneOf ?? setupResponse.anyOf)[1].properties.requiredUserAction.properties.kind.enum).toEqual(["enter_credentials"]);
+    expect(setup.description).toContain("without changing credentials");
     expect(
       setup.requestBody.content["application/json"].schema.properties.action
         .enum,
@@ -769,12 +791,16 @@ describe("openapi routes", () => {
 
     const setupSecret =
       spec.paths["/api/chat-endpoints/{endpointId}/setup-secret"].post;
+    const secretHandoff = setupSecret.responses["200"].content["application/json"].schema;
+    expect(secretHandoff.properties.requiredUserAction.properties.kind.enum).toEqual(["enter_credentials"]);
+    expect(secretHandoff.properties).not.toHaveProperty("webhookSecret");
+    expect(setupSecret.description).toContain("without rotating or reading");
     expect(
       setupSecret.responses["201"].content["application/json"].schema,
     ).toMatchObject({
       type: "object",
       additionalProperties: false,
-      required: ["webhookSecret"],
+      required: ["webhookSecret", "credentialRotationId"],
     });
     expect(setupSecret.responses["409"]).toBeDefined();
     expect(setupSecret.responses["422"]).toBeDefined();
@@ -930,6 +956,21 @@ describe("openapi routes", () => {
     expect(decision.requestBody.content["application/json"].schema.required).toEqual(expect.arrayContaining(["approve", "approvalCode"]));
   });
 
+  it("documents board-only prompt injection settings and fixed-sample testing", () => {
+    const { spec } = loadSpecRoutes();
+    const base = "/api/companies/{companyId}/prompt-injection-prevention";
+    for (const [method, suffix] of [["get", ""], ["put", ""], ["get", "/models"], ["post", "/test"]]) {
+      expect(spec.paths[base + suffix][method]["x-paperclip-authorization"]).toEqual({ actor: "board" });
+      expect(spec.paths[base + suffix][method].security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+    }
+    expect(spec.paths[base].put.requestBody.content["application/json"].schema).toMatchObject({
+      additionalProperties: false, required: ["enabled", "connectionId", "grantId", "model"],
+    });
+    expect(spec.paths[base + "/test"].post.requestBody.content["application/json"].schema).toMatchObject({
+      type: "object", additionalProperties: false, properties: {},
+    });
+  });
+
   it("covers the mounted server routes exactly", () => {
     const {
       routes: actualRoutes,
@@ -959,6 +1000,21 @@ describe("openapi routes", () => {
       extraInSpec: [],
       excludedRoutes: [...explicitOpenApiOperationCoverageExclusions].sort(),
     });
+  });
+
+  it("documents additive project access as board-only with a strict request", () => {
+    const { spec } = loadSpecRoutes();
+    const path = spec.paths["/api/agents/{id}/project-access"];
+    for (const operation of [path.get, path.post]) {
+      expect(operation["x-paperclip-authorization"]).toEqual({ actor: "board" });
+      expect(operation.security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+      expect(operation.responses["200"].content["application/json"].schema.required).toEqual(["projectIds", "canManage"]);
+    }
+    expect(path.post.requestBody.content["application/json"].schema).toMatchObject({
+      additionalProperties: false, required: ["projectIds"],
+      properties: { projectIds: { type: "array", items: { type: "string", format: "uuid" } } },
+    });
+    expect(path.post.responses["409"]).toBeDefined();
   });
 
   it("documents the authenticated personal primary-agent contract", () => {
@@ -1032,12 +1088,12 @@ describe("openapi routes", () => {
     expect(replacement.responses["422"]).toBeDefined();
   });
 
-  it("documents the manager-only GitHub wizard and compatible owner-aware registration", () => {
+  it("documents delegated GitHub setup with human identity confirmation and compatible owner-aware registration", () => {
     const { spec } = loadSpecRoutes();
     for (const [suffix, method] of [["draft", "put"], ["setup", "post"], ["identity/start", "post"], ["identity/confirm", "post"]]) {
       const operation = spec.paths[`/api/chat-endpoints/{endpointId}/github/${suffix}`][method];
-      expect(operation["x-paperclip-authorization"]).toEqual({ actor: "board" });
-      expect(operation.security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+      expect(operation["x-paperclip-authorization"]).toEqual({ actor: suffix === "identity/confirm" ? "board" : "board_or_agent" });
+      expect(operation.security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }, ...(suffix === "identity/confirm" ? [] : [{ AgentBearerAuth: [] }])]);
     }
     const registration = spec.paths["/api/chat-endpoints/{endpointId}/github/registration"].post;
     const input = registration.requestBody.content["application/json"].schema;
@@ -1045,6 +1101,10 @@ describe("openapi routes", () => {
     expect(input.required).not.toContain("ownerType");
     const response = registration.responses["200"].content["application/json"].schema;
     expect(response.oneOf ?? response.anyOf).toHaveLength(2);
+    const appImport = spec.paths["/api/chat-endpoints/{endpointId}/github/app"].post;
+    expect(appImport.description).toContain("Only a human session");
+    const appImportResponse = appImport.responses["200"].content["application/json"].schema;
+    expect(appImportResponse.oneOf ?? appImportResponse.anyOf).toHaveLength(2);
   });
 
   it("documents GitHub recovery, draft receipts, paged repositories and old review lookups", () => {
@@ -1053,21 +1113,22 @@ describe("openapi routes", () => {
     const setup = spec.paths[root + "setup"].post.responses["200"].content["application/json"].schema;
     expect(setup.properties.restartableRegistrationId.format).toBe("uuid");
     const restart = spec.paths[root + "registration/restart"].post;
-    expect(restart["x-paperclip-authorization"]).toEqual({ actor: "board" });
+    expect(restart["x-paperclip-authorization"]).toEqual({ actor: "board_or_agent" });
     const restartInput = restart.requestBody.content["application/json"].schema;
     expect(restartInput.required).toEqual(expect.arrayContaining(["registrationId", "appNotCreated"]));
     expect(restartInput.properties.appNotCreated.enum ?? [restartInput.properties.appNotCreated.const]).toEqual([true]);
     const receipt = spec.paths[root + "draft"].put.responses["200"].content["application/json"].schema;
     expect(receipt.required).toEqual(["saved"]);
     expect(receipt.properties).not.toHaveProperty("state");
-    const app = spec.paths[root + "app"].post.requestBody.content["application/json"].schema;
+    const appInput = spec.paths[root + "app"].post.requestBody.content["application/json"].schema;
+    const app = (appInput.oneOf ?? appInput.anyOf).find((variant: { properties?: { appId?: unknown } }) => variant.properties?.appId);
     expect(app.properties.clientId).toBeDefined();
     expect(app.properties.clientSecret).toBeDefined();
     expect(app.required).not.toContain("clientId");
     const page = spec.paths[root + "repositories"].get;
     expect(page.parameters.map((param: { name: string }) => param.name)).toEqual(expect.arrayContaining(["endpointId", "offset", "limit", "search"]));
     expect(page.responses["200"].content["application/json"].schema.properties).toHaveProperty("totalCount");
-    expect(spec.paths[root + "repositories/access"].put["x-paperclip-authorization"]).toEqual({ actor: "board" });
+    expect(spec.paths[root + "repositories/access"].put["x-paperclip-authorization"]).toEqual({ actor: "board_or_agent" });
     const review = spec.paths[root + "reviews/{reviewId}"].get;
     expect(review.parameters.map((param: { name: string }) => param.name)).toEqual(["endpointId", "reviewId"]);
     expect(review.responses["404"]).toBeDefined();

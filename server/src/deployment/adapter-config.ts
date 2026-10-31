@@ -1,8 +1,6 @@
 import { z } from "zod";
 import { SECRET_PAYLOAD_KEY_RE } from "../redaction.js";
 
-// Execution contracts, deliberately independent of UI form schemas. Keep this
-// closed until an adapter's consumed fields and credential projection are audited.
 const text = z.string().min(1);
 const duration = z.number().finite().nonnegative();
 const url = z.string().url().refine((value) => {

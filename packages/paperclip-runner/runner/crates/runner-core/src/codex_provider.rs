@@ -43,6 +43,7 @@ const OPENCODE_PROVIDER_ENVIRONMENT_KEYS: &[&str] = &[
     "PAPERCLIP_NATIVE_MCP_TOKEN",
     "PAPERCLIP_OPENCODE_PERMISSION_MODE",
     "PAPERCLIP_OPENCODE_RUNTIME_DIR",
+    "PAPERCLIP_OPENCODE_PERFORMANCE_DIAGNOSTICS",
     "PAPERCLIP_RUNNER_INSTANCE_ID",
     "PAPERCLIP_RUN_ID",
     "PAPERCLIP_NORMALIZED_SESSION_ID",
@@ -372,11 +373,8 @@ pub struct CodexProviderConfig {
     // Older persisted configurations deliberately retain the provider default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_skill_instructions: Option<bool>,
-    // Keep explicit command values out of bounded argv. Persist them with the
-    // provider profile so every thread/start and thread/resume uses the same map.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_environment: Option<BTreeMap<String, String>>,
-    // Controller-registered AGENT_HOME binding; rotates with run authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_working_copy_root: Option<String>,
     // Older sessions retain their standalone task envelope.
@@ -470,9 +468,6 @@ impl CodexProviderConfig {
                 "local runner provider must use a supported Codex or OpenCode launch driver",
             ));
         }
-        // The discriminator is checked by older runners even when serde ignores
-        // unknown fields. Persist it with the environment so neither fresh
-        // preparation nor durable recovery can silently downgrade to argv mode.
         if matches!(
             self.driver.as_str(),
             "codex_app_server_command_environment_v1" | "codex_app_server_command_environment_v2"
@@ -527,8 +522,6 @@ impl CodexProviderConfig {
             ));
         }
         if let Some(environment) = &self.command_environment {
-            // Mirrors codexCommandEnvironment's nonsecret projection. GitHub
-            // credentials remain inherited through the separate allowlist.
             let mut bytes = 0_usize;
             for (key, value) in environment {
                 if !matches!(
@@ -551,7 +544,6 @@ impl CodexProviderConfig {
                 }
                 bytes = bytes.saturating_add(key.len()).saturating_add(value.len());
             }
-            // Bound both the immutable map and the effective run projection.
             if let Some(root) = &self.instruction_working_copy_root {
                 let prior_bytes = environment
                     .get("AGENT_HOME")
@@ -917,6 +909,8 @@ const GITHUB_CREDENTIAL_ENVIRONMENT_KEYS: &[&str] = &[
 const CODEX_PROVIDER_ENVIRONMENT_KEYS: &[&str] = &[
     "OTEL_EXPORTER_OTLP_LOGS_TIMEOUT",
     "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT",
+    "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+    "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
     "PAPERCLIP_AI_PROVIDER_KEY",
     "PAPERCLIP_AGENT_KEY_ID",
     "PAPERCLIP_AGENT_PUBLIC_KEY",
@@ -4301,9 +4295,9 @@ done
             instructions: "Test only.".to_owned(),
             approval_policy: "never".to_owned(),
             externally_sandboxed: false,
+            read_only: false,
             command_environment: None,
             instruction_working_copy_root: None,
-            read_only: false,
             include_skill_instructions: None,
             conversation_mode: None,
         };
@@ -4691,9 +4685,9 @@ done
             instructions: String::new(),
             approval_policy: "never".to_owned(),
             externally_sandboxed: false,
+            read_only: false,
             command_environment: None,
             instruction_working_copy_root: None,
-            read_only: false,
             include_skill_instructions: None,
             conversation_mode: None,
         };
@@ -4814,9 +4808,9 @@ done
             instructions: String::new(),
             approval_policy: "never".to_owned(),
             externally_sandboxed: false,
+            read_only: false,
             command_environment: None,
             instruction_working_copy_root: None,
-            read_only: false,
             include_skill_instructions: None,
             conversation_mode: None,
         };

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { and, asc, eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { agents, agentWakeupRequests, chatCompletionDeliveries as deliveries, chatTaskHandoffs as handoffs,
-  authUsers, companies, createDb, documents, environmentLeases, heartbeatRuns, issueComments, issueRecoveryActions, issues } from "@paperclipai/db";
+  authUsers, companies, companyMemberships, createDb, documents, environmentLeases, heartbeatRuns, issueComments, issueRecoveryActions, issues } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { settleInterruptedNativeBootstrap, terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
@@ -161,6 +161,7 @@ const support = await getEmbeddedPostgresTestSupport();
   it("acknowledges a reused provider comment before a restarted delivery sweep", async () => {
     const f = await seed();
     await db.insert(authUsers).values({ id: "operator", name: "Operator", email: "operator@example.test", createdAt: new Date(), updatedAt: new Date() }).onConflictDoNothing();
+    await db.insert(companyMemberships).values({ companyId: f.companyId, principalType: "user", principalId: "operator", status: "active", membershipRole: "operator" });
     await db.update(issues).set({ responsibleUserId: "operator" }).where(eq(issues.id, f.sourceId));
     const cwd = await mkdtemp(join(tmpdir(), "completion-presentation-"));
     const listener = createServer(async (req, res) => {

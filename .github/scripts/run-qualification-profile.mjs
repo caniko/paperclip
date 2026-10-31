@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { createVitest, parseCLI } from "vitest/node";
@@ -115,6 +115,9 @@ if (profile === "tailscale-mock") metadata.tailscaleMock = bindMockTailscale(roo
 const options = { ...cli.options, root: testRoot, ...(completePackage ? { config: path.join(testRoot, "vitest.config.ts") } : {}),
   watch: false, includeTaskLocation: true, allowOnly: false, retry: 0,
   maxWorkers: 1, fileParallelism: false, exclude: [...(cli.options.exclude ?? []), "**/dist/**"] };
+// Unbuffered start/finish lines: a hung case is named by the last "START" line.
+const progressReporter = { onTestCaseReady: test => writeSync(2, `START ${test.fullName}\n`),
+  onTestCaseResult: test => writeSync(2, `${test.result().state.toUpperCase()} ${test.fullName}\n`) };
 let ctx;
 let selection;
 try {
@@ -152,7 +155,8 @@ try {
   const rawReporter = new QualificationJUnitReporter();
   rawReporter.options.outputFile = path.join(evidence, "raw-results.junit");
   ctx = await createVitest({ ...options, testNamePattern: selection.testNamePattern,
-    reporters: ["default", rawReporter] });
+    // 
+    reporters: [profile === "runnerd" ? progressReporter : "default", rawReporter] });
   const executionSpecs = await ctx.globTestSpecifications(filters);
   assert.deepEqual(specificationRows(executionSpecs, testRoot), discovery);
   // https://vitest.dev/api/advanced/vitest#start — run once, no retries or timeout overrides.

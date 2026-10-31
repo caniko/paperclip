@@ -8,8 +8,6 @@ vi.mock("../hot-restart.js", async importOriginal => ({
 
 const { currentNativeControllerIdentity } = await import("./native-restart-recovery.js");
 
-// Warm-recovery admission runs inside runnerd's post-auth welcome window;
-// re-probing this process's start time there under load made runnerd fail closed.
 describe("current native controller identity", () => {
   it("probes the controller start once, retrying only failed probes", async () => {
     readProcessStartedAt.mockResolvedValueOnce(null).mockResolvedValue("2026-10-21T10:00:00.000Z");

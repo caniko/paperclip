@@ -106,13 +106,20 @@ jobs:
           run_install: false
 
       - name: Validate migration ordering against target branch
-        run: >-
-          node .github/scripts/check-pr-migration-order.mjs
-          "${{ github.event.pull_request.base.sha }}"
-          "${{ github.event.pull_request.head.sha }}"
+        run: |
+          upstream_sha=
+          if git fetch --no-tags https://github.com/paperclipai/paperclip.git master; then
+            upstream_sha="$(git rev-parse FETCH_HEAD)"
+          fi
+          node .github/scripts/check-pr-migration-order.mjs \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            $upstream_sha
 
       - name: Validate Dockerfile deps stage
-        run: node ./scripts/check-docker-deps-stage.mjs
+        run: |
+          node ./scripts/check-docker-deps-stage.mjs
+          node "$CI_NODE_TEST" ./scripts/docker-deps-postinstall.test.mjs
 
       - name: Validate Node version policy
         run: pnpm check:node-version
@@ -131,6 +138,13 @@ jobs:
 
       - name: Install policy test dependencies
         uses: ./.github/actions/setup-ci-dependencies
+
+      # Report-only for now (always exits 0); --enforce turns findings into failures.
+      - name: Report raw query-error rendering
+        run: node scripts/check-query-error-rendering.mjs --summary
+
+      - name: Test query-error rendering check
+        run: node --test ./scripts/check-query-error-rendering.test.mjs
 
       - name: Test PR quality-gate scripts
         run: node "$CI_NODE_TEST" '.github/scripts/tests/*.test.mjs'
@@ -153,7 +167,7 @@ jobs:
         run: node --test ./scripts/__tests__/qualify-composer-stop.test.mjs ./scripts/__tests__/composer-candidate-runtime.test.mjs ./.github/scripts/tests/pr-lockfile-policy.test.mjs
 
       - name: Test release verify workflow wiring
-        run: node "$CI_NODE_TEST" ./scripts/__tests__/release-verify-workflow.test.mjs ./scripts/__tests__/prepare-runner-release-image.test.mjs ./scripts/cloud-source-verification.test.mjs ./scripts/standard-image-contract.test.mjs
+        run: node "$CI_NODE_TEST" ./scripts/__tests__/release-verify-workflow.test.mjs ./scripts/__tests__/eval-schedule-monitor.test.mjs ./scripts/__tests__/prepare-runner-release-image.test.mjs ./scripts/cloud-source-verification.test.mjs ./scripts/standard-image-contract.test.mjs
 
       - name: Test standalone package build concurrency
         run: node "$CI_NODE_TEST" ./scripts/__tests__/build-standalone-concurrency.test.mjs
@@ -225,6 +239,7 @@ jobs:
       - name: Restore materialized dependencies and shared builds
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') != ''
         uses: ./.github/actions/setup-ci-dependencies
+
 
       - name: Locate pnpm store
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') == ''
@@ -357,7 +372,7 @@ jobs:
             packages/paperclip-runner/runner/target/release/deps/paperclip_runnerd-*
             packages/paperclip-runner/runner/target/release/paperclip-runnerd
             packages/paperclip-runner/runner/target/release/paperclip-runnerd.d
-          key: runner-release-crate-v1-${{ steps.runner_release_crate_key.outputs.scope }}-${{ hashFiles('packages/paperclip-runner/rust-toolchain.toml', 'packages/paperclip-runner/runner/Cargo.toml', 'packages/paperclip-runner/runner/Cargo.lock', 'packages/paperclip-runner/runner/crates/**', 'packages/paperclip-runner/protocol/**', 'packages/paperclip-runner/test-fixtures/**', 'packages/paperclip-runner/test/fixtures/**', 'tests/runner-e2e/fixtures/**') }}
+          key: runner-release-crate-v1-${{ steps.runner_release_crate_key.outputs.scope }}-${{ hashFiles('packages/paperclip-runner/rust-toolchain.toml', 'packages/paperclip-runner/acpx-profiles.json', 'packages/paperclip-runner/runner/Cargo.toml', 'packages/paperclip-runner/runner/Cargo.lock', 'packages/paperclip-runner/runner/crates/**', 'packages/paperclip-runner/protocol/**', 'packages/paperclip-runner/test-fixtures/**', 'packages/paperclip-runner/test/fixtures/**', 'tests/runner-e2e/fixtures/**') }}
 
       - name: Mark the restored Runner release crate current
         if: ${{ steps.runner_release_crate.outputs.cache-hit == 'true' }}
@@ -513,6 +528,7 @@ jobs:
       - name: Restore materialized dependencies and shared builds
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') != ''
         uses: ./.github/actions/setup-ci-dependencies
+
 
       - name: Locate pnpm store
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') == ''
@@ -729,6 +745,7 @@ jobs:
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') != ''
         uses: ./.github/actions/setup-ci-dependencies
 
+
       - name: Locate pnpm store
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') == ''
         id: pnpm_store
@@ -870,7 +887,7 @@ jobs:
             packages/paperclip-runner/runner/target/release/deps/paperclip_runnerd-*
             packages/paperclip-runner/runner/target/release/paperclip-runnerd
             packages/paperclip-runner/runner/target/release/paperclip-runnerd.d
-          key: runner-release-crate-v1-${{ steps.runner_release_crate_key.outputs.scope }}-${{ hashFiles('packages/paperclip-runner/rust-toolchain.toml', 'packages/paperclip-runner/runner/Cargo.toml', 'packages/paperclip-runner/runner/Cargo.lock', 'packages/paperclip-runner/runner/crates/**', 'packages/paperclip-runner/protocol/**', 'packages/paperclip-runner/test-fixtures/**', 'packages/paperclip-runner/test/fixtures/**', 'tests/runner-e2e/fixtures/**') }}
+          key: runner-release-crate-v1-${{ steps.runner_release_crate_key.outputs.scope }}-${{ hashFiles('packages/paperclip-runner/rust-toolchain.toml', 'packages/paperclip-runner/acpx-profiles.json', 'packages/paperclip-runner/runner/Cargo.toml', 'packages/paperclip-runner/runner/Cargo.lock', 'packages/paperclip-runner/runner/crates/**', 'packages/paperclip-runner/protocol/**', 'packages/paperclip-runner/test-fixtures/**', 'packages/paperclip-runner/test/fixtures/**', 'tests/runner-e2e/fixtures/**') }}
 
       - name: Mark the restored Runner release crate current
         if: ${{ steps.runner_release_crate.outputs.cache-hit == 'true' }}
@@ -936,6 +953,7 @@ jobs:
       - name: Restore materialized dependencies and shared builds
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') != ''
         uses: ./.github/actions/setup-ci-dependencies
+
 
       - name: Locate pnpm store
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') == ''
@@ -1087,7 +1105,7 @@ jobs:
             packages/paperclip-runner/runner/target/release/deps/paperclip_runnerd-*
             packages/paperclip-runner/runner/target/release/paperclip-runnerd
             packages/paperclip-runner/runner/target/release/paperclip-runnerd.d
-          key: runner-release-crate-v1-${{ steps.runner_release_crate_key.outputs.scope }}-${{ hashFiles('packages/paperclip-runner/rust-toolchain.toml', 'packages/paperclip-runner/runner/Cargo.toml', 'packages/paperclip-runner/runner/Cargo.lock', 'packages/paperclip-runner/runner/crates/**', 'packages/paperclip-runner/protocol/**', 'packages/paperclip-runner/test-fixtures/**', 'packages/paperclip-runner/test/fixtures/**', 'tests/runner-e2e/fixtures/**') }}
+          key: runner-release-crate-v1-${{ steps.runner_release_crate_key.outputs.scope }}-${{ hashFiles('packages/paperclip-runner/rust-toolchain.toml', 'packages/paperclip-runner/acpx-profiles.json', 'packages/paperclip-runner/runner/Cargo.toml', 'packages/paperclip-runner/runner/Cargo.lock', 'packages/paperclip-runner/runner/crates/**', 'packages/paperclip-runner/protocol/**', 'packages/paperclip-runner/test-fixtures/**', 'packages/paperclip-runner/test/fixtures/**', 'tests/runner-e2e/fixtures/**') }}
 
       - name: Mark the restored Runner release crate current
         if: ${{ steps.runner_release_crate.outputs.cache-hit == 'true' }}
@@ -1228,6 +1246,7 @@ jobs:
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') != ''
         uses: ./.github/actions/setup-ci-dependencies
 
+
       - name: Locate pnpm store
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') == ''
         id: pnpm_store
@@ -1313,6 +1332,7 @@ jobs:
       - name: Restore materialized dependencies and shared builds
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') != ''
         uses: ./.github/actions/setup-ci-dependencies
+
 
       - name: Locate pnpm store
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') == ''
@@ -1445,7 +1465,7 @@ jobs:
             packages/paperclip-runner/runner/target/release/deps/paperclip_runnerd-*
             packages/paperclip-runner/runner/target/release/paperclip-runnerd
             packages/paperclip-runner/runner/target/release/paperclip-runnerd.d
-          key: runner-release-crate-v1-${{ steps.runner_release_crate_key.outputs.scope }}-${{ hashFiles('packages/paperclip-runner/rust-toolchain.toml', 'packages/paperclip-runner/runner/Cargo.toml', 'packages/paperclip-runner/runner/Cargo.lock', 'packages/paperclip-runner/runner/crates/**', 'packages/paperclip-runner/protocol/**', 'packages/paperclip-runner/test-fixtures/**', 'packages/paperclip-runner/test/fixtures/**', 'tests/runner-e2e/fixtures/**') }}
+          key: runner-release-crate-v1-${{ steps.runner_release_crate_key.outputs.scope }}-${{ hashFiles('packages/paperclip-runner/rust-toolchain.toml', 'packages/paperclip-runner/acpx-profiles.json', 'packages/paperclip-runner/runner/Cargo.toml', 'packages/paperclip-runner/runner/Cargo.lock', 'packages/paperclip-runner/runner/crates/**', 'packages/paperclip-runner/protocol/**', 'packages/paperclip-runner/test-fixtures/**', 'packages/paperclip-runner/test/fixtures/**', 'tests/runner-e2e/fixtures/**') }}
 
       - name: Mark the restored Runner release crate current
         if: ${{ steps.runner_release_crate.outputs.cache-hit == 'true' }}
@@ -1568,6 +1588,7 @@ jobs:
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') != ''
         uses: ./.github/actions/setup-ci-dependencies
 
+
       - name: Locate pnpm store
         if: hashFiles('.github/actions/setup-ci-dependencies/action.yml') == ''
         id: pnpm_store
@@ -1655,7 +1676,7 @@ jobs:
       PAPERCLIP_STOP_REQUIRE_NATIVE: "true"
       PAPERCLIP_E2E_SOURCE_ROOT: ${{ github.workspace }}
       COMPOSER_STOP_HEAD_REVISION: ${{ github.event.pull_request.head.sha }}
-      COMPOSER_STOP_TRUSTED_REVISION: 1e74838667c21d35dacd993e3b08decbf224bd44
+      COMPOSER_STOP_TRUSTED_REVISION: 2acfb196e34fec515c42bc71c461d965bedd8352
     steps:
       - name: Checkout exact PR head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1668,7 +1689,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: caniko/paperclip
-          ref: 1e74838667c21d35dacd993e3b08decbf224bd44
+          ref: 2acfb196e34fec515c42bc71c461d965bedd8352
           path: .trusted-composer-stop
           persist-credentials: false
 

@@ -557,13 +557,14 @@ fn admit_terminal_tool_authority(
         "paperclip_finish" => {
             matches!(disposition.as_str(), "done" | "needs_review")
                 || (disposition == "yielded"
-                    && matches!(
-                        input
-                            .get("continuation")
-                            .and_then(|continuation| continuation.get("kind"))
-                            .and_then(Value::as_str),
-                        Some("response_wake" | "monitor")
-                    ))
+                    && (input.get("continuation").map_or(true, Value::is_null)
+                        || matches!(
+                            input
+                                .get("continuation")
+                                .and_then(|continuation| continuation.get("kind"))
+                                .and_then(Value::as_str),
+                            Some("response_wake" | "monitor" | "case_handoff" | "same_agent")
+                        )))
         }
         "paperclip_block" => disposition == "blocked",
         _ => false,
@@ -2513,9 +2514,6 @@ impl CodexCommandExecutor {
                         | "codex_app_server_command_environment_v2"
                 )
             {
-                // The base environment stays immutable. Only the authenticated
-                // controller can rotate/clear the registered run copy. Upgrading
-                // a v1 checkpoint also clears its old inline AGENT_HOME at use.
                 instruction_root_changed = next_state.config.driver != config.driver
                     || next_state.config.instruction_working_copy_root
                         != config.instruction_working_copy_root;
@@ -5110,9 +5108,9 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                read_only: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
-                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5332,7 +5330,37 @@ mod tests {
     }
 
     #[test]
-    fn terminal_tool_authority_rejects_an_unbound_yield() {
+    fn terminal_tool_authority_preserves_controller_resolved_workspace_yields() {
+        for continuation in [
+            None,
+            Some(Value::Null),
+            Some(json!({
+                "kind": "same_agent",
+                "summary": "Continue the prepared repository.",
+                "idempotencyKey": "repository:task:receipt:run"
+            })),
+        ] {
+            let mut state = opencode_result_state();
+            let mut result = valid_opencode_result();
+            result["reportedWorkDisposition"] = json!("yielded");
+            if let Some(value) = continuation {
+                result["continuation"] = value;
+            }
+            admit_terminal_tool_authority(&mut state, "paperclip_finish", &result, false).unwrap();
+            assert_eq!(
+                state.active_provider_result_disposition.as_deref(),
+                Some("yielded")
+            );
+            assert_eq!(
+                state.active_provider_result_fingerprint.as_deref(),
+                Some(semantic_value_digest(&result).as_str())
+            );
+            assert!(state.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn terminal_tool_authority_does_not_record_a_controller_rejected_yield() {
         let mut state = opencode_result_state();
         let mut result = valid_opencode_result();
         result["reportedWorkDisposition"] = json!("yielded");
@@ -5342,9 +5370,10 @@ mod tests {
             "idempotencyKey": "same-agent-1"
         });
 
-        assert!(
-            admit_terminal_tool_authority(&mut state, "paperclip_finish", &result, false,).is_err()
-        );
+        admit_terminal_tool_authority(&mut state, "paperclip_finish", &result, true).unwrap();
+        assert!(state.active_provider_result_fingerprint.is_none());
+        assert!(state.active_provider_result_disposition.is_none());
+        assert!(state.validate().is_ok());
     }
 
     #[test]
@@ -5494,9 +5523,9 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                read_only: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
-                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5588,9 +5617,9 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                read_only: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
-                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5644,9 +5673,9 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                read_only: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
-                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5690,9 +5719,9 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                read_only: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
-                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5785,9 +5814,9 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                read_only: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
-                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5855,9 +5884,9 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                read_only: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
-                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5908,9 +5937,9 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                read_only: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
-                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6035,9 +6064,9 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                read_only: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
-                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6150,9 +6179,9 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                read_only: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
-                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6210,9 +6239,9 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                read_only: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
-                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6355,9 +6384,9 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                read_only: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
-                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6399,9 +6428,9 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                read_only: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
-                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6440,9 +6469,9 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                read_only: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
-                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6520,9 +6549,9 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                read_only: false,
                 command_environment: None,
                 instruction_working_copy_root: None,
-                read_only: false,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },

@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
-import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
+import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, budgetPolicies, authAccounts, routines, routineTriggers, agentApiKeys, acquireDeploymentLease, assertDeploymentSchemaCompatible } from "@paperclipai/db";
 import { reconcileDeployment } from "./reconcile.js";
 import { loadConfig } from "../config.js";
 import { secretService } from "../services/secrets.js";
@@ -16,7 +16,7 @@ import { projectWorkspaces, environments } from "@paperclipai/db";
 import { resolveEnvironmentDriverConfigForRuntime } from "../services/environment-config.js";
 import { environmentService } from "../services/environments.js";
 import { projectService } from "../services/projects.js";
-import { budgetPolicies, resourceLifecycleEvents } from "@paperclipai/db";
+import { resourceLifecycleEvents } from "@paperclipai/db";
 import { budgetService } from "../services/budgets.js";
 import * as liveEvents from "../services/live-events.js";
 
@@ -68,7 +68,6 @@ beforeAll(async () => {
   db = createDb(database.connectionString);
 }, 90000);
 afterAll(async () => { gateway.closeAllConnections(); gateway.close(); await database?.cleanup(); rmSync(root, { recursive: true, force: true }); });
-// This fixture intentionally exercises multiple independent owners in one test database.
 const reconcile = (raw: unknown, apply = true) => reconcileDeployment(db, raw, { descriptor, config, apply, singleOwner: false });
 
 it("plans without writes, bootstraps once and preserves identities, pauses and spending", async () => {
@@ -125,6 +124,14 @@ it("plans without writes, bootstraps once and preserves identities, pauses and s
   expect(JSON.stringify(plan)).not.toContain("fixture-only");
 }, 90000);
 
+it("rejects task bridges that share one token before writing any key", async () => {
+  const base = structuredClone(manifest);
+  base.companies.example.fields.name = "Duplicate bridges";
+  const declaration = { ...base, owner: "duplicate-bridges", taskBridges: { ...base.taskBridges, other: { ...base.taskBridges.tasks } } };
+  await expect(reconcile(declaration)).rejects.toThrow("Task bridge tokens must be unique");
+  expect(await db.select().from(companies).where(eq(companies.name, "Duplicate bridges"))).toHaveLength(0);
+}, 90000);
+
 it.each(["manual", "budget"])("reenables declarations without resuming %s pauses", async (pauseReason) => {
   const declaration = { ...structuredClone(manifest), owner: `enablement-${pauseReason}`, taskBridges: {} };
   declaration.companies.example.fields.name = `Enablement ${pauseReason}`;
@@ -145,12 +152,20 @@ it.each(["manual", "budget"])("reenables declarations without resuming %s pauses
     routines: { daily: { ...disabled.routines.daily, enabled: true } },
   };
   expect((await reconcile(enabled)).bindings).toEqual(first.bindings);
+  expect((await db.select().from(routineTriggers).where(eq(routineTriggers.id, first.bindings["schedule/daily"])))[0].enabled).toBe(true);
   expect((await db.select().from(agents).where(eq(agents.id, agentId)))[0])
     .toMatchObject({ status: "paused", pauseReason, spentMonthlyCents: 123 });
   expect((await db.select().from(routines).where(eq(routines.id, routineId)))[0].status).toBe("paused");
   await db.update(agents).set({ status: "idle", pauseReason: null }).where(eq(agents.id, agentId));
   await db.update(routines).set({ status: "active" }).where(eq(routines.id, routineId));
   expect((await reconcile(enabled)).differences).toEqual([]);
+  const scheduleId = first.bindings["schedule/daily"];
+  await db.update(routineTriggers).set({ enabled: false }).where(eq(routineTriggers.id, scheduleId));
+  const retimed = structuredClone(enabled);
+  retimed.routines.daily.schedule.cronExpression = "0 13 * * *";
+  await reconcile(retimed);
+  expect((await db.select().from(routineTriggers).where(eq(routineTriggers.id, scheduleId)))[0])
+    .toMatchObject({ enabled: false, cronExpression: "0 13 * * *" });
   expect((await db.select().from(agents).where(eq(agents.id, agentId)))[0].status).toBe("idle");
   expect((await db.select().from(routines).where(eq(routines.id, routineId)))[0].status).toBe("active");
 });
@@ -259,6 +274,26 @@ it.each(["company", "agent"] as const)("preserves %s budget pause and policy on 
   expect(await readScope()).toMatchObject({ budgetMonthlyCents: target.fields.budgetMonthlyCents });
   expect(await readPolicy()).toMatchObject({ amount: target.fields.budgetMonthlyCents, isActive: true });
   expect((await reconcile(declaration)).differences).toEqual([]);
+});
+
+it("creates native budget policies for newly declared company and agent limits", async () => {
+  const declaration = { ...structuredClone(manifest), owner: "budget-create", projects: {}, routines: {}, taskBridges: {} };
+  declaration.companies.example.fields.name = "Budget create";
+  const created = await reconcile(declaration);
+  const policies = await db.select().from(budgetPolicies).where(and(
+    eq(budgetPolicies.windowKind, "calendar_month_utc"), eq(budgetPolicies.isActive, true)));
+  const amounts = new Map(policies.map((policy) => [policy.scopeId, policy.amount]));
+  expect(amounts.get(created.bindings["company/example"])).toBe(10000);
+  expect(amounts.get(created.bindings["agent/worker"])).toBe(2000);
+});
+
+it("re-enables the hard stop when adopting a company with a disabled monthly policy", async () => {
+  const [company] = await db.insert(companies).values({ name: "Adopted budget", issuePrefix: "ADBUD" }).returning();
+  const [policy] = await db.insert(budgetPolicies).values({ companyId: company.id, scopeType: "company", scopeId: company.id,
+    windowKind: "calendar_month_utc", amount: 1, hardStopEnabled: false, isActive: false }).returning();
+  await reconcile({ version: 1, owner: "adopt-budget", companies: { existing: { adopt: company.id, fields: { name: company.name, budgetMonthlyCents: 900 } } } });
+  expect((await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, policy.id)))[0])
+    .toMatchObject({ amount: 900, hardStopEnabled: true, isActive: true });
 });
 
 it("preserves existing and later operator membership decisions for adopted companies", async () => {
@@ -385,8 +420,6 @@ it("rejects implicit primary takeover and wrong-project adoption before writes",
     ...adopted.projectWorkspaces,
     alias: { ...adopted.projectWorkspaces.main, fields: { ...workspace.fields, isPrimary: false } },
   } }, false)).rejects.toThrow("ownership");
-  // A native primary switch also mutates the previously primary row. The trigger
-  // must protect that indirect path, not just direct updates to owned resources.
   await expect(svc.createWorkspace(first.bindings["project/main"], {
     name: "UI primary", cwd: "/fixture/ui-primary", isPrimary: true,
   })).rejects.toThrow();
@@ -476,7 +509,6 @@ it("requires explicit adoption and rolls back an apply that fails after creating
   const adopted = await reconcile({ ...adoption, companies: { existing: { ...adoption.companies.existing, adopt: unmanaged.id } } });
   expect(adopted.bindings["company/existing"]).toBe(unmanaged.id);
   const before = await db.select().from(companies);
-  // Fail at the database boundary after company/project/agent creation.
   await db.execute(sql`create function deployment_test_failure() returns trigger language plpgsql as $$ begin raise exception 'injected write failure'; end; $$`);
   await db.execute(sql`create trigger deployment_test_failure before insert on routines for each row execute function deployment_test_failure()`);
   const invalid = { ...manifest, owner: "rollback", companies: { example: { fields: { name: "Rollback" } } },

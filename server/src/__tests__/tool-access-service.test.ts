@@ -1,5 +1,9 @@
+import { resolveExternalTestDatabaseUrl } from "./helpers/external-test-database.js";
 import * as fs from "node:fs/promises";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import express from "express";
 import request from "supertest";
 import {
@@ -12,6 +16,7 @@ import {
   vi,
 } from "vitest";
 import {
+  applyPendingMigrations,
   activityLog,
   agents,
   authUsers,
@@ -92,9 +97,10 @@ import { errorHandler } from "../middleware/index.js";
 import * as sentry from "../sentry.js";
 import { HttpError } from "../errors.js";
 import type { VercelConnectClient } from "../services/vercel-connect.js";
-import { invalidatePaperclipCloudConnectorCapabilities, type PaperclipCloudConnector } from "../services/paperclip-cloud-connector.js";
+import { invalidatePaperclipCloudConnectorCapabilities, PaperclipCloudConnectorError, type PaperclipCloudConnector } from "../services/paperclip-cloud-connector.js";
 
-const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
+const externalDatabaseUrl = resolveExternalTestDatabaseUrl("PAPERCLIP_TOOL_ACCESS_TEST_DATABASE_URL");
+const embeddedPostgresSupport = externalDatabaseUrl ? { supported: true } : await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported
   ? describe
   : describe.skip;
@@ -388,7 +394,15 @@ function createRouteApp(
 ) {
   const app = express();
   app.use(express.json());
-  app.use((req, _res, next) => {
+  app.use(async (req, _res, next) => {
+    // Session fixtures must persist the membership normally loaded by authentication.
+    // Keep existing rows unchanged so explicit restrictions and revocations survive.
+    if (actor?.type === "board" && actor.userId) {
+      for (const membership of actor.memberships ?? []) await db.insert(companyMemberships).values({
+        companyId: membership.companyId, principalType: "user", principalId: actor.userId,
+        membershipRole: membership.membershipRole, status: membership.status,
+      }).onConflictDoNothing();
+    }
     req.actor = actor ?? {
       type: "board",
       userId: "board-user",
@@ -909,9 +923,8 @@ describeEmbeddedPostgres("tool access service", () => {
   > | null = null;
 
   beforeAll(async () => {
-    const externalDatabaseUrl =
-      process.env.PAPERCLIP_TOOL_ACCESS_TEST_DATABASE_URL?.trim();
     if (externalDatabaseUrl) {
+      await applyPendingMigrations(externalDatabaseUrl);
       db = createDb(externalDatabaseUrl);
       await instanceSettingsService(db).updateExperimental({ enableMemoryConnectors: true });
       return;
@@ -978,6 +991,70 @@ describeEmbeddedPostgres("tool access service", () => {
     }
     return false;
   }
+
+  it.each(["pages", "rfc8693"] as const)("mints %s tokens over real HTTP and records upstream failures without token material", async (protocol) => {
+    vi.stubEnv("PAPERCLIP_TOKEN_BROKER_ALLOWED_HOSTS", "127.0.0.1");
+    const received: Array<{ authorization: string | undefined; body: string }> = [];
+    let failExchange = false;
+    const server = createServer(async (incoming, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
+      received.push({ authorization: incoming.headers.authorization, body: Buffer.concat(chunks).toString() });
+      response.writeHead(failExchange ? 503 : 200, { "content-type": "application/json" });
+      response.end(JSON.stringify(failExchange
+        ? { error: "temporarily_unavailable" }
+        : { access_token: "real-http-child-token", expires_in: 600, scope: "pages:publish:ns/dotta" }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const company = await createCompany(db);
+      const agent = await createAgent(db, company.id);
+      const { run } = await createIssueAndRun(db, company.id, agent.id);
+      const port = (server.address() as { port: number }).port;
+      const { connection } = await createBrokerConnection(db, company.id, {
+        tokenUrl: `http://127.0.0.1:${port}/exchange`, protocol,
+      });
+      await allowConnectionForAgent(db, company.id, agent.id, connection.id);
+      const app = createRouteApp(db, agentJwtActor(company.id, agent.id, run.id));
+      const mint = () => request(app)
+        .post(`/api/agents/me/connections/${connection.id}/token`)
+        .send({ scope: "pages:publish:ns/dotta" });
+      const result = await mint();
+      expect(result.status).toBe(200);
+      expect(result.body).toMatchObject({ status: "minted", token: "real-http-child-token", scope: ["pages:publish:ns/dotta"] });
+      expect(received).toHaveLength(1);
+      if (protocol === "pages") {
+        expect(received[0].authorization).toBe("Bearer parent-deploy-token");
+        expect(JSON.parse(received[0].body)).toMatchObject({ namespace: "dotta", actor: { id: agent.id, runId: run.id, onBehalfOf: "user:user-for-run" } });
+      } else {
+        const form = new URLSearchParams(received[0].body);
+        expect(form.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:token-exchange");
+        expect(form.get("subject_token")).toBe("parent-deploy-token");
+        expect(form.get("scope")).toBe("pages:publish:ns/dotta");
+      }
+      failExchange = true;
+      const failed = await mint();
+      expect(failed.status).toBe(502);
+      expect(failed.body).toMatchObject({ code: "upstream_error" });
+      expect(received).toHaveLength(2);
+      const issuances = await db.select().from(connectionTokenIssuances)
+        .where(eq(connectionTokenIssuances.connectionId, connection.id));
+      expect(issuances).toHaveLength(2);
+      expect(issuances.find(row => row.outcome === "success")).toMatchObject({
+        tokenHash: createHash("sha256").update("real-http-child-token").digest("hex"),
+        companyId: company.id, agentId: agent.id, runId: run.id,
+      });
+      expect(issuances.find(row => row.outcome === "upstream_error")).toMatchObject({ tokenHash: null, errorCode: "upstream_error" });
+      const audits = await db.select().from(toolAccessAuditEvents)
+        .where(eq(toolAccessAuditEvents.connectionId, connection.id));
+      const persisted = JSON.stringify({ issuances, audits });
+      expect(persisted).not.toContain("parent-deploy-token");
+      expect(persisted).not.toContain("real-http-child-token");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  });
 
   it("mints generic exchange connection tokens through the agent route and stores only hashes", async () => {
     const company = await createCompany(db);
@@ -1104,8 +1181,8 @@ describeEmbeddedPostgres("tool access service", () => {
     const { run } = await createIssueAndRun(db, company.id, agent.id);
     const { connection } = await createBrokerConnection(db, company.id);
     await allowConnectionForAgent(db, company.id, agent.id, connection.id);
-    const mintDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
-    const revocationDb = createDb(tempDb!.connectionString, {
+    const mintDb = createDb(externalDatabaseUrl ?? tempDb!.connectionString, { maxConnections: 1 });
+    const revocationDb = createDb(externalDatabaseUrl ?? tempDb!.connectionString, {
       maxConnections: 1,
     });
     const service = createTestToolAccessService(mintDb);
@@ -1678,7 +1755,7 @@ describeEmbeddedPostgres("tool access service", () => {
     ).post(`/api/tool-connections/${connection.id}/health-check`);
 
     expect(response.status).toBe(403);
-    expect(response.body.error).toContain("need access to this connection");
+    expect(response.body.error).toContain("Missing permission: tools:manage_connections");
   });
 
   it("serializes delegation creation behind membership removal so reauthorization cannot revive stale consent", async () => {
@@ -1691,9 +1768,9 @@ describeEmbeddedPostgres("tool access service", () => {
       .values(personalGrantRow(company, connection))
       .returning()
       .then((rows) => rows[0]!);
-    const serviceDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    const serviceDb = createDb(externalDatabaseUrl ?? tempDb!.connectionString, { maxConnections: 1 });
     const service = createTestToolAccessService(serviceDb);
-    const removalDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    const removalDb = createDb(externalDatabaseUrl ?? tempDb!.connectionString, { maxConnections: 1 });
     let releaseRemoval!: () => void;
     const removalMayCommit = new Promise<void>((resolve) => {
       releaseRemoval = resolve;
@@ -1973,13 +2050,13 @@ describeEmbeddedPostgres("tool access service", () => {
         subjectId: "previous-user",
       });
 
-      const firstReplacementDb = createDb(tempDb!.connectionString, {
+      const firstReplacementDb = createDb(externalDatabaseUrl ?? tempDb!.connectionString, {
         maxConnections: 1,
       });
-      const replacementDb = createDb(tempDb!.connectionString, {
+      const replacementDb = createDb(externalDatabaseUrl ?? tempDb!.connectionString, {
         maxConnections: 1,
       });
-      const cleanupDb = createDb(tempDb!.connectionString, {
+      const cleanupDb = createDb(externalDatabaseUrl ?? tempDb!.connectionString, {
         maxConnections: 1,
       });
       const replacementService = createTestToolAccessService(replacementDb);
@@ -3842,7 +3919,7 @@ describeEmbeddedPostgres("tool access service", () => {
     );
   });
 
-  it("cancels an ask-first test request when approval signing is unavailable", async () => {
+  it("cancels an ask-first test request when approval signing is unavailable", async ({ onTestFinished }) => {
     vi.stubEnv("PAPERCLIP_TOOL_ACTION_SIGNING_SECRET", "");
     const company = await createCompany(db);
     const userId = `tool-tester-${randomUUID()}`;
@@ -3861,6 +3938,12 @@ describeEmbeddedPostgres("tool access service", () => {
       boardSessionActor(company.id, "operator", userId),
       createToolGatewayService(db, { toolActionSigningSecret: " " }),
     );
+    const keyDirectory = await fs.mkdtemp(join(tmpdir(), "tool-access-signing-failure-"));
+    onTestFinished(() => fs.rm(keyDirectory, { recursive: true, force: true }));
+    const keyFile = join(keyDirectory, "master.key");
+    await fs.writeFile(keyFile, "corrupt-fixture-master-key", { mode: 0o600 });
+    vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "");
+    vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY_FILE", keyFile);
 
     const res = await request(app)
       .post(`/api/tool-connections/${connection.id}/test-calls`)
@@ -4039,8 +4122,9 @@ describeEmbeddedPostgres("tool access service", () => {
       .from(toolActionRequests)
       .where(eq(toolActionRequests.companyId, company.id));
     expect(requests).toHaveLength(2);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     expect(requests.map((row) => row.status).sort()).toEqual([
-      "approved",
+      "executed",
       "pending",
     ]);
   });
@@ -4777,7 +4861,7 @@ describeEmbeddedPostgres("tool access service", () => {
     });
   });
 
-  it("keeps duplicate, delete, and new-tools profile routes board-only and viewer-safe", async () => {
+  it("keeps duplicate, delete, and new-tools profile routes permission-gated and viewer-safe", async () => {
     const company = await createCompany(db);
     const [agent] = await db
       .insert(agents)
@@ -5295,6 +5379,7 @@ describeEmbeddedPostgres("tool access service", () => {
         "github-code-review-bot",
         "youcom",
         "enterpret",
+        "vercel",
         "openrouter",
         "bedrock",
         "responses-api",
@@ -5335,7 +5420,7 @@ describeEmbeddedPostgres("tool access service", () => {
       [...APP_STORE_HIDDEN_SLUGS].filter((slug) => gallerySlugs.has(slug)),
     ).toEqual([]);
     expect(
-      ["g2", "vercel", "zomato"].filter((slug) => gallerySlugs.has(slug)),
+      ["g2", "zomato"].filter((slug) => gallerySlugs.has(slug)),
     ).toEqual([]);
     expect(res.body.apps).toEqual(
       expect.arrayContaining([
@@ -6438,6 +6523,52 @@ describeEmbeddedPostgres("tool access service", () => {
     ).rejects.toMatchObject({ status: 400 });
   });
 
+  it("connects Ditto with a workspace API key sent with the token scheme", async () => {
+    const company = await createCompany(db);
+    const service = createTestToolAccessService(db);
+    const fetchMock = mockToolsList([
+      { name: "search_ditto_text" },
+      { name: "translate_text_items" },
+      { name: "delete_text_items" },
+    ]);
+
+    const result = await service.connectGalleryApp(
+      company.id,
+      {
+        galleryKey: "ditto",
+        connectionMethodKey: "mcp-api-key",
+        credentialValues: { "credentials.authorization": "ditto-test-secret" },
+      },
+      { actorType: "user", actorId: "board" },
+    );
+
+    // Ditto rejects the Bearer scheme for API keys; it expects `token <key>`.
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.dittowords.com/v2/mcp",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "token ditto-test-secret",
+        }),
+      }),
+    );
+    expect(result.connection).toMatchObject({
+      authKind: "api_key",
+      config: {
+        url: "https://api.dittowords.com/v2/mcp",
+        sourceTemplateKey: "ditto",
+        connectionMethodKey: "mcp-api-key",
+      },
+    });
+    expect(JSON.stringify(result.connection.config)).not.toContain("ditto-test-secret");
+    expect(result.catalog).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ toolName: "search_ditto_text", riskLevel: "read", status: "active" }),
+        expect.objectContaining({ toolName: "translate_text_items", riskLevel: "write", status: "active" }),
+        expect.objectContaining({ toolName: "delete_text_items", riskLevel: "destructive", status: "active" }),
+      ]),
+    );
+  });
+
   it("connects Superagent with an organization API key sent as a bearer header", async () => {
     const company = await createCompany(db);
     const service = createTestToolAccessService(db);
@@ -6542,7 +6673,7 @@ describeEmbeddedPostgres("tool access service", () => {
         connectionMethodKey: "mcp-oauth",
         name,
         configValues: {
-          projectRef: "firstprojectref12345",
+          projectRef: "abcdefghijklmnopqrst",
           readOnly: true,
         },
       },
@@ -6556,7 +6687,7 @@ describeEmbeddedPostgres("tool access service", () => {
         connectionMethodKey: "mcp-oauth",
         name,
         configValues: {
-          projectRef: "secondprojectref1234",
+          projectRef: "tsrqponmlkjihgfedcba",
           readOnly: true,
           features: "database",
         },
@@ -6570,11 +6701,11 @@ describeEmbeddedPostgres("tool access service", () => {
       status: "draft",
       enabled: false,
       config: {
-        url: "https://mcp.supabase.com/mcp?project_ref=secondprojectref1234&read_only=true&features=database",
+        url: "https://mcp.supabase.com/mcp?project_ref=tsrqponmlkjihgfedcba&read_only=true&features=database",
         sourceTemplateKey: "supabase",
         connectionMethodKey: "mcp-oauth",
         methodConfig: {
-          projectRef: "secondprojectref1234",
+          projectRef: "tsrqponmlkjihgfedcba",
           readOnly: true,
           features: "database",
         },
@@ -6604,7 +6735,7 @@ describeEmbeddedPostgres("tool access service", () => {
         connectionMethodKey: "mcp-oauth",
         name: "Supabase for the company",
         configValues: {
-          projectRef: "firstprojectref12345",
+          projectRef: "abcdefghijklmnopqrst",
           readOnly: true,
         },
       },
@@ -6623,7 +6754,7 @@ describeEmbeddedPostgres("tool access service", () => {
         resumeConnectionId: first.connectionId,
         name: "Supabase for the company",
         configValues: {
-          projectRef: "secondprojectref1234",
+          projectRef: "tsrqponmlkjihgfedcba",
           readOnly: true,
         },
       },
@@ -6636,7 +6767,7 @@ describeEmbeddedPostgres("tool access service", () => {
       sourceTemplateKey: "supabase",
       connectionMethodKey: "mcp-oauth",
       methodConfig: {
-        projectRef: "secondprojectref1234",
+        projectRef: "tsrqponmlkjihgfedcba",
         readOnly: true,
       },
     });
@@ -7579,7 +7710,7 @@ describeEmbeddedPostgres("tool access service", () => {
     const company = await createCompany(db);
     const userId = `gmail-member-${randomUUID()}`;
     await grantBoardUser(db, company.id, userId, []);
-    const callbackDb = createDb(tempDb!.connectionString, {
+    const callbackDb = createDb(externalDatabaseUrl ?? tempDb!.connectionString, {
       maxConnections: 1,
     });
     const connector = fakeGmailConnector(company.id, userId);
@@ -9376,6 +9507,36 @@ describeEmbeddedPostgres("tool access service", () => {
     }
   });
 
+  it("marks a managed grant for reconnection when the provider rejects its refresh", async () => {
+    const company = await createCompany(db);
+    await createAgent(db, company.id);
+    const userId = `managed-refresh-rejected-${randomUUID()}`;
+    await grantBoardUser(db, company.id, userId, [], "owner");
+    const actor = { actorType: "user" as const, actorId: userId };
+    const connector = fakeGmailConnector(company.id, userId);
+    const service = createTestToolAccessService(db, { paperclipCloudConnector: connector });
+    const definition = getConnectableAppDefinition("gmail")!;
+    const availability = definition.ownershipAvailability;
+    definition.ownershipAvailability = { ...availability, platform_shared: true };
+    mockToolsList([]);
+    try {
+      const connected = await service.connectGalleryApp(company.id, { galleryKey: "gmail", connectionMethodKey: "paperclip-draft", grantKind: "user", name: "Managed rejected refresh" }, actor);
+      const started = await service.startOAuth(company.id, connected.connectionId, { redirectUri: "https://paperclip.example/api/tools/oauth/cloud-connector/callback", actor });
+      await service.completePaperclipCloudConnectorCallback({ state: new URL(started.authorizationUrl).searchParams.get("state")!, claimId: "initial", actor });
+      const [grant] = await db.select().from(connectionGrants).where(and(eq(connectionGrants.connectionId, connected.connectionId), eq(connectionGrants.subjectUserId, userId)));
+      vi.mocked(connector.refresh).mockRejectedValueOnce(new PaperclipCloudConnectorError(
+        "Paperclip Cloud connector rejected the request (operation=refresh, status=409, reason=PROVIDER_REAUTHORIZATION_REQUIRED)",
+        "REAUTHORIZATION_REQUIRED",
+        409,
+      ));
+      await expect(service.refreshOAuthGrantCredentials({ companyId: company.id, connectionId: connected.connectionId, grantId: grant.id, forceRefresh: true, actor }))
+        .rejects.toMatchObject({ status: 422, details: { code: "oauth_reauthorization_required" } });
+      expect((await db.select().from(connectionGrants).where(eq(connectionGrants.id, grant.id)))[0].status).toBe("needs_reauthorization");
+    } finally {
+      definition.ownershipAvailability = availability;
+    }
+  });
+
   it("orders managed reconnect with refresh and rejects superseded secret writes", async () => {
     const company = await createCompany(db);
     await createAgent(db, company.id);
@@ -9383,7 +9544,7 @@ describeEmbeddedPostgres("tool access service", () => {
     await grantBoardUser(db, company.id, userId, [], "owner");
     const actor = { actorType: "user" as const, actorId: userId };
     const connector = fakeGmailConnector(company.id, userId);
-    const refreshDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    const refreshDb = createDb(externalDatabaseUrl ?? tempDb!.connectionString, { maxConnections: 1 });
     const service = createTestToolAccessService(db, { paperclipCloudConnector: connector });
     const definition = getConnectableAppDefinition("gmail")!;
     const availability = definition.ownershipAvailability;
@@ -9523,10 +9684,10 @@ describeEmbeddedPostgres("tool access service", () => {
     const company = await createCompany(db);
     const userId = `gmail-member-${randomUUID()}`;
     await grantBoardUser(db, company.id, userId, []);
-    const callbackDb = createDb(tempDb!.connectionString, {
+    const callbackDb = createDb(externalDatabaseUrl ?? tempDb!.connectionString, {
       maxConnections: 1,
     });
-    const removalDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    const removalDb = createDb(externalDatabaseUrl ?? tempDb!.connectionString, { maxConnections: 1 });
     const service = createTestToolAccessService(callbackDb, {
       paperclipCloudConnector: fakeGmailConnector(company.id, userId),
     });
@@ -12846,7 +13007,7 @@ describeEmbeddedPostgres("tool access service", () => {
       connectionMethodKey: "mcp-oauth",
       name: "Supabase confidential DCR",
       configValues: {
-        projectRef: "supabaseproject12345",
+        projectRef: "abcdefghijklmnopqrst",
         readOnly: true,
         features: "database",
       },
@@ -12918,7 +13079,7 @@ describeEmbeddedPostgres("tool access service", () => {
         }
         if (
           href ===
-          "https://mcp.supabase.com/mcp?project_ref=supabaseproject12345&read_only=true&features=database"
+          "https://mcp.supabase.com/mcp?project_ref=abcdefghijklmnopqrst&read_only=true&features=database"
         ) {
           expect(init?.headers).toEqual(
             expect.objectContaining({
@@ -15725,38 +15886,44 @@ describeEmbeddedPostgres("tool access service", () => {
     );
     await service.archiveConnection(first.connectionId, company.id, actor);
     fetchMock.mockRejectedValue(new Error("provider unavailable"));
-    const runTransaction = db.transaction.bind(db);
-    vi.spyOn(db, "transaction")
-      .mockImplementationOnce(runTransaction)
-      .mockRejectedValueOnce(new Error("rollback unavailable"));
+    await db.execute(sql`create function tool_health_rollback_failure() returns trigger language plpgsql as $$
+      begin raise exception 'rollback unavailable'; end $$`);
+    await db.execute(sql.raw(`create trigger tool_health_rollback_failure before update on tool_connections
+      for each row when (old.id = '${first.connectionId}'::uuid and old.credential_policy = 'per_user' and new.credential_policy = 'shared')
+      execute function tool_health_rollback_failure()`));
+    try {
 
-    await expect(
-      service.connectGalleryApp(
-        company.id,
-        {
-          galleryKey: "github",
-          connectionMethodKey: "mcp-key",
-          grantKind: "user",
-          name: "GitHub rollback failure",
-          credentialValues: {
-            "credentials.authorization": "new-personal-token",
+      await expect(
+        service.connectGalleryApp(
+          company.id,
+          {
+            galleryKey: "github",
+            connectionMethodKey: "mcp-key",
+            grantKind: "user",
+            name: "GitHub rollback failure",
+            credentialValues: {
+              "credentials.authorization": "new-personal-token",
+            },
           },
-        },
-        actor,
-      ),
-    ).rejects.toMatchObject({
-      status: 500,
-      details: { code: "connection_identity_rollback_failed" },
-    });
+          actor,
+        ),
+      ).rejects.toMatchObject({
+        status: 500,
+        details: { code: "connection_identity_rollback_failed" },
+      });
 
-    await expect(
-      service.getConnection(first.connectionId, company.id),
-    ).resolves.toMatchObject({
-      status: "draft",
-      enabled: false,
-      healthStatus: "error",
-      lastError: "connection_identity_rollback_failed",
-    });
+      await expect(
+        service.getConnection(first.connectionId, company.id),
+      ).resolves.toMatchObject({
+        status: "draft",
+        enabled: false,
+        healthStatus: "error",
+        lastError: "connection_identity_rollback_failed",
+      });
+    } finally {
+      await db.execute(sql`drop trigger tool_health_rollback_failure on tool_connections`);
+      await db.execute(sql`drop function tool_health_rollback_failure()`);
+    }
   });
 
   it("automatically gives same-named connections distinct names", async () => {
@@ -20028,7 +20195,7 @@ describeEmbeddedPostgres("tool access service", () => {
       .send({ name: "Member edit" });
     expect(denied.status).toBe(403);
     expect(denied.body.error).toContain(
-      "connection creator or a connection manager",
+      "Missing permission: tools:manage_connections",
     );
 
     await request(createRouteApp(db, creator))
@@ -20133,6 +20300,35 @@ describe("classifyRisk", () => {
     expect(classifyRisk({ name: "validate_agent_rule", annotations: { readOnlyHint: true } }, "superagent")).toBe("read");
     // Without the provider rule, the generic classifier treats these as reads.
     expect(classifyRisk({ name: "triage_finding" })).toBe("read");
+  });
+
+  it("classifies Ditto translate, link and unlink tools as writes", () => {
+    for (const name of [
+      "get_styleguide_rules",
+      "suggest_edit",
+      "search_ditto_text",
+      "list_projects",
+      "list_variants",
+      "get_workspace_tags",
+    ])
+      expect(classifyRisk({ name }, "ditto")).toBe("read");
+    for (const name of [
+      "translate_text_items",
+      "translate_library_components",
+      "link_figma_nodes_to_text_item",
+      "link_text_items_to_component",
+      "unlink_text_items_from_component",
+      "publish_library_component",
+      "create_text_items",
+      "update_styleguide_rules",
+    ])
+      expect(classifyRisk({ name }, "ditto")).toBe("write");
+    for (const name of ["delete_text_items", "delete_styleguide_rules", "delete_variants"])
+      expect(classifyRisk({ name }, "ditto")).toBe("destructive");
+    expect(classifyRisk({ name: "list_projects", annotations: { readOnlyHint: false } }, "ditto")).toBe("write");
+    // Without the provider rule, the generic classifier treats these as reads.
+    expect(classifyRisk({ name: "translate_text_items" })).toBe("read");
+    expect(classifyRisk({ name: "link_text_items_to_component" })).toBe("read");
   });
 
   it("classifies Enterpret run_graph_query as write despite readOnlyHint", () => {

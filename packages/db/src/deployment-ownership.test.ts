@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
-import { createDb } from "./client.js";
+import { assertSameDeploymentDatabase, createDb } from "./client.js";
 import { startEmbeddedPostgresTestDatabase } from "./test-embedded-postgres.js";
-import { agents, companies, deploymentResources, companySecrets, companySecretVersions } from "./schema/index.js";
+import { agents, budgetPolicies, companies, deploymentResources, companySecrets, companySecretVersions } from "./schema/index.js";
 
 let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
 let db: ReturnType<typeof createDb>;
@@ -39,4 +39,34 @@ it("rejects ordinary secret-version changes for declared credentials", async () 
     material: { fixture: "ciphertext" }, valueSha256: "fixture-hash", fingerprintSha256: "fixture-fingerprint" }))
     .rejects.toMatchObject({ cause: { code: "23514", message: "Declaratively owned secret versions cannot be changed" } });
   expect(await db.select().from(companySecretVersions)).toHaveLength(0);
+});
+
+it("keeps a declared budget limit enforced", async () => {
+  const [company] = await db.insert(companies).values({ name: "Budgeted", issuePrefix: "BUD" }).returning();
+  await db.insert(deploymentResources).values({ owner: "test", kind: "company", key: "budgeted", resourceId: company.id,
+    companyId: company.id, fields: { budgetMonthlyCents: 500 } });
+  const [policy] = await db.insert(budgetPolicies).values({ companyId: company.id, scopeType: "company", scopeId: company.id,
+    windowKind: "calendar_month_utc", amount: 500 }).returning();
+  for (const change of [{ isActive: false }, { hardStopEnabled: false }, { amount: 900 }]) {
+    await expect(db.update(budgetPolicies).set(change).where(eq(budgetPolicies.id, policy.id)))
+      .rejects.toMatchObject({ cause: { code: "23514", message: "Declaratively owned budget policy cannot be changed" } });
+  }
+  await expect(db.delete(budgetPolicies).where(eq(budgetPolicies.id, policy.id)))
+    .rejects.toMatchObject({ cause: { code: "23514", message: "Declaratively owned budget policy cannot be deleted" } });
+  const [lifetime] = await db.insert(budgetPolicies).values({ companyId: company.id, scopeType: "company", scopeId: company.id,
+    windowKind: "lifetime", amount: 700 }).returning();
+  await db.update(budgetPolicies).set({ amount: 800, isActive: false }).where(eq(budgetPolicies.id, lifetime.id));
+  await db.update(budgetPolicies).set({ enforcementDeliveredVersion: 1 }).where(eq(budgetPolicies.id, policy.id));
+});
+
+it("refuses a migration connection that reaches another database", async () => {
+  const url = database.connectionString;
+  await assertSameDeploymentDatabase(url, url);
+  await assertSameDeploymentDatabase(url, `${url}?application_name=migration`);
+  const tokyo = new URL(url);
+  tokyo.searchParams.set("options", "-c TimeZone=Asia/Tokyo -c DateStyle=SQL,DMY");
+  await assertSameDeploymentDatabase(url, tokyo.toString());
+  const other = new URL(url);
+  other.pathname = "/postgres";
+  await expect(assertSameDeploymentDatabase(url, other.toString())).rejects.toThrow("leased database");
 });

@@ -68,9 +68,9 @@ fn provider_config(directory: &Path, switches: &[&str]) -> CodexProviderConfig {
         instructions: "Stay inside the test workspace.".to_owned(),
         approval_policy: "never".to_owned(),
         externally_sandboxed: false,
+        read_only: false,
         command_environment: None,
         instruction_working_copy_root: None,
-        read_only: false,
         include_skill_instructions: None,
         conversation_mode: None,
     }
@@ -237,7 +237,6 @@ fn command_environment_rebinds_only_the_registered_run_copy() {
         let config = provider_config(&directory, &["--request-log", requests.to_str().unwrap()]);
         let mut wire = serde_json::to_value(&config).unwrap();
         wire["driver"] = json!(initial_driver);
-        // Retain v1's inline root unchanged even when upgrading its projection.
         wire["commandEnvironment"] = json!({"PATH": "/tools", "AGENT_HOME": "/old-copy"});
         if initial_driver.ends_with("v2") {
             wire["instructionWorkingCopyRoot"] = json!("/old-copy");
@@ -379,6 +378,19 @@ fn provider_receives_the_isolated_codex_auth_home() {
         .env("PAPERCLIP_CODEX_AUTH_TEST_HOME", &directory)
         .env("HOME", &directory)
         .env("CODEX_HOME", &directory)
+        .env(
+            "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+            "authorization=Bearer%20logs-fixture",
+        )
+        .env(
+            "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+            "authorization=Bearer%20traces-fixture",
+        )
+        .env(
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "authorization=unwanted-ambient",
+        )
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", "https://unwanted.example")
         .status()
         .expect("run isolated auth-home assertion");
     assert!(status.success());
@@ -392,7 +404,10 @@ fn provider_receives_isolated_codex_auth_home_subprocess() {
     else {
         return;
     };
-    let config = provider_config(&directory, &["--require-codex-home-auth"]);
+    let config = provider_config(
+        &directory,
+        &["--require-codex-home-auth", "--require-otel-environment"],
+    );
     let mut provider = CodexProvider::start(&config, None)
         .expect("Codex provider should read auth from the isolated CODEX_HOME");
     provider.shutdown().expect("stop fake Codex provider");

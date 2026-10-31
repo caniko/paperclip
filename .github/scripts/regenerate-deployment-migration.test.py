@@ -58,7 +58,7 @@ class JournaledGenerationTest(unittest.TestCase):
         self.assertFalse((self.migrations / "meta" / f"{index:04d}_snapshot.json").exists())
 
     def test_rejects_modified_original_guard(self):
-        sql = self.migrations / "0355_sweet_titanium_man.sql"
+        sql = self.migrations / "0398_sweet_titanium_man.sql"
         sql.write_bytes(sql.read_bytes().replace(b"BEFORE UPDATE OR DELETE", b"AFTER UPDATE OR DELETE", 1))
         with self.assertRaisesRegex(RuntimeError, "Executable migration changed"):
             generation.prepare(self.evidence)

@@ -1,4 +1,6 @@
-import type { PluginAgentRuntimeState } from "./types.js";
+import type { PluginWorkspaceParams, PluginWorkspaceResult } from "./workspace-provider.js";
+import type { PluginEnvironmentTaskParams, PluginEnvironmentTaskResult } from "./environment-tasks.js";
+import type { PluginAgentRuntimeState, PluginAgentRuntimeIdentity } from "./types.js";
 import type { AgentLifecycleRequest, AgentLifecycleResult } from "@paperclipai/shared";
 import type { AiConnectionRouterRequest, AiConnectionRouterResult } from "@paperclipai/shared";
 /**
@@ -287,6 +289,7 @@ export type PluginRpcErrorCode =
  */
 export interface PluginInvocationScope {
   companyId: string;
+  projectGit?: { projectId: string; workspaceId?: string; runId?: string; agentId?: string; operation?: "prepare" | "inspect" | "remove" };
 }
 
 /**
@@ -667,6 +670,8 @@ export interface PluginEnvironmentAcquireLeaseParams extends PluginEnvironmentDr
 }
 
 export interface PluginEnvironmentResumeLeaseParams extends PluginEnvironmentDriverBaseParams {
+  /** New run authority for a retained task; omitted by legacy environment consumers. */
+  runId?: string;
   providerLeaseId: string;
   leaseMetadata?: Record<string, unknown>;
 }
@@ -1393,6 +1398,8 @@ export interface HostToWorkerMethods {
     params: PluginEnvironmentValidateConfigParams,
     result: PluginEnvironmentValidationResult,
   ];
+  workspaceOperation: [params: PluginWorkspaceParams, result: PluginWorkspaceResult];
+  environmentTask: [params: PluginEnvironmentTaskParams, result: PluginEnvironmentTaskResult];
   environmentProbe: [
     params: PluginEnvironmentProbeParams,
     result: PluginEnvironmentProbeResult,
@@ -1513,6 +1520,7 @@ export const HOST_TO_WORKER_OPTIONAL_METHODS: readonly HostToWorkerMethodName[] 
   "handleApiRequest",
   "agentLifecycle",
   "resourceLifecycle",
+  "workspaceOperation",
   "getData",
   "performAction",
   "executeTool",
@@ -1521,6 +1529,7 @@ export const HOST_TO_WORKER_OPTIONAL_METHODS: readonly HostToWorkerMethodName[] 
   "resolveExternalObject",
   "refreshExternalObjects",
   "environmentValidateConfig",
+  "environmentTask",
   "environmentProbe",
   "environmentAcquireLease",
   "environmentResumeLease",
@@ -1787,6 +1796,14 @@ export interface WorkerToHostMethods {
   "projects.list": [
     params: { companyId: string; limit?: number; offset?: number },
     result: Project[],
+  ];
+  "projects.resolveGitCredential": [
+    params: { projectId: string; workspaceId: string; companyId: string },
+    result: string | null,
+  ];
+  "projects.getInstanceSecrets": [
+    params: { projectId: string; companyId: string },
+    result: Record<string, string>,
   ];
   "projects.get": [
     params: { projectId: string; companyId: string },
@@ -2136,8 +2153,12 @@ export interface WorkerToHostMethods {
     params: { companyId: string; status?: string; limit?: number; offset?: number },
     result: Agent[],
   ];
-  "agents.getRuntime": [
+  "agents.getRuntimeIdentity": [
     params: { agentId: string; companyId: string },
+    result: PluginAgentRuntimeIdentity | null,
+  ];
+  "agents.getRuntime": [
+    params: { agentId: string; companyId: string; environmentId?: string; installEnvironmentSkills?: boolean },
     result: PluginAgentRuntimeState | null,
   ];
   "agents.get": [
