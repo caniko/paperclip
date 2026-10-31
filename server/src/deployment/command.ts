@@ -9,6 +9,7 @@ import { publishDeploymentBindings } from "./startup.js";
 
 export async function deploymentCommand(command: "plan" | "apply" | "check", descriptor: DeploymentDescriptor) {
   const config = loadConfig();
+  process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = descriptor.serverCredentials.encryption ?? config.secretsMasterKeyFilePath;
   const apply = command === "apply";
   let stop: (() => Promise<void>) | undefined;
   let release: (() => Promise<void>) | undefined;
