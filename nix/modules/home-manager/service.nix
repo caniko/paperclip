@@ -271,7 +271,7 @@ in {
         Type = "exec";
         ExecStartPre = "${pkgs.coreutils}/bin/install -d -m 0700 ${lib.escapeShellArg cfg.dataDir}";
         ExecStart = "${cfg.package}/bin/paperclip-deployment ${descriptor}";
-        ExecStartPost = "${pkgs.curl}/bin/curl --fail --silent --output /dev/null --retry 30 --retry-delay 1 --retry-connrefused --max-time 2 http://127.0.0.1:${toString cfg.port}/api/health";
+        ExecStartPost = "${pkgs.curl}/bin/curl --fail --silent --output /dev/null --retry 1000 --retry-delay 1 --retry-max-time 110 --retry-connrefused --max-time 2 http://127.0.0.1:${toString cfg.port}/api/health";
         WorkingDirectory = config.home.homeDirectory;
         Environment = lib.mapAttrsToList (name: value: "${name}=${value}") {
           HOME = config.home.homeDirectory;
