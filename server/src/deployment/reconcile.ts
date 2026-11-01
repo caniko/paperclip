@@ -396,8 +396,13 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       }
     }
     const removed = owned.filter((b) => b.enabled && !specs.some((s) => s.kind === b.kind && s.key === b.key));
+    // A company dropped from the manifest releases everything bound inside it: the resources are
+    // disabled as before, then unbound so the operator can delete the company (the ownership
+    // guard rejects deleting any resource that still has a ledger row).
+    const releasedCompanies = new Set(removed.filter((b) => b.kind === "company").map((b) => b.resourceId));
+    const released = (b: (typeof removed)[number]) => b.kind === "company" || (b.companyId !== null && releasedCompanies.has(b.companyId));
     if (removed.some((b) => b.kind === "environment")) throw new Error("Environment removal requires an explicit ownership handoff; retain the declaration to preserve execution references");
-    if (removed.some((b) => b.kind === "workspace")) throw new Error("Workspace removal requires an explicit ownership handoff; retain the declaration to preserve execution references");
+    if (removed.some((b) => b.kind === "workspace" && !released(b))) throw new Error("Workspace removal requires an explicit ownership handoff; retain the declaration to preserve execution references");
     for (const b of removed) differences.push({ kind: b.kind, key: b.key, action: "disable", fields: [] });
     if (options.descriptor.bootstrap && !actorId) differences.unshift({ kind: "operator", key: "bootstrap", action: "create", fields: [] });
     if (services) {
@@ -449,7 +454,9 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       for (const binding of removed) {
         if (binding.kind === "agent") lifecycleAgents.add(binding.resourceId);
         await disableResource(tx, binding.kind as Kind, binding.resourceId, agentLifecycle!);
-        await tx.update(deploymentResources).set({ enabled: false }).where(and(eq(deploymentResources.owner, m.owner), eq(deploymentResources.kind, binding.kind), eq(deploymentResources.key, binding.key)));
+        const ledgerRow = and(eq(deploymentResources.owner, m.owner), eq(deploymentResources.kind, binding.kind), eq(deploymentResources.key, binding.key));
+        if (released(binding)) await tx.delete(deploymentResources).where(ledgerRow);
+        else await tx.update(deploymentResources).set({ enabled: false }).where(ledgerRow);
         for (const auditCompanyId of binding.kind === "operatorKey" ? auditCompanies : [binding.companyId ?? binding.resourceId]) await logActivity(tx, { companyId: auditCompanyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.disabled", entityType: binding.kind, entityId: binding.resourceId, details: { key: binding.key } }, publications);
       }
     }

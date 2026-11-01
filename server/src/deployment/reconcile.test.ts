@@ -425,6 +425,28 @@ it("reconciles named workspaces, switches primaries and protects owned native fi
   expect(await read()).toEqual(rows);
 });
 
+it("releases workspaces and ownership when their whole company is dropped from the manifest", async () => {
+  const declaration = {
+    version: 1, owner: "release",
+    companies: { example: { fields: { name: "Released company" } } },
+    projects: { main: { company: "example", fields: { name: "Released project" } } },
+    projectWorkspaces: { alpha: { project: "main", fields: { name: "Alpha", cwd: "/fixture/alpha", isPrimary: true } } },
+  };
+  const first = await reconcile(declaration);
+  const companyId = first.bindings["company/example"];
+  expect((await reconcile({ version: 1, owner: "release", companies: {} }, false)).differences.map((d) => d.action)).toEqual(["disable", "disable", "disable"]);
+  await reconcile({ version: 1, owner: "release", companies: {} });
+  expect(await db.select().from(deploymentResources).where(eq(deploymentResources.owner, "release"))).toEqual([]);
+  expect((await db.select().from(companies).where(eq(companies.id, companyId)))[0].status).toBe("paused");
+  // Unbound, the ownership guard no longer blocks deleting the company (the audit log has a plain FK).
+  await db.execute(sql`delete from activity_log where company_id = ${companyId}`);
+  await db.delete(companyMemberships).where(eq(companyMemberships.companyId, companyId));
+  await db.delete(projectWorkspaces).where(eq(projectWorkspaces.id, first.bindings["workspace/alpha"]));
+  await db.delete(projects).where(eq(projects.id, first.bindings["project/main"]));
+  await db.delete(companies).where(eq(companies.id, companyId));
+  expect(await db.select().from(companies).where(eq(companies.id, companyId))).toEqual([]);
+});
+
 it("rejects implicit primary takeover and wrong-project adoption before writes", async () => {
   const declaration = {
     version: 1, owner: "workspace-adoption",
