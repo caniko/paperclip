@@ -24,7 +24,6 @@ import { createHeartbeatWorkspaceResolver, resolveExecutionWorkspaceReuseRequest
 import { environmentService } from "./environments.js";
 import { classifyEnvironmentCapabilities, environmentRuntimeService } from "./environment-runtime.js";
 import { environmentRunOrchestrator } from "./environment-run-orchestrator.js";
-import { createAdapterExecutionControl } from "./adapter-execution-control.js";
 import { executionWorkspaceService } from "./execution-workspaces.js";
 import { workspaceOperationService } from "./workspace-operations.js";
 import { instanceSettingsService } from "./instance-settings.js";

@@ -186,9 +186,9 @@ export function companySkillRoutes(db: Db, options: { pluginWorkerManager?: Plug
     return { type: "system" as const };
   }
 
-  async function skillPolicyPrincipal(req: Request, companyId: string, database: Db = db): Promise<SkillPolicyPrincipal> {
+  async function skillPolicyPrincipal(req: Request, companyId: string, policies = skillPolicies): Promise<SkillPolicyPrincipal> {
     if (req.actor.type === "agent" && req.actor.agentId) {
-      return companySkillPolicyService(database).resolveAgentPrincipal(companyId, req.actor.agentId);
+      return policies.resolveAgentPrincipal(companyId, req.actor.agentId);
     }
     if (req.actor.type === "board") {
       return { type: "board", id: req.actor.userId ?? "board", role: "board" };
@@ -240,7 +240,8 @@ export function companySkillRoutes(db: Db, options: { pluginWorkerManager?: Plug
       throw forbidden("Agent key cannot access another company", { code: "skill_company_boundary_denied" });
     }
     assertCompanyAccess(req, companyId);
-    const platformDecision = await accessService(database).decide({
+    const policies = database === db ? skillPolicies : companySkillPolicyService(database);
+    const platformDecision = await (database === db ? access : accessService(database)).decide({
       actor: req.actor,
       action: "skill_config:update",
       resource: { type: "company", companyId },
@@ -260,9 +261,9 @@ export function companySkillRoutes(db: Db, options: { pluginWorkerManager?: Plug
       });
     }
     const resolvedResource = typeof resource === "function" ? await resource() : await resource;
-    const policyDecision = await companySkillPolicyService(database).evaluate({
+    const policyDecision = await policies.evaluate({
       companyId,
-      principal: await skillPolicyPrincipal(req, companyId, database),
+      principal: await skillPolicyPrincipal(req, companyId, policies),
       action,
       resource: resolvedResource,
     });

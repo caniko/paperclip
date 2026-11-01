@@ -399,6 +399,7 @@ describe.skipIf(!url || !endpoint)("native run log source recovery", () => {
     } as typeof heartbeatRuns.$inferSelect;
     const output = createHeartbeatRunOutput(db, {
       run,
+      adapterType: "process",
       runId: run.id,
       issueId: null,
       runLogStore: f.store(),

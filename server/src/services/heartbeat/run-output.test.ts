@@ -169,6 +169,7 @@ describe("object-backed diagnostic recording", () => {
     const chunks: string[] = [];
     const output = createHeartbeatRunOutput(db, {
       run: row,
+      adapterType: "process",
       runId: row.id,
       issueId: null,
       secretKeys: new Set(),
@@ -230,6 +231,7 @@ describe("object-backed diagnostic recording", () => {
     const commit: Array<() => void> = [];
     const recorder = createHeartbeatRunOutput(db, {
       run: row as Run,
+      adapterType: "process",
       runId: row.id!,
       issueId: null,
       runLogStore: {

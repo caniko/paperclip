@@ -1481,7 +1481,7 @@ describeEmbeddedPostgres("native runner restart recovery with real processes", (
     },
   );
 
-  realProcessIt("durably retires an accepted warm Runner while its same-controller successor prepares", async () => {
+  it("durably retires an accepted warm Runner while its same-controller successor prepares", async () => {
     const fixture = await seedRun("REAL-WARM-RETIREMENT");
     const binding = { companyId, issueId: fixture.issueId, runId: fixture.runId };
     const root = resolve(runtimeRoot, fixture.runId, "real-retirement");
