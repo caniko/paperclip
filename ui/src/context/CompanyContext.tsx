@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type Context,
   type ReactNode,
 } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -46,13 +47,18 @@ interface CompanyContextValue {
 
 const STORAGE_KEY = "paperclip.selectedCompanyId";
 
-const CompanyContext = createContext<CompanyContextValue | null>(null);
+// A refresh can replace consumers before a mounted provider is replaced. Keep
+// their context identity in Vite's per-module data; never store account state.
+const CompanyContext: Context<CompanyContextValue | null> =
+  import.meta.hot?.data?.companyContext ?? createContext<CompanyContextValue | null>(null);
+if (import.meta.hot?.data) import.meta.hot.data.companyContext = CompanyContext;
 
 export function resolveBootstrapCompanySelection(input: {
   companies: Array<Pick<Company, "id">>;
   sidebarCompanies: Array<Pick<Company, "id">>;
   selectedCompanyId: string | null;
   storedCompanyId: string | null;
+  routeCompanyId?: string | null;
 }) {
   if (input.companies.length === 0) return null;
 
@@ -69,6 +75,9 @@ export function resolveBootstrapCompanySelection(input: {
   // selection exists yet.
   if (input.selectedCompanyId && input.companies.some((company) => company.id === input.selectedCompanyId)) {
     return input.selectedCompanyId;
+  }
+  if (input.routeCompanyId && input.sidebarCompanies.some((company) => company.id === input.routeCompanyId)) {
+    return input.routeCompanyId;
   }
   if (input.storedCompanyId && selectableCompanies.some((company) => company.id === input.storedCompanyId)) {
     return input.storedCompanyId;
@@ -177,6 +186,9 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
       sidebarCompanies,
       selectedCompanyId,
       storedCompanyId: localStorage.getItem(STORAGE_KEY),
+      routeCompanyId: companies.find(company =>
+        company.issuePrefix.toLowerCase() === window.location.pathname.split("/")[1]?.toLowerCase(),
+      )?.id,
     });
     if (next === null || next === selectedCompanyId) return;
     setSelectedCompanyIdState(next);
