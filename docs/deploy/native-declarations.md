@@ -286,29 +286,42 @@ declarable yet) and an explicit boolean `dangerouslySkipPermissions`; runtime
 credentials such as `CLAUDE_CODE_OAUTH_TOKEN` bind as `env.*` credentials. Worker credentials are native encrypted secret references.
 Manifest fields must contain nonsecret values.
 
-### Owned SSH environments
+### Instance-level environments
 
-Declare `environments.<key>` with a `company` key, `credential` name from the
+Declare `environments.<key>` at the top level of the manifest. Environments are
+instance-level execution hosts: they take no `company` and any company may use
+them, so a manifest may declare environments with `companies = {}`. Give SSH
+environments a `credential` name from the
 descriptor's runtime credential map, and `fields` containing `name`, `driver:
 "ssh"`, and `config`. The SSH config requires `host`, `username`, an absolute
 `remoteWorkspacePath`, `knownHosts`, and `strictHostKeyChecking: true`; `port`
 defaults to 22. Optional in-place workspace ownership uses the native
 `workspaceRealizationMode` and `filesystemOwnership` contract.
 
-Set `agents.<key>.environment` to an environment declaration key in the same
-company. Reconciliation resolves the stable environment ID before creating the
+Set `agents.<key>.environment` to a declared environment key (any declared
+environment, regardless of the agent's company). Reconciliation resolves the stable
+environment ID before creating the
 agent. Explicit `null` clears the binding; omission preserves an existing
 application-managed binding. Raw database IDs and private keys are not manifest
 fields. `opencode_local` declarations require an explicit boolean
 `dangerouslySkipPermissions`; use `false` to retain the executor's permission
 policy.
 
-The SSH key becomes an encrypted native secret with an environment consumer
-binding. Rotation updates its version without changing the environment or agent
-identity. Plans expose changed field names only. Database guards protect the
-owned environment configuration and agent binding. Environment placement changes
-and removal require an explicit ownership handoff, as do workspace removals;
-they cannot silently retarget retained runs or sessions. Declaring an environment
+The SSH key is never stored. The environment records only the credential name
+(`privateKeyCredential`), and every use (probe, lease, orchestrator, runner
+selection) reads the key from the descriptor's runtime credential file, so
+rotating the file needs no reconcile and any company's run can use the host.
+Environments created in the GUI keep their encrypted-secret path. Existing
+company-bound environment bindings migrate in place to instance-level ones
+(same environment rows), and the superseded company-held key secret is
+deleted once no environment references it. Plans expose changed field names
+only. Database guards protect the owned environment configuration and agent
+binding. Environment placement changes and removal require an explicit ownership
+handoff, as do workspace removals while their company stays declared; they
+cannot silently retarget retained runs or sessions. When a declared company is
+removed from the manifest, its projects, workspaces and agents are disabled and
+released (their ledger rows are deleted) so the company can be deleted through
+the API, while declared environments are untouched. Declaring an environment
 does not establish reachability or qualify execution, Stop, or recovery.
 
 SSH configs may add `capacity` (`maxConcurrentRuns`, `admissionCommand`). A
@@ -317,8 +330,7 @@ It must set `adopt: "instance-local"`. Paperclip creates the single local
 environment itself, so it has no UUID before the first apply; the sentinel is
 the explicit adoption of that environment. The declaration then owns its config.
 Other drivers cannot use the sentinel.
-Set `agents.<key>.overflowEnvironments` to ordered environment keys in the same
-company. Reconciliation writes their IDs to the agent's
+Set `agents.<key>.overflowEnvironments` to ordered declared environment keys. Reconciliation writes their IDs to the agent's
 `runtimeConfig.fallbackEnvironmentIds` and preserves the other application-owned
 runtime keys. See [environment overflow](../guides/board-operator/execution-workspaces-and-runtime-services.md#environment-overflow).
 

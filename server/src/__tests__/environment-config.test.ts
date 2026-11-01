@@ -67,6 +67,7 @@ describe("environment config helpers", () => {
         port: "2222",
         username: "ssh-user",
         remoteWorkspacePath: "/srv/paperclip/workspace",
+        privateKeyCredential: null,
         privateKeySecretRef: {
           type: "secret_ref",
           secretId: "11111111-1111-1111-1111-111111111111",
@@ -82,6 +83,7 @@ describe("environment config helpers", () => {
       username: "ssh-user",
       remoteWorkspacePath: "/srv/paperclip/workspace",
       privateKey: null,
+      privateKeyCredential: null,
       privateKeySecretRef: {
         type: "secret_ref",
         secretId: "11111111-1111-1111-1111-111111111111",
@@ -140,6 +142,7 @@ describe("environment config helpers", () => {
         username: "ssh-user",
         remoteWorkspacePath: "/srv/paperclip/workspace",
         privateKey: null,
+        privateKeyCredential: null,
         privateKeySecretRef: null,
         knownHosts: null,
         strictHostKeyChecking: false,
@@ -154,6 +157,7 @@ describe("environment config helpers", () => {
         username: "ssh-user",
         remoteWorkspacePath: "/srv/paperclip/workspace",
         privateKey: null,
+        privateKeyCredential: null,
         privateKeySecretRef: null,
         knownHosts: null,
         strictHostKeyChecking: false,

@@ -13,25 +13,28 @@ describe("deployment manifest", () => {
       expect(deploymentManifestSchema.safeParse({ ...manifest, operatorKeys: invalid }).success).toBe(false);
     }
   });
-  it("resolves company-owned SSH environments by declaration key without database IDs or key material", () => {
-    const ssh = { company: "example", credential: "executor", fields: { name: "Atlas", driver: "ssh",
+  it("resolves instance-level SSH environments by declaration key without database IDs or key material", () => {
+    const ssh = { credential: "executor", fields: { name: "Atlas", driver: "ssh",
       config: { host: "atlas", port: 1337, username: "can", remoteWorkspacePath: "/work", knownHosts: "atlas ssh-ed25519 AAAA", strictHostKeyChecking: true } } };
     const manifest = { version: 1, owner: "deployment", companies: { example: company },
       environments: { atlas: ssh }, agents: { worker: { ...agent, environment: "atlas" } } };
     expect(deploymentManifestSchema.parse(manifest).agents.worker.environment).toBe("atlas");
+    // Instance-level: valid with no company declared, and an agent in any company may reference it.
+    expect(deploymentManifestSchema.safeParse({ version: 1, owner: "deployment", companies: {}, environments: { atlas: ssh } }).success).toBe(true);
+    expect(deploymentManifestSchema.safeParse({ ...manifest, companies: { example: company, other: company }, agents: { worker: { ...agent, company: "other", environment: "atlas" } } }).success).toBe(true);
     for (const invalid of [
       { ...manifest, agents: { worker: { ...agent, environment: "missing" } } },
-      { ...manifest, environments: { atlas: { ...ssh, company: "missing" } } },
+      { ...manifest, environments: { atlas: { ...ssh, company: "example" } } },
       { ...manifest, environments: { atlas: { ...ssh, fields: { ...ssh.fields, config: { ...ssh.fields.config, privateKey: "PRIVATE" } } } } },
       { ...manifest, environments: { atlas: { ...ssh, fields: { ...ssh.fields, config: { ...ssh.fields.config, strictHostKeyChecking: false } } } } },
-      { ...manifest, environments: { atlas: { ...ssh, company: "other" } }, companies: { example: company, other: company } },
+      { ...manifest, environments: { atlas: { ...ssh, credential: undefined } } },
     ]) expect(deploymentManifestSchema.safeParse(invalid).success).toBe(false);
   });
-  it("declares local capacity and same-company overflow environments", () => {
-    const ssh = { company: "example", credential: "executor", fields: { name: "Nomad", driver: "ssh",
+  it("declares local capacity and overflow environments", () => {
+    const ssh = { credential: "executor", fields: { name: "Nomad", driver: "ssh",
       config: { host: "nomad", username: "exec", remoteWorkspacePath: "/work", knownHosts: "nomad ssh-ed25519 AAAA", strictHostKeyChecking: true,
         capacity: { maxConcurrentRuns: 1, admissionCommand: ["probe"] } } } };
-    const local = { adopt: "instance-local", company: "example", fields: { driver: "local", config: { capacity: { maxConcurrentRuns: 1 } } } };
+    const local = { adopt: "instance-local", fields: { driver: "local", config: { capacity: { maxConcurrentRuns: 1 } } } };
     const manifest = { version: 1, owner: "deployment", companies: { example: company },
       environments: { local, nomad: ssh }, agents: { worker: { ...agent, environment: "local", overflowEnvironments: ["nomad"] } } };
     expect(deploymentManifestSchema.parse(manifest).agents.worker.overflowEnvironments).toEqual(["nomad"]);
