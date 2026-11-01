@@ -166,7 +166,7 @@ test("required aggregates reject omitted, failed and cancelled selected work", (
     const names = /needs: \[([^\]]+)\]/.exec(block)[1].split(", ");
     const resultPlan = plan(["ui/src/components/Sidebar.tsx"]);
     const results = Object.fromEntries(names.map((name) => [name, { result:
-      name === "gate" || name === "policy" || resultPlan.jobs[name]?.run ? "success" : "skipped" }]));
+      name === "gate" || name === "policy" || name === "native_composer_stop" || resultPlan.jobs[name]?.run ? "success" : "skipped" }]));
     const run = () => spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8",
       env: { ...process.env, FULL_CI: "true", CI_PLAN: JSON.stringify(resultPlan), CI_RESULTS: JSON.stringify(results) } });
     assert.equal(run().status, 0);
