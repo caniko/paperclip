@@ -1,3 +1,6 @@
+import { notifyAttentionRetentionWork } from "../retention-work-notifications.js";
+import { notifyStatusCardIssueChange } from "../status-card-notifications.js";
+import { notifyScheduledRetryDispatch } from "../run-dispatch-notifications.js";
 import { deriveTaskKeyWithHeartbeatFallback } from "./run-state.js";
 import { infrastructureRetryDelayMs } from "../system-recovery-state.js";
 import {
@@ -78,7 +81,7 @@ type PlanApprovalResumeFailure = {
 export interface HeartbeatRetryDependencies {
   hasCaseHandoffForRun: (run: Pick<HeartbeatRun, "id" | "companyId">) => Promise<boolean>;
   runDispatch: Pick<ReturnType<typeof createRunDispatch>,
-    "evaluateScheduledRetryGate" | "promoteDueScheduledRetries" | "promoteScheduledRetry">;
+    "evaluateScheduledRetryGate" | "promoteDueScheduledRetries" | "promoteScheduledRetry" | "nextScheduledRetryAt">;
   getAgent: (agentId: string) => Promise<typeof agents.$inferSelect | null | undefined>;
   getRun: (
     runId: string,
@@ -693,6 +696,10 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
       },
       "normal_model",
     );
+    // A successor resolves current assignments; the failed run retains its snapshot.
+    delete retryContextSnapshot.skillVersions;
+    delete retryContextSnapshot.skillSelectionSnapshot;
+    delete retryContextSnapshot.shadowedSkills;
     const responsibleUserId = await resolveResponsibleUserIdForRunContext(
       run,
       retryContextSnapshot,
@@ -1013,6 +1020,8 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
           retryContextSnapshot.previousRunId = continuation.previousRunId;
         }
 
+        await notifyAttentionRetentionWork(tx, { companyId: run.companyId });
+        await notifyScheduledRetryDispatch(tx, { companyId: run.companyId });
         const wakeupRequest = await tx
           .insert(agentWakeupRequests)
           .values({
@@ -1198,6 +1207,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
         }
 
         if (issueId) {
+          await notifyStatusCardIssueChange(tx, run.companyId);
           await tx
             .update(issues)
             .set({
@@ -1667,6 +1677,10 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
     });
   }
 
+  async function nextScheduledRetryAt() {
+    return runDispatch.nextScheduledRetryAt({ cutoff: await getWorktreeExecutionCutoff() });
+  }
+
   async function promoteDueScheduledRetries(now = new Date()) {
     const cutoff = await getWorktreeExecutionCutoff();
     const result = await runDispatch.promoteDueScheduledRetries({
@@ -1774,6 +1788,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
     };
 
     const updated = await db.transaction(async (tx) => {
+      await notifyScheduledRetryDispatch(tx, { companyId: scheduled.run.companyId });
       const row = await tx
         .update(heartbeatRuns)
         .set({
@@ -1925,6 +1940,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
     finalizeAiConnectionBusyDeferral,
     finalizeWorkspaceBusyDeferral,
     promoteDueScheduledRetries,
+    nextScheduledRetryAt,
     retryScheduledRetryNow,
 
     scheduleBoundedRetry: async (
