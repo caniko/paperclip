@@ -248,7 +248,6 @@ test("the trusted PR workflow limits full CI to merge-relevant stack layers", ()
     "verify_serialized_server",
     "canary_dry_run",
     "e2e_shards",
-    "native_composer_stop",
   ]) {
     assert.match(
       jobs.get(jobId),
@@ -256,6 +255,8 @@ test("the trusted PR workflow limits full CI to merge-relevant stack layers", ()
       `${jobId} must run only when the gate selects full CI`,
     );
   }
+  assert.match(jobs.get("native_composer_stop"), /^ {4}if: \$\{\{ needs\.gate\.outputs\.full_ci == 'true' \}\}$/m,
+    "native_composer_stop must run only when the gate selects full CI");
 
   assert.doesNotMatch(
     jobs.get("policy"),
@@ -288,31 +289,20 @@ test("the trusted PR workflow limits full CI to merge-relevant stack layers", ()
   assert.match(e2e, /^ {4}needs: \[gate, policy, e2e_shards, native_composer_stop\]$/m);
   assert.notEqual(runAggregate(e2e, true, { policy: "failure" }).status, 0);
   assert.notEqual(runAggregate(e2e, false, { e2e_shards: "success" }).status, 0);
-  assert.match(e2e, /POLICY_RESULT: \$\{\{ needs\.policy\.result \}\}/);
-  assert.match(e2e, /false\)[\s\S]*test "\$E2E_SHARDS_RESULT" = "skipped"/);
-  assert.match(e2e, /NATIVE_COMPOSER_STOP_RESULT: \$\{\{ needs\.native_composer_stop\.result \}\}/);
-  assert.match(e2e, /true\)[\s\S]*test "\$NATIVE_COMPOSER_STOP_RESULT" = "success"/);
-  assert.match(e2e, /false\)[\s\S]*test "\$NATIVE_COMPOSER_STOP_RESULT" = "skipped"/);
 });
 
 test("the e2e aggregate refuses failed or missing native Stop qualification", () => {
   const aggregate = readWorkflowJobs(readTrustedPrWorkflow()).get("e2e");
-  const script = aggregate.split("        run: |\n")[1]
-    .split("\n").map(line => line.replace(/^ {10}/, "")).join("\n");
-  for (const [full, policy, shards, native, succeeds] of [
-    ["true", "success", "success", "success", true],
-    ["true", "success", "success", "failure", false],
-    ["true", "success", "success", "skipped", false],
-    ["true", "success", "failure", "success", false],
-    ["true", "failure", "success", "success", false],
-    ["false", "success", "skipped", "skipped", true],
-    ["false", "success", "skipped", "success", false],
+  for (const [full, overrides, succeeds] of [
+    [true, {}, true],
+    [true, { native_composer_stop: "failure" }, false],
+    [true, { native_composer_stop: "skipped" }, false],
+    [true, { e2e_shards: "failure" }, false],
+    [true, { policy: "failure" }, false],
+    [false, {}, true],
+    [false, { native_composer_stop: "success" }, false],
   ]) {
-    const result = spawnSync("bash", ["-e", "-c", script], { env: {
-      ...process.env, FULL_CI: full, POLICY_RESULT: policy,
-      E2E_SHARDS_RESULT: shards, NATIVE_COMPOSER_STOP_RESULT: native,
-    } });
-    assert.equal(result.status === 0, succeeds, `${full}/${policy}/${shards}/${native}`);
+    assert.equal(runAggregate(aggregate, full, overrides).status === 0, succeeds, JSON.stringify([full, overrides]));
   }
 });
 

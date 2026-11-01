@@ -7,7 +7,6 @@ import type { Issue, IssueDocument } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
-  readTaskSidePanelState,
   taskPanelAgentTasksTab,
   taskPanelArtifactsTab,
   taskPanelDocumentTab,

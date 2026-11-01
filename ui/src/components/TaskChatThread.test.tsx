@@ -3558,7 +3558,7 @@ describe("TaskChatThread runtime transcript selection", () => {
         activeRun={{ ...activeRun, filesystemOwnershipState: state }} />,
     );
     show("waiting");
-    const wait = container.querySelector('[role="status"]');
+    const wait = container.querySelector('[data-testid="task-chat-live-transcript"] [role="status"]');
     expect(wait?.textContent).toContain("Waiting for exclusive filesystem ownership");
     expect(wait?.textContent).toContain("No agent work has started");
     show("acquired");

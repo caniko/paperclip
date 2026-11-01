@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { createTaskAction } from "../protocol-actions/create-task.js";
 import { createProjectAction } from "../protocol-actions/create-project.js";
 import { handoffCaseAction } from "../protocol-actions/handoff-case.js";
+import { updateSkillAction } from "../protocol-actions/update-skill.js";
 
 import {
   PAPERCLIP_SEMANTIC_ACTION_CATALOG,
@@ -127,7 +128,9 @@ describe("semantic action catalog", () => {
       (action) => action.operationId,
     );
 
-    expect(operationIds).toHaveLength(50);
+    // Upstream's 50 actions plus the fork's update_skill binding.
+    expect(operationIds).toHaveLength(51);
+    expect(operationIds).toContain("update_skill");
     expect(operationIds).toContain("set_task_monitor");
     expect(operationIds).toContain("send_chat_message");
     expect(new Set(operationIds).size).toBe(operationIds.length);
@@ -137,6 +140,22 @@ describe("semantic action catalog", () => {
       Object.isFrozen(paperclipSemanticAction("write_document")?.inputSchema),
     ).toBe(true);
   });
+
+  it("projects the canonical skill update schema and modes as an optional mutation", () => {
+    const update = paperclipSemanticAction("update_skill");
+    const live = updateSkillAction.live.descriptor;
+    expect(update).toBeDefined();
+    expect(update).toMatchObject({
+      operationId: live.operationId,
+      placement: "optional",
+      effect: "write",
+      allowedModes: live.allowedModes,
+      requiredClaims: live.requiredClaims,
+      inputSchema: live.inputSchema,
+      outputSchema: live.outputSchema,
+    });
+  });
+
 
   it("declares hire_agent as a native identity-only mutation", () => {
     const hire = paperclipSemanticAction("hire_agent");
