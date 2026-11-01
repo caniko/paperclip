@@ -54,6 +54,9 @@
       // lib.optionalAttrs (cfg.oidc != null) {
         oidc = {
           inherit (cfg.oidc) providerId displayName discoveryUrl clientId;
+        }
+        // lib.filterAttrs (_: value: value != null) {
+          inherit (cfg.oidc) authorizationUrl tokenUrl userInfoUrl;
         };
       };
     storage = {
@@ -172,6 +175,21 @@ in {
           discoveryUrl = lib.mkOption {
             type = lib.types.str;
             description = "OpenID Connect discovery document URL.";
+          };
+          authorizationUrl = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            description = "Explicit authorization endpoint, so sign-in works when the discovery document was unreachable at server start.";
+          };
+          tokenUrl = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            description = "Explicit token endpoint, paired with `authorizationUrl`.";
+          };
+          userInfoUrl = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            description = "Explicit userinfo endpoint, paired with `authorizationUrl`.";
           };
           clientId = lib.mkOption {
             type = lib.types.str;

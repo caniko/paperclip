@@ -100,7 +100,11 @@ The client secret is the `serverCredentials.oidc` file (or
 `PAPERCLIP_AUTH_OIDC_CLIENT_SECRET` outside declarative mode); the provider
 fields can also be set with `PAPERCLIP_AUTH_OIDC_PROVIDER_ID`,
 `PAPERCLIP_AUTH_OIDC_DISPLAY_NAME`, `PAPERCLIP_AUTH_OIDC_DISCOVERY_URL` and
-`PAPERCLIP_AUTH_OIDC_CLIENT_ID`. Register
+`PAPERCLIP_AUTH_OIDC_CLIENT_ID`. The discovery document is fetched once at
+server start; set `authorizationUrl`, `tokenUrl` and `userInfoUrl` (env
+`PAPERCLIP_AUTH_OIDC_AUTHORIZATION_URL`, `PAPERCLIP_AUTH_OIDC_TOKEN_URL`,
+`PAPERCLIP_AUTH_OIDC_USERINFO_URL`) so sign-in still works when the provider
+was unreachable at that moment. Register
 `<publicBaseUrl>/api/auth/callback/<providerId>` as the redirect URI. The flow
 uses PKCE with scopes `openid email profile`. It never creates accounts: a user
 signs in only when an existing account has the same email and the provider reports it as verified. The Home Manager
