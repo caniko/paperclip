@@ -5625,9 +5625,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const heartbeat = heartbeatService(db);
     let drain: ReturnType<typeof heartbeat.drainRunningRunsForShutdown> | undefined;
     try {
+      // A fresh company first seeds the bundled skills (about half a second locally, more on CI) before
+      // the adapter can register for cancellation; wait for that instead of racing the default 1s.
       await heartbeat.resumeQueuedRuns();
-      await vi.waitFor(() => expect(adapterExecutionControls.has(runId)).toBe(true));
-      await vi.waitFor(async () => expect((await heartbeat.getRun(runId))?.executionStage).toBe("dispatching"));
+      await vi.waitFor(() => expect(adapterExecutionControls.has(runId)).toBe(true), { timeout: 5_000 });
+      await vi.waitFor(async () => expect((await heartbeat.getRun(runId))?.executionStage).toBe("dispatching"), { timeout: 5_000 });
       expect(runningProcesses.has(runId)).toBe(false);
       drain = heartbeat.drainRunningRunsForShutdown("SIGTERM", new Date(), [runId]);
       await Promise.race([
