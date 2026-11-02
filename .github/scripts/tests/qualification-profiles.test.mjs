@@ -215,7 +215,9 @@ test("checked-in package-profile rules bind current package sources and are exec
     assert.equal(sha256(text), rule.source_sha256, `Package rule source drift: ${rule.file}`);
     assert.ok(text.toString().includes(rule.anchor), `Package rule anchor missing: ${rule.file}`);
     // The case is gated to the profile's platform, so the Linux package skips it and cannot silently drop it.
-    assert.ok(text.toString().includes(`process.platform !== "${environment.platform}"`));
+    const source = text.toString();
+    assert.ok(source.includes(`process.platform !== "${environment.platform}"`) || source.includes(`process.platform === "${environment.platform}"`),
+      `Package rule is not gated to ${environment.platform}: ${rule.file}`);
     assert.match(workflow, new RegExp(`- profile: ${rule.environment}\\n\\s+runner: macos-15`));
   }
 });
