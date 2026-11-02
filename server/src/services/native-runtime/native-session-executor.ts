@@ -9540,7 +9540,11 @@ async function executePaperclipNativeSessionWithinScope(
         if (!suspendedController) throw new Error("native_runner_checkpoint_missing_after_suspension");
         persistWarmNativeCheckpoint(remoteWarmRecovery.previousExecution,
           nativeSessionConfigDigest(remoteWarmRecovery.previousExecution, "remote"), await recovered.session.snapshot());
-        await restoreWarmRunnerdController(input);
+        // restoreNativeRunnerCheckpoint above already replaced the external marker with the prior
+        // run's controller checkpoint (fork 891335aad9). Do not also call restoreWarmRunnerdController:
+        // the closed remote runner is now suspended, so its restoreRemoteSuspendedRunnerCheckpoint would
+        // write a plugin-runner-state.json for the prior identity and make the successor's authority
+        // lifecycle indeterminate (prior_owner_terminal_state_indeterminate on the next turn).
         persistedWarmSession = loadWarmNativeCheckpoint(input.execution, warmConfigDigest!, "remote");
         runnerdBackend = await createRunnerdBackend({ ...input, providerPackAdmissionSource, onAccountingEvent: producerUsage?.capture, runnerInstanceId: effectiveRunnerInstanceId,
           controllerPersistence: input.runnerExecutionTarget?.kind === "remote" ? { bootId: controller.bootId } : undefined,
