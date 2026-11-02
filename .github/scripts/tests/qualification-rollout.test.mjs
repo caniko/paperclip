@@ -125,4 +125,13 @@ test("provider observations reconcile source, complete Runner, conditional and m
     mutate(changed);
     assert.throws(() => qualifyRolloutObservation(changed));
   }
+  // A maintainer-host owner is not a hosted lane: its deferred case needs no observed profile, but without the flag it still does.
+  const maintainer = structuredClone(observation);
+  maintainer.profiles.pop();
+  maintainer.required_profiles.pop();
+  maintainer.coverage_policy.rules[0].environment = "apple-silicon-maintainer";
+  maintainer.coverage_policy.environments["apple-silicon-maintainer"] = { platform: "darwin", package_root: "packages/paperclip-runner" };
+  assert.throws(() => qualifyRolloutObservation(structuredClone(maintainer)));
+  maintainer.coverage_policy.environments["apple-silicon-maintainer"].maintainer_host = true;
+  assert.equal(qualifyRolloutObservation(maintainer).rollout_coverage_accepted, true);
 });

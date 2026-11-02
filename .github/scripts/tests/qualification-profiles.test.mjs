@@ -218,6 +218,8 @@ test("checked-in package-profile rules bind current package sources and are exec
     const source = text.toString();
     assert.ok(source.includes(`process.platform !== "${environment.platform}"`) || source.includes(`process.platform === "${environment.platform}"`),
       `Package rule is not gated to ${environment.platform}: ${rule.file}`);
-    assert.match(workflow, new RegExp(`- profile: ${rule.environment}\\n\\s+runner: macos-15`));
+    // A maintainer-host owner is deliberately not a hosted matrix lane.
+    if (environment.maintainer_host) assert.doesNotMatch(workflow, new RegExp(`- profile: ${rule.environment}\\n`));
+    else assert.match(workflow, new RegExp(`- profile: ${rule.environment}\\n\\s+runner: macos-15`));
   }
 });

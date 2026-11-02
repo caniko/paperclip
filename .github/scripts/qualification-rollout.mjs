@@ -140,6 +140,8 @@ export function qualifyRolloutObservation(observation) {
       const rule = coveragePolicy.rules.find(rule => rule.file === deferred.file && deferred.name.includes(rule.name_contains)
         && rule.environment !== profile && coveragePolicy.environments[rule.environment]?.package_root === coveragePolicy.environments[profile].package_root);
       assert.ok(rule, "A deferred package case has no source-backed rule");
+      // A maintainer-host owner is not a hosted lane, so nothing can require it here; the case stays unexecuted.
+      if (coveragePolicy.environments[rule.environment]?.maintainer_host) continue;
       const owner = observation.profiles.find(candidate => candidate.profile === rule.environment);
       assert.ok(owner?.selection.requiredCases.some(row => identity(row) === identity(deferred)), "A deferred package case is not required by its owning profile");
     }
