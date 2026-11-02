@@ -18,7 +18,8 @@ test("checked-in coverage bindings match the current source before expensive col
   assert.equal(configured.all_declared_cases_required, true);
   for (const group of ["rules", "supplemental_rules", "static_helper_calls", "declaration_branches", "conditional_expansions"]) {
     for (const rule of configured[group] ?? []) {
-      const source = readFileSync(new URL(rule.file, root), "utf8");
+      const packageRoot = configured.environments[rule.environment]?.package_root;
+      const source = readFileSync(new URL(packageRoot ? `${packageRoot}/${rule.file}` : rule.file, root), "utf8");
       assert.equal(sha256(source), rule.source_sha256, `${group}: ${rule.file}`);
       assert.ok(source.includes(rule.anchor), `${group}: ${rule.file}: missing anchor`);
     }

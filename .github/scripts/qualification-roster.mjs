@@ -208,7 +208,11 @@ export function declarationSites(declarations, rows, sources, policy = {}, prove
 export function mapEnvironments(rows, sources, policy) {
   assert.equal(policy.all_declared_cases_required, true, "Coverage policy cannot waive declared cases");
   const stale = [];
-  for (const rule of [...policy.rules, ...(policy.conditional_expansions ?? [])]) {
+  // Rules for a separately rooted package profile name files relative to that package; its own profile
+  // (and the complete-package profile that defers to it) verifies them against the package sources.
+  const rootRule = rule => !policy.environments[rule.environment]?.package_root;
+  const policyRules = policy.rules.filter(rootRule);
+  for (const rule of [...policyRules, ...(policy.conditional_expansions ?? [])]) {
     assert.ok(policy.environments[rule.environment], "Unknown environment");
     const source = sources[rule.file];
     if (!source || sha256(source) !== rule.source_sha256 || !source.includes(rule.anchor)) stale.push(rule);
@@ -219,7 +223,7 @@ export function mapEnvironments(rows, sources, policy) {
       required: true, evidence: [], status: "unexecuted", source_valid: !stale.includes(rule),
       observed_case_ids: rows.filter(row => row.file === rule.file && row.name.includes(rule.name_contains)).map(row => row.id) })),
     cases: rows.map(row => {
-      const rules = policy.rules.filter(rule => rule.file === row.file && row.name.includes(rule.name_contains));
+      const rules = policyRules.filter(rule => rule.file === row.file && row.name.includes(rule.name_contains));
       const valid = rules.filter(rule => !stale.includes(rule));
       const environments = [...new Set(valid.map(rule => rule.environment))];
       if (!environments.length && !row.skipped_in_environment && !rules.length) environments.push("default-hosted");
