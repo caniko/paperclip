@@ -107,7 +107,8 @@ it("keeps anonymous wrappers usable after run cleanup and excludes sandbox image
     await writeFile(path.join(bin, "gh"), `#!${process.execPath}
 const fs = require('node:fs');
 process.stdout.write(JSON.stringify({token:process.env.GH_TOKEN || '', githubToken:process.env.GITHUB_TOKEN || '', ssh:process.env.SSH_AUTH_SOCK, global:process.env.GIT_CONFIG_GLOBAL, globalConfig:fs.readFileSync(process.env.GIT_CONFIG_GLOBAL, 'utf8'), imageConfig:fs.existsSync(process.env.GH_CONFIG_DIR + '/hosts.yml')}));`, { mode: 0o700 });
-    const imageEnv = { HOME: root, PATH: `${bin}:${path.dirname(process.execPath)}:${process.env.PATH}`, GH_TOKEN: "ambient-token", GITHUB_TOKEN: "ambient-other-token", SSH_AUTH_SOCK: "/ambient/socket" };
+    const sandboxPath = await createSandboxToolPath(root);
+    const imageEnv = { HOME: root, PATH: `${bin}:${sandboxPath}`, GH_TOKEN: "ambient-token", GITHUB_TOKEN: "ambient-other-token", SSH_AUTH_SOCK: "/ambient/socket" };
     const execute: CommandManagedRuntimeRunner["execute"] = async (input) => {
       const startedAt = new Date().toISOString();
       const child = promisify(execFile)(input.command, input.args ?? [], { cwd: input.cwd ?? root, env: { ...imageEnv, ...input.env }, timeout: 15_000 });
