@@ -97,7 +97,8 @@ describe("provider pack admission identity", () => {
       { identity: initial, sourceRunId: initial.runId, ...binding })).resolves.toBe(false);
     expect(admittedNativeProviderPack(recovered.session, initial)).toBeNull();
   });
-  it.each([undefined, { ...verified, state: "pending" }, { ...verified, state: "unknown" }])("does not revive a historical receipt without verified current provenance: %j", async state => {
+  // Titles use stable labels: `verified` embeds a per-load random epoch, which `%j` would put in the case title.
+  it.each([["absent", undefined], ["pending", { ...verified, state: "pending" }], ["unknown", { ...verified, state: "unknown" }]] as const)("does not revive a historical receipt without verified current provenance: %s", async (_label, state) => {
     const source = sessionFixture(); remember(source.session);
     const recovered = sessionFixture();
     const absentState = state === undefined ? null : state;
