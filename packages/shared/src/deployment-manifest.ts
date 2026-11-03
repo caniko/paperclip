@@ -54,9 +54,8 @@ export const deploymentManifestSchema = z.object({
   companies: z.record(key, company),
   projects: z.record(key, project).default({}),
   environments: z.record(key, z.object({
-    // The singleton local environment has no UUID before the first apply; adopt it by name.
+    // Environments are instance-level (no company). The singleton local one has no UUID before the first apply; adopt it by name.
     adopt: z.union([z.string().uuid(), z.literal(LOCAL_ENVIRONMENT_ADOPT)]).optional(),
-    company: key,
     // SSH declarations name their private key; local declarations take none.
     credential: key.optional(),
     fields: z.discriminatedUnion("driver", [
@@ -112,7 +111,7 @@ export const deploymentManifestSchema = z.object({
       }
     }
   }
-  for (const kind of ["projects", "environments", "agents", "routines"] as const) {
+  for (const kind of ["projects", "agents", "routines"] as const) {
     for (const [name, resource] of Object.entries(m[kind])) {
       if (!m.companies[resource.company]) issue([kind, name, "company"], "Unknown company key");
     }
@@ -121,13 +120,11 @@ export const deploymentManifestSchema = z.object({
     issue(["environments"], "The instance has one local environment; declare it at most once");
   }
   for (const [name, a] of Object.entries(m.agents)) {
-    if (a.environment && m.environments[a.environment]?.company !== a.company) {
-      issue(["agents", name, "environment"], "Environment must be declared in the same company");
+    if (a.environment && !m.environments[a.environment]) {
+      issue(["agents", name, "environment"], "Unknown environment key");
     }
     for (const overflow of a.overflowEnvironments ?? []) {
-      if (m.environments[overflow]?.company !== a.company) {
-        issue(["agents", name, "overflowEnvironments"], "Overflow environments must be declared in the same company");
-      }
+      if (!m.environments[overflow]) issue(["agents", name, "overflowEnvironments"], "Unknown environment key");
     }
     const seen = new Set([name]);
     let manager = a.reportsTo;

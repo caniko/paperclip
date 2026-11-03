@@ -19,7 +19,24 @@ export function profileSelection(profile, platform, rows, sources, policy) {
   }
   const mapped = sourceScope ? mapEnvironments(rows, sources, { ...policy, rules, conditional_expansions: [] }).cases : undefined;
   if (mapped) assert.ok(mapped.every(row => row.environments.length), "Skipped source case has no environment mapping");
-  const requiredCases = mapped ? mapped.filter(row => row.environments.includes(profile)) : allCasesRequired ? rows
+  // A complete package roster excludes exactly the cases that a source-backed rule assigns to another
+  // profile of the same package on a different platform. Each exclusion must be skipped here.
+  const packageRoot = policy.environments[profile]?.package_root;
+  const deferringRules = allCasesRequired && packageRoot ? policy.rules.filter(rule => rule.environment !== profile
+    && policy.environments[rule.environment]?.package_root === packageRoot) : [];
+  for (const rule of deferringRules) {
+    assert.notEqual(policy.environments[rule.environment].platform, platform, "A deferral must name a different platform");
+    assert.ok(Object.hasOwn(sources, rule.file), `Deferred source is not in this package roster: ${rule.file}`);
+    assert.equal(sha256(sources[rule.file]), rule.source_sha256, `Deferred source drift: ${rule.file}`);
+    assert.ok(sources[rule.file].includes(rule.anchor), "Deferred prerequisite anchor is missing");
+    const matched = rows.filter(row => row.file === rule.file && row.name.includes(rule.name_contains));
+    assert.ok(matched.length, "Deferred mapping collected no cases");
+    for (const row of matched) assert.equal(row.skipped_in_environment, true, `Deferred case is not skipped in this environment: ${row.name}`);
+  }
+  const deferredCases = rows.filter(row => deferringRules.some(rule => rule.file === row.file && row.name.includes(rule.name_contains)));
+  const deferredKeys = new Set(deferredCases.map(identity));
+  const requiredCases = mapped ? mapped.filter(row => row.environments.includes(profile))
+    : allCasesRequired ? rows.filter(row => !deferredKeys.has(identity(row)))
     : rows.filter(row => rules.some(rule => rule.file === row.file && row.name.includes(rule.name_contains)));
   assert.ok(requiredCases.length, "Profile collection is empty");
   if (allCasesRequired) {
@@ -41,6 +58,7 @@ export function profileSelection(profile, platform, rows, sources, policy) {
     assert.equal(row.skipped_in_environment, false, `Profile prerequisite not met: ${row.name}`);
   }
   return { profile, platform, rules, requiredCases, allCasesRequired,
+    ...(allCasesRequired ? { deferredCases } : {}),
     ...(mapped ? { collectedCases: mapped, deferredCases: mapped.filter(row => !row.environments.includes(profile)) } : {}),
     testNamePattern: allCasesRequired || sourceScope ? undefined : rules.map(rule => escape(rule.name_contains)).join("|") };
 }
@@ -52,9 +70,13 @@ export function verifyProfileResults(selection, results, errors) {
   assert.ok(results.every(row => row.retryCount === 0 && row.repeatCount === 0), "Retried/repeated execution cannot qualify");
   if (selection.collectedCases) assert.deepEqual(results.map(identity).sort(), selection.collectedCases.map(identity).sort(),
     "Source execution roster changed after collection");
-  if (selection.allCasesRequired) assert.deepEqual(results.map(identity).sort(), selection.requiredCases.map(identity).sort(),
+  if (selection.allCasesRequired) assert.deepEqual(results.map(identity).sort(),
+    [...selection.requiredCases, ...(selection.deferredCases ?? [])].map(identity).sort(),
     "Complete-package execution must match every collected identity without additions or omissions");
   const actual = new Map(results.map(row => [identity(row), row]));
+  for (const deferred of selection.deferredCases ?? []) {
+    assert.equal(actual.get(identity(deferred))?.outcome, "skipped", `Deferred case must stay skipped here: ${deferred.name}`);
+  }
   for (const required of selection.requiredCases) {
     const row = actual.get(identity(required));
     assert.ok(row, `Required case was not executed: ${required.name}`);

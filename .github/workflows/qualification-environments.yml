@@ -50,6 +50,8 @@ jobs:
             runner: ubuntu-24.04
           - profile: runner-package
             runner: ubuntu-24.04
+          - profile: runner-package-macos
+            runner: macos-15
           - profile: warm-transition
             runner: ubuntu-24.04
     steps:
@@ -112,7 +114,7 @@ jobs:
           set -euo pipefail
           pnpm --filter @paperclipai/tailscale-https-broker build 2>&1 | tee "$EVIDENCE/broker-build.log"
       - name: Build the exact-source native runner with its declared toolchain
-        if: matrix.profile == 'runnerd' || matrix.profile == 'warm-transition' || matrix.profile == 'runner-package'
+        if: matrix.profile == 'runnerd' || matrix.profile == 'warm-transition' || matrix.profile == 'runner-package' || matrix.profile == 'runner-package-macos'
         working-directory: packages/paperclip-runner
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/packages/paperclip-runner/runner/target
@@ -127,6 +129,10 @@ jobs:
             pnpm run ensure:eval-build-deps 2>&1 | tee "$EVIDENCE/eval-build-deps.log"
           else
             cargo build --manifest-path runner/Cargo.toml --locked --bin paperclip-runnerd --bin fake-codex-app-server --jobs 2 2>&1 | tee "$EVIDENCE/runner-build.log"
+          fi
+          if [ "$PROFILE" = runner-package-macos ]; then
+            test "$(uname -s)-$(uname -m)" = Darwin-arm64
+            pnpm run ensure:eval-build-deps 2>&1 | tee "$EVIDENCE/eval-build-deps.log"
           fi
       - name: Prepare the actual locked Pi snapshot for the complete Runner package
         if: matrix.profile == 'runner-package'
@@ -236,7 +242,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - name: Verify actual provider expiry and SHA-256
-        run: python .github/scripts/qualification-evidence.py artifacts required-profile- 13 profile-retention.json
+        run: python .github/scripts/qualification-evidence.py artifacts required-profile- 14 profile-retention.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

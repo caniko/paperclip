@@ -23,7 +23,9 @@ assert.ok(!cli.options.testNamePattern && !cli.options.config && !cli.options.ro
   "Source qualification preserves the configured roster without name or configuration overrides");
 const root = process.cwd();
 const completePackage = profile === "runner-package";
-const testRoot = completePackage ? path.join(root, "packages/paperclip-runner") : root;
+// Package profiles run the separately configured packages/paperclip-runner roster (the macOS one only its mapped cases).
+const packageProfile = ["runner-package", "runner-package-macos"].includes(profile);
+const testRoot = packageProfile ? path.join(root, "packages/paperclip-runner") : root;
 const evidence = path.resolve(directory);
 const write = (name, data) => writeFileSync(path.join(evidence, name), JSON.stringify(data, null, 2) + "\n", { flag: "wx" });
 if (diagnostic) mkdirSync(evidence, { recursive: true });
@@ -38,6 +40,7 @@ const policyRaw = readFileSync(".github/qualification/coverage-environments.json
 const policy = JSON.parse(policyRaw);
 const rules = [...policy.rules, ...(policy.supplemental_rules ?? [])].filter(rule => rule.environment === profile);
 assert.ok(rules.length || completePackage || sourceScope, "Unknown or unmapped profile");
+if (profile === "runner-package-macos") assert.ok(process.platform === "darwin" && process.arch === "arm64", "Apple Silicon is required");
 let files = [...new Set(rules.map(rule => rule.file))];
 let sources;
 const serverRequire = createRequire(path.join(root, "server/package.json"));
@@ -58,6 +61,8 @@ const metadata = { schema: "paperclip.required-profile-execution.v1", profile, p
   nodeVersion: process.version, nodeExecutable: process.execPath, nodeSha256: sha256(readFileSync(process.execPath)),
   vitestVersion: createRequire(path.join(root, "package.json"))("vitest/package.json").version,
   policySha256: sha256(policyRaw) };
+if (packageProfile) metadata.scope = { kind: "configured-package-vitest", root: "packages/paperclip-runner",
+  config: "packages/paperclip-runner/vitest.config.ts", configSha256: sha256(readFileSync(path.join(testRoot, "vitest.config.ts"))) };
 if (completePackage) {
   assert.equal(process.env.PAPERCLIP_FINAL_BURST_BENCHMARK, "1");
   assert.equal(process.env.PAPERCLIP_FINAL_BURST_REPETITIONS, "1");
@@ -112,7 +117,7 @@ function runnerBinding() {
 if (["runnerd", "warm-transition", "runner-package"].includes(profile)) metadata.runnerd = runnerBinding();
 if (profile === "runnerd") metadata.remoteContinuity = bindRemoteContinuity(root, evidence);
 if (profile === "tailscale-mock") metadata.tailscaleMock = bindMockTailscale(root);
-const options = { ...cli.options, root: testRoot, ...(completePackage ? { config: path.join(testRoot, "vitest.config.ts") } : {}),
+const options = { ...cli.options, root: testRoot, ...(packageProfile ? { config: path.join(testRoot, "vitest.config.ts") } : {}),
   watch: false, includeTaskLocation: true, allowOnly: false, retry: 0,
   maxWorkers: 1, fileParallelism: false, exclude: [...(cli.options.exclude ?? []), "**/dist/**"] };
 // Unbuffered start/finish lines: a hung case is named by the last "START" line.
@@ -174,7 +179,7 @@ try {
   const errors = [...executed.unhandledErrors, ...moduleErrors(executed.testModules)];
   write("profile-raw-results.json", { cases: results, errors });
   for (const file of files) assert.equal(sha256(readFileSync(path.join(testRoot, file))), metadata.sourceFiles[file], "Fixture changed during execution");
-  if (completePackage) assert.equal(sha256(readFileSync(path.join(testRoot, "vitest.config.ts"))), metadata.scope.configSha256,
+  if (packageProfile) assert.equal(sha256(readFileSync(path.join(testRoot, "vitest.config.ts"))), metadata.scope.configSha256,
     "The package configuration changed during execution");
   if (["runnerd", "warm-transition", "runner-package"].includes(profile)) assert.deepEqual(runnerBinding(), metadata.runnerd, "Runner prerequisites changed during execution");
   if (profile === "runnerd") assert.deepEqual(bindRemoteContinuity(root, evidence), metadata.remoteContinuity, "Remote continuity prerequisites changed during execution");

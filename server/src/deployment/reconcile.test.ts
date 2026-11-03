@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { createDb, startEmbeddedPostgresTestDatabase, deploymentResources, agents, companies, projects, companyMemberships, companySecrets, companySecretVersions, budgetPolicies, authAccounts, routines, routineTriggers, agentApiKeys, boardApiKeys, authUsers, acquireDeploymentLease, assertDeploymentSchemaCompatible, activityLog } from "@paperclipai/db";
 import { reconcileDeployment } from "./reconcile.js";
@@ -425,6 +425,28 @@ it("reconciles named workspaces, switches primaries and protects owned native fi
   expect(await read()).toEqual(rows);
 });
 
+it("releases workspaces and ownership when their whole company is dropped from the manifest", async () => {
+  const declaration = {
+    version: 1, owner: "release",
+    companies: { example: { fields: { name: "Released company" } } },
+    projects: { main: { company: "example", fields: { name: "Released project" } } },
+    projectWorkspaces: { alpha: { project: "main", fields: { name: "Alpha", cwd: "/fixture/alpha", isPrimary: true } } },
+  };
+  const first = await reconcile(declaration);
+  const companyId = first.bindings["company/example"];
+  expect((await reconcile({ version: 1, owner: "release", companies: {} }, false)).differences.map((d) => d.action)).toEqual(["disable", "disable", "disable"]);
+  await reconcile({ version: 1, owner: "release", companies: {} });
+  expect(await db.select().from(deploymentResources).where(eq(deploymentResources.owner, "release"))).toEqual([]);
+  expect((await db.select().from(companies).where(eq(companies.id, companyId)))[0].status).toBe("paused");
+  // Unbound, the ownership guard no longer blocks deleting the company (the audit log has a plain FK).
+  await db.execute(sql`delete from activity_log where company_id = ${companyId}`);
+  await db.delete(companyMemberships).where(eq(companyMemberships.companyId, companyId));
+  await db.delete(projectWorkspaces).where(eq(projectWorkspaces.id, first.bindings["workspace/alpha"]));
+  await db.delete(projects).where(eq(projects.id, first.bindings["project/main"]));
+  await db.delete(companies).where(eq(companies.id, companyId));
+  expect(await db.select().from(companies).where(eq(companies.id, companyId))).toEqual([]);
+});
+
 it("rejects implicit primary takeover and wrong-project adoption before writes", async () => {
   const declaration = {
     version: 1, owner: "workspace-adoption",
@@ -603,12 +625,23 @@ it("restores ownership, stable IDs, encrypted credentials and schema guards from
   await expect(restored.update(agents).set({ name: "bypass after restore" }).where(eq(agents.id, agent.id))).rejects.toThrow();
 }, 90000);
 
-it("reconciles protected SSH environments and agent references with stable IDs and secret rotation", async () => {
+// Runtime resolution reads the instance credential map from the deployment descriptor file.
+function useDeploymentFile(d: DeploymentDescriptor) {
+  const file = join(root, `descriptor-${randomUUID()}.json`);
+  writeFileSync(file, JSON.stringify({ credentialFiles: d.credentialFiles }), { mode: 0o600 });
+  process.env.PAPERCLIP_DEPLOYMENT_FILE = file;
+  process.env.PAPERCLIP_DECLARATIVE = "true";
+}
+
+const sshEnvironment = (credential = "executor", name = "SSH Atlas") => ({ credential, fields: { name, driver: "ssh",
+  config: { host: "atlas", port: 1337, username: "can", remoteWorkspacePath: "/work", knownHosts: "atlas ssh-ed25519 AAAA", strictHostKeyChecking: true } } });
+
+it("reconciles protected SSH environments at instance level with a credential-file key", async () => {
   writeFileSync(join(root, "executor"), "fixture-only-ssh-private-key", { mode: 0o600 });
   const sshDescriptor = { ...descriptor, credentialFiles: { ...descriptor.credentialFiles, executor: join(root, "executor") } };
+  useDeploymentFile(sshDescriptor);
   const declaration = { version: 1, owner: "ssh-execution", companies: { example: { fields: { name: "SSH execution" } } },
-    environments: { atlas: { company: "example", credential: "executor", fields: { name: "SSH Atlas", driver: "ssh",
-      config: { host: "atlas", port: 1337, username: "can", remoteWorkspacePath: "/work", knownHosts: "atlas ssh-ed25519 AAAA", strictHostKeyChecking: true } } } },
+    environments: { atlas: sshEnvironment() },
     agents: { worker: { company: "example", environment: "atlas", fields: { name: "SSH worker", adapterType: "opencode_local",
       adapterConfig: { dangerouslySkipPermissions: false } } } },
   };
@@ -618,21 +651,26 @@ it("reconciles protected SSH environments and agent references with stable IDs a
   expect(await db.select().from(environments).where(eq(environments.name, "SSH Atlas"))).toEqual([]);
   const first = await run(declaration);
   const environmentId = first.bindings["environment/atlas"];
-  const companyId = first.bindings["company/example"];
+  const [binding] = await db.select().from(deploymentResources).where(eq(deploymentResources.key, "atlas"));
+  expect(binding.companyId).toBeNull();
   const [agent] = await db.select().from(agents).where(eq(agents.id, first.bindings["agent/worker"]));
   expect(agent.defaultEnvironmentId).toBe(environmentId);
   const environment = await environmentService(db).getById(environmentId);
   if (!environment) throw new Error("Missing declared environment");
-  expect(await resolveEnvironmentDriverConfigForRuntime(db, companyId, environment))
-    .toMatchObject({ driver: "ssh", config: { privateKey: "fixture-only-ssh-private-key" } });
-  expect(await environmentService(db).listBoundCompanyIds(environmentId)).toEqual([companyId]);
+  expect(environment.config).toMatchObject({ privateKeyCredential: "executor", privateKeySecretRef: null });
   expect(JSON.stringify(first)).not.toContain("fixture-only-ssh-private-key");
   expect(JSON.stringify(environment)).not.toContain("fixture-only-ssh-private-key");
+  // The key serves a run in any company, including one that never held a secret.
+  for (const runCompany of [first.bindings["company/example"], randomUUID(), null]) {
+    expect(await resolveEnvironmentDriverConfigForRuntime(db, runCompany, environment))
+      .toMatchObject({ driver: "ssh", config: { privateKey: "fixture-only-ssh-private-key" } });
+  }
+  expect((await db.select().from(companySecrets).where(eq(companySecrets.name, "deployment.ssh-execution.environment-atlas.privateKey")))).toEqual([]);
   expect((await run(declaration)).differences).toEqual([]);
+  // Rotation is picked up from the file without any reconcile.
   writeFileSync(join(root, "executor"), "rotated-fixture-only-ssh-key", { mode: 0o600 });
-  const rotated = await run(declaration);
-  expect(rotated.bindings).toEqual(first.bindings);
-  expect(await resolveEnvironmentDriverConfigForRuntime(db, companyId, environment))
+  expect((await run(declaration)).differences).toEqual([]);
+  expect(await resolveEnvironmentDriverConfigForRuntime(db, null, environment))
     .toMatchObject({ driver: "ssh", config: { privateKey: "rotated-fixture-only-ssh-key" } });
   await expect(db.update(environments).set({ config: {} }).where(eq(environments.id, environmentId))).rejects.toThrow();
   await expect(db.update(agents).set({ defaultEnvironmentId: null }).where(eq(agents.id, agent.id))).rejects.toThrow();
@@ -642,13 +680,52 @@ it("reconciles protected SSH environments and agent references with stable IDs a
   expect((await run(declaration, false)).differences).toEqual([]);
 });
 
+it("migrates company-bound environment bindings in place and keeps environments when the company is removed", async () => {
+  writeFileSync(join(root, "migrate-executor"), "fixture-only-migrated-key", { mode: 0o600 });
+  const migrateDescriptor = { ...descriptor, credentialFiles: { ...descriptor.credentialFiles, executor: join(root, "migrate-executor") } };
+  useDeploymentFile(migrateDescriptor);
+  const run = (raw: unknown, apply = true) => reconcileDeployment(db, raw, { descriptor: migrateDescriptor, config, apply, singleOwner: false });
+  const declaration = { version: 1, owner: "migrate", companies: { example: { fields: { name: "Migrating company" } } },
+    projects: { main: { company: "example", fields: { name: "Migrating project" } } },
+    projectWorkspaces: { alpha: { project: "main", fields: { name: "Alpha", cwd: "/fixture/alpha", isPrimary: true } } },
+    environments: { atlas: sshEnvironment("executor", "SSH Migrated") } };
+  const first = await run(declaration);
+  const environmentId = first.bindings["environment/atlas"], companyId = first.bindings["company/example"];
+  // Recreate the legacy shape: a company-bound binding plus a company-held SSH key secret.
+  const legacySecret = await secretService(db).create(companyId, { name: "legacy-ssh-key", provider: "local_encrypted", value: "legacy-key" });
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`select set_config('paperclip.deployment_apply', 'on', true)`);
+    const [current] = await tx.select().from(deploymentResources).where(eq(deploymentResources.key, "atlas"));
+    await tx.update(deploymentResources).set({ companyId, fields: { config: { ...(current.fields as any).config, privateKeyCredential: null, privateKeySecretRef: { type: "secret_ref", secretId: legacySecret.id, version: "latest" } } } }).where(eq(deploymentResources.key, "atlas"));
+    await tx.update(environments).set({ config: { ...(await environmentService(tx as unknown as typeof db).getById(environmentId))!.config, privateKeyCredential: null,
+      privateKeySecretRef: { type: "secret_ref", secretId: legacySecret.id, version: "latest" } } }).where(eq(environments.id, environmentId));
+    await tx.insert(deploymentResources).values({ owner: "migrate", kind: "secret", key: "environment-atlas.privateKey", resourceId: legacySecret.id, companyId, fields: { digest: "legacy" }, enabled: true });
+  });
+  const plan = await run(declaration, false);
+  expect(plan.differences.map(d => `${d.kind}/${d.key}`)).toContain("environment/atlas");
+  const migrated = await run(declaration);
+  expect(migrated.bindings["environment/atlas"]).toBe(environmentId);
+  expect(await db.select().from(environments).where(eq(environments.id, environmentId))).toHaveLength(1);
+  const [binding] = await db.select().from(deploymentResources).where(and(eq(deploymentResources.owner, "migrate"), eq(deploymentResources.key, "atlas")));
+  expect(binding).toMatchObject({ companyId: null, resourceId: environmentId, enabled: true });
+  expect((await environmentService(db).getById(environmentId))!.config).toMatchObject({ privateKeyCredential: "executor", privateKeySecretRef: null });
+  expect(await db.select().from(companySecrets).where(eq(companySecrets.id, legacySecret.id))).toEqual([]);
+  expect(await db.select().from(deploymentResources).where(and(eq(deploymentResources.owner, "migrate"), eq(deploymentResources.kind, "secret")))).toEqual([]);
+  // Dropping the company releases its project and workspace; the environment stays.
+  const released = await run({ version: 1, owner: "migrate", companies: {}, environments: declaration.environments });
+  expect(released.bindings).toEqual({ "environment/atlas": environmentId });
+  expect((await db.select().from(deploymentResources).where(eq(deploymentResources.owner, "migrate"))).map(r => r.kind)).toEqual(["environment"]);
+  expect(await db.select().from(environments).where(eq(environments.id, environmentId))).toHaveLength(1);
+  expect((await run({ version: 1, owner: "migrate", companies: {}, environments: declaration.environments }, false)).differences).toEqual([]);
+});
+
 it("binds the managed local environment and owns only the agent overflow list", async () => {
   writeFileSync(join(root, "overflow-executor"), "fixture-only-overflow-key", { mode: 0o600 });
   const overflowDescriptor = { ...descriptor, credentialFiles: { ...descriptor.credentialFiles, executor: join(root, "overflow-executor") } };
   const declaration = { version: 1, owner: "overflow-execution", companies: { example: { fields: { name: "Overflow execution" } } },
     environments: {
-      primary: { adopt: "instance-local", company: "example", fields: { driver: "local", config: { capacity: { maxConcurrentRuns: 1 } } } },
-      nomad: { company: "example", credential: "executor", fields: { name: "SSH Overflow", driver: "ssh",
+      primary: { adopt: "instance-local", fields: { driver: "local", config: { capacity: { maxConcurrentRuns: 1 } } } },
+      nomad: { credential: "executor", fields: { name: "SSH Overflow", driver: "ssh",
         config: { host: "nomad", port: 22, username: "exec", remoteWorkspacePath: "/work", knownHosts: "nomad ssh-ed25519 AAAA", strictHostKeyChecking: true,
           capacity: { maxConcurrentRuns: 1, admissionCommand: ["probe"] } } } },
     },

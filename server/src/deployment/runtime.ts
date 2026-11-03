@@ -124,3 +124,16 @@ export function deploymentEnvironment(d: DeploymentDescriptor, inherited: NodeJS
   }
   return env;
 }
+
+/** Reads a declared instance credential file at use time; the value is never stored in the database. */
+export function deploymentExecutionCredential(name: string): string {
+  const file = process.env.PAPERCLIP_DEPLOYMENT_FILE;
+  if (process.env.PAPERCLIP_DECLARATIVE !== "true" || !file) {
+    throw new Error("Declared execution credentials are available only to a declarative deployment");
+  }
+  const raw = readJson(file) as { credentialFiles?: unknown };
+  const credentialFiles = deploymentDescriptorSchema.shape.credentialFiles.parse(raw.credentialFiles ?? {});
+  const path = credentialFiles[name];
+  if (!path) throw new Error("Missing declared execution credential");
+  return readCredential(path);
+}

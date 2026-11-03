@@ -5,6 +5,8 @@ import { verifyProfileResults } from "./qualification-profiles.mjs";
 
 const externalEnvironments = new Set(["cloud", "live-daytona", "live-daytona-duplex", "live-tailscale", "hermes-hosted-64gib"]);
 const identity = row => JSON.stringify([row.project, row.file, row.id]);
+// Profiles that run the separately rooted packages/paperclip-runner roster; their files are package-relative.
+const packageProfiles = new Set(["runner-package", "runner-package-macos"]);
 const sourceFields = ["repository", "pull_request", "head", "base", "tree", "harness_sha256", "policy_sha256", "exception_policy_sha256"];
 
 // The observer must verify provider identities, hashes and retention before
@@ -112,7 +114,7 @@ export function qualifyRolloutObservation(observation) {
     assert.equal(source.platform, selection.platform);
     assert.equal(source.platform, coveragePolicy.environments[profile].platform);
     for (const [file, digest] of Object.entries(source.sourceFiles)) {
-      const full = profile === "runner-package" ? `packages/paperclip-runner/${file}` : file;
+      const full = packageProfiles.has(profile) ? `packages/paperclip-runner/${file}` : file;
       assert.equal(sourceFiles[full], digest, `Profile source changed: ${full}`);
     }
     verifyProfileResults(selection, results.cases, results.errors);
@@ -128,9 +130,24 @@ export function qualifyRolloutObservation(observation) {
       assert.deepEqual(selection.requiredCases.filter(row => row.file === "src/live/runnerd-final-output-burst.benchmark.test.ts")
         .map(row => row.name).sort(), [16, 128, 512].map(count => `measures ${count} final deltas, repetition 1, without relaxing durable handoff`).sort());
     }
+    if (profile === "runner-package-macos") {
+      assert.equal(selection.allCasesRequired, false);
+      assert.equal(source.scope.kind, "configured-package-vitest");
+      assert.equal(source.arch, "arm64", "The darwin package profile must execute on Apple Silicon");
+    }
+    // Every case the complete Linux package defers must be required, and passed, by the profile that owns it.
+    for (const deferred of selection.deferredCases ?? []) {
+      const rule = coveragePolicy.rules.find(rule => rule.file === deferred.file && deferred.name.includes(rule.name_contains)
+        && rule.environment !== profile && coveragePolicy.environments[rule.environment]?.package_root === coveragePolicy.environments[profile].package_root);
+      assert.ok(rule, "A deferred package case has no source-backed rule");
+      // A maintainer-host owner is not a hosted lane, so nothing can require it here; the case stays unexecuted.
+      if (coveragePolicy.environments[rule.environment]?.maintainer_host) continue;
+      const owner = observation.profiles.find(candidate => candidate.profile === rule.environment);
+      assert.ok(owner?.selection.requiredCases.some(row => identity(row) === identity(deferred)), "A deferred package case is not required by its owning profile");
+    }
     const actual = new Map(results.cases.map(row => [identity(row), row]));
     for (const required of selection.requiredCases) {
-      const full = profile === "runner-package" ? `packages/paperclip-runner/${required.file}` : required.file;
+      const full = packageProfiles.has(profile) ? `packages/paperclip-runner/${required.file}` : required.file;
       const collected = { ...required, file: full, source_sha256: source.sourceFiles[required.file] };
       let row = cases.get(identity(collected));
       if (row) {
@@ -142,7 +159,9 @@ export function qualifyRolloutObservation(observation) {
           && rule.environment === profile && rule.source_sha256 === collected.source_sha256 && collected.name.includes(rule.name_contains));
         const expansion = (coveragePolicy.conditional_expansions ?? []).some(rule => rule.file === full
           && rule.environment === profile && rule.source_sha256 === collected.source_sha256 && collected.name.includes(rule.name_contains));
-        assert.ok(profile === "runner-package" || supplemental || expansion, "Profile introduced an unmapped case");
+        const packageRule = packageProfiles.has(profile) && coveragePolicy.environments[profile].package_root && coveragePolicy.rules.some(rule =>
+          rule.file === required.file && rule.environment === profile && rule.source_sha256 === collected.source_sha256 && collected.name.includes(rule.name_contains));
+        assert.ok(profile === "runner-package" || packageRule || supplemental || expansion, "Profile introduced an unmapped case");
         // A mocked provider is a separate obligation and can never cover the
         // same source case's real live-provider requirement.
         row = { ...collected, ...(supplemental ? { project: `${profile}:${collected.project}` } : {}),

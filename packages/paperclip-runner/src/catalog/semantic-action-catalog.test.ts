@@ -6,8 +6,8 @@ import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
 import { createTaskAction } from "../protocol-actions/create-task.js";
 import { createProjectAction } from "../protocol-actions/create-project.js";
-import { updateSkillAction } from "../protocol-actions/update-skill.js";
 import { handoffCaseAction } from "../protocol-actions/handoff-case.js";
+import { updateSkillAction } from "../protocol-actions/update-skill.js";
 
 import {
   PAPERCLIP_SEMANTIC_ACTION_CATALOG,
@@ -128,10 +128,11 @@ describe("semantic action catalog", () => {
       (action) => action.operationId,
     );
 
-    // Upstream's 49 actions plus the fork's update_skill binding.
-    expect(operationIds).toHaveLength(50);
+    // Upstream's 50 actions plus the fork's update_skill binding.
+    expect(operationIds).toHaveLength(51);
     expect(operationIds).toContain("update_skill");
     expect(operationIds).toContain("set_task_monitor");
+    expect(operationIds).toContain("send_chat_message");
     expect(new Set(operationIds).size).toBe(operationIds.length);
     expect(operationIds).not.toContain("generic_api_request");
     expect(Object.isFrozen(PAPERCLIP_SEMANTIC_ACTION_CATALOG)).toBe(true);
@@ -154,6 +155,7 @@ describe("semantic action catalog", () => {
       outputSchema: live.outputSchema,
     });
   });
+
 
   it("declares hire_agent as a native identity-only mutation", () => {
     const hire = paperclipSemanticAction("hire_agent");

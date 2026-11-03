@@ -1,3 +1,4 @@
+import { deploymentExecutionCredential } from "../deployment/runtime.js";
 import { z } from "zod";
 import { environmentCapacitySchema, filesystemOwnershipSchema } from "@paperclipai/shared";
 import { randomUUID } from "node:crypto";
@@ -74,6 +75,8 @@ const sshEnvironmentConfigBaseSchema = z.object({
     .refine((value) => value.startsWith("/"), "SSH remote workspace path must be absolute."),
   privateKey: z.null().optional().default(null),
   privateKeySecretRef: secretRefSchema.optional().nullable().default(null),
+  // Set only by the deployment reconcile; the key is read from the instance credential file at runtime.
+  privateKeyCredential: z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/).optional().nullable().default(null),
   knownHosts: z
     .string()
     .trim()
@@ -325,6 +328,7 @@ async function resolveConfigSecretRefsForRuntime(input: {
   companyId: string;
   config: Record<string, unknown>;
   schema: Record<string, unknown> | null;
+  readOnlyInspection?: boolean;
   context: {
     consumerId: string;
     issueId?: string | null;
@@ -344,7 +348,10 @@ async function resolveConfigSecretRefsForRuntime(input: {
     nextConfig = writeConfigValueAtPath(
       nextConfig,
       path,
-      await secrets.resolveSecretValue(input.companyId, trimmed, "latest", {
+      input.readOnlyInspection ? await secrets.resolveSecretValueForReadOnlyEnvironmentInspection(input.companyId, trimmed, "latest", {
+        environmentId: input.context.consumerId, configPath: path,
+        issueId: input.context.issueId, heartbeatRunId: input.context.heartbeatRunId,
+      }) : await secrets.resolveSecretValue(input.companyId, trimmed, "latest", {
         consumerType: "environment",
         consumerId: input.context.consumerId,
         actorType: "system",
@@ -525,7 +532,8 @@ export function normalizeEnvironmentConfigForProbe(input: {
         issues: parsed.error.issues,
       });
     }
-    return parsed.data satisfies SshEnvironmentConfig;
+    // Only the deployment reconcile may bind an instance credential file.
+    return { ...parsed.data, privateKeyCredential: null } satisfies SshEnvironmentConfig;
   }
 
   if (input.driver === "sandbox") {
@@ -590,7 +598,7 @@ export async function normalizeEnvironmentConfigForPersistence(input: {
       });
     }
     const secrets = secretService(input.db);
-    const { privateKey, ...stored } = parsed.data;
+    const { privateKey, privateKeyCredential: _deploymentCredential, ...stored } = parsed.data;
     let nextPrivateKeySecretRef = stored.privateKeySecretRef;
     if (privateKey) {
       nextPrivateKeySecretRef = await createEnvironmentSecret({
@@ -692,12 +700,21 @@ export async function resolveEnvironmentDriverConfigForRuntime(
     // configuration and tooling so the test reflects what real agent runs use.
     applyCustomImageTemplate?: boolean;
     readOnlyCustomImageTemplate?: boolean;
+    readOnlyInspection?: boolean;
     onResolvedCustomImageTemplate?: (identity: { id: string; capturedAt: string | null; templateKind: string; bindingField: string }) => void;
   },
 ): Promise<ParsedEnvironmentConfig> {
   const parsed = parseEnvironmentDriverConfig(environment);
   const secrets = secretService(db);
   const environmentId = environment.id;
+  if (parsed.driver === "ssh" && parsed.config.privateKeyCredential) {
+    // Instance-level declared environment: any company's run may use it, so the key comes from
+    // the deployment credential file rather than a company-held secret.
+    return {
+      driver: "ssh",
+      config: { ...parsed.config, privateKey: deploymentExecutionCredential(parsed.config.privateKeyCredential) },
+    };
+  }
   if (parsed.driver === "ssh" && parsed.config.privateKeySecretRef && !environmentId) {
     throw unprocessable("Runtime secret resolution requires an environment id");
   }
@@ -737,6 +754,7 @@ export async function resolveEnvironmentDriverConfigForRuntime(
         companyId,
         config: parsed.config as Record<string, unknown>,
         schema,
+        readOnlyInspection: context?.readOnlyInspection,
         context: {
           consumerId: environmentId!,
           issueId: context?.issueId ?? null,

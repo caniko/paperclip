@@ -43,7 +43,13 @@ def project_profile_report(raw, selection):
             target.extend(selected)
     assert found == expected.keys(), "Required profile execution is missing"
     if selection.get("allCasesRequired"):
-        assert seen == found, "Complete-package raw report contains uncollected cases"
+        deferred = {row["id"] for row in selection.get("deferredCases", [])}
+        assert seen == found | deferred, "Complete-package raw report contains uncollected cases"
+        for suite in root.findall("testsuite"):
+            for case in suite.findall("testcase"):
+                match = re.fullmatch(r"(.+) \[vitest:([^\]]+)\]", case.get("name", ""), re.DOTALL)
+                if match.group(2) in deferred:
+                    assert case.find("skipped") is not None, "A deferred case ran in the wrong environment"
     return ET.tostring(projected, encoding="utf-8", xml_declaration=True) + b"\n"
 
 

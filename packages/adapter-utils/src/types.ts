@@ -329,6 +329,8 @@ export interface AdapterEnvironmentCheck {
   message: string;
   detail?: string | null;
   hint?: string | null;
+  /** The check could not complete because its execution target was unavailable. */
+  retryable?: boolean;
 }
 
 export type AdapterEnvironmentTestStatus = "pass" | "warn" | "fail";

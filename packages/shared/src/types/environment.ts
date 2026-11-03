@@ -39,6 +39,8 @@ export interface SshEnvironmentConfig {
   capacity?: EnvironmentCapacity;
   privateKey: string | null;
   privateKeySecretRef: EnvSecretRefBinding | null;
+  /** Name of an instance deployment credential file holding the key (declarative environments only). */
+  privateKeyCredential?: string | null;
   knownHosts: string | null;
   strictHostKeyChecking: boolean;
 }
