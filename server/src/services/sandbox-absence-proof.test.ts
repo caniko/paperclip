@@ -52,7 +52,11 @@ describe("cleanup-only sandbox absence", () => {
     leaseId: binding.leaseId, heartbeatRunId: null as string | null, provider: binding.provider, providerLeaseId: binding.providerLeaseId };
   const lease = { id: cleanup.leaseId, ...cleanup };
   const signed = (overrides: Record<string, unknown> = {}) => receipt(overrides, "sandbox-cleanup-absence", cleanup);
-  it.each([null, binding.runId])("accepts exact absence with nullable run %s without issuing a run receipt", async heartbeatRunId => {
+  // The nullable-run value renders into the case title. A per-process UUID here makes the
+  // title differ between the roster collection and the execution, which the qualification
+  // harness rejects, so the non-null case uses a fixed run id.
+  const nullableRunId = "6f0d8b7a-1c2e-4b3d-9e4f-0a1b2c3d4e5f";
+  it.each([null, nullableRunId])("accepts exact absence with nullable run %s without issuing a run receipt", async heartbeatRunId => {
     const source = { ...cleanup, heartbeatRunId };
     const fetchImpl = vi.fn().mockResolvedValue(Response.json({ receipt: receipt({}, "sandbox-cleanup-absence", source) }));
     expect(await inspectCloudSandboxCleanupAbsence({ ...lease, heartbeatRunId }, { env, now, fetchImpl }))

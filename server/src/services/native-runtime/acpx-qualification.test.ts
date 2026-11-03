@@ -10,7 +10,9 @@ const authorize = (value: unknown) => ({ [ACPX_QUALIFICATION_ENV]: JSON.stringif
 describe("host ACPX qualification admission", () => {
   afterEach(() => vi.unstubAllEnvs());
 
-  it.each([undefined, "malformed", JSON.stringify(kimiAdmission("linux", "x64"))])("admits released Kimi without candidate authority (%s)", authority => {
+  // The admission expires within 24h of wall-clock time, so its JSON payload cannot be the
+  // rendered case title: the qualification harness compares collected and executed titles.
+  it.each([undefined, "malformed", JSON.stringify(kimiAdmission("linux", "x64"))])("admits released Kimi without candidate authority (%#)", authority => {
     vi.stubEnv(ANTIGRAVITY_CANDIDATE_ADMISSION_ENV, authority);
     vi.stubEnv(ACPX_QUALIFICATION_ENV, "malformed-unrelated-authority");
     const config = { provider: "acpx", acpxAgent: "kimi", model: "kimi-for-coding" };
