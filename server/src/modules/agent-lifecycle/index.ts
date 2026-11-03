@@ -163,4 +163,4 @@ export function startAgentLifecycle(db: Db, effects: LifecycleEffects, driver: L
   };
 }
 
-export { lifecycleFailureCode } from "./application/failure.js";
+export { lifecycleFailureCode, lifecycleFailureDiagnostics } from "./application/failure.js";
