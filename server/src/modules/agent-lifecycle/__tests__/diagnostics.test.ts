@@ -144,6 +144,7 @@ describe("lifecycle failure diagnostics", () => {
     [{ code: "harness_auth_failed" }, "harness_auth_failed"],
     [{ cause: { code: "40P01", message: "private query" } }, "40P01"],
     [{ code: "environment_company_mismatch" }, "environment_company_mismatch"],
+    [{ details: { code: "environment_company_mismatch" } }, "environment_company_mismatch"],
     [{ code: "private credential value" }, "unclassified"],
   ])("logs known codes without provider error contents", (details, failureCode) => {
     const log = vi.spyOn(logger, "warn").mockImplementation(() => {});
@@ -153,15 +154,17 @@ describe("lifecycle failure diagnostics", () => {
     expect(JSON.stringify(log.mock.calls)).not.toContain("private");
   });
 
-  it("logs only identifier-shaped codes and class names for unmapped failures", () => {
+  it("logs only known system codes and identifier-shaped class names for unmapped failures", () => {
     const log = vi.spyOn(logger, "warn").mockImplementation(() => {});
     class ProbeError extends Error {}
     const context = { stage: "host" as const };
     const effects = createAgentLifecycleEffects();
     effects.reportFailure(context, Object.assign(new ProbeError("private provider detail"), { cause: { code: "ENOENT" } }));
     effects.reportFailure(context, Object.assign(new ProbeError("private"), { code: "has spaces and secret" }));
+    effects.reportFailure(context, Object.assign(new ProbeError("private"), { code: "deadbeef0123456789" }));
     expect(log).toHaveBeenNthCalledWith(1, { ...context, failureCode: "unclassified", errorCode: "ENOENT", errorName: "ProbeError" }, "Agent lifecycle operation failed");
     expect(log).toHaveBeenNthCalledWith(2, { ...context, failureCode: "unclassified", errorName: "ProbeError" }, "Agent lifecycle operation failed");
+    expect(log).toHaveBeenNthCalledWith(3, { ...context, failureCode: "unclassified", errorName: "ProbeError" }, "Agent lifecycle operation failed");
     expect(JSON.stringify(log.mock.calls)).not.toContain("private");
   });
 });

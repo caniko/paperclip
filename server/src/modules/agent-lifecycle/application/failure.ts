@@ -1,3 +1,4 @@
+import { getSystemErrorMap } from "node:util";
 import type { LifecycleFailure } from "./ports.js";
 
 // Only fixed text may leave this boundary. Provider errors can contain secrets.
@@ -18,17 +19,19 @@ const reasons = {
 const transientCodes = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "40001", "40P01", "53300", "57P01"]);
 
 export function lifecycleFailureCode(error: unknown): string | undefined {
-  const candidate = error as { code?: unknown; cause?: { code?: unknown } } | null;
-  return [candidate?.code, candidate?.cause?.code].find((code): code is string =>
+  const candidate = error as { code?: unknown; details?: { code?: unknown }; cause?: { code?: unknown } } | null;
+  return [candidate?.code, candidate?.details?.code, candidate?.cause?.code].find((code): code is string =>
     typeof code === "string" && (Object.hasOwn(reasons, code) || transientCodes.has(code)));
 }
 
-// Unmapped failures log only identifier-shaped codes and class names, never messages or stacks.
+// Unmapped failures log only known system codes and identifier-shaped class names, never messages or stacks.
+const systemCodes = new Set([...getSystemErrorMap().values()].map(([code]) => code));
 const safeIdentifier = /^[A-Za-z0-9_.:-]{1,64}$/;
 export function lifecycleFailureDiagnostics(error: unknown): { errorCode?: string; errorName?: string } {
   const candidate = error as { code?: unknown; cause?: { code?: unknown }; constructor?: { name?: unknown } } | null;
   const safe = (value: unknown) => typeof value === "string" && safeIdentifier.test(value) ? value : undefined;
-  const errorCode = safe(candidate?.code) ?? safe(candidate?.cause?.code);
+  const errorCode = [candidate?.code, candidate?.cause?.code].find((code): code is string =>
+    typeof code === "string" && systemCodes.has(code));
   const errorName = safe(candidate?.constructor?.name);
   return { ...(errorCode ? { errorCode } : {}), ...(errorName ? { errorName } : {}) };
 }
