@@ -938,9 +938,13 @@ export function environmentService(db: Db) {
             eq(builtInManagedResources.resourceId, environmentId),
           ),
         );
-      const declared = await db.select({ companyId: deploymentResources.companyId }).from(deploymentResources).where(and(
-        eq(deploymentResources.kind, "environment"), eq(deploymentResources.resourceId, environmentId),
-      ));
+      // The instance-local environment is instance-wide: adopting it in a
+      // deployment declaration owns its config but must not bind it to one company.
+      const declared = await db.select({ companyId: deploymentResources.companyId }).from(deploymentResources)
+        .innerJoin(environments, eq(environments.id, deploymentResources.resourceId)).where(and(
+          eq(deploymentResources.kind, "environment"), eq(deploymentResources.resourceId, environmentId),
+          ne(environments.driver, "local"),
+        ));
       return Array.from(new Set([...rows, ...declared].flatMap(row => row.companyId ? [row.companyId] : [])));
     },
 
