@@ -1,8 +1,10 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
+import { WebSocketServer } from "ws";
 import { execute } from "./execute.js";
 
 const FAKE_T3 = `#!/usr/bin/env node
@@ -14,7 +16,8 @@ const stdin = args.includes("-") ? fs.readFileSync(0, "utf8") : null;
 fs.appendFileSync(path.join(dir, "calls.jsonl"), JSON.stringify({ args, stdin }) + "\\n");
 const planPath = path.join(dir, "plan.json");
 const plan = JSON.parse(fs.readFileSync(planPath, "utf8"));
-const step = (plan[args.slice(0, 2).join(" ")] || []).shift() || {};
+const key = args[0] === "auth" ? args.slice(0, 3).join(" ") : args.slice(0, 2).join(" ");
+const step = (plan[key] || []).shift() || {};
 fs.writeFileSync(planPath, JSON.stringify(plan));
 if (step.stdout) process.stdout.write(step.stdout);
 if (step.stderr) process.stderr.write(step.stderr);
@@ -24,23 +27,61 @@ setTimeout(() => process.exit(step.exit || 0), (step.sleep || 0) * 1000);
 type Step = { stdout?: string; stderr?: string; exit?: number; sleep?: number };
 
 const tempRoots: string[] = [];
+const servers: WebSocketServer[] = [];
 
 async function setup(plan: Record<string, Step[]>) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-t3code-local-"));
   tempRoots.push(root);
   const fakeDir = path.join(root, "fake");
   const workspace = path.join(root, "workspace");
+  const home = path.join(root, "home");
   await fs.mkdir(fakeDir);
   await fs.mkdir(workspace);
+  await fs.mkdir(home, { recursive: true });
   const command = path.join(fakeDir, "t3");
   await fs.writeFile(command, FAKE_T3, { mode: 0o755 });
-  await fs.writeFile(path.join(fakeDir, "plan.json"), JSON.stringify(plan));
+  await fs.writeFile(path.join(fakeDir, "plan.json"), JSON.stringify({
+    "auth session issue": [{ stdout: `${JSON.stringify({ sessionId: "sess-1", token: "tok-secret" })}\n` }],
+    "auth session revoke": [{}],
+    ...plan,
+  }));
+
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const port = (server.address() as AddressInfo).port;
+  const stateDir = path.join(home, "userdata");
+  await fs.mkdir(stateDir, { recursive: true });
+  await fs.writeFile(
+    path.join(stateDir, "server-runtime.json"),
+    JSON.stringify({ version: 1, pid: process.pid, port, origin: `http://127.0.0.1:${port}` }),
+  );
+
+  const projections: unknown[] = [{ runs: [{ status: "interrupted" }], providerTurns: [], subagents: [] }];
+  const frames: Array<{ tag: string; payload: Record<string, unknown> }> = [];
+  const authorizations: Array<string | undefined> = [];
+  server.on("connection", (socket, request) => {
+    authorizations.push(request.headers.authorization);
+    socket.on("message", (data) => {
+      const frame = JSON.parse(data.toString()) as { _tag: string; id: string; tag: string; payload: Record<string, unknown> };
+      frames.push({ tag: frame.tag, payload: frame.payload });
+      const value = frame.tag === "orchestration.dispatchCommand"
+        ? { sequence: 1 }
+        : (projections.length > 1 ? projections.shift() : projections[0]) ?? { runs: [], providerTurns: [], subagents: [] };
+      socket.send(JSON.stringify({
+        _tag: "Exit",
+        requestId: frame.id,
+        exit: { _tag: "Success", value },
+      }));
+    });
+  });
+
   const calls = async () =>
     (await fs.readFile(path.join(fakeDir, "calls.jsonl"), "utf8").catch(() => ""))
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as { args: string[]; stdin: string | null });
-  return { command, fakeDir, workspace, calls };
+  return { command, fakeDir, workspace, home, calls, projections, frames, authorizations };
 }
 
 function makeContext(
@@ -52,7 +93,7 @@ function makeContext(
     runId: "run-1",
     agent: { id: "agent-1", companyId: "company-1", name: "T3 Agent", adapterType: "t3code_local", adapterConfig: {} },
     runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
-    config: { command: env.command, cwd: env.workspace, env: { T3_FAKE_DIR: env.fakeDir }, ...config },
+    config: { command: env.command, cwd: env.workspace, env: { T3_FAKE_DIR: env.fakeDir, T3CODE_HOME: env.home }, ...config },
     context: {},
     onLog: async () => {},
     ...rest,
@@ -63,6 +104,10 @@ const result = (fields: Record<string, unknown>) =>
   `T3 log line\n${JSON.stringify({ threadId: "thr-1", runId: "r-1", reply: null, error: null, ...fields })}\n`;
 
 afterEach(async () => {
+  await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => {
+    for (const client of server.clients) client.terminate();
+    server.close(() => resolve());
+  })));
   await Promise.all(tempRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
@@ -212,17 +257,20 @@ describe("t3code_local execute", () => {
     const env = await setup({
       "thread start": [{ sleep: 10 }],
       "thread list": [{ stdout: `${JSON.stringify([{ threadId: "thr-2", title: "Paperclip: T3 Agent (run-1)" }])}\n` }],
-      "thread stop": [
-        { stdout: `${JSON.stringify({ threadId: "thr-2", runId: "r-2", status: "interrupt_requested" })}\n` },
-        { stdout: `${JSON.stringify({ threadId: "thr-2", runId: "r-2", status: "interrupted" })}\n` },
-      ],
     });
     const onProviderStopped = vi.fn(async () => {});
     const res = await execute(makeContext(env, { config: { timeoutSec: 1, graceSec: 1 }, onProviderStopped }));
 
-    expect((await env.calls()).map((call) => call.args.slice(0, 2).join(" "))).toEqual([
-      "thread start", "thread list", "thread stop", "thread stop",
+    expect((await env.calls()).map((call) =>
+      call.args[0] === "auth" ? call.args.slice(0, 3).join(" ") : call.args.slice(0, 2).join(" ")
+    )).toEqual([
+      "thread start", "thread list", "auth session issue", "auth session revoke",
     ]);
+    expect(env.frames[0]).toMatchObject({
+      tag: "orchestration.dispatchCommand",
+      payload: { type: "thread.stop", threadId: "thr-2" },
+    });
+    expect(env.authorizations).toEqual(["Bearer tok-secret"]);
     expect(res).toMatchObject({ timedOut: true, errorMessage: "Timed out after 1s", errorCode: null });
     expect(res.sessionParams).toEqual({ threadId: "thr-2", cwd: env.workspace });
     expect(onProviderStopped).toHaveBeenCalledOnce();
@@ -245,15 +293,16 @@ describe("t3code_local execute", () => {
   it("stops the thread when the run is cancelled", async () => {
     const env = await setup({
       "thread send": [{ sleep: 10 }],
-      "thread stop": [{ stdout: `${JSON.stringify({ threadId: "thr-old", runId: null, status: "no_active_run" })}\n` }],
     });
     const onProviderStopped = vi.fn(async () => {});
     const onCancellationReady = vi.fn(async () => {});
+    const logs: string[] = [];
     const controller = new AbortController();
     const res = await execute(makeContext(env, {
       runtime: { sessionId: null, sessionParams: { threadId: "thr-old" }, sessionDisplayId: null, taskKey: null },
       signal: controller.signal,
       onCancellationReady,
+      onLog: async (_stream, chunk) => { logs.push(chunk); },
       onSpawn: async ({ pid }) => {
         setTimeout(() => { controller.abort(); process.kill(pid, "SIGTERM"); }, 300);
       },
@@ -261,7 +310,13 @@ describe("t3code_local execute", () => {
     }));
 
     expect(onCancellationReady).toHaveBeenCalledOnce();
-    expect((await env.calls()).at(-1)!.args).toEqual(["thread", "stop", "thr-old", "--json"]);
+    expect((await env.calls()).at(-1)!.args.slice(0, 3)).toEqual(["auth", "session", "revoke"]);
+    expect(env.frames[0]).toMatchObject({
+      tag: "orchestration.dispatchCommand",
+      payload: { type: "thread.stop", threadId: "thr-old" },
+    });
+    expect(env.authorizations).toEqual(["Bearer tok-secret"]);
+    expect(logs.join("")).not.toContain("tok-secret");
     expect(res).toMatchObject({ signal: "SIGTERM", errorCode: "cancelled", errorMessage: "Stopped by the operator" });
     expect(res.resultJson?.executionCancellation).toMatchObject({ state: "acknowledged" });
     expect(onProviderStopped).toHaveBeenCalledOnce();
@@ -365,7 +420,11 @@ describe("t3code_local execute", () => {
   it("bounds a hanging thread stop by the confirmation window", async () => {
     const env = await setup({
       "thread send": [{ sleep: 10 }],
-      "thread stop": [{ sleep: 30 }],
+    });
+    env.projections.splice(0, env.projections.length, {
+      runs: [{ status: "running" }],
+      providerTurns: [],
+      subagents: [],
     });
     const onProviderStopped = vi.fn(async () => {});
     const started = Date.now();
@@ -383,10 +442,10 @@ describe("t3code_local execute", () => {
     expect(onProviderStopped).not.toHaveBeenCalled();
   }, 20_000);
 
-  it("reports an unverified stop when the t3 CLI has no thread stop", async () => {
+  it("reports an unverified stop when the native auth session cannot be issued", async () => {
     const env = await setup({
       "thread send": [{ sleep: 10 }],
-      "thread stop": [{ stderr: "Unknown subcommand \"stop\" for \"t3 thread\"\n", exit: 1 }],
+      "auth session issue": [{ stderr: "auth is unavailable\n", exit: 1 }],
     });
     const onProviderStopped = vi.fn(async () => {});
     const res = await execute(makeContext(env, {
@@ -398,7 +457,7 @@ describe("t3code_local execute", () => {
     expect(res).toMatchObject({
       timedOut: true,
       errorCode: "t3code_stop_unverified",
-      errorMessage: "Timed out after 1s Could not confirm that T3 Code thread thr-old stopped: this t3 CLI has no `thread stop` command, so the run may still be active in T3 Code.",
+      errorMessage: "Timed out after 1s Could not confirm that T3 Code thread thr-old stopped: Could not issue a T3 Code auth session for the native stop.",
     });
     expect(onProviderStopped).not.toHaveBeenCalled();
   }, 20_000);

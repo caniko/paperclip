@@ -1,11 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  isT3CommandUnsupported,
   isT3ProjectNotFound,
   isT3ServerUnavailable,
   isT3ThreadNotFound,
   parseT3RunResult,
-  parseT3StopStatus,
   parseT3ThreadList,
 } from "./parse.js";
 
@@ -21,9 +19,7 @@ describe("t3 CLI output parsing", () => {
     expect(parseT3RunResult("No JSON here\n{broken")).toBeNull();
   });
 
-  it("reads stop statuses and thread lists", () => {
-    expect(parseT3StopStatus(`${JSON.stringify({ threadId: "t1", runId: null, status: "no_active_run" })}\n`)).toBe("no_active_run");
-    expect(parseT3StopStatus("")).toBeNull();
+  it("reads thread lists", () => {
     expect(parseT3ThreadList(`${JSON.stringify([{ threadId: "t1", title: "A" }, { nope: 1 }])}\n`)).toEqual([{ threadId: "t1", title: "A" }]);
     expect(parseT3ThreadList("[]\n")).toEqual([]);
     expect(parseT3ThreadList("error\n")).toBeNull();
@@ -36,8 +32,5 @@ describe("t3 CLI output parsing", () => {
     expect(isT3ThreadNotFound("Thread abc was not found.")).toBe(true);
     expect(isT3ThreadNotFound("'x y' is not a thread id.")).toBe(true);
     expect(isT3ThreadNotFound("Thread abc stopped with status failed")).toBe(false);
-    expect(isT3CommandUnsupported('Unknown subcommand "stop" for "t3 thread"')).toBe(true);
-    expect(isT3CommandUnsupported("Unrecognized command: stop")).toBe(true);
-    expect(isT3CommandUnsupported("Thread abc was not found.")).toBe(false);
   });
 });

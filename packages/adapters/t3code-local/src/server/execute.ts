@@ -29,14 +29,13 @@ import {
   DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE,
   type RunProcessResult,
 } from "@paperclipai/adapter-utils/server-utils";
+import { stopNativeThread } from "./native-rpc.js";
 import {
   firstNonEmptyLine,
-  isT3CommandUnsupported,
   isT3ProjectNotFound,
   isT3ServerUnavailable,
   isT3ThreadNotFound,
   parseT3RunResult,
-  parseT3StopStatus,
   parseT3ThreadList,
   T3_STOPPED_STATUSES,
   type T3RunResult,
@@ -284,7 +283,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const budgetSec = Math.max(graceSec, 5);
     const deadline = Date.now() + budgetSec * 1000;
     const remainingSec = () => Math.max(1, Math.ceil((deadline - Date.now()) / 1000));
-    const notConfirmed = (id: string) => `T3 Code did not confirm within ${budgetSec}s that thread ${id} stopped.`;
     let threadId = attempt.result?.threadId ?? attempt.threadId;
     while (!threadId) {
       const listed = await runT3(["thread", "list", "--project", cwd, "--json"], {
@@ -303,28 +301,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
       await new Promise((resolve) => setTimeout(resolve, STOP_POLL_MS));
     }
-    for (;;) {
-      const stop = await runT3(["thread", "stop", threadId, "--json"], {
-        helper: "thread-stop",
-        timeoutSec: remainingSec(),
-      });
-      if (stop.timedOut) return { threadId, error: notConfirmed(threadId) };
-      const status = parseT3StopStatus(stop.stdout);
-      if (status && T3_STOPPED_STATUSES.has(status)) return { threadId, error: null };
-      if (stop.exitCode !== 0 && isT3ThreadNotFound(stop.stderr)) return { threadId, error: null };
-      if (stop.exitCode !== 0 && isT3CommandUnsupported(stop.stderr)) {
-        return {
-          threadId,
-          error: `Could not confirm that T3 Code thread ${threadId} stopped: this t3 CLI has no \`thread stop\` command, so the run may still be active in T3 Code.`,
-        };
-      }
-      if (status !== "interrupt_requested") {
-        const reason = firstNonEmptyLine(stop.stderr) || `exit code ${stop.exitCode ?? -1}`;
-        return { threadId, error: `Could not stop T3 Code thread ${threadId}: ${reason}` };
-      }
-      if (Date.now() + STOP_POLL_MS >= deadline) return { threadId, error: notConfirmed(threadId) };
-      await new Promise((resolve) => setTimeout(resolve, STOP_POLL_MS));
-    }
+    const stopError = await stopNativeThread({
+      runId,
+      command,
+      cwd,
+      env,
+      threadId,
+      deadline,
+      budgetSec,
+    });
+    return { threadId, error: stopError };
   };
 
   let attempt = canResume ? await runTurn(storedThreadId) : await startThread();
