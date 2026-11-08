@@ -431,6 +431,8 @@ it("releases workspaces and ownership when their whole company is dropped from t
     companies: { example: { fields: { name: "Released company" } } },
     projects: { main: { company: "example", fields: { name: "Released project" } } },
     projectWorkspaces: { alpha: { project: "main", fields: { name: "Alpha", cwd: "/fixture/alpha", isPrimary: true } } },
+    // A disabled agent's ledger row must be released with its company too.
+    agents: { idle: { company: "example", enabled: false, fields: { name: "Idle worker", adapterType: "process", adapterConfig: { command: "worker" } } } },
   };
   const first = await reconcile(declaration);
   const companyId = first.bindings["company/example"];
@@ -441,6 +443,8 @@ it("releases workspaces and ownership when their whole company is dropped from t
   // Unbound, the ownership guard no longer blocks deleting the company (the audit log has a plain FK).
   await db.execute(sql`delete from activity_log where company_id = ${companyId}`);
   await db.delete(companyMemberships).where(eq(companyMemberships.companyId, companyId));
+  await db.execute(sql`delete from principal_permission_grants where company_id = ${companyId}`);
+  await db.delete(agents).where(eq(agents.id, first.bindings["agent/idle"]));
   await db.delete(projectWorkspaces).where(eq(projectWorkspaces.id, first.bindings["workspace/alpha"]));
   await db.delete(projects).where(eq(projects.id, first.bindings["project/main"]));
   await db.delete(companies).where(eq(companies.id, companyId));

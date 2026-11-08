@@ -397,6 +397,8 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     // guard rejects deleting any resource that still has a ledger row).
     const releasedCompanies = new Set(removed.filter((b) => b.kind === "company").map((b) => b.resourceId));
     const released = (b: (typeof removed)[number]) => b.kind === "company" || (b.companyId !== null && releasedCompanies.has(b.companyId));
+    // Already-disabled bindings inside a released company must be unbound too, or their ledger rows keep blocking its deletion.
+    const releasedDisabled = owned.filter((b) => !b.enabled && b.companyId !== null && releasedCompanies.has(b.companyId) && !specs.some((s) => s.kind === b.kind && s.key === b.key));
     if (removed.some((b) => b.kind === "environment")) throw new Error("Environment removal requires an explicit ownership handoff; retain the declaration to preserve execution references");
     if (removed.some((b) => b.kind === "workspace" && !released(b))) throw new Error("Workspace removal requires an explicit ownership handoff; retain the declaration to preserve execution references");
     for (const b of removed) differences.push({ kind: b.kind, key: b.key, action: "disable", fields: [] });
@@ -464,6 +466,9 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         if (released(binding)) await tx.delete(deploymentResources).where(ledgerRow);
         else await tx.update(deploymentResources).set({ enabled: false }).where(ledgerRow);
         for (const auditCompanyId of (binding.kind === "operatorKey" || binding.kind === "environment") ? auditCompanies : [binding.companyId ?? binding.resourceId]) await services!.logActivity(tx, { companyId: auditCompanyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.disabled", entityType: binding.kind, entityId: binding.resourceId, details: { key: binding.key } }, publications);
+      }
+      for (const binding of releasedDisabled) {
+        await tx.delete(deploymentResources).where(and(eq(deploymentResources.owner, m.owner), eq(deploymentResources.kind, binding.kind), eq(deploymentResources.key, binding.key)));
       }
     }
     return {
