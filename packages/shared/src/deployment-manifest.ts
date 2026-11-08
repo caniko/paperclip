@@ -18,7 +18,6 @@ const agentHeartbeat = z.object({
   wakeOnDemand: z.boolean().optional(),
   skipTimerWhenNoActionableWork: z.boolean().optional(),
   maxDailyRuns: z.number().int().min(0).optional(),
-  cooldownSec: z.number().int().min(0).optional(),
   maxConcurrentRuns: z.number().int().min(1).optional(),
 }).strict();
 const agentRuntimeConfig = z.object({ heartbeat: agentHeartbeat.optional() }).strict();

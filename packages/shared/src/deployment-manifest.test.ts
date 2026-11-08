@@ -51,7 +51,7 @@ describe("deployment manifest", () => {
   });
   it("declares only the agent heartbeat policy inside runtimeConfig", () => {
     const heartbeat = { enabled: true, intervalSec: 300, wakeOnDemand: true, skipTimerWhenNoActionableWork: true,
-      maxDailyRuns: 5, cooldownSec: 10, maxConcurrentRuns: 2 };
+      maxDailyRuns: 5, maxConcurrentRuns: 2 };
     const manifest = { version: 1, owner: "deployment", companies: { example: company },
       agents: { worker: { ...agent, fields: { ...agent.fields, runtimeConfig: { heartbeat } } } } };
     expect(deploymentManifestSchema.parse(manifest).agents.worker.fields.runtimeConfig).toEqual({ heartbeat });
