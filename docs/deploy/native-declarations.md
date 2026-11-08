@@ -336,6 +336,10 @@ Other drivers cannot use the sentinel.
 Set `agents.<key>.overflowEnvironments` to ordered declared environment keys. Reconciliation writes their IDs to the agent's
 `runtimeConfig.fallbackEnvironmentIds` and preserves the other application-owned
 runtime keys. See [environment overflow](../guides/board-operator/execution-workspaces-and-runtime-services.md#environment-overflow).
+Set `agents.<key>.fields.runtimeConfig.heartbeat` to declare timer policy keys
+(`enabled`, `intervalSec`, `wakeOnDemand`, `skipTimerWhenNoActionableWork`,
+`maxDailyRuns`, `cooldownSec`, `maxConcurrentRuns`); reconciliation merges only
+the declared keys and preserves other runtime configuration.
 
 Hermes declarations accept the boolean `adapterConfig.waitForJobs`. When enabled,
 the existing adapter binds a selected execution target and requires the worker's

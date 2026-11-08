@@ -11,6 +11,17 @@ function undefaulted<T extends z.ZodObject>(schema: T) {
 }
 
 const key = z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/);
+/** The manifest owns the heartbeat policy and nothing else in application-managed runtime configuration. */
+const agentHeartbeat = z.object({
+  enabled: z.boolean().optional(),
+  intervalSec: z.number().int().min(0).optional(),
+  wakeOnDemand: z.boolean().optional(),
+  skipTimerWhenNoActionableWork: z.boolean().optional(),
+  maxDailyRuns: z.number().int().min(0).optional(),
+  cooldownSec: z.number().int().min(0).optional(),
+  maxConcurrentRuns: z.number().int().min(1).optional(),
+}).strict();
+const agentRuntimeConfig = z.object({ heartbeat: agentHeartbeat.optional() }).strict();
 /** Explicitly adopts the instance's singleton local environment. */
 export const LOCAL_ENVIRONMENT_ADOPT = "instance-local";
 const identity = z.object({ adopt: z.string().uuid().optional() });
@@ -31,7 +42,7 @@ const agent = identity.extend({
   fields: undefaulted(createAgentSchema.pick({
     name: true, role: true, title: true, capabilities: true,
     adapterType: true, adapterConfig: true, budgetMonthlyCents: true, permissions: true,
-  })).required({ adapterConfig: true }).strict(),
+  })).extend({ runtimeConfig: agentRuntimeConfig.optional() }).required({ adapterConfig: true }).strict(),
   credentials: z.record(z.string().regex(/^(env\.[A-Z_][A-Z0-9_]*|[a-zA-Z][a-zA-Z0-9]*)$/), key).default({}),
 }).strict();
 const routine = identity.extend({

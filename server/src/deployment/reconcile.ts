@@ -26,11 +26,14 @@ type Fields = Record<string, unknown>;
 type Spec = { kind: Kind; key: string; id: string; companyId: string | null; adopt?: string; enabled: boolean; fields: () => Fields; create: (fields: Fields) => Promise<string>; update: (fields: Fields) => Promise<unknown> };
 export type DeploymentDifference = { kind: string; key: string; action: "create" | "adopt" | "update" | "disable"; fields: string[] };
 
-/** The manifest owns only the fallback list inside application-managed runtime configuration. */
-function withFallbacks({ fallbackEnvironmentIds, ...fields }: Fields, runtimeConfig: unknown = {}): Fields {
-  if (fallbackEnvironmentIds === undefined) return fields;
-  const current = runtimeConfig && typeof runtimeConfig === "object" ? runtimeConfig as Fields : {};
-  return { ...fields, runtimeConfig: { ...current, fallbackEnvironmentIds } };
+/** The manifest owns only the fallback list and heartbeat policy inside application-managed runtime configuration. */
+function withFallbacks({ fallbackEnvironmentIds, heartbeat, ...fields }: Fields, current: unknown = {}): Fields {
+  if (fallbackEnvironmentIds === undefined && heartbeat === undefined) return fields;
+  const existing = current && typeof current === "object" ? current as Fields : {};
+  const currentHeartbeat = existing.heartbeat && typeof existing.heartbeat === "object" ? existing.heartbeat as Fields : {};
+  return { ...fields, runtimeConfig: { ...existing,
+    ...(heartbeat && typeof heartbeat === "object" ? { heartbeat: { ...currentHeartbeat, ...heartbeat as Fields } } : {}),
+    ...(fallbackEnvironmentIds !== undefined ? { fallbackEnvironmentIds } : {}) } };
 }
 
 /** Values never appear in plans, including adapter URLs, paths and credentials. */
@@ -240,13 +243,15 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
           update: () => secrets!.rotate(getId("secret", secretKey), { value }) });
       }
       const fields = () => {
-        const adapterConfig = { ...a.fields.adapterConfig };
+        const { runtimeConfig, ...declared } = a.fields;
+        const adapterConfig = { ...declared.adapterConfig };
         for (const field of Object.keys(a.credentials)) {
           const ref = { type: "secret_ref", secretId: getId("secret", `${key}.${field}`), version: "latest" };
           if (field.startsWith("env.")) adapterConfig.env = { ...(adapterConfig.env as Fields ?? {}), [field.slice(4)]: ref };
           else adapterConfig[field] = ref;
         }
-        return { ...a.fields, adapterConfig, reportsTo: a.reportsTo ? getId("agent", a.reportsTo) : null, companyId,
+        return { ...declared, adapterConfig, reportsTo: a.reportsTo ? getId("agent", a.reportsTo) : null, companyId,
+          ...(runtimeConfig?.heartbeat !== undefined ? { heartbeat: runtimeConfig.heartbeat } : {}),
           ...(a.environment !== undefined ? { defaultEnvironmentId: a.environment ? getId("environment", a.environment) : null } : {}),
           ...(a.overflowEnvironments !== undefined ? { fallbackEnvironmentIds: a.overflowEnvironments.map((k) => getId("environment", k)) } : {}) };
       };
@@ -259,7 +264,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         },
         update: async (f) => {
           const { companyId: _companyId, ...configuration } = f;
-          const [current] = configuration.fallbackEnvironmentIds === undefined ? []
+          const [current] = configuration.fallbackEnvironmentIds === undefined && configuration.heartbeat === undefined ? []
             : await tx.select({ runtimeConfig: agents.runtimeConfig }).from(agents).where(eq(agents.id, getId("agent", key)));
           return agentLifecycle!.updateConfiguration(getId("agent", key), withFallbacks(configuration, current?.runtimeConfig));
         } });
@@ -384,7 +389,21 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
           }
         }
       }
-      const changed = changedFields(binding?.fields ?? {}, spec.fields());
+      const declared = spec.fields();
+      const changed = changedFields(binding?.fields ?? {}, declared);
+      // A declared heartbeat owns only its keys; live application-managed keys never cause drift.
+      if (spec.kind === "agent" && declared.heartbeat && !changed.includes("heartbeat") && !changed.includes("runtimeConfig")) {
+        const heartbeat = declared.heartbeat;
+        if (heartbeat && typeof heartbeat === "object") {
+          const [live] = await tx.select({ runtimeConfig: agents.runtimeConfig }).from(agents).where(eq(agents.id, spec.id));
+          const liveHeartbeat = live?.runtimeConfig && typeof live.runtimeConfig === "object"
+            ? (live.runtimeConfig as Fields).heartbeat : undefined;
+          const actual = liveHeartbeat && typeof liveHeartbeat === "object" ? liveHeartbeat as Fields : {};
+          if (Object.entries(heartbeat as Fields).some(([field, value]) => stableJson(value) !== stableJson(actual[field]))) {
+            changed.push("runtimeConfig");
+          }
+        }
+      }
       if (binding && (spec.kind === "taskBridge" || spec.kind === "operatorKey") && changed.length) throw new Error("Task bridge rotation requires a new declaration key and removal of the old key");
       if (!binding || changed.length || binding.enabled !== spec.enabled || binding.companyId !== spec.companyId) {
         const action: DeploymentDifference = { kind: spec.kind, key: spec.key, action: !binding ? (spec.adopt ? "adopt" : "create") : "update", fields: changed };
