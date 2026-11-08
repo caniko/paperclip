@@ -229,6 +229,8 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     nextConfig.small_model = smallModel;
     notes.push(`Pinned OpenCode small_model to ${smallModel}.`);
   }
+  // Replace the copied file: operator configs may link into a read-only Nix store.
+  await fs.rm(runtimeConfigPath, { force: true });
   await fs.writeFile(runtimeConfigPath, `${JSON.stringify(nextConfig, null, 2)}\n`, "utf8");
   if (input.sandboxToolOomPreference) {
     try {

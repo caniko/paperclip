@@ -642,7 +642,7 @@ it("reconciles protected SSH environments and agent references with stable IDs a
   expect((await run(declaration, false)).differences).toEqual([]);
 });
 
-it("binds the managed local environment and owns only the agent overflow list", async () => {
+it("adopts the instance-local environment and owns only the agent overflow list", async () => {
   writeFileSync(join(root, "overflow-executor"), "fixture-only-overflow-key", { mode: 0o600 });
   const overflowDescriptor = { ...descriptor, credentialFiles: { ...descriptor.credentialFiles, executor: join(root, "overflow-executor") } };
   const declaration = { version: 1, owner: "overflow-execution", companies: { example: { fields: { name: "Overflow execution" } } },
@@ -659,6 +659,7 @@ it("binds the managed local environment and owns only the agent overflow list", 
   const first = await run(declaration);
   const local = await environmentService(db).ensureLocalEnvironment("unused");
   expect(first.bindings["environment/primary"]).toBe(local.id);
+  expect(await environmentService(db).listBoundCompanyIds(local.id)).toEqual([]);
   expect(local.config).toMatchObject({ capacity: { maxConcurrentRuns: 1 } });
   const agentId = first.bindings["agent/worker"];
   const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
