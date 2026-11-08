@@ -136,6 +136,8 @@ it("checkpoints exact admission before dispatch and uses the managed backend wit
   const body = JSON.parse(String(checkpoint.body));
   expect(body.environment.PAPERCLIP_API_KEY).toBe("paperclip-token");
   expect(body.prompt.text).toContain("Owned task");
+  // OpenCode decodes this as Model.Ref; any other shape fails admission and Stop.
+  expect(body.model).toEqual({ providerID: "openai", id: "gpt-6.1-sol" });
   expect(body.environment).not.toHaveProperty("HOME");
   expect(body.environment).not.toHaveProperty("XDG_CONFIG_HOME");
   expect(f.requests.filter((value) => value.body).every((value) => value.body === checkpoint.body)).toBe(true);

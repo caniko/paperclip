@@ -89,7 +89,7 @@ export async function executeManaged(
     sessionID: `ses_external_${id}`,
     inputID: `msg_external_${id}`,
     location: { directory: adapterExecutionTargetRemoteCwd(target, input.cwd) },
-    model: { provider: model.slice(0, slash), model: model.slice(slash + 1) },
+    model: { providerID: model.slice(0, slash), id: model.slice(slash + 1) },
     environment: input.environment,
     prompt: { text: input.prompt, files: input.files.map((file) => ({ uri: pathToFileURL(file).href })) },
   });
