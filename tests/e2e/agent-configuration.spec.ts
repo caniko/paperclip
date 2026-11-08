@@ -311,6 +311,7 @@ test("a lost creation response requires reload and cannot blindly replay command
   }, { capture: true, once: true }));
   expect((await document(page)).spec.apiKeys!.create).toHaveLength(2);
   await page.getByRole("button", { name: "Reload saved", exact: true }).click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page).toHaveURL(/\/agents\/partially-renamed-yaml-engineer\/advanced$/);
   await expect(page.getByRole("button", { name: "Reload saved", exact: true })).toBeEnabled();
   expect((await document(page)).spec.apiKeys).toBeUndefined();

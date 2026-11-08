@@ -12,6 +12,7 @@ import {
   companySecrets,
   createDb,
   closeRegisteredClients,
+  deploymentResources,
   environmentCustomImageSetupSessions,
   environmentLeases,
   environments,
@@ -1344,6 +1345,22 @@ describeEmbeddedPostgres("environmentService leases", () => {
       updatedAt: new Date(),
     });
     expect(await svc.listBoundCompanyIds(unboundId)).toEqual([]);
+  });
+
+  it("keeps the instance-local environment unbound by declarations while SSH declarations stay exclusive", async () => {
+    const companyId = await seedCompany();
+    const local = await svc.ensureLocalEnvironment(companyId);
+    const ssh = randomUUID();
+    await db.insert(environments).values({
+      id: ssh, name: "Declared SSH", driver: "ssh", status: "active", config: {}, createdAt: new Date(), updatedAt: new Date(),
+    });
+    await db.insert(deploymentResources).values([
+      { owner: "t", kind: "environment", key: "local", resourceId: local.id, companyId, fields: {} },
+      { owner: "t", kind: "environment", key: "ssh", resourceId: ssh, companyId, fields: {} },
+    ]);
+    expect(await svc.listBoundCompanyIds(local.id)).toEqual([]);
+    expect(await svc.listBoundCompanyIds(ssh)).toEqual([companyId]);
+    await db.delete(deploymentResources); // the deployment guard blocks cleanup of declared rows
   });
 
   it("preserves tenant env vars across managed sandbox boot reconciles", async () => {

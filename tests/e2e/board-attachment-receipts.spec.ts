@@ -8,7 +8,7 @@ import {
 } from "@playwright/test";
 
 // Real local Board UI, upload storage, comment HTTP routes, and disposable DB.
-// Only the interface flag and explicit transport/upload rejection faults are mocked.
+// Only announcements, the interface flag and explicit transport/upload rejection faults are mocked.
 // Tasks have no recipient: no agent, runner, or provider is contacted.
 type Attachment = {
   id: string;
@@ -27,17 +27,9 @@ async function body<T>(
 }
 
 async function setup(page: Page, request: APIRequestContext, classic: boolean) {
-  // Announcements can appear after navigation or reload and cover the classic
-  // composer's attachment button. Dismiss through the same UI as a Board user.
-  await page.addLocatorHandler(
-    page.getByRole("complementary", { name: "Paperclip announcements", exact: true })
-      .getByRole("button", { name: "Dismiss announcement", exact: true }),
-    async (dismiss) => {
-      const menuOpen = await page.getByRole("menu", { name: "Add to composer", exact: true }).isVisible();
-      if (menuOpen) await page.keyboard.press("Escape");
-      await dismiss.click();
-      if (menuOpen) await page.getByRole("button", { name: "Add to composer", exact: true }).click();
-    },
+  // Keep unrelated, asynchronously delivered product news out of attachment checks.
+  await page.route("**/api/announcements/current", (route) =>
+    route.fulfill({ json: null }),
   );
   const company = await body<{ id: string; issuePrefix: string }>(
     await request.post("/api/companies", {

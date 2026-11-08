@@ -329,6 +329,9 @@ SSH configs may add `capacity` (`maxConcurrentRuns`, `admissionCommand`). A
 It must set `adopt: "instance-local"`. Paperclip creates the single local
 environment itself, so it has no UUID before the first apply; the sentinel is
 the explicit adoption of that environment. The declaration then owns its config.
+The local environment stays instance-wide and available to every company, even
+when one company's declaration owns its config; the adoption does not bind it
+to that company.
 Other drivers cannot use the sentinel.
 Set `agents.<key>.overflowEnvironments` to ordered declared environment keys. Reconciliation writes their IDs to the agent's
 `runtimeConfig.fallbackEnvironmentIds` and preserves the other application-owned

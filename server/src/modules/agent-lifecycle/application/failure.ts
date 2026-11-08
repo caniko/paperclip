@@ -1,3 +1,4 @@
+import { getSystemErrorMap } from "node:util";
 import type { LifecycleFailure } from "./ports.js";
 
 // Only fixed text may leave this boundary. Provider errors can contain secrets.
@@ -10,6 +11,7 @@ const reasons = {
   harness_probe_timed_out: "The execution test timed out. Paperclip will retry automatically. If this continues, run the agent test in Configuration.",
   harness_probe_unexpected_output: "The execution test did not return the expected response. Run the agent test in Configuration to inspect the failed checks.",
   test_environment_unavailable: "The test environment is unavailable. Check the agent's environment in Configuration. Paperclip will retry automatically.",
+  environment_company_mismatch: "The agent's environment belongs to another company. Choose an environment of this company in Configuration.",
   required_plugin_unavailable: "A required plugin is unavailable. Check the plugin's status in Settings. Paperclip will retry automatically.",
   invalid_lifecycle_result: "A required plugin returned an invalid result. Check the plugin's status in Settings. Paperclip will retry automatically.",
 } as const;
@@ -27,9 +29,21 @@ export function lifecycleVerificationNeedsRetry(context: LifecycleFailure, error
 }
 
 export function lifecycleFailureCode(error: unknown): string | undefined {
-  const candidate = error as { code?: unknown; cause?: { code?: unknown } } | null;
-  return [candidate?.code, candidate?.cause?.code].find((code): code is string =>
+  const candidate = error as { code?: unknown; details?: { code?: unknown }; cause?: { code?: unknown } } | null;
+  return [candidate?.code, candidate?.details?.code, candidate?.cause?.code].find((code): code is string =>
     typeof code === "string" && (Object.hasOwn(reasons, code) || transientCodes.has(code)));
+}
+
+// Unmapped failures log only known system codes and identifier-shaped class names, never messages or stacks.
+const systemCodes = new Set([...getSystemErrorMap().values()].map(([code]) => code));
+const safeIdentifier = /^[A-Za-z0-9_.:-]{1,64}$/;
+export function lifecycleFailureDiagnostics(error: unknown): { errorCode?: string; errorName?: string } {
+  const candidate = error as { code?: unknown; cause?: { code?: unknown }; constructor?: { name?: unknown } } | null;
+  const safe = (value: unknown) => typeof value === "string" && safeIdentifier.test(value) ? value : undefined;
+  const errorCode = [candidate?.code, candidate?.cause?.code].find((code): code is string =>
+    typeof code === "string" && systemCodes.has(code));
+  const errorName = safe(candidate?.constructor?.name);
+  return { ...(errorCode ? { errorCode } : {}), ...(errorName ? { errorName } : {}) };
 }
 
 export function lifecycleFailureMessage(context: LifecycleFailure, error: unknown): string {

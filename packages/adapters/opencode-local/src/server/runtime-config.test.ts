@@ -34,6 +34,26 @@ async function makeConfigHome(initialConfig?: Record<string, unknown>) {
 }
 
 describe("prepareOpenCodeRuntimeConfig", () => {
+  it("replaces a read-only linked config without changing the operator configuration", async () => {
+    const configHome = await makeConfigHome();
+    const operatorRoot = await makeConfigHome({ theme: "system", permission: { bash: "ask" } });
+    const operatorConfigPath = path.join(operatorRoot, "opencode", "opencode.json");
+    const original = await fs.readFile(operatorConfigPath, "utf8");
+    await fs.chmod(operatorConfigPath, 0o444);
+    const sourceConfigPath = path.join(configHome, "opencode", "opencode.json");
+    await fs.symlink(operatorConfigPath, sourceConfigPath);
+
+    const prepared = await prepareOpenCodeRuntimeConfig({ env: { XDG_CONFIG_HOME: configHome }, config: {} });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+    const runtimeConfigPath = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
+    expect((await fs.lstat(runtimeConfigPath)).isFile()).toBe(true);
+    expect(JSON.parse(await fs.readFile(runtimeConfigPath, "utf8"))).toMatchObject({ theme: "system", permission: "allow" });
+    expect(await fs.readFile(operatorConfigPath, "utf8")).toBe(original);
+    expect((await fs.lstat(sourceConfigPath)).isSymbolicLink()).toBe(true);
+    await prepared.cleanup();
+    expect(await fs.readFile(operatorConfigPath, "utf8")).toBe(original);
+  });
+
   it("stages a relocatable sandbox shell hook without changing the parent environment", async () => {
     const configHome = await makeConfigHome({ plugin: ["operator-plugin"], permission: { bash: "ask" } });
     const input = { env: { XDG_CONFIG_HOME: configHome }, config: { dangerouslySkipPermissions: false }, sandboxToolOomPreference: true };
