@@ -278,7 +278,7 @@ describe("executeNativeSession recovery", () => {
 
   it.each([
     "completed", "pending", "duplicate", "conflicting", "other turn", "newer turn",
-    "wrong session", "invalid",
+    "wrong session", "invalid", "pre-turn checkpoint",
   ])("recovers a journaled completion proposal after restart: %s", async (scenario) => {
     const originalTransport = new FakeCodexTransport();
     const recoveredTransport = new FakeCodexTransport();
@@ -299,12 +299,16 @@ describe("executeNativeSession recovery", () => {
         if (next.value.eventType === eventType) return;
       }
     };
+    // A detach can land after turn.started is durable but before the
+    // checkpoint that records the turn, leaving only the pre-turn checkpoint.
+    const preTurnCheckpoint = await original.snapshot();
     await original.startTurn({ message: { role: "user", text: "Finish the assigned review." } });
     originalTransport.push("turn/started", {
       threadId: "thread-1", turn: { id: "turn-1", status: "inProgress" },
     });
     await drainThrough("turn.started");
-    const checkpoint = await original.snapshot();
+    const checkpoint = scenario === "pre-turn checkpoint" ? preTurnCheckpoint : await original.snapshot();
+    expect(checkpoint.activeTurnId ?? null).toBe(scenario === "pre-turn checkpoint" ? null : "turn-1");
     expect(checkpoint.semanticResult).toBeNull();
     originalTransport.push("paperclip/runResult", {
       threadId: "thread-1", turnId: "turn-1", result,

@@ -1581,6 +1581,8 @@ async function reconcileRecoveryCheckpoint(input: {
   let afterSourceSeq = checkpointHighWater;
   let persistedHighWater = checkpointHighWater;
   let proposalTurnId = input.checkpoint.activeTurnId ?? null;
+  let recoveredActiveTurnId: string | null = null;
+  let replayedTurnStarts = 0;
   let recoveredResult: PrpStructuredRunResult | null = null;
   while (true) {
     const replay = await input.controlPlane.replayEvents(
@@ -1595,9 +1597,29 @@ async function reconcileRecoveryCheckpoint(input: {
     input.signal.throwIfAborted();
     if (replay.events.length === 0) break;
     for (const event of replay.events) {
+      if (event.eventType === "turn.started") replayedTurnStarts++;
       if (event.eventType === "turn.started" && event.turnId !== proposalTurnId) {
         proposalTurnId = null;
         recoveredResult = null;
+        // A controller can detach after turn.started is durable but before the
+        // checkpoint records the turn. Adopt that turn so recovery reconciles it
+        // instead of submitting the task again. Only Codex app-server emits
+        // turn.started from the provider's own notification and reconciles an
+        // active turn on recovery; later turns keep the driver's history-based
+        // disposition recovery.
+        if (
+          input.checkpoint.driverKind === "codex_app_server" &&
+          !input.checkpoint.activeTurnId &&
+          (input.checkpoint.terminalTurns ?? []).length === 0 &&
+          replayedTurnStarts === 1 &&
+          event.turnId
+        ) {
+          recoveredActiveTurnId = proposalTurnId = event.turnId;
+        } else if (recoveredActiveTurnId !== null) {
+          // A later turn means the adopted one ended unrecorded; leave that
+          // history to the driver's provider reconciliation.
+          recoveredActiveTurnId = null;
+        }
       }
       if (
         proposalTurnId &&
@@ -1635,13 +1657,15 @@ async function reconcileRecoveryCheckpoint(input: {
   if (
     persistedHighWater === checkpointHighWater &&
     input.checkpoint.cursor === String(checkpointHighWater) &&
-    recoveredResult === null
+    recoveredResult === null &&
+    recoveredActiveTurnId === null
   ) {
     return input.checkpoint;
   }
   return {
     ...input.checkpoint,
     cursor: String(persistedHighWater),
+    ...(recoveredActiveTurnId === null ? {} : { activeTurnId: recoveredActiveTurnId }),
     ...(recoveredResult === null ? {} : { semanticResult: recoveredResult }),
   };
 }
