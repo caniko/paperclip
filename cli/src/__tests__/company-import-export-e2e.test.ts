@@ -129,6 +129,8 @@ function createBasePaperclipEnv(options: TestPaperclipEnv) {
   env.PAPERCLIP_INSTANCE_ID = options.instanceId;
   env.PAPERCLIP_CONTEXT = path.join(options.paperclipHome, "context.json");
   env.PAPERCLIP_AUTH_STORE = path.join(options.paperclipHome, "auth.json");
+  // No npm registry round-trip on every CLI start.
+  env.PAPERCLIP_UPDATE_CHECK = "0";
   if (options.shellHome) {
     env.HOME = options.shellHome;
   }
@@ -256,7 +258,8 @@ async function waitForServer(
   output: { stdout: string[]; stderr: string[] },
 ) {
   const startedAt = Date.now();
-  while (Date.now() - startedAt < 30_000) {
+  // A cold tsx CLI boot plus doctor checks can take ~30 s on a loaded hosted runner.
+  while (Date.now() - startedAt < 90_000) {
     if (child.exitCode !== null) {
       throw new Error(
         `paperclipai run exited before healthcheck succeeded.\nstdout:\n${output.stdout.join("")}\nstderr:\n${output.stderr.join("")}`,
@@ -342,7 +345,7 @@ describeEmbeddedPostgres("paperclipai company import/export e2e", () => {
       output,
     );
     expect(new URL(apiBase).port).not.toBe(String(port));
-  }, 60_000);
+  }, 120_000);
 
   afterAll(async () => {
     await stopServerProcess(serverProcess);
