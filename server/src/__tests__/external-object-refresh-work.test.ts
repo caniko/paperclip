@@ -16,6 +16,7 @@ import { instanceSettingsService } from "../services/instance-settings.js";
 import { notifyExternalObjectRefresh } from "../services/external-object-refresh-notifications.js";
 import { DELIVERY_QUEUES } from "../services/delivery-work-notifications.js";
 import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
+import { idleWorkSnapshot } from "../services/task-admission.js";
 import { resolveExternalTestDatabaseUrl } from "./helpers/external-test-database.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -93,6 +94,9 @@ const active: ExternalObjectResolveResult = { ok: true, snapshot: {
     throw new Error("refresh worker did not settle");
   }
   async function quiet() { await settle(() => coordinator!.nextWakeAt() === null); }
+  // nextWakeAt() is also null while a pass runs, and that pass can reschedule
+  // itself. Before measuring an idle window, also wait for no tracked work.
+  async function idle() { await settle(() => coordinator!.nextWakeAt() === null && idleWorkSnapshot().active === 0); }
   function clock() { vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"], shouldAdvanceTime: true }); }
   async function change(companyId: string, patch: Partial<typeof externalObjects.$inferInsert>) {
     await db.transaction(async tx => {
@@ -119,12 +123,12 @@ const active: ExternalObjectResolveResult = { ok: true, snapshot: {
 
   it("settles empty, configured-idle and retained terminal history without recurring SQL or provider calls", async () => {
     clock();
-    const svc = service(); await start(svc); await quiet();
+    const svc = service(); await start(svc); await idle();
     const selects = vi.spyOn(db, "select");
     await vi.advanceTimersByTimeAsync(15 * 60_000);
     expect(selects).not.toHaveBeenCalled(); expect(provider).not.toHaveBeenCalled();
     const f = await fixture(); await svc.syncIssue(f.issueId);
-    await settle(async () => (await row(f.companyId))?.isTerminal === true); await quiet();
+    await settle(async () => (await row(f.companyId))?.isTerminal === true); await idle();
     expect((await row(f.companyId)).statusKey).toBe("done");
     selects.mockClear(); provider.mockClear();
     await vi.advanceTimersByTimeAsync(15 * 60_000);
