@@ -74,6 +74,18 @@ const delay = DEFAULT_DECISION_ARCHIVE_DAYS * 86_400_000;
   });
   afterAll(async () => { await db?.$client.end({ timeout: 1 }); await temporary?.cleanup(); });
   const old = () => new Date(Date.now() - delay - 600_000);
+  // The per-row workspace provenance trigger re-aggregates every issue in the
+  // workspace, so bulk history fixtures cost O(n^2) and outran the test budget
+  // on loaded runners. Insert with that trigger off, then rebuild the same
+  // provenance once.
+  async function bulkWorkspaceIssues(workspaceId: string, insert: SQL) {
+    await db.transaction(async tx => {
+      await tx.execute(sql`alter table issues disable trigger issues_record_workspace_privacy_source`);
+      await tx.execute(insert);
+      await tx.execute(sql`alter table issues enable trigger issues_record_workspace_privacy_source`);
+      await tx.execute(sql`update execution_workspaces set metadata = metadata where id = ${workspaceId}::uuid`);
+    });
+  }
   async function insertIssue(status = "todo", values: Partial<typeof issues.$inferInsert> = {}, database: Db = db) {
     const [row] = await database.insert(issues).values({ companyId, title: randomUUID(), status,
       createdByAgentId: agentId, createdAt: old(), updatedAt: old(), ...values }).returning();
@@ -446,7 +458,7 @@ const delay = DEFAULT_DECISION_ARCHIVE_DAYS * 86_400_000;
       values (${workspaceId}::uuid, ${companyId}::uuid, 'Finalized shared history', 'shared', 'project_primary')`);
     await db.execute(sql`insert into workspace_operations (company_id, execution_workspace_id, phase, status, started_at)
       values (${companyId}::uuid, ${workspaceId}::uuid, 'workspace_finalize', 'succeeded', ${old().toISOString()}::timestamptz)`);
-    await db.execute(sql`with history as (
+    await bulkWorkspaceIssues(workspaceId, sql`with history as (
       insert into issues (id, company_id, title, status, updated_at, execution_workspace_id)
       select ('00000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
         ${companyId}::uuid, 'completed-blocker-' || n, 'done', ${old().toISOString()}::timestamptz, ${workspaceId}::uuid
@@ -567,7 +579,7 @@ const delay = DEFAULT_DECISION_ARCHIVE_DAYS * 86_400_000;
         values (${workspaceId}::uuid, ${companyId}::uuid, 'Pending shared export', 'shared', 'project_primary')`);
       await workspaceOperationService(db).createRecorder({ companyId, executionWorkspaceId: workspaceId })
         .recordOperation({ phase: "workspace_provision", run: async () => ({ status: "succeeded" }) });
-      await db.execute(sql`with history as (
+      await bulkWorkspaceIssues(workspaceId, sql`with history as (
         insert into issues (company_id, title, status, updated_at, execution_workspace_id)
         select ${companyId}::uuid, 'waiting-for-export-' || n, 'done', ${old().toISOString()}::timestamptz, ${workspaceId}::uuid
         from generate_series(1, 2100) n returning id)
