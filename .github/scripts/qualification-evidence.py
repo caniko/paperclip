@@ -11,11 +11,15 @@ import platform
 import re
 import stat
 import subprocess
+import time
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 
 MIN_RETENTION_SECONDS = 2592000
+# The provider lists a just-finalized upload up to a few seconds later; poll about 60 s before refusing.
+ARTIFACT_LISTING_ATTEMPTS = 13
+ARTIFACT_LISTING_DELAY_SECONDS = 5
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 ORIGINAL_RED = {"artifact_id": 12146584669, "run_id": 39157504264,
                 "head": "9192d66579850b36cf10abd651b41804cfa75447",
@@ -454,28 +458,34 @@ def artifacts(prefix, count, destination):
     try:
         receipt.update(event_identity())
         identity(receipt)
-        page = 1
-        while True:
-            response = api(f"actions/runs/{receipt['run_id']}/artifacts?per_page=100&page={page}")
-            for artifact in response["artifacts"]:
-                if not artifact["name"].startswith(prefix):
-                    continue
-                retained = {"id": artifact["id"], "name": artifact["name"], "sha256": artifact.get("digest", ""),
-                            "created_at": artifact["created_at"], "expires_at": artifact["expires_at"],
-                            "expired": artifact["expired"], "workflow_run": artifact.get("workflow_run")}
-                receipt["artifacts"].append(retained)
-                created = dt.datetime.fromisoformat(artifact["created_at"].replace("Z", "+00:00"))
-                expiry = dt.datetime.fromisoformat(artifact["expires_at"].replace("Z", "+00:00"))
-                lifetime = (expiry - created).total_seconds()
-                retained["retention_seconds"] = lifetime
-                require(not artifact["expired"] and lifetime >= MIN_RETENTION_SECONDS,
-                        f"Artifact {artifact['id']} lifetime is only {lifetime} seconds")
-                digest = retained["sha256"]
-                require(digest.startswith("sha256:") and len(digest) == 71, "Provider artifact SHA-256 is missing")
-                require(artifact["workflow_run"]["head_sha"] == receipt["head"], "Artifact workflow source mismatch")
-            if len(response["artifacts"]) < 100:
+        for attempt in range(ARTIFACT_LISTING_ATTEMPTS):
+            if attempt:
+                time.sleep(ARTIFACT_LISTING_DELAY_SECONDS)
+            receipt["artifacts"] = []
+            page = 1
+            while True:
+                response = api(f"actions/runs/{receipt['run_id']}/artifacts?per_page=100&page={page}")
+                for artifact in response["artifacts"]:
+                    if not artifact["name"].startswith(prefix):
+                        continue
+                    retained = {"id": artifact["id"], "name": artifact["name"], "sha256": artifact.get("digest", ""),
+                                "created_at": artifact["created_at"], "expires_at": artifact["expires_at"],
+                                "expired": artifact["expired"], "workflow_run": artifact.get("workflow_run")}
+                    receipt["artifacts"].append(retained)
+                    created = dt.datetime.fromisoformat(artifact["created_at"].replace("Z", "+00:00"))
+                    expiry = dt.datetime.fromisoformat(artifact["expires_at"].replace("Z", "+00:00"))
+                    lifetime = (expiry - created).total_seconds()
+                    retained["retention_seconds"] = lifetime
+                    require(not artifact["expired"] and lifetime >= MIN_RETENTION_SECONDS,
+                            f"Artifact {artifact['id']} lifetime is only {lifetime} seconds")
+                    digest = retained["sha256"]
+                    require(digest.startswith("sha256:") and len(digest) == 71, "Provider artifact SHA-256 is missing")
+                    require(artifact["workflow_run"]["head_sha"] == receipt["head"], "Artifact workflow source mismatch")
+                if len(response["artifacts"]) < 100:
+                    break
+                page += 1
+            if len(receipt["artifacts"]) >= count:
                 break
-            page += 1
         require(len(receipt["artifacts"]) == count,
                 f"Expected {count} required artifacts, found {len(receipt['artifacts'])}")
     except Exception as error:

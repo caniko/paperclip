@@ -233,14 +233,29 @@ class ReceiptTests(unittest.TestCase):
                      (self.pr, "Expected 5 required artifacts, found 0")]
         for index, (live, reason) in enumerate(responses):
             destination = self.root / f"retention-source-{index}.json"
-            with self.subTest(reason=reason), \
-                    patch.object(evidence, "api", side_effect=[live, {"artifacts": []}]):
+            listings = [{"artifacts": []}] * evidence.ARTIFACT_LISTING_ATTEMPTS
+            with self.subTest(reason=reason), patch.object(evidence.time, "sleep") as sleep, \
+                    patch.object(evidence, "api", side_effect=[live, *listings]):
                 with self.assertRaisesRegex(RuntimeError, reason):
                     evidence.artifacts("source-proof-", 5, destination)
+                self.assertEqual(sleep.call_count, 0 if index == 0 else evidence.ARTIFACT_LISTING_ATTEMPTS - 1)
                 receipt = json.loads(destination.read_text())
                 self.assertEqual(receipt["base"], "target")
                 self.assertFalse(receipt["qualified"])
                 self.assertIn(reason, receipt["rejected"][0])
+
+    def test_retention_polls_until_a_just_uploaded_artifact_is_listed(self):
+        artifact = {"id": 7, "name": "source-proof-tests-candidate-1", "digest": "sha256:" + "a" * 64,
+                    "created_at": "2026-10-08T00:00:00Z", "expires_at": "2026-11-08T00:00:00Z",
+                    "expired": False, "workflow_run": {"head_sha": "candidate"}}
+        destination = self.root / "retention-delayed.json"
+        with patch.object(evidence.time, "sleep") as sleep, \
+                patch.object(evidence, "api", side_effect=[self.pr, {"artifacts": []}, {"artifacts": [artifact]}]):
+            evidence.artifacts("source-proof-", 1, destination)
+        self.assertEqual(sleep.call_count, 1)
+        receipt = json.loads(destination.read_text())
+        self.assertEqual(receipt["rejected"], [])
+        self.assertEqual([entry["id"] for entry in receipt["artifacts"]], [7])
 
     def test_supported_retention_still_requires_independent_acceptance(self):
         artifact = {"id": 7, "name": "source-proof-tests-candidate-1", "digest": "sha256:" + "a" * 64,
