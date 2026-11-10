@@ -9,3 +9,5 @@ export { routineService } from "../services/routines.js";
 export { secretService } from "../services/secrets.js";
 export { environmentService } from "../services/environments.js";
 export { deliverBudgetEnforcement } from "../services/budgets.js";
+export { publishAccountingActivities } from "../services/accounting-transaction.js";
+export { logActivity } from "../services/activity-log.js";

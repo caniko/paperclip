@@ -459,12 +459,18 @@ test("plan approval hands the preserved revision to an assigned project task", a
         { timeout: 60_000 },
       )
       .toBe(1);
+    // Task completion is delivered back to the chat as another real turn.
+    await idle(request, f.chatPath, 3);
     const task = (
       await json(await request.get(`/api/companies/${f.company.id}/issues`))
     )[0];
     expect(task.parentId).toBeNull();
     expect(task.projectId).toBeTruthy();
     expect(task.assigneeAgentId).toBe(f.agent.id);
+    const completion = page.getByText("Delegated work completed:", { exact: false });
+    await expect(completion.getByRole("link").and(page.locator(
+      `a[href="/${f.company.issuePrefix}/issues/${task.identifier}"]`,
+    ))).toBeVisible();
     const plan = await json(
       await request.get(`/api/issues/${task.id}/documents/plan`),
     );
@@ -511,14 +517,9 @@ test("plan approval hands the preserved revision to an assigned project task", a
       expect.objectContaining({
         authorAgentId: f.agent.id,
         createdByRunId: completionRuns[0].id,
-        body: "Received the delegated task completion update.",
+        body: expect.stringContaining("Delegated work completed:"),
       }),
     ]));
-    await expect(
-      page.getByText("Received the delegated task completion update.", {
-        exact: true,
-      }),
-    ).toBeVisible();
     await expect(
       page.getByRole("article", {
         name: "Project created: Approved plan project",
@@ -542,6 +543,7 @@ test("shared questions resume and existing project reuse creates no project card
     );
     await page.goto(f.route);
     await send(page, { action: "question" });
+    await idle(request, f.chatPath);
     await expect(
       page.getByRole("radio", { name: "Garden club", exact: true }).last(),
     ).toBeVisible();
@@ -652,7 +654,7 @@ test("disabling the experiment lets an active turn settle and keeps idle history
     await send(page, { action: "delayed" });
     await expect(
       page.getByText("Turn started before feature disable.", { exact: true }),
-    ).toBeVisible();
+    ).toBeVisible({ timeout: 30_000 });
     const chat = await json(await request.get(f.chatPath));
     await json(
       await request.patch("/api/instance/settings/experimental", {

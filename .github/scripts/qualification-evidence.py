@@ -429,7 +429,7 @@ def observe_rollout(request_path, directory):
         source_files = {file: sha256(REPOSITORY_ROOT / file) for file in roster["source_files"]}
         for profile in profile_data:
             for file in profile["source"]["sourceFiles"]:
-                full = f"packages/paperclip-runner/{file}" if profile["profile"] == "runner-package" else file
+                full = f"packages/paperclip-runner/{file}" if profile["profile"] in ("runner-package", "runner-package-macos") else file
                 source_files[full] = sha256(REPOSITORY_ROOT / full)
         payload = {"expected_source": expected, "roster": roster, "source_results": source_results,
                    "profiles": profile_data, "required_profiles": profiles, "claude_results": claude_results,

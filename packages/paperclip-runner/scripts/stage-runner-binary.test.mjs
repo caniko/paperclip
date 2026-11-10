@@ -109,24 +109,27 @@ async function withOwnedChildren(root, action) {
 }
 
 const hostFixtureBinary = command => execFileSync("bash", ["--noprofile", "--norc", "-c", 'type -P "$1"', "fixture-tool", command], { encoding: "utf8" }).trim();
+// Staged fixtures run under the name paperclip-runnerd. Multicall coreutils
+// (uutils on Ubuntu 26.04) pick the tool from that name, so a staged copy of
+// sleep exits at once. Node and bash keep their behaviour under any name.
+const waitArgs = ["-e", "setTimeout(() => {}, 30_000)"];
 
 test("atomically publishes while the previous executable is running", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), "runnerd-stage-test-"));
   const destination = path.join(root, "paperclip-runnerd");
   await withOwnedChildren(root, async start => {
-    const sleep = hostFixtureBinary("sleep");
-    await stageRunnerBinary(sleep, destination);
+    await stageRunnerBinary(process.execPath, destination);
     const previous = await stat(destination);
-    const old = start(destination, ["30"], "sleep");
+    const old = start(destination, waitArgs);
     await old.spawned;
-    await stageRunnerBinary(sleep, destination);
+    await stageRunnerBinary(process.execPath, destination);
     const published = await stat(destination);
     assert.notEqual(published.ino, previous.ino);
     assert.equal(published.mode & 0o777, 0o755);
     assert.equal(old.child.exitCode, null);
     assert.equal(old.child.signalCode, null);
     assert.deepEqual(await readdir(root), ["paperclip-runnerd"]);
-    const next = start(destination, ["0"], "sleep");
+    const next = start(destination, ["-e", ""]);
     await next.spawned; await next.closed;
     assert.equal(next.child.exitCode, 0);
   });
@@ -162,9 +165,9 @@ test("a source rebuild selects fresh dev bytes while preserving release binaries
     await writeFile(path.join(path.dirname(source), "..", "Cargo.toml"), '[package]\nname = "paperclip-runner-core"\nversion = "0.0.0"\nedition = "2021"\n[[bin]]\nname = "paperclip-runnerd"\npath = "src/main.rs"\n');
     await writeFile(path.join(packageRoot, "runner", "Cargo.lock"), 'version = 4\n[[package]]\nname = "paperclip-runner-core"\nversion = "0.0.0"\n');
     await mkdir(path.dirname(built), { recursive: true });
-    await copyHostFixture(process.execPath, built);
+    await copyHostFixture(hostFixtureBinary("bash"), built);
     const previousBuild = path.join(root, "previous-build");
-    await copyHostFixture(hostFixtureBinary("sleep"), previousBuild);
+    await copyHostFixture(process.execPath, previousBuild);
     await stageRunnerBinary(previousBuild, hostTarget);
     await stageRunnerBinary(built, path.join(binaryRoot, "paperclip-runnerd"));
     const platforms = {}, releaseBytes = new Map();
@@ -190,7 +193,7 @@ test("a source rebuild selects fresh dev bytes while preserving release binaries
     const manifestPath = path.join(binaryRoot, "release-manifest.json");
     const manifest = JSON.stringify({ schema: "paperclip.runner.release-binaries.v1", sourceRevision: "a".repeat(40), platforms });
     await writeFile(manifestPath, manifest);
-    const old = start(hostTarget, ["30"], "sleep");
+    const old = start(hostTarget, waitArgs);
     await old.spawned;
     const requirement = { repoRoot: root, nativeRunnerRequired: true };
     assert.equal(paperclipRunnerBinaryNeedsBuild(requirement), true);
@@ -210,7 +213,7 @@ test("a source rebuild selects fresh dev bytes while preserving release binaries
     assert.equal(paperclipRunnerBinaryNeedsBuild(requirement), false);
     assert.equal(old.child.exitCode, null);
     assert.equal(old.child.signalCode, null);
-    const next = start(selected.binary, ["-e", 'console.log("rebuilt")']);
+    const next = start(selected.binary, ["-c", "exit 0"]);
     await next.spawned; await next.closed;
     assert.equal(next.child.exitCode, 0);
   });

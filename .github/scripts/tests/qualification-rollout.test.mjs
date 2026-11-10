@@ -66,22 +66,31 @@ test("provider observations reconcile source, complete Runner, conditional and m
   const benchmark = "src/live/runnerd-final-output-burst.benchmark.test.ts";
   const packageCases = [16, 128, 512].map(count => ({ id: `benchmark-${count}`, project: "", file: benchmark,
     name: `measures ${count} final deltas, repetition 1, without relaxing durable handoff` }));
-  const profile = (name, rows) => ({ profile: name,
-    source: { ...source, diagnostic: false, policySha256: source.policy_sha256, profile: name, platform: "linux",
-      sourceFiles: Object.fromEntries(rows.map(row => [row.file, "native-source"])),
+  // Apple Silicon only: the complete Linux package defers it (skipped there) to the darwin package profile.
+  const darwinCase = { id: "darwin-1", project: "", file: "src/darwin.test.ts", name: "runs only on darwin arm64" };
+  const deferredCase = { ...darwinCase, skipped_in_environment: true };
+  const profile = (name, rows, { platform = "linux", deferred = [] } = {}) => ({ profile: name,
+    source: { ...source, diagnostic: false, policySha256: source.policy_sha256, profile: name, platform, arch: "arm64",
+      sourceFiles: Object.fromEntries([...rows, ...deferred].map(row => [row.file, "native-source"])),
       scope: { kind: "configured-package-vitest", benchmarkEnabled: true, benchmarkRepetitions: 1 } },
-    selection: { profile: name, platform: "linux", requiredCases: rows, allCasesRequired: name === "runner-package" },
-    results: { cases: rows.map(row => ({ ...row, outcome: "passed", retryCount: 0, repeatCount: 0 })), errors: [] },
+    selection: { profile: name, platform, requiredCases: rows, allCasesRequired: name === "runner-package",
+      ...(name === "runner-package" ? { deferredCases: deferred } : {}) },
+    results: { cases: [...rows.map(row => ({ ...row, outcome: "passed", retryCount: 0, repeatCount: 0 })),
+      ...deferred.map(row => ({ ...row, outcome: "skipped", retryCount: 0, repeatCount: 0 }))], errors: [] },
     strict_results: rows.map(row => ({ ...row, outcome: "passed", retryCount: 0, repeatCount: 0 })) });
-  const profiles = [profile("runner-package", packageCases), profile("tailscale-mock", [liveCase]), profile("warm-transition", [expansion])];
+  const profiles = [profile("runner-package", packageCases, { deferred: [deferredCase] }), profile("tailscale-mock", [liveCase]),
+    profile("warm-transition", [expansion]), profile("runner-package-macos", [darwinCase], { platform: "darwin" })];
   const rule = (environment, name_contains) => ({ file: row.file, source_sha256: "native-source", environment, name_contains });
   const observation = { expected_source: source,
     roster: { ...roster, cases: [defaultCase, liveCase, claudeCase], source_files: {},
       conditional_expansions: [{ ...rule("warm-transition", "managed expansion"), source_valid: true }] },
-    coverage_policy: { environments: Object.fromEntries(profiles.map(({ profile }) => [profile, { platform: "linux" }])),
+    coverage_policy: { environments: Object.fromEntries(profiles.map(({ profile, selection }) => [profile, { platform: selection.platform,
+        ...(profile.startsWith("runner-package") ? { package_root: "packages/paperclip-runner" } : {}) }])),
+      rules: [{ file: darwinCase.file, source_sha256: "native-source", environment: "runner-package-macos", name_contains: darwinCase.name }],
       supplemental_rules: [{ ...rule("tailscale-mock", liveCase.name), file: liveCase.file }],
       conditional_expansions: [rule("warm-transition", "managed expansion")] },
-    source_files: { [row.file]: "native-source", [liveCase.file]: "native-source", [`packages/paperclip-runner/${benchmark}`]: "native-source" },
+    source_files: { [row.file]: "native-source", [liveCase.file]: "native-source", [`packages/paperclip-runner/${benchmark}`]: "native-source",
+      [`packages/paperclip-runner/${darwinCase.file}`]: "native-source" },
     profiles, required_profiles: profiles.map(row => row.profile), exception_policy: policy,
     blocker_evidence: { ...blocker, cases: [liveCase] },
     source_results: [{ ...proof, ...defaultCase, producer_scope: "source/tests/profile.xml" }],
@@ -91,7 +100,7 @@ test("provider observations reconcile source, complete Runner, conditional and m
   assert.equal(decision.producer_acceptance_qualified, false);
   assert.equal(decision.exceptions.length, 1);
   assert.deepEqual(decision.exceptions[0].environments, ["live-tailscale"]);
-  assert.equal(decision.supplemental_cases, 5);
+  assert.equal(decision.supplemental_cases, 6);
   for (const mutate of [
     value => { value.profiles.pop(); },
     value => { value.profiles[0].selection.testNamePattern = "benchmark"; },
@@ -101,6 +110,12 @@ test("provider observations reconcile source, complete Runner, conditional and m
     value => { value.profiles[0].results.cases[0].retryCount = 1; },
     value => { value.profiles[0].selection.requiredCases.pop(); value.profiles[0].results.cases.pop(); value.profiles[0].strict_results.pop(); },
     value => { value.coverage_policy.supplemental_rules = []; },
+    // The darwin package profile must exist, own the deferred case, and run on Apple Silicon.
+    value => { value.profiles.pop(); value.required_profiles.pop(); },
+    value => { value.coverage_policy.rules = []; },
+    value => { value.profiles[3].selection.requiredCases = []; value.profiles[3].results.cases = []; value.profiles[3].strict_results = []; },
+    value => { value.profiles[3].source.arch = "x64"; },
+    value => { value.profiles[0].results.cases.at(-1).outcome = "passed"; },
     value => { value.coverage_policy.conditional_expansions = []; },
     value => { value.source_results[0].head = "other"; },
     value => { value.source_results.push({ ...value.source_results[0] }); },
@@ -110,4 +125,13 @@ test("provider observations reconcile source, complete Runner, conditional and m
     mutate(changed);
     assert.throws(() => qualifyRolloutObservation(changed));
   }
+  // A maintainer-host owner is not a hosted lane: its deferred case needs no observed profile, but without the flag it still does.
+  const maintainer = structuredClone(observation);
+  maintainer.profiles.pop();
+  maintainer.required_profiles.pop();
+  maintainer.coverage_policy.rules[0].environment = "apple-silicon-maintainer";
+  maintainer.coverage_policy.environments["apple-silicon-maintainer"] = { platform: "darwin", package_root: "packages/paperclip-runner" };
+  assert.throws(() => qualifyRolloutObservation(structuredClone(maintainer)));
+  maintainer.coverage_policy.environments["apple-silicon-maintainer"].maintainer_host = true;
+  assert.equal(qualifyRolloutObservation(maintainer).rollout_coverage_accepted, true);
 });

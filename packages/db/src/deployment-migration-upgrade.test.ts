@@ -21,7 +21,7 @@ import {
 type TestSql = ReturnType<typeof connectPostgres>;
 type JournalEntry = { idx: number; version: string; when: number; tag: string; breakpoints: boolean };
 type Journal = { version: string; dialect: string; entries: JournalEntry[] };
-const nativeFile = "0398_sweet_titanium_man.sql";
+const nativeFile = "0423_sweet_titanium_man.sql";
 const nativeHash = "ac20d3f6626b23aaf07e7bc7f6502bbcd728a2808d4b4adb56b2116bb30e6412";
 // Authentic entry and SQL from 843bb5b, whose upstream prefix through 0288 is unchanged.
 const oldEntry: JournalEntry = {

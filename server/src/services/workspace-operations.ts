@@ -1,3 +1,7 @@
+import { notifyAttentionRetentionWork, notifyIssueAttentionRetentionWork } from "./retention-work-notifications.js";
+import { notifyNativeResultCommit } from "./native-result-commit-notifications.js";
+import { notifyNativeWorkspaceFinalization } from "./native-workspace-finalization-notifications.js";
+import { notifyNativeStatusReassessment } from "./native-status-reassessment-notifications.js";
 import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { workspaceOperations } from "@paperclipai/db";
@@ -251,6 +255,8 @@ export interface WorkspaceOperationRecorder {
      * timeout error is rethrown, so a hung provider can never leave an active operation.
      */
     timeoutMs?: number | null;
+    /** Publish the running row under a caller-owned admission fence before run starts. */
+    admit?: (publish: () => Promise<void>) => Promise<void>;
     run: (reportProgress: (input: {
       metadata?: Record<string, unknown> | null;
       system?: string | null;
@@ -310,6 +316,12 @@ export function workspaceOperationService(db: Db) {
     const live: WorkspaceOperation[] = [];
 
     for (const candidate of candidates) {
+      // Migration owns the workspace until its explicit publication/repair. It
+      // has no runtime-control action stamp and must never be swept as abandoned.
+      if (candidate.phase === "remote_workspace_migration") {
+        live.push(toWorkspaceOperation(candidate));
+        continue;
+      }
       const action = readRuntimeControlAction(candidate.metadata);
       if (!action) continue;
 
@@ -478,13 +490,32 @@ export function workspaceOperationService(db: Db) {
         },
 
         async recordOperation(recordInput) {
-          const writeOperation = async <T>(write: (connection: Pick<Db, "insert" | "update">) => Promise<T>): Promise<T> => {
-            if (recordInput.phase !== "workspace_finalize" || !input.protectedFinalization) return write(db);
-            if (!input.heartbeatRunId) throw new Error("Protected workspace finalization requires a run.");
-            return withProtectedWorkspaceFinalizationWrite(db, {
-              companyId: input.companyId, runId: input.heartbeatRunId, ...input.protectedFinalization,
-            }, write);
-          };
+          async function writeState<T>(write: (database: Db) => Promise<T>): Promise<T> {
+            if (recordInput.phase !== "workspace_finalize") return write(db);
+            const protectedFinalization = input.protectedFinalization;
+            if (protectedFinalization && !input.heartbeatRunId) throw new Error("Protected workspace finalization requires a run.");
+            if (!protectedFinalization && !input.heartbeatRunId && !executionWorkspaceId && !input.issueId) return write(db);
+            const transact = async (tx: Parameters<Parameters<Db["transaction"]>[0]>[0]) => {
+              if (!input.heartbeatRunId) {
+                // An export clears barriers for every issue sharing this workspace.
+                if (executionWorkspaceId) await notifyAttentionRetentionWork(tx, { companyId: input.companyId, sourceKind: "blocker_attention" });
+                else await notifyIssueAttentionRetentionWork(tx, { companyId: input.companyId, issueId: input.issueId ?? undefined });
+                return write(tx as unknown as Db);
+              }
+              await notifyNativeResultCommit(tx, { companyId: input.companyId,
+                runId: input.heartbeatRunId!, issueId: input.issueId ?? undefined });
+              await notifyNativeWorkspaceFinalization(tx, { companyId: input.companyId,
+                runId: input.heartbeatRunId!, issueId: input.issueId ?? undefined });
+              await notifyNativeStatusReassessment(tx, { companyId: input.companyId,
+                runId: input.heartbeatRunId!, issueId: input.issueId ?? undefined });
+              return write(tx as unknown as Db);
+            };
+            return protectedFinalization
+              ? withProtectedWorkspaceFinalizationWrite(db, {
+                companyId: input.companyId, runId: input.heartbeatRunId!, ...protectedFinalization,
+              }, transact)
+              : db.transaction(transact);
+          }
           const currentUserRedactionOptions = {
             enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
           };
@@ -530,27 +561,29 @@ export function workspaceOperationService(db: Db) {
           if (runtimeControlAction) liveRuntimeControlOperationIds.add(id);
 
           try {
-            await writeOperation(async (connection) => {
-              await connection.insert(workspaceOperations).values({
-                id,
-                companyId: input.companyId,
-                executionWorkspaceId,
-                heartbeatRunId: input.heartbeatRunId ?? null,
-                issueId: input.issueId ?? null,
-                phase: recordInput.phase,
-                command: recordInput.command ?? null,
-                cwd: recordInput.cwd ?? null,
-                status: "running",
-                logStore: handle.store,
-                logRef: handle.logRef,
-                metadata: redactCurrentUserValue(
-                  currentMetadata,
-                  currentUserRedactionOptions,
-                ) as Record<string, unknown> | null,
-                startedAt,
-                updatedAt: startedAt,
-              });
-            });
+            let published = false;
+            const publish = async () => { await writeState(database => database.insert(workspaceOperations).values({
+              id,
+              companyId: input.companyId,
+              executionWorkspaceId,
+              heartbeatRunId: input.heartbeatRunId ?? null,
+              issueId: input.issueId ?? null,
+              phase: recordInput.phase,
+              command: recordInput.command ?? null,
+              cwd: recordInput.cwd ?? null,
+              status: "running",
+              logStore: handle.store,
+              logRef: handle.logRef,
+              metadata: redactCurrentUserValue(
+                currentMetadata,
+                currentUserRedactionOptions,
+              ) as Record<string, unknown> | null,
+              startedAt,
+              updatedAt: startedAt,
+            })); published = true; };
+            if (recordInput.admit) await recordInput.admit(publish);
+            else await publish();
+            if (!published) throw new Error("Workspace operation admission did not publish its running row");
           } catch (insertError) {
             liveRuntimeControlOperationIds.delete(id);
             throw insertError;
@@ -641,7 +674,7 @@ export function workspaceOperationService(db: Db) {
             await append("stderr", result.stderr ?? null);
             const finalized = await logStore.finalize(handle);
             const finishedAt = new Date();
-            const row = await writeOperation(async (connection) => connection
+            const row = await writeState(database => database
               .update(workspaceOperations)
               .set({
                 executionWorkspaceId,
@@ -671,7 +704,7 @@ export function workspaceOperationService(db: Db) {
             await append("stderr", error instanceof Error ? error.message : String(error)).catch(() => undefined);
             const finalized = await logStore.finalize(handle).catch(() => null);
             const finishedAt = new Date();
-            await db
+            await writeState(database => database
               .update(workspaceOperations)
               .set({
                 executionWorkspaceId,
@@ -702,7 +735,7 @@ export function workspaceOperationService(db: Db) {
               // but must not overwrite a terminal receipt observed by recovery.
               .where(and(eq(workspaceOperations.id, id),
                 recordInput.phase === "workspace_finalize" && input.protectedFinalization
-                  ? eq(workspaceOperations.status, "running") : undefined));
+                  ? eq(workspaceOperations.status, "running") : undefined)));
             throw error;
           } finally {
             // Releasing the in-process claim before the request unwinds is what lets the very

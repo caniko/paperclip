@@ -155,7 +155,7 @@ in {
       type = lib.types.attrsOf runtimePath;
       default = {};
       example = {gateway = "/run/user/1000/paperclip/gateway";};
-      description = "Protected runtime files for credential aliases bound by the manifest's agents, environments, and task bridges.";
+      description = "Protected runtime files for credential aliases bound by the manifest's agents, instance-level environments (SSH keys are read from these files at use, never stored), and task bridges.";
     };
     oidc = lib.mkOption {
       default = null;

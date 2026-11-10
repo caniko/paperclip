@@ -9,10 +9,8 @@ import {
 } from "@paperclipai/db";
 import { LOCAL_ENVIRONMENT_ADOPT, deploymentManifestSchema, type DeploymentManifest, type Environment } from "@paperclipai/shared";
 import type { createAgentLifecycleInTransaction } from "../services/agent-lifecycle.js";
-import { publishAccountingActivities } from "../services/accounting-transaction.js";
 import type { ActivityPublication } from "../types/activity-publication.js";
 import { stableJson } from "../services/managed-resource-drift.js";
-import { logActivity } from "../services/activity-log.js";
 import { validateDeclaredAdapterConfig } from "./adapter-config.js";
 import { validateCron } from "../services/cron.js";
 import { bootstrapOperator } from "./bootstrap.js";
@@ -172,13 +170,14 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     }
     for (const [key, e] of Object.entries(m.environments).sort()) {
       const { collectEnvironmentSecretRefs, normalizeEnvironmentConfig } = await import("../services/environment-config.js");
-      const companyId = getId("company", e.company), svc = services?.environmentService(tx);
+      // Environments are instance-level: no company owns them.
+      const svc = services?.environmentService(tx);
       if (e.fields.driver === "local") {
         const config = e.fields.config;
         const fields = () => ({ config: normalizeEnvironmentConfig({ driver: "local", config }) });
-        add({ kind: "environment", key, adopt: environmentAdopt(e), companyId, enabled: true, fields,
+        add({ kind: "environment", key, adopt: environmentAdopt(e), companyId: null, enabled: true, fields,
           create: async (f) => {
-            const { id } = await svc!.ensureLocalEnvironment(companyId);
+            const { id } = await svc!.ensureLocalEnvironment();
             if (!await svc!.update(id, f)) throw new Error("Managed environment is missing; explicit recovery is required");
             return id;
           },
@@ -187,21 +186,17 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
           } });
         continue;
       }
-      const secretKey = `environment-${key}.privateKey`;
-      const value = credentials[e.credential!], digest = createHash("sha256").update(value).digest("hex");
-      add({ kind: "secret", key: secretKey, companyId, enabled: true, fields: () => ({ digest }),
-        create: async () => (await secrets!.create(companyId, { name: `deployment.${m.owner}.${secretKey}`, provider: "local_encrypted", value })).id,
-        update: () => secrets!.rotate(getId("secret", secretKey), { value }) });
+      // The private key stays in the instance credential file; only its name is stored.
       const ssh = e.fields;
       const fields = () => ({ ...ssh, status: "active" as const, envVars: {}, config: normalizeEnvironmentConfig({ driver: "ssh", config: {
-        ...ssh.config, privateKeySecretRef: { type: "secret_ref", secretId: getId("secret", secretKey), version: "latest" },
+        ...ssh.config, privateKeyCredential: e.credential!,
       } }) });
       const syncRefs = async (environment: Environment) => {
         await secrets!.replaceSecretRefsForInstanceTarget({ targetType: "environment", targetId: environment.id },
           await collectEnvironmentSecretRefs({ db: tx, environment }));
         return environment.id;
       };
-      add({ kind: "environment", key, adopt: e.adopt, companyId, enabled: true, fields,
+      add({ kind: "environment", key, adopt: e.adopt, companyId: null, enabled: true, fields,
         create: async () => syncRefs(await svc!.create(fields())),
         update: async () => {
           const updated = await svc!.update(getId("environment", key), fields());
@@ -312,7 +307,8 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       claimed.add(resource);
       const binding = bindings.get(`${spec.kind}/${spec.key}`);
       if (spec.adopt && binding && spec.adopt !== binding.resourceId) throw new Error("Adoption cannot change a managed identity");
-      if (binding && binding.companyId !== spec.companyId) throw new Error("Moving managed resources between companies is unsupported");
+      // Environments became instance-level; an existing company-bound binding is migrated in place below.
+      if (binding && spec.kind !== "environment" && binding.companyId !== spec.companyId) throw new Error("Moving managed resources between companies is unsupported");
       if (binding && !binding.enabled && ["taskBridge", "operatorKey", "secret"].includes(spec.kind)) throw new Error("Removed credentials require a new declaration key");
       if (ledger.some((b) => b.kind === spec.kind && b.resourceId === spec.id && (b.owner !== m.owner || b.key !== spec.key))) throw new Error("Resource ownership conflict");
       const table = tables[spec.kind];
@@ -390,14 +386,21 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
       }
       const changed = changedFields(binding?.fields ?? {}, spec.fields());
       if (binding && (spec.kind === "taskBridge" || spec.kind === "operatorKey") && changed.length) throw new Error("Task bridge rotation requires a new declaration key and removal of the old key");
-      if (!binding || changed.length || binding.enabled !== spec.enabled) {
+      if (!binding || changed.length || binding.enabled !== spec.enabled || binding.companyId !== spec.companyId) {
         const action: DeploymentDifference = { kind: spec.kind, key: spec.key, action: !binding ? (spec.adopt ? "adopt" : "create") : "update", fields: changed };
         actions.set(spec, action); differences.push(action);
       }
     }
     const removed = owned.filter((b) => b.enabled && !specs.some((s) => s.kind === b.kind && s.key === b.key));
+    // A company dropped from the manifest releases everything bound inside it: the resources are
+    // disabled as before, then unbound so the operator can delete the company (the ownership
+    // guard rejects deleting any resource that still has a ledger row).
+    const releasedCompanies = new Set(removed.filter((b) => b.kind === "company").map((b) => b.resourceId));
+    const released = (b: (typeof removed)[number]) => b.kind === "company" || (b.companyId !== null && releasedCompanies.has(b.companyId));
+    // Already-disabled bindings inside a released company must be unbound too, or their ledger rows keep blocking its deletion.
+    const releasedDisabled = owned.filter((b) => !b.enabled && b.companyId !== null && releasedCompanies.has(b.companyId) && !specs.some((s) => s.kind === b.kind && s.key === b.key));
     if (removed.some((b) => b.kind === "environment")) throw new Error("Environment removal requires an explicit ownership handoff; retain the declaration to preserve execution references");
-    if (removed.some((b) => b.kind === "workspace")) throw new Error("Workspace removal requires an explicit ownership handoff; retain the declaration to preserve execution references");
+    if (removed.some((b) => b.kind === "workspace" && !released(b))) throw new Error("Workspace removal requires an explicit ownership handoff; retain the declaration to preserve execution references");
     for (const b of removed) differences.push({ kind: b.kind, key: b.key, action: "disable", fields: [] });
     if (options.descriptor.bootstrap && !actorId) differences.unshift({ kind: "operator", key: "bootstrap", action: "create", fields: [] });
     if (services) {
@@ -444,13 +447,28 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
         if (spec.kind === "company" && actor.userId && !binding) {
           await tx.insert(companyMemberships).values({ companyId, principalType: "user", principalId: actor.userId, status: "active", membershipRole: "owner" }).onConflictDoNothing();
         }
-        for (const auditCompanyId of spec.kind === "operatorKey" ? auditCompanies : [companyId]) await logActivity(tx, { companyId: auditCompanyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.reconciled", entityType: spec.kind, entityId: spec.id, details: { key: spec.key, fields: actions.get(spec)!.fields } }, publications);
+        for (const auditCompanyId of (spec.kind === "operatorKey" || spec.kind === "environment") ? auditCompanies : [companyId]) await services!.logActivity(tx, { companyId: auditCompanyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.reconciled", entityType: spec.kind, entityId: spec.id, details: { key: spec.key, fields: actions.get(spec)!.fields } }, publications);
       }
       for (const binding of removed) {
+        if (binding.kind === "secret" && /^environment-.+\.privateKey$/.test(binding.key)) {
+          // Superseded by the instance credential file: delete the company-held copy once no environment references it.
+          const [ref] = await tx.select({ id: environments.id }).from(environments)
+            .where(sql`${environments.config}->'privateKeySecretRef'->>'secretId' = ${binding.resourceId}`).limit(1);
+          if (!ref) {
+            await tx.delete(deploymentResources).where(and(eq(deploymentResources.owner, m.owner), eq(deploymentResources.kind, binding.kind), eq(deploymentResources.key, binding.key)));
+            await secrets!.remove(binding.resourceId);
+            continue;
+          }
+        }
         if (binding.kind === "agent") lifecycleAgents.add(binding.resourceId);
         await disableResource(tx, binding.kind as Kind, binding.resourceId, agentLifecycle!);
-        await tx.update(deploymentResources).set({ enabled: false }).where(and(eq(deploymentResources.owner, m.owner), eq(deploymentResources.kind, binding.kind), eq(deploymentResources.key, binding.key)));
-        for (const auditCompanyId of binding.kind === "operatorKey" ? auditCompanies : [binding.companyId ?? binding.resourceId]) await logActivity(tx, { companyId: auditCompanyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.disabled", entityType: binding.kind, entityId: binding.resourceId, details: { key: binding.key } }, publications);
+        const ledgerRow = and(eq(deploymentResources.owner, m.owner), eq(deploymentResources.kind, binding.kind), eq(deploymentResources.key, binding.key));
+        if (released(binding)) await tx.delete(deploymentResources).where(ledgerRow);
+        else await tx.update(deploymentResources).set({ enabled: false }).where(ledgerRow);
+        for (const auditCompanyId of (binding.kind === "operatorKey" || binding.kind === "environment") ? auditCompanies : [binding.companyId ?? binding.resourceId]) await services!.logActivity(tx, { companyId: auditCompanyId, actorType: "system", actorId: `deployment:${m.owner}`, action: "deployment.disabled", entityType: binding.kind, entityId: binding.resourceId, details: { key: binding.key } }, publications);
+      }
+      for (const binding of releasedDisabled) {
+        await tx.delete(deploymentResources).where(and(eq(deploymentResources.owner, m.owner), eq(deploymentResources.kind, binding.kind), eq(deploymentResources.key, binding.key)));
       }
     }
     return {
@@ -459,7 +477,7 @@ export async function reconcileDeployment(db: Db, raw: unknown, options: {
     };
    });
    for (const id of lifecycleAgents) services!.scheduleAgentLifecycle(db, id);
-   for (const publication of publications) publishAccountingActivities(publication.companyId, [publication]);
+   for (const publication of publications) services!.publishAccountingActivities(publication.companyId, [publication]);
    for (const effect of afterCommit) await effect();
    for (const companyId of budgetCompanies) {
      await services!.deliverBudgetEnforcement(db, {}, companyId);
