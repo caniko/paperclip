@@ -1857,11 +1857,13 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
   ) {
     const endpoint = await service.get(endpointId);
     let conversation: typeof chatConversations.$inferSelect | undefined;
+    // The setup write is real database IO; vi.waitFor's 1 s default is too
+    // short on a loaded runner. Match the file's other durable waits.
     await vi.waitFor(async () => {
       conversation = await readChatConversationsByEndpointId(endpointId)
         .then((rows) => rows.at(-1));
       expect(conversation).toBeDefined();
-    });
+    }, { timeout: 10_000 });
     if (!conversation) throw new Error("Expected setup conversation");
     const fakeRuntime = service.runtime as unknown as FakeChatSdkRuntime;
     const callbacks = fakeRuntime.configurations.get(endpointId)?.callbacks;
