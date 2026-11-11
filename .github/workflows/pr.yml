@@ -16,5 +16,5 @@ jobs:
     if: github.event.action != 'labeled' || github.event.label.name == 'profile-ci' || github.event.label.name == 'full-ci'
     # Expanded policy qualified on attempt 1 in run 39474414257 (511 source-bound cases).
     # Preserve the Stop commands qualified in run 39336767061; harness 2acfb196e3 qualified on attempt 1 in run 40941483197.
-    # 69c3c47b0b is that workflow plus lockfile changes accepted as CI's own resolution (branch ci/pr-trusted-pin-lock-ci-resolution).
-    uses: caniko/paperclip/.github/workflows/pr-trusted.yml@69c3c47b0bc74b4beca90008d68a9185125f7df5
+    # a7ce46964f is that workflow plus lockfile changes accepted as CI's own resolution (branch ci/pr-trusted-pin-lock-ci-resolution).
+    uses: caniko/paperclip/.github/workflows/pr-trusted.yml@a7ce46964fc64af6711b50107bdb3dac3952c03e
