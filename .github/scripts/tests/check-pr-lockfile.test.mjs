@@ -31,3 +31,8 @@ test('fails when lockfile changed by bot on wrong branch', () => {
   );
   assert.equal(result.passed, false);
 });
+
+test('defers to the trusted policy job in the fork', () => {
+  assert.equal(checkLockfile(makeFiles(['pnpm-lock.yaml']), 'someuser', 'fix/bug', 'caniko/paperclip').passed, true);
+  assert.equal(checkLockfile(makeFiles(['pnpm-lock.yaml']), 'someuser', 'fix/bug', 'paperclipai/paperclip').passed, false);
+});
