@@ -187,17 +187,14 @@ impl RuntimeNotifications {
             .mode(0o600)
             .open(pipe.0.with_extension("lock"))
             .map_err(failure)?;
-        let status = std::process::Command::new("/usr/bin/mkfifo")
-            .args(["-m", "600"])
-            .arg(&pipe.0)
-            .env_clear()
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_err(failure)?;
-        if !status.success() {
-            return Err(failure("cannot create activity pipe"));
-        }
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &pipe.0,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .map_err(failure)?;
         let reader = OpenOptions::new()
             .read(true)
             .write(true)
