@@ -6,8 +6,9 @@ import { notifyAttentionRetentionWork } from "./retention-work-notifications.js"
 import { notifySkillVersionPinChange } from "./skill-version-retention-notifications.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { notifyExternalConversationSettlement } from "./external-conversation-settlement-notifications.js";
-import { and, eq } from "drizzle-orm";
-import { assets, agentConfigRevisions, agentTaskSessions, agentRuntimeState, type Db } from "@paperclipai/db";
+import { isDeepStrictEqual } from "node:util";
+import { and, eq, sql } from "drizzle-orm";
+import { assets, agentConfigRevisions, agentTaskSessions, agentRuntimeState, deploymentResources, type Db } from "@paperclipai/db";
 import { normalizeAgentUrlKey } from "@paperclipai/shared";
 import { normalizePaperclipRunnerAdapterConfig } from "@paperclipai/adapter-utils/server-utils";
 import { conflict, notFound, unprocessable } from "../errors.js";
@@ -34,6 +35,8 @@ export async function prepareAgentConfiguration(db: Db, existing: AgentConfigura
       });
     }
   }
+
+  if (data.runtimeConfig !== undefined) await assertDeclaredRuntimeConfigUnchanged(db, existing, data.runtimeConfig);
 
   if (data.reportsTo !== undefined) {
     if (data.reportsTo) {
@@ -100,6 +103,33 @@ export async function prepareAgentConfiguration(db: Db, existing: AgentConfigura
   }
   assertEphemeralAgentInstructions({ ...existing, ...normalizedPatch });
   return normalizedPatch;
+}
+
+/**
+ * A deployment declaration owns its heartbeat keys and overflow list inside runtimeConfig.
+ * The schema guard only covers whole columns, so refuse those nested edits here unless the
+ * deployment itself applies them.
+ */
+async function assertDeclaredRuntimeConfigUnchanged(db: Db, existing: AgentConfigurationRecord, next: unknown) {
+  const [binding] = await db.select({ fields: deploymentResources.fields }).from(deploymentResources)
+    .where(and(eq(deploymentResources.kind, "agent"), eq(deploymentResources.resourceId, existing.id)));
+  if (!binding) return;
+  const record = (value: unknown) => (isPlainRecord(value) ? value : {});
+  const before = record(existing.runtimeConfig), after = record(next);
+  const changed = Object.keys(record(binding.fields.heartbeat))
+    .filter((key) => !isDeepStrictEqual(record(before.heartbeat)[key], record(after.heartbeat)[key]))
+    .map((key) => `heartbeat.${key}`);
+  if ("fallbackEnvironmentIds" in binding.fields && !isDeepStrictEqual(before.fallbackEnvironmentIds, after.fallbackEnvironmentIds)) {
+    changed.push("fallbackEnvironmentIds");
+  }
+  if (!changed.length) return;
+  const [setting] = await db.execute<{ apply: string | null }>(sql`select current_setting('paperclip.deployment_apply', true) as apply`);
+  if (setting?.apply === "on") return;
+  throw conflict("Declaratively owned field cannot be changed", {
+    code: "deployment_owned_runtime_config",
+    agentId: existing.id,
+    fields: changed,
+  });
 }
 
 export async function completeAgentConfiguration(txDb: Db, existing: AgentConfigurationRecord, updated: AgentConfigurationRecord, normalizedPatch: AgentConfigurationPatch, options: UpdateAgentOptions | undefined, publications: ActivityPublication[] | undefined) {

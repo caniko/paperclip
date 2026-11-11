@@ -18,6 +18,7 @@ import { resolveEnvironmentDriverConfigForRuntime } from "../services/environmen
 import { environmentService } from "../services/environments.js";
 import { projectService } from "../services/projects.js";
 import { resourceLifecycleEvents } from "@paperclipai/db";
+import { createAgentLifecycle } from "../services/agent-lifecycle.js";
 import { budgetService } from "../services/budgets.js";
 import * as liveEvents from "../services/live-events.js";
 
@@ -786,5 +787,18 @@ it("declares agent heartbeat policy and merges it without clobbering runtime key
   expect((await reconcile(changed)).differences.map((difference) => difference.fields)).toEqual([["runtimeConfig"]]);
   expect((await read("worker")).runtimeConfig).toEqual({ fallbackEnvironmentIds,
     heartbeat: { enabled: true, intervalSec: 600, maxConcurrentRuns: 20 } });
+  expect((await reconcile(changed)).differences).toEqual([]);
+  // Outside a deployment apply, the application refuses edits to declared keys but not to undeclared ones.
+  const lifecycle = createAgentLifecycle(db);
+  const worker = first.bindings["agent/worker"];
+  await expect(lifecycle.updateConfiguration(worker, { runtimeConfig: { fallbackEnvironmentIds,
+    heartbeat: { enabled: true, intervalSec: 60, maxConcurrentRuns: 20 } } }))
+    .rejects.toMatchObject({ status: 409, message: "Declaratively owned field cannot be changed" });
+  await expect(lifecycle.updateConfiguration(worker, { runtimeConfig: { fallbackEnvironmentIds,
+    heartbeat: { enabled: true, maxConcurrentRuns: 20 } } })).rejects.toMatchObject({ status: 409 });
+  await lifecycle.updateConfiguration(worker, { runtimeConfig: { fallbackEnvironmentIds: [],
+    heartbeat: { enabled: true, intervalSec: 600, maxConcurrentRuns: 5 } } });
+  expect((await read("worker")).runtimeConfig).toEqual({ fallbackEnvironmentIds: [],
+    heartbeat: { enabled: true, intervalSec: 600, maxConcurrentRuns: 5 } });
   expect((await reconcile(changed)).differences).toEqual([]);
 });
