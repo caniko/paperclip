@@ -801,4 +801,16 @@ it("declares agent heartbeat policy and merges it without clobbering runtime key
   expect((await read("worker")).runtimeConfig).toEqual({ fallbackEnvironmentIds: [],
     heartbeat: { enabled: true, intervalSec: 600, maxConcurrentRuns: 5 } });
   expect((await reconcile(changed)).differences).toEqual([]);
+  // Completing an adopted setup draft rewrites the row; declared keys stay protected there too.
+  const { companyId } = await read("worker");
+  const draftFields = { name: "Setup draft", role: "engineer", adapterType: "process", adapterConfig: { command: "true" } };
+  const draft = await lifecycle.requestHire(companyId, draftFields, { setupOnly: true, runnerResolved: true });
+  const adopting = structuredClone(changed) as typeof changed & { agents: Record<string, unknown> };
+  adopting.agents.draft = { company: "example", adopt: draft.id,
+    fields: { ...draftFields, runtimeConfig: { heartbeat: { enabled: true, intervalSec: 300 } } } };
+  await reconcile(adopting);
+  await expect(lifecycle.requestHire(companyId, { ...draftFields, runtimeConfig: { heartbeat: { enabled: false } } },
+    { setupAgentId: draft.id, runnerResolved: true })).rejects.toMatchObject({ status: 409 });
+  expect((await db.select().from(agents).where(eq(agents.id, draft.id)))[0]!.runtimeConfig)
+    .toMatchObject({ heartbeat: { enabled: true, intervalSec: 300 } });
 });

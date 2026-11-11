@@ -110,7 +110,7 @@ export async function prepareAgentConfiguration(db: Db, existing: AgentConfigura
  * The schema guard only covers whole columns, so refuse those nested edits here unless the
  * deployment itself applies them.
  */
-async function assertDeclaredRuntimeConfigUnchanged(db: Db, existing: AgentConfigurationRecord, next: unknown) {
+export async function assertDeclaredRuntimeConfigUnchanged(db: Db, existing: Pick<AgentConfigurationRecord, "id" | "runtimeConfig">, next: unknown) {
   const [binding] = await db.select({ fields: deploymentResources.fields }).from(deploymentResources)
     .where(and(eq(deploymentResources.kind, "agent"), eq(deploymentResources.resourceId, existing.id)));
   if (!binding) return;
