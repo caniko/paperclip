@@ -162,6 +162,14 @@ jobs:
                 exit 0
               fi
             done
+            # In this fork, CI may own the change itself: a step after pnpm setup
+            # regenerates the lock from the merge base and these manifests and
+            # accepts only that exact result, with no package added or changed.
+            if test "${GITHUB_REPOSITORY:-}" = caniko/paperclip; then
+              echo "No CI-owned import matches; CI will resolve the lock itself."
+              echo "PAPERCLIP_LOCK_FROM_CI_RESOLUTION=true" >> "$GITHUB_ENV"
+              exit 0
+            fi
             echo "Do not commit pnpm-lock.yaml in pull requests. CI owns lockfile updates."
             exit 1
           fi
@@ -181,6 +189,34 @@ jobs:
         with:
           version: 9.15.4
           run_install: false
+
+      - name: Require the committed lock to equal CI's own resolution
+        if: env.PAPERCLIP_LOCK_FROM_CI_RESOLUTION == 'true'
+        run: |
+          merge_base="$(git merge-base '${{ github.event.pull_request.base.sha }}' '${{ github.event.pull_request.head.sha }}')"
+          # Resolve with the merge base's pnpm configuration. The PR controls .npmrc,
+          # pnpm-workspace.yaml, .pnpmfile.cjs and nested packageManager fields; none of
+          # them may choose the lockfile location, the pnpm version or resolution hooks.
+          for file in pnpm-lock.yaml .npmrc pnpm-workspace.yaml; do
+            if git cat-file -e "$merge_base:$file" 2>/dev/null; then git show "$merge_base:$file" > "$file"; else rm -f "$file"; fi
+          done
+          npm_config_manage_package_manager_versions=false \
+            pnpm install --resolution-only --ignore-scripts --ignore-pnpmfile --lockfile-dir=. --no-frozen-lockfile
+          if ! git show '${{ github.event.pull_request.head.sha }}:pnpm-lock.yaml' | cmp -s - pnpm-lock.yaml; then
+            echo "pnpm-lock.yaml differs from CI's resolution of the merge-base lock and these manifests. CI owns lockfile updates."
+            exit 1
+          fi
+          # CI may record importer entries only. Adding, removing or re-resolving
+          # a package still waits for the lockfile bot on master.
+          resolved() { awk '/^[^ ]/ { section = $0 } section != "importers:"'; }
+          if ! cmp -s <(git show "$merge_base:pnpm-lock.yaml" | resolved) <(resolved < pnpm-lock.yaml); then
+            echo "The lock change adds, removes or re-resolves packages. CI owns lockfile updates."
+            exit 1
+          fi
+          echo "pnpm-lock.yaml equals CI's resolution and changes only importer entries"
+          for file in pnpm-lock.yaml .npmrc pnpm-workspace.yaml; do
+            if git cat-file -e "HEAD:$file" 2>/dev/null; then git checkout HEAD -- "$file"; else rm -f "$file"; fi
+          done
 
       - name: Validate migration ordering against target branch
         run: |
