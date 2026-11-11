@@ -1,6 +1,10 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import {
+  RUN_SCRATCH_PATH_ENV_KEYS,
+  RUN_SCRATCH_TEMP_ENV_KEYS,
+} from "@paperclipai/adapter-utils/run-scratch-env";
 
 export const HEARTBEAT_RUN_SCRATCH_MARKER = ".paperclip-run-scratch.json";
 
@@ -29,7 +33,6 @@ export type HeartbeatRunScratchCleanupResult =
   | { removed: true; dir: string }
   | { removed: false; dir: string; reason: "missing" | "unmarked" | "owner_mismatch" | "process_group_alive" };
 
-const TEMP_ENV_KEYS = ["TMPDIR", "TEMP", "TMP"] as const;
 const ISSUE_SEGMENT_MAX_CHARS = 32;
 
 function sanitizePathSegment(value: string | null | undefined, fallback: string): string {
@@ -106,14 +109,11 @@ export function buildHeartbeatRunScratchEnv(
   existingEnv: Record<string, unknown>,
   scratch: HeartbeatRunScratch,
 ): HeartbeatRunScratchEnvResult {
-  const env: Record<string, string> = {
-    PAPERCLIP_RUN_SCRATCH_DIR: scratch.dir,
-    PAPERCLIP_TASK_SCRATCH_DIR: scratch.dir,
-    PAPERCLIP_SCRATCH_DIR: scratch.dir,
-    PAPERCLIP_TMPDIR: scratch.dir,
-  };
+  const env: Record<string, string> = Object.fromEntries(
+    RUN_SCRATCH_PATH_ENV_KEYS.map((key) => [key, scratch.dir]),
+  );
   const tempKeysApplied: string[] = [];
-  for (const key of TEMP_ENV_KEYS) {
+  for (const key of RUN_SCRATCH_TEMP_ENV_KEYS) {
     const existing = existingEnv[key];
     if (typeof existing === "string" && existing.trim().length > 0) continue;
     env[key] = scratch.dir;

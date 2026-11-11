@@ -3,6 +3,7 @@ import { setTimeout } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import { asString, parseObject } from "@paperclipai/adapter-utils/server-utils";
+import { serverRunScratchEnv } from "@paperclipai/adapter-utils/run-scratch-env";
 import {
   adapterExecutionTargetRemoteCwd,
   readAdapterExecutionTarget,
@@ -42,7 +43,10 @@ type Receipt = Backend & {
 };
 
 export function validateManagedConfig(
-  ctx: Pick<AdapterExecutionContext, "config" | "executionTarget" | "onExecutionCheckpoint" | "onCancellationReady">,
+  ctx: Pick<
+    AdapterExecutionContext,
+    "config" | "context" | "executionTarget" | "onExecutionCheckpoint" | "onCancellationReady"
+  >,
 ) {
   if (!ctx.onExecutionCheckpoint || !ctx.onCancellationReady)
     throw new Error("Managed OpenCode requires durable execution checkpoint and cancellation hooks");
@@ -56,7 +60,15 @@ export function validateManagedConfig(
     [ctx.config.args, ctx.config.extraArgs].some((value) => Array.isArray(value) && value.length)
   )
     throw new Error("Managed OpenCode uses the backend's model configuration and native lifecycle arguments");
-  if (Object.keys(parseObject(ctx.config.env)).some((key) => !/^PAPERCLIP_[A-Z0-9_]+$/.test(key)))
+  // The server assigns run scratch paths (including temp dirs) to this run; only
+  // those server-owned values may reach the backend. Anything else stays personal.
+  const scratch = serverRunScratchEnv(ctx.context);
+  if (
+    Object.entries(parseObject(ctx.config.env)).some(
+      ([key, value]) =>
+        !/^PAPERCLIP_[A-Z0-9_]+$/.test(key) && !(scratch !== null && scratch.keys.has(key) && value === scratch.dir),
+    )
+  )
     throw new Error(
       "Managed OpenCode environment overrides must be Paperclip-scoped; personal HOME, XDG, authentication and configuration stay backend-owned",
     );

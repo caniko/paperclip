@@ -92,6 +92,7 @@ import {
   type PaperclipSkillEntry,
 } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
+import { serverRunScratchEnv } from "../run-scratch-env.js";
 import { createEphemeralSessionEnvironmentStore } from "./ephemeral-session-environment.js";
 import {
   createAcpRuntime,
@@ -2070,12 +2071,8 @@ async function buildRuntime(input: {
   // `env` above and are never present in shapedEnvConfig, so they inherently
   // stay out of the hash and don't reset the session every heartbeat.
   const resolvedAdapterEnv: Record<string, string> = {};
-  const scratch = parseObject(context.paperclipScratch);
-  const scratchKeys = scratch.type === "heartbeat_run" && typeof scratch.dir === "string"
-    ? new Set(["PAPERCLIP_RUN_SCRATCH_DIR", "PAPERCLIP_TASK_SCRATCH_DIR", "PAPERCLIP_SCRATCH_DIR", "PAPERCLIP_TMPDIR",
-      ...(Array.isArray(scratch.tempKeysApplied) ? scratch.tempKeysApplied.filter((key): key is string =>
-        typeof key === "string" && ["TMPDIR", "TEMP", "TMP"].includes(key)) : [])])
-    : new Set<string>();
+  const scratch = serverRunScratchEnv(context);
+  const scratchKeys = scratch?.keys ?? new Set<string>();
   for (const [key, value] of Object.entries(shapedEnvConfig)) {
     if (typeof value !== "string") continue;
     // Runtime PAPERCLIP_* always wins over config: skip a PAPERCLIP_* key that
@@ -2089,7 +2086,7 @@ async function buildRuntime(input: {
     // The server rotates run-owned scratch paths on every wake. Still forward
     // them, but only hash actual adapter settings. User-supplied temp overrides
     // are absent from tempKeysApplied and keep their compatibility protection.
-    if (!scratchKeys.has(key) || value !== scratch.dir) resolvedAdapterEnv[key] = value;
+    if (!scratchKeys.has(key) || value !== scratch?.dir) resolvedAdapterEnv[key] = value;
   }
   if (acpxAgent === "claude" && isOpenRouterUrl(env.ANTHROPIC_BASE_URL ?? process.env.ANTHROPIC_BASE_URL)) {
     env.ANTHROPIC_CUSTOM_HEADERS = openRouterClaudeHeaders(env.ANTHROPIC_CUSTOM_HEADERS ?? process.env.ANTHROPIC_CUSTOM_HEADERS);
