@@ -373,6 +373,13 @@ export async function stopNativeThread(input: NativeStopInput): Promise<string |
     return `Could not confirm that T3 Code thread ${input.threadId} stopped: ${reason}`;
   } finally {
     rpc?.close();
-    if (issued) await revokeNativeSession(input, issued.sessionId);
+    // Revocation must not stretch the stop window. It keeps running after the
+    // deadline, and the session's 5-minute TTL bounds a revocation that fails.
+    if (issued) {
+      await Promise.race([
+        revokeNativeSession(input, issued.sessionId),
+        sleep(Math.max(0, input.deadline - Date.now())),
+      ]);
+    }
   }
 }

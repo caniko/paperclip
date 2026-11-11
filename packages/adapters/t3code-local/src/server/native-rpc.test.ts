@@ -16,7 +16,8 @@ if (args[0] === "auth" && args[1] === "session" && args[2] === "issue") {
   process.stdout.write(JSON.stringify({ sessionId: "sess-1", token: "tok-secret" }, null, 2) + "\\n");
   process.exit(process.env.T3_FAKE_AUTH_EXIT ? Number(process.env.T3_FAKE_AUTH_EXIT) : 0);
 }
-process.exit(process.env.T3_FAKE_AUTH_EXIT ? Number(process.env.T3_FAKE_AUTH_EXIT) : 0);
+const revokeDelay = args[2] === "revoke" ? Number(process.env.T3_FAKE_REVOKE_DELAY_MS || 0) : 0;
+setTimeout(() => process.exit(process.env.T3_FAKE_AUTH_EXIT ? Number(process.env.T3_FAKE_AUTH_EXIT) : 0), revokeDelay);
 `;
 
 type StopFrame = { tag: string; payload: Record<string, unknown> };
@@ -288,25 +289,32 @@ describe("native T3 RPC stop", () => {
     expect(error).toContain("did not confirm within");
     expect(env.frames[0]!.tag).toBe("orchestration.dispatchCommand");
     expect(env.frames.some((frame) => frame.tag === "orchestration.getThreadProjection")).toBe(true);
-    expect((await env.authCalls()).at(-1)!.args).toEqual(["auth", "session", "revoke", "sess-1"]);
+    // Revocation continues after the stop window closes.
+    await vi.waitFor(async () =>
+      expect((await env.authCalls()).at(-1)!.args).toEqual(["auth", "session", "revoke", "sess-1"]));
   });
 
   it("keeps the stop unverified while the projection still has an active run", async () => {
-    const env = await setup();
+    // A slow revocation must not hold the reported stop past its deadline.
+    const env = await setup({ env: { T3_FAKE_REVOKE_DELAY_MS: "1500" } });
     env.serve([active]);
+    const deadline = Date.now() + 300;
     const error = await stopNativeThread({
       runId: "run-1",
       command: env.command,
       cwd: os.tmpdir(),
       env: env.env,
       threadId: "thr-1",
-      deadline: Date.now() + 300,
+      deadline,
       pollMs: 20,
     });
 
     expect(error).toContain("T3 Code did not confirm within 1s that thread thr-1 stopped.");
+    // Session revocation must not extend the stop window it reports on.
+    expect(Date.now() - deadline).toBeLessThan(250);
     expect(env.frames[0]!.tag).toBe("orchestration.dispatchCommand");
-    expect((await env.authCalls()).at(-1)!.args).toEqual(["auth", "session", "revoke", "sess-1"]);
+    await vi.waitFor(async () =>
+      expect((await env.authCalls()).at(-1)!.args).toEqual(["auth", "session", "revoke", "sess-1"]));
   });
 
   it("does not connect when it cannot issue an auth session", async () => {
