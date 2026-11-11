@@ -118,7 +118,8 @@ jobs:
         run: |
           merge_base="$(git merge-base '${{ github.event.pull_request.base.sha }}' '${{ github.event.pull_request.head.sha }}')"
           git show "$merge_base:pnpm-lock.yaml" > pnpm-lock.yaml
-          pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
+          # The PR controls .pnpmfile.cjs and .npmrc; their hooks must not shape CI's result.
+          pnpm install --resolution-only --ignore-scripts --ignore-pnpmfile --no-frozen-lockfile
           if ! git show '${{ github.event.pull_request.head.sha }}:pnpm-lock.yaml' | cmp -s - pnpm-lock.yaml; then
             echo "pnpm-lock.yaml differs from CI's resolution of the merge-base lock and these manifests. CI owns lockfile updates."
             exit 1
