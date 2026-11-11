@@ -331,10 +331,18 @@ export async function stopNativeThread(input: NativeStopInput): Promise<string |
   let issued: IssuedSession | null = null;
   let rpc: NativeRpcConnection | null = null;
   try {
-    issued = await issueNativeSession(
+    // The helper's whole-second timeout and kill grace can outlast the deadline.
+    // Stop waiting at the deadline and revoke a session that is issued later.
+    const issuing = issueNativeSession(
       input,
       Math.min(HELPER_TIMEOUT_SEC, Math.max(1, Math.ceil((input.deadline - Date.now()) / 1000))),
     );
+    const onTime = await Promise.race([issuing, sleep(Math.max(0, input.deadline - Date.now())).then(() => null)]);
+    if (!onTime) {
+      issuing.then((late) => revokeNativeSession(input, late.sessionId), () => undefined);
+      return notConfirmed();
+    }
+    issued = onTime;
     rpc = await openNativeRpc(origin, issued.token, Math.min(RPC_OPEN_TIMEOUT_MS, Math.max(1, input.deadline - Date.now())));
     try {
       await rpc.request(DISPATCH_COMMAND, {

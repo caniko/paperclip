@@ -13,8 +13,11 @@ const dir = process.env.T3_FAKE_DIR;
 const args = process.argv.slice(2);
 fs.appendFileSync(path.join(dir, "auth-calls.jsonl"), JSON.stringify({ args }) + "\\n");
 if (args[0] === "auth" && args[1] === "session" && args[2] === "issue") {
-  process.stdout.write(JSON.stringify({ sessionId: "sess-1", token: "tok-secret" }, null, 2) + "\\n");
-  process.exit(process.env.T3_FAKE_AUTH_EXIT ? Number(process.env.T3_FAKE_AUTH_EXIT) : 0);
+  setTimeout(() => {
+    process.stdout.write(JSON.stringify({ sessionId: "sess-1", token: "tok-secret" }, null, 2) + "\\n");
+    process.exit(process.env.T3_FAKE_AUTH_EXIT ? Number(process.env.T3_FAKE_AUTH_EXIT) : 0);
+  }, Number(process.env.T3_FAKE_ISSUE_DELAY_MS || 0));
+  return;
 }
 const revokeDelay = args[2] === "revoke" ? Number(process.env.T3_FAKE_REVOKE_DELAY_MS || 0) : 0;
 setTimeout(() => process.exit(process.env.T3_FAKE_AUTH_EXIT ? Number(process.env.T3_FAKE_AUTH_EXIT) : 0), revokeDelay);
@@ -315,6 +318,27 @@ describe("native T3 RPC stop", () => {
     expect(env.frames[0]!.tag).toBe("orchestration.dispatchCommand");
     await vi.waitFor(async () =>
       expect((await env.authCalls()).at(-1)!.args).toEqual(["auth", "session", "revoke", "sess-1"]));
+  });
+
+  it("stops waiting for a slow auth helper at the deadline and revokes the late session", async () => {
+    const env = await setup({ env: { T3_FAKE_ISSUE_DELAY_MS: "700" } });
+    env.serve([stopped]);
+    const deadline = Date.now() + 300;
+    const error = await stopNativeThread({
+      runId: "run-1",
+      command: env.command,
+      cwd: os.tmpdir(),
+      env: env.env,
+      threadId: "thr-1",
+      deadline,
+      pollMs: 20,
+    });
+
+    expect(error).toContain("did not confirm within");
+    expect(Date.now() - deadline).toBeLessThan(250);
+    expect(env.frames).toEqual([]);
+    await vi.waitFor(async () =>
+      expect((await env.authCalls()).at(-1)!.args).toEqual(["auth", "session", "revoke", "sess-1"]), { timeout: 3000 });
   });
 
   it("does not connect when it cannot issue an auth session", async () => {
