@@ -187,6 +187,9 @@ impl RuntimeNotifications {
             .mode(0o600)
             .open(pipe.0.with_extension("lock"))
             .map_err(failure)?;
+        // rustix has no mknodat on Apple targets; macOS always ships
+        // /usr/bin/mkfifo, while NixOS and other Linux hosts may not.
+        #[cfg(not(target_vendor = "apple"))]
         rustix::fs::mknodat(
             rustix::fs::CWD,
             &pipe.0,
@@ -195,6 +198,20 @@ impl RuntimeNotifications {
             0,
         )
         .map_err(failure)?;
+        #[cfg(target_vendor = "apple")]
+        {
+            let status = std::process::Command::new("/usr/bin/mkfifo")
+                .args(["-m", "600"])
+                .arg(&pipe.0)
+                .env_clear()
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map_err(failure)?;
+            if !status.success() {
+                return Err(failure("cannot create activity pipe"));
+            }
+        }
         let reader = OpenOptions::new()
             .read(true)
             .write(true)
