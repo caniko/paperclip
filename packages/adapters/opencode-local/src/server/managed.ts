@@ -80,8 +80,9 @@ export async function executeManaged(
   const id = createHash("sha256").update(`${ctx.agent.companyId}\0${ctx.agent.id}\0${ctx.runId}`).digest("hex");
   const model = asString(ctx.config.model, "").trim();
   const slash = model.indexOf("/");
-  if (slash <= 0 || slash === model.length - 1)
-    throw new Error("Managed OpenCode requires a provider/model identifier");
+  // Variants are backend-owned (see validateManagedConfig); OpenCode would split "#variant" out of the id.
+  if (slash <= 0 || slash === model.length - 1 || model.includes("#"))
+    throw new Error("Managed OpenCode requires a provider/model identifier without a variant");
   const body = JSON.stringify({
     version: 1,
     backendID: backend.backendID,
@@ -89,7 +90,7 @@ export async function executeManaged(
     sessionID: `ses_external_${id}`,
     inputID: `msg_external_${id}`,
     location: { directory: adapterExecutionTargetRemoteCwd(target, input.cwd) },
-    model: { provider: model.slice(0, slash), model: model.slice(slash + 1) },
+    model: { providerID: model.slice(0, slash), id: model.slice(slash + 1) },
     environment: input.environment,
     prompt: { text: input.prompt, files: input.files.map((file) => ({ uri: pathToFileURL(file).href })) },
   });
@@ -224,6 +225,10 @@ export async function reconcileExecution(raw: Record<string, unknown>): Promise<
       body.inputID !== admission.inputID
     )
       return "pending";
+    // Checkpoints from before the Model.Ref fix carry model as { provider, model }. OpenCode decodes model as
+    // Model.Ref and rejects excess properties, so such a body was never admitted and owns nothing.
+    const model = body.model;
+    if (model && typeof model === "object" && "provider" in model && !("providerID" in model)) return "settled";
     const receipt = readReceipt(await control(admission, "stop"), admission);
     return receipt.stopRequested && receipt.settled ? "settled" : "pending";
   } catch {

@@ -136,6 +136,8 @@ it("checkpoints exact admission before dispatch and uses the managed backend wit
   const body = JSON.parse(String(checkpoint.body));
   expect(body.environment.PAPERCLIP_API_KEY).toBe("paperclip-token");
   expect(body.prompt.text).toContain("Owned task");
+  // OpenCode decodes this as Model.Ref; any other shape fails admission and Stop.
+  expect(body.model).toEqual({ providerID: "openai", id: "gpt-6.1-sol" });
   expect(body.environment).not.toHaveProperty("HOME");
   expect(body.environment).not.toHaveProperty("XDG_CONFIG_HOME");
   expect(f.requests.filter((value) => value.body).every((value) => value.body === checkpoint.body)).toBe(true);
@@ -163,6 +165,30 @@ it("reconciles controller recovery from the immutable checkpoint and refuses cha
   const before = control.mock.calls.length;
   expect(await reconcileExecution({ ...f.checkpoint(), body: `${f.checkpoint().body} ` })).toBe("pending");
   expect(control.mock.calls).toHaveLength(before);
+});
+
+it("settles a pre-Model.Ref checkpoint without contacting the backend", async () => {
+  const f = await fixture();
+  await execute(f.ctx);
+  const legacy = JSON.parse(String(f.checkpoint().body));
+  legacy.model = { provider: "openai", model: "gpt-6.1-sol" };
+  const body = JSON.stringify(legacy);
+  const before = control.mock.calls.length;
+  expect(
+    await reconcileExecution({
+      ...f.checkpoint(),
+      body,
+      bodySha256: createHash("sha256").update(body).digest("hex"),
+    }),
+  ).toBe("settled");
+  expect(control.mock.calls).toHaveLength(before);
+});
+
+it("refuses a model variant before checkpointing", async () => {
+  const f = await fixture();
+  f.ctx.config.model = "openai/gpt-6.1-sol#high";
+  await expect(execute(f.ctx)).rejects.toThrow("without a variant");
+  expect(f.operations).not.toContain("checkpoint");
 });
 
 it("keeps an uncertain Stop pending and rejects another backend's settlement", async () => {
