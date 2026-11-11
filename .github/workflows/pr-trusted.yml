@@ -117,9 +117,14 @@ jobs:
         if: env.PAPERCLIP_LOCK_FROM_CI_RESOLUTION == 'true'
         run: |
           merge_base="$(git merge-base '${{ github.event.pull_request.base.sha }}' '${{ github.event.pull_request.head.sha }}')"
-          git show "$merge_base:pnpm-lock.yaml" > pnpm-lock.yaml
-          # The PR controls .pnpmfile.cjs and .npmrc; their hooks must not shape CI's result.
-          pnpm install --resolution-only --ignore-scripts --ignore-pnpmfile --no-frozen-lockfile
+          # Resolve with the merge base's pnpm configuration. The PR controls .npmrc,
+          # pnpm-workspace.yaml, .pnpmfile.cjs and nested packageManager fields; none of
+          # them may choose the lockfile location, the pnpm version or resolution hooks.
+          for file in pnpm-lock.yaml .npmrc pnpm-workspace.yaml; do
+            if git cat-file -e "$merge_base:$file" 2>/dev/null; then git show "$merge_base:$file" > "$file"; else rm -f "$file"; fi
+          done
+          npm_config_manage_package_manager_versions=false \
+            pnpm install --resolution-only --ignore-scripts --ignore-pnpmfile --lockfile-dir=. --no-frozen-lockfile
           if ! git show '${{ github.event.pull_request.head.sha }}:pnpm-lock.yaml' | cmp -s - pnpm-lock.yaml; then
             echo "pnpm-lock.yaml differs from CI's resolution of the merge-base lock and these manifests. CI owns lockfile updates."
             exit 1
@@ -132,7 +137,9 @@ jobs:
             exit 1
           fi
           echo "pnpm-lock.yaml equals CI's resolution and changes only importer entries"
-          git checkout -- pnpm-lock.yaml
+          for file in pnpm-lock.yaml .npmrc pnpm-workspace.yaml; do
+            if git cat-file -e "HEAD:$file" 2>/dev/null; then git checkout HEAD -- "$file"; else rm -f "$file"; fi
+          done
 
       - name: Validate migration ordering against target branch
         run: |
