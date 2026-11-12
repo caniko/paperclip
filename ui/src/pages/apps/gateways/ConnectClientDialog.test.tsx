@@ -66,6 +66,24 @@ vi.mock("@/components/SearchableSelect", () => ({
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+async function flushReact(): Promise<void> {
+  await new Promise((resolve) => window.setTimeout(resolve, 0));
+}
+
+async function waitForAssertion(assertion: () => void): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await flushReact();
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
 function storedToken(): ToolMcpGatewayToken {
   return {
     id: "token-1",
@@ -78,7 +96,8 @@ function storedToken(): ToolMcpGatewayToken {
     clientLabel: "research-client",
     ownerNote: "",
     allowedActions: ["tools/list", "tools/call"],
-    expiresAt: "2026-12-01T00:00:00.000Z",
+    // Keep the token valid relative to the run; a fixed date expires the fixture forever after that date.
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
     expiryOverrideReason: null,
     expiryOverrideByUserId: null,
     expiryOverrideByAgentId: null,
@@ -173,13 +192,20 @@ describe("ConnectClientDialog", () => {
         </QueryClientProvider>,
       );
     });
-    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    await flushReact();
 
     expect(container.textContent).toContain("does not give it access to Paperclip or skills");
-    const copyButton = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Copy");
-    if (!copyButton) throw new Error("snippet copy button missing");
-    copyButton.click();
-    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    const copyButton = () => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent?.trim() === "Copy");
+    // The snippet copy button stays disabled until the token-selection effect commits, so wait
+    // for it instead of assuming one macrotask is enough on a loaded worker.
+    await waitForAssertion(() => {
+      const button = copyButton();
+      if (!button) throw new Error("snippet copy button missing");
+      expect(button.disabled).toBe(false);
+    });
+    copyButton()?.click();
+    await flushReact();
 
     expect(copyTextMock).toHaveBeenCalledWith(expect.stringContaining('"Authorization": "Bearer pcgw_FULL_SECRET"'));
     expect(copyTextMock).toHaveBeenCalledWith(expect.stringContaining(
