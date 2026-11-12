@@ -127,10 +127,11 @@ jobs:
           for file in pnpm-lock.yaml .npmrc pnpm-workspace.yaml; do
             if git cat-file -e "$merge_base:$file" 2>/dev/null; then git show "$merge_base:$file" > "$resolution/$file"; else rm -f "$resolution/$file"; fi
           done
-          # The lockfile directory and pnpm version flags are defence in depth on top of
-          # the merge base's configuration; hooks and lifecycle scripts never run.
+          # The merge base's .npmrc fixes the lockfile location. Do not pass --lockfile-dir:
+          # pnpm 9.15.4 then omits the root package.json's overrides from the lock. The pnpm
+          # version flag is defence in depth; hooks and lifecycle scripts never run.
           (cd "$resolution" && npm_config_manage_package_manager_versions=false \
-            pnpm install --resolution-only --ignore-scripts --ignore-pnpmfile --lockfile-dir=. --no-frozen-lockfile)
+            pnpm install --resolution-only --ignore-scripts --ignore-pnpmfile --no-frozen-lockfile)
           if ! git show '${{ github.event.pull_request.head.sha }}:pnpm-lock.yaml' | cmp -s - "$resolution/pnpm-lock.yaml"; then
             echo "pnpm-lock.yaml differs from CI's resolution of the merge-base lock and this PR's manifests. CI owns lockfile updates."
             exit 1
