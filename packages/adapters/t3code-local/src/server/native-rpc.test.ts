@@ -516,4 +516,32 @@ describe("native thread projection state", () => {
       turnItems: [{ type: "command_execution", status: "completed" }, { type: "assistant_message" }],
     })).toBe(true);
   });
+
+  it("treats a missing or unknown background status as still running", () => {
+    const settled = { runs: [{ status: "interrupted" }], providerTurns: [], subagents: [] };
+
+    // Command items: only known inactive statuses settle; missing and unknown fail closed.
+    expect(isNativeThreadStopped({ ...settled, turnItems: [{ type: "command_execution" }] })).toBe(false);
+    expect(isNativeThreadStopped({
+      ...settled,
+      turnItems: [{ type: "command_execution", status: "new_unknown_state" }],
+    })).toBe(false);
+    // Provider threads: same rule for the thread status.
+    expect(isNativeThreadStopped({ ...settled, providerThreads: [{ pendingBackgroundTasks: [] }] })).toBe(false);
+    expect(isNativeThreadStopped({
+      ...settled,
+      providerThreads: [{ status: "new_unknown_state", pendingBackgroundTasks: [] }],
+    })).toBe(false);
+
+    // Every known terminal status still confirms.
+    for (const status of ["idle", "completed", "failed", "cancelled", "interrupted"]) {
+      expect(isNativeThreadStopped({ ...settled, turnItems: [{ type: "command_execution", status }] })).toBe(true);
+    }
+    for (const status of ["not_loaded", "idle", "archived", "closed", "error"]) {
+      expect(isNativeThreadStopped({
+        ...settled,
+        providerThreads: [{ status, pendingBackgroundTasks: [] }],
+      })).toBe(true);
+    }
+  });
 });

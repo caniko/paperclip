@@ -39,11 +39,24 @@ const INACTIVE_SUBAGENT_STATUSES = new Set([
   "cancelled",
   "interrupted",
 ]);
-// Live states from OrchestrationV2ProviderThread.status and OrchestrationV2TurnItemStatus
-// in packages/contracts/src/orchestrationV2.ts. A terminal run or turn can still own work
-// in these, because thread.stop queues the interruption instead of completing it inline.
-const LIVE_PROVIDER_THREAD_STATUSES = new Set(["active"]);
-const ACTIVE_COMMAND_STATUSES = new Set(["pending", "running", "waiting"]);
+// Inactive states from OrchestrationV2ProviderThread.status and
+// OrchestrationV2TurnItemStatus in packages/contracts/src/orchestrationV2.ts. A terminal
+// run or turn can still own background work, because thread.stop queues the interruption
+// instead of completing it inline. A missing or unknown status stays unconfirmed.
+const INACTIVE_PROVIDER_THREAD_STATUSES = new Set([
+  "not_loaded",
+  "idle",
+  "archived",
+  "closed",
+  "error",
+]);
+const INACTIVE_COMMAND_STATUSES = new Set([
+  "idle",
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
 
 type JsonRecord = Record<string, unknown>;
 
@@ -301,9 +314,10 @@ function backgroundWorkIsDrained(projection: JsonRecord): boolean {
   if (Array.isArray(providerThreads)) {
     for (const entry of providerThreads) {
       const providerThread = asRecord(entry);
-      if (!providerThread) continue;
+      if (!providerThread) return false;
       if (hasPendingBackgroundTasks(providerThread)) return false;
-      if (typeof providerThread.status === "string" && LIVE_PROVIDER_THREAD_STATUSES.has(providerThread.status)) {
+      if (typeof providerThread.status !== "string"
+        || !INACTIVE_PROVIDER_THREAD_STATUSES.has(providerThread.status)) {
         return false;
       }
     }
@@ -312,9 +326,8 @@ function backgroundWorkIsDrained(projection: JsonRecord): boolean {
   if (!Array.isArray(items)) return true;
   return items.every((item) => {
     const record = asRecord(item);
-    return record?.type !== "command_execution"
-      || typeof record.status !== "string"
-      || !ACTIVE_COMMAND_STATUSES.has(record.status);
+    if (!record || record.type !== "command_execution") return true;
+    return typeof record.status === "string" && INACTIVE_COMMAND_STATUSES.has(record.status);
   });
 }
 
