@@ -12,21 +12,33 @@ test("generated Nix concurrency isolates forks but coalesces the same source bra
   const group = nix.match(/^  group: (.+)$/m)?.[1];
   assert.ok(group);
   assert.match(nix, /^  cancel-in-progress: true$/m);
-  const key = (repository, ref, pullRequest = false) => group.replace(/\$\{\{ (.*?) \}\}/g, (_, expression) => {
-    const context = {
-      "github.workflow": "Nix installable builds",
-      "github.repository": pullRequest ? "caniko/paperclip" : repository,
-      "github.ref_name": pullRequest ? "4/merge" : ref,
-      "github.event.pull_request.head.repo.full_name": pullRequest ? repository : "",
-      "github.event.pull_request.head.ref": pullRequest ? ref : "",
-    };
-    const operands = expression.split(" || ");
-    for (const operand of operands) assert.ok(Object.hasOwn(context, operand), operand);
-    return operands.map((operand) => context[operand]).find(Boolean);
-  });
-  assert.notEqual(key("alice/paperclip", "fix", true), key("bob/paperclip", "fix", true));
-  assert.notEqual(key("alice/paperclip", "fix", true), key("alice/paperclip", "other", true));
-  assert.equal(key("alice/paperclip", "fix", true), key("alice/paperclip", "fix"));
+  // `workflow_ref` carries the event ref, so a pull request is keyed by its
+  // unique merge ref: two forks with a same-named branch never share a group.
+  // `event_name` keeps a filtered push run from cancelling a pull request.
+  const key = (repository, ref, pullRequest = false, number = 4) =>
+    group.replace(/\$\{\{ (.*?) \}\}/g, (_, expression) => {
+      const context = {
+        "github.workflow": "Nix installable builds",
+        "github.workflow_ref": pullRequest
+          ? `caniko/paperclip/.github/workflows/nix-builds.yaml@refs/pull/${number}/merge`
+          : `${repository}/.github/workflows/nix-builds.yaml@refs/heads/${ref}`,
+        "github.event_name": pullRequest ? "pull_request" : "push",
+        "github.head_ref": pullRequest ? ref : "",
+        "github.repository": pullRequest ? "caniko/paperclip" : repository,
+        "github.ref_name": pullRequest ? `${number}/merge` : ref,
+        "github.event.pull_request.head.repo.full_name": pullRequest ? repository : "",
+        "github.event.pull_request.head.ref": pullRequest ? ref : "",
+      };
+      const operands = expression.split(" || ");
+      for (const operand of operands) assert.ok(Object.hasOwn(context, operand), operand);
+      return operands.map((operand) => context[operand]).find(Boolean);
+    });
+  assert.notEqual(key("alice/paperclip", "fix", true, 10), key("bob/paperclip", "fix", true, 11));
+  assert.notEqual(key("alice/paperclip", "fix", true, 10), key("alice/paperclip", "other", true, 12));
+  assert.notEqual(key("alice/paperclip", "fix", true, 10), key("alice/paperclip", "fix"));
+  // Coalescing stays commit-independent: pushes to one branch share a group,
+  // so a newer commit replaces the previous run instead of queueing behind it.
+  assert.doesNotMatch(group, /github\.(?:sha|run_id|run_number|run_attempt)\b/);
 });
 
 test("PR workflows restore dependency stores without creating branch copies", () => {
