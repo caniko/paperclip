@@ -279,11 +279,13 @@ and 32 days retention; the receipt binds harness SHA-256
 failed runs on the previous harness remain failed evidence. This is Stop-lane
 qualification, not full application acceptance.
 
-The caller now pins `a7ce46964fc64af6711b50107bdb3dac3952c03e` (branch
+The caller now pins `8b24d50ab43739857aa436e7a3f664168429efec` (branch
 `ci/pr-trusted-pin-lock-ci-resolution`): `1339fe2ddeed9149bdb4ecb1e3a2144eed539e23`
 plus the fork's lockfile acceptance. A lock change with no CI-owned provenance is
 accepted only when it equals CI's own resolution of the merge-base lock and the PR's
-manifests and changes nothing but importer entries. The policy job's diff from the
+manifests and changes nothing but importer entries. (The earlier pin `a7ce46964f`
+passed `--lockfile-dir=.`, which made pnpm drop the root overrides and refuse every
+such change.) The policy job's diff from the
 previous pin is that step change alone; the native Stop job and its qualified bytes
 are unchanged.
 

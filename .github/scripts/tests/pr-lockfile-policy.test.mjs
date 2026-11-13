@@ -134,7 +134,8 @@ test("CI's lock resolution uses real pnpm and ignores PR-controlled pnpm hooks",
   const commit = message => { git("add", "-A"); git("commit", "-q", "-m", message); return git("rev-parse", "HEAD"); };
   git("init", "-q", "-b", "main");
   write(".gitignore", ".store\n.cache\n");
-  write("package.json", '{"name":"fixture","private":true}\n');
+  // Like this repository, the fixture root declares pnpm overrides; CI's resolution must keep them.
+  write("package.json", '{"name":"fixture","private":true,"pnpm":{"overrides":{"left-pad":"1.3.0"}}}\n');
   write("pnpm-workspace.yaml", 'packages:\n  - "packages/*"\n');
   write("packages/a/package.json", '{"name":"a","version":"1.0.0"}\n');
   write("packages/b/package.json", '{"name":"b","version":"1.0.0"}\n');
