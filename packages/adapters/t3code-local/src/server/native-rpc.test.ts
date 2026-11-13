@@ -320,6 +320,65 @@ describe("native T3 RPC stop", () => {
       expect((await env.authCalls()).at(-1)!.args).toEqual(["auth", "session", "revoke", "sess-1"]));
   });
 
+  it("waits for a delayed background interruption before confirming the stop", async () => {
+    const env = await setup();
+    const interruptedRunWithBackgroundWork = {
+      runs: [{ status: "interrupted" }],
+      providerTurns: [{ status: "interrupted" }],
+      subagents: [],
+      providerThreads: [{ status: "active", pendingBackgroundTasks: [{ taskId: "task-1", kind: "command" }] }],
+      turnItems: [{ type: "command_execution", status: "running" }],
+    };
+    const drained = {
+      runs: [{ status: "interrupted" }],
+      providerTurns: [{ status: "interrupted" }],
+      subagents: [],
+      providerThreads: [{ status: "idle", pendingBackgroundTasks: [] }],
+      turnItems: [{ type: "command_execution", status: "interrupted" }],
+    };
+    env.serve([interruptedRunWithBackgroundWork, interruptedRunWithBackgroundWork, drained]);
+
+    const error = await stopNativeThread({
+      runId: "run-1",
+      command: env.command,
+      cwd: os.tmpdir(),
+      env: env.env,
+      threadId: "thr-1",
+      deadline: Date.now() + 2_000,
+      pollMs: 20,
+    });
+
+    expect(error).toBeNull();
+    // One projection showed the terminal run with live background work; the stop
+    // is only confirmed after a later projection drains it.
+    const reads = env.frames.filter((frame) => frame.tag === "orchestration.getThreadProjection");
+    expect(reads.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("keeps the stop unverified when a background interruption fails", async () => {
+    const env = await setup();
+    env.serve([{
+      runs: [{ status: "interrupted" }],
+      providerTurns: [{ status: "interrupted" }],
+      subagents: [],
+      providerThreads: [{ status: "active", pendingBackgroundTasks: [{ taskId: "task-1", kind: "command" }] }],
+      turnItems: [{ type: "command_execution", status: "running" }],
+    }]);
+
+    const error = await stopNativeThread({
+      runId: "run-1",
+      command: env.command,
+      cwd: os.tmpdir(),
+      env: env.env,
+      threadId: "thr-1",
+      deadline: Date.now() + 400,
+      pollMs: 20,
+    });
+
+    expect(error).toContain("T3 Code did not confirm within 1s that thread thr-1 stopped.");
+    expect(env.frames.some((frame) => frame.tag === "orchestration.getThreadProjection")).toBe(true);
+  });
+
   it("stops waiting for a slow auth helper at the deadline and revokes the late session", async () => {
     const env = await setup({ env: { T3_FAKE_ISSUE_DELAY_MS: "700" } });
     env.serve([stopped]);
@@ -421,5 +480,40 @@ describe("native thread projection state", () => {
     expect(isNativeThreadStopped(null)).toBe(false);
     expect(isNativeThreadStopped({})).toBe(false);
     expect(isNativeThreadStopped({ runs: [{}], providerTurns: [], subagents: [] })).toBe(false);
+  });
+
+  it("holds the stop while background work drains and fails closed when it does not", () => {
+    const settled = { runs: [{ status: "interrupted" }], providerTurns: [], subagents: [] };
+    const pendingTask = { taskId: "task-1", kind: "command", description: "npm test" };
+
+    // A terminal run can still own a pending background task on its provider thread.
+    expect(isNativeThreadStopped({
+      ...settled,
+      providerThreads: [{ status: "active", pendingBackgroundTasks: [pendingTask] }],
+    })).toBe(false);
+    expect(isNativeThreadStopped({
+      ...settled,
+      providerThreads: [{ status: "active", pendingBackgroundTasks: [] }],
+    })).toBe(false);
+    expect(isNativeThreadStopped({
+      ...settled,
+      providerThreads: [{ status: "idle", pendingBackgroundTasks: [pendingTask] }],
+    })).toBe(false);
+    // The thread shell carries the same list when the server exposes it.
+    expect(isNativeThreadStopped({ ...settled, thread: { pendingBackgroundTasks: [pendingTask] } })).toBe(false);
+    // A command item stays active after its run reached a terminal state.
+    for (const status of ["pending", "running", "waiting"]) {
+      expect(isNativeThreadStopped({
+        ...settled,
+        turnItems: [{ type: "command_execution", status }],
+      })).toBe(false);
+    }
+
+    expect(isNativeThreadStopped({
+      ...settled,
+      thread: { pendingBackgroundTasks: [] },
+      providerThreads: [{ status: "idle", pendingBackgroundTasks: [] }],
+      turnItems: [{ type: "command_execution", status: "completed" }, { type: "assistant_message" }],
+    })).toBe(true);
   });
 });

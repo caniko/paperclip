@@ -39,6 +39,11 @@ const INACTIVE_SUBAGENT_STATUSES = new Set([
   "cancelled",
   "interrupted",
 ]);
+// Live states from OrchestrationV2ProviderThread.status and OrchestrationV2TurnItemStatus
+// in packages/contracts/src/orchestrationV2.ts. A terminal run or turn can still own work
+// in these, because thread.stop queues the interruption instead of completing it inline.
+const LIVE_PROVIDER_THREAD_STATUSES = new Set(["active"]);
+const ACTIVE_COMMAND_STATUSES = new Set(["pending", "running", "waiting"]);
 
 type JsonRecord = Record<string, unknown>;
 
@@ -285,12 +290,41 @@ function itemsAreIdle(projection: JsonRecord, key: string, inactiveStatuses: Set
   });
 }
 
+function hasPendingBackgroundTasks(record: JsonRecord): boolean {
+  return Array.isArray(record.pendingBackgroundTasks) && record.pendingBackgroundTasks.length > 0;
+}
+
+function backgroundWorkIsDrained(projection: JsonRecord): boolean {
+  const thread = asRecord(projection.thread);
+  if (thread && hasPendingBackgroundTasks(thread)) return false;
+  const providerThreads = projection.providerThreads;
+  if (Array.isArray(providerThreads)) {
+    for (const entry of providerThreads) {
+      const providerThread = asRecord(entry);
+      if (!providerThread) continue;
+      if (hasPendingBackgroundTasks(providerThread)) return false;
+      if (typeof providerThread.status === "string" && LIVE_PROVIDER_THREAD_STATUSES.has(providerThread.status)) {
+        return false;
+      }
+    }
+  }
+  const items = projection.turnItems;
+  if (!Array.isArray(items)) return true;
+  return items.every((item) => {
+    const record = asRecord(item);
+    return record?.type !== "command_execution"
+      || typeof record.status !== "string"
+      || !ACTIVE_COMMAND_STATUSES.has(record.status);
+  });
+}
+
 export function isNativeThreadStopped(projection: unknown): boolean {
   const record = asRecord(projection);
   if (!record) return false;
   return itemsAreIdle(record, "runs", INACTIVE_RUN_STATUSES)
     && itemsAreIdle(record, "providerTurns", INACTIVE_PROVIDER_TURN_STATUSES)
-    && itemsAreIdle(record, "subagents", INACTIVE_SUBAGENT_STATUSES);
+    && itemsAreIdle(record, "subagents", INACTIVE_SUBAGENT_STATUSES)
+    && backgroundWorkIsDrained(record);
 }
 
 function remainingTimeoutMs(deadline: number): number {
@@ -314,8 +348,9 @@ export interface NativeStopInput extends NativeSessionContext {
 
 /**
  * Stops a thread through the server's own RPC command and waits until its
- * projection shows no active run, provider turn, or subagent. Returns an error
- * string instead of claiming a stop the server did not confirm.
+ * projection shows no active run, provider turn, subagent, or background work
+ * (pending background tasks and active command items). Returns an error string
+ * instead of claiming a stop the server did not confirm.
  */
 export async function stopNativeThread(input: NativeStopInput): Promise<string | null> {
   const pollMs = input.pollMs ?? STOP_POLL_MS;
