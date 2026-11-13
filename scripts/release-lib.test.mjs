@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -405,4 +405,31 @@ test("every publish job budgets for build time and four delayed packages", () =>
     const timeoutMinutes = Number(body.match(/^    timeout-minutes: (\d+)$/m)?.[1]);
     assert.ok(timeoutMinutes * 60 > requiredSeconds, `${job} must leave time beyond build and polling`);
   }
+});
+
+function runPendingBootstrapGuard(packageName, dryRun = "false") {
+  return spawnSync("bash", [
+    "-c",
+    'set -euo pipefail; source "$1/scripts/release-lib.sh"; reject_pending_bootstrap_publish "$2" "$3"',
+    "bash",
+    repoRoot,
+    packageName,
+    dryRun,
+  ], { encoding: "utf8" });
+}
+
+test("a real publish refuses pending-bootstrap packages while dry runs and other packages proceed", () => {
+  // The real publish loop calls the guard before any publish work.
+  assert.match(
+    readFileSync(new URL("../scripts/release.sh", import.meta.url), "utf8"),
+    /reject_pending_bootstrap_publish "\$pkg_name" "\$dry_run"/,
+  );
+
+  const refused = runPendingBootstrapGuard("@paperclipai/adapter-t3code-local", "false");
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /@paperclipai\/adapter-t3code-local/);
+  assert.match(refused.stderr, /fork-only package pending bootstrap/);
+
+  assert.equal(runPendingBootstrapGuard("@paperclipai/adapter-t3code-local", "true").status, 0);
+  assert.equal(runPendingBootstrapGuard("@paperclipai/server", "false").status, 0);
 });

@@ -209,7 +209,11 @@ function main(changedPaths) {
 }
 
 if (process.argv[1] && normalizePath(process.argv[1]).endsWith("scripts/check-release-package-bootstrap.mjs")) {
-  main(process.argv.slice(2));
+  if (process.argv.includes("--pending-bootstrap")) {
+    for (const name of PENDING_BOOTSTRAP_PACKAGES) process.stdout.write(`${name}\n`);
+  } else {
+    main(process.argv.slice(2));
+  }
 }
 
 export {
