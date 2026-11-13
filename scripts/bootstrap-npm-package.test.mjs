@@ -3,12 +3,23 @@ import test from "node:test";
 
 import {
   PLACEHOLDER_VERSION,
+  assertBootstrapAllowed,
   buildPlaceholderFiles,
   parseArgs,
   promptOtp,
   validatePackageName,
   waitForPackageVisible,
 } from "./bootstrap-npm-package.mjs";
+
+test("a real bootstrap publish of a pending-bootstrap package is refused", () => {
+  assert.throws(
+    () => assertBootstrapAllowed("@paperclipai/adapter-t3code-local", true),
+    /fork-only package pending bootstrap/,
+  );
+  // A dry run still stages the placeholder, and other packages are unaffected.
+  assert.doesNotThrow(() => assertBootstrapAllowed("@paperclipai/adapter-t3code-local", false));
+  assert.doesNotThrow(() => assertBootstrapAllowed("@paperclipai/adapter-kimi-local", true));
+});
 
 test("parseArgs recognizes the publish flag", () => {
   assert.deepEqual(parseArgs(["@paperclipai/adapter-kimi-local", "--publish"]), {

@@ -39,6 +39,25 @@ reject_pending_bootstrap_publish() {
   return 0
 }
 
+# Preflight the whole plan before the first publish, so a plan that contains a
+# pending-bootstrap package fails as a unit instead of after earlier packages
+# already advanced their dist-tags.
+assert_publish_plan_allowed() {
+  local package_info="$1"
+  local dry_run="${2:-false}"
+
+  if [ "$dry_run" = "true" ]; then
+    return 0
+  fi
+
+  local pkg_dir pkg_name pkg_version
+  while IFS=$'\t' read -r pkg_dir pkg_name pkg_version; do
+    [ -z "$pkg_dir" ] && continue
+    reject_pending_bootstrap_publish "$pkg_name" "false"
+  done <<< "$package_info"
+  return 0
+}
+
 git_remote_exists() {
   git -C "$REPO_ROOT" remote get-url "$1" >/dev/null 2>&1
 }

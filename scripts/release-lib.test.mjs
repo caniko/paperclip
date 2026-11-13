@@ -418,6 +418,47 @@ function runPendingBootstrapGuard(packageName, dryRun = "false") {
   ], { encoding: "utf8" });
 }
 
+function runPublishPlanPreflight(plan, dryRun = "false") {
+  const script = [
+    "set -euo pipefail",
+    'source "$1/scripts/release-lib.sh"',
+    "publish_calls=0",
+    'publish_package_to_npm() { publish_calls=$((publish_calls + 1)); }',
+    'set_dist_tag() { publish_calls=$((publish_calls + 1)); }',
+    'assert_publish_plan_allowed "$2" "$3"',
+    'echo "publish_calls=$publish_calls"',
+  ].join("\n");
+  return spawnSync("bash", ["-c", script, "bash", repoRoot, plan, dryRun], { encoding: "utf8" });
+}
+
+test("a non-dry-run release plan with a pending-bootstrap package fails before any publish", () => {
+  // The preflight runs before the publish loop, so no publisher or dist-tag
+  // call can happen for a plan that contains the fork-only adapter.
+  const releaseScript = readFileSync(new URL("../scripts/release.sh", import.meta.url), "utf8");
+  assert.ok(
+    releaseScript.indexOf('assert_publish_plan_allowed "$VERSIONED_PACKAGE_INFO" "$dry_run"')
+      < releaseScript.indexOf('release_info "  Publishing $pkg_name@$pkg_version"'),
+  );
+
+  const plan = [
+    "packages/adapters/kimi-local\t@paperclipai/adapter-kimi-local\t1.0.0",
+    "packages/adapters/t3code-local\t@paperclipai/adapter-t3code-local\t0.3.1",
+  ].join("\n");
+
+  const refused = runPublishPlanPreflight(plan);
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /@paperclipai\/adapter-t3code-local/);
+  assert.doesNotMatch(refused.stdout, /publish_calls=/);
+
+  const dryRun = runPublishPlanPreflight(plan, "true");
+  assert.equal(dryRun.status, 0);
+  assert.match(dryRun.stdout, /publish_calls=0/);
+
+  const unaffected = runPublishPlanPreflight("packages/adapters/kimi-local\t@paperclipai/adapter-kimi-local\t1.0.0");
+  assert.equal(unaffected.status, 0);
+  assert.match(unaffected.stdout, /publish_calls=0/);
+});
+
 test("a real publish refuses pending-bootstrap packages while dry runs and other packages proceed", () => {
   // The real publish loop calls the guard before any publish work.
   assert.match(
