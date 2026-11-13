@@ -90,13 +90,6 @@ const RESOLVED_DEP_SECTIONS = ["dependencies", "optionalDependencies", "peerDepe
 // publish, so the rewritten spec points at a version that will never exist on npm and
 // the package becomes uninstallable. Detect those edges so the release fails fast
 // instead of shipping a broken canary (e.g. server -> skills-catalog from #8327).
-//
-// Fork-only packages that cannot be published under the upstream @paperclipai scope
-// stay out of CI release enrollment and are listed here by name. Published
-// server/ui/cli would need them on npm first; remove an entry when the package is
-// published or upstreamed.
-const PENDING_BOOTSTRAP_DEPENDENCIES = new Set(["@paperclipai/adapter-t3code-local"]);
-
 function findUnpublishableWorkspaceEdges(packages) {
   const publishFromCiByName = new Map(packages.map((pkg) => [pkg.name, pkg.publishFromCi]));
   const problems = [];
@@ -112,8 +105,6 @@ function findUnpublishableWorkspaceEdges(packages) {
         if (!depName.startsWith("@paperclipai/")) continue;
         if (typeof spec !== "string" || !spec.startsWith("workspace:")) continue;
         if (publishFromCiByName.get(depName) === true) continue;
-        // The exception only covers a package that is present and deliberately disabled.
-        if (PENDING_BOOTSTRAP_DEPENDENCIES.has(depName) && publishFromCiByName.get(depName) === false) continue;
 
         problems.push(
           `${pkg.name} (${pkg.dir}) is publishFromCi:true but declares a "${section}" workspace dependency on ${depName}, ` +

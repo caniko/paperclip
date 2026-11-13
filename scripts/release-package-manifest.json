@@ -52,7 +52,7 @@
   {
     "dir": "packages/adapters/t3code-local",
     "name": "@paperclipai/adapter-t3code-local",
-    "publishFromCi": false
+    "publishFromCi": true
   },
   {
     "dir": "packages/adapters/opencode-local",
