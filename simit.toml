@@ -7,6 +7,11 @@ nix_builds = [".#checks.x86_64-linux.hermes-worker-env"]
 
 [ci.nix_build]
 only = true
+# Qualify each change once: the integration branch keeps its post-merge push
+# run while pull requests qualify their own heads. A wildcard here also ran a
+# push for every PR head in the same concurrency group, so the PR run
+# cancelled it and left a red cancelled check.
+push_branches = ["integration/nixpkgs-567242-all-prs-20260930"]
 timeout_minutes = 30
 max_parallel = 1
 max_jobs = 1
