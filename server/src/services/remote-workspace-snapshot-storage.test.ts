@@ -86,7 +86,13 @@ suite("remote workspace snapshot storage", () => {
   it("rejects object corruption and leaves the requested plaintext path unpublished", async () => {
     const f = await fixture(), ref = await uploadWorkspaceSnapshot(f.upload);
     const objectPath = path.join(root, "objects", ref.objectKey), object = await fs.open(objectPath, "r+");
-    try { await object.write(Buffer.from("X"), 0, 1, 15); } finally { await object.close(); }
+    try {
+      // Complement the byte instead of overwriting it with a constant: the header IV is random,
+      // so a fixed replacement matches the original about once in 256 runs and the load succeeds.
+      const original = Buffer.alloc(1);
+      await object.read(original, 0, 1, 15);
+      await object.write(Buffer.from([original[0] ^ 0xff]), 0, 1, 15);
+    } finally { await object.close(); }
     const targetPath = path.join(root, "corrupted.pcws");
     await expect(loadWorkspaceSnapshotArchive({ storage, reference: ref, targetPath })).rejects.toThrow("object_hash_mismatch");
     await expect(fs.access(targetPath)).rejects.toMatchObject({ code: "ENOENT" });
