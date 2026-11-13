@@ -137,6 +137,36 @@ test("guard ignores non-workspace specs, non-internal deps, and edges from off-t
   assert.deepEqual(problems, []);
 });
 
+test("guard allows only the named pending-bootstrap dependency on a disabled package", () => {
+  const problems = findUnpublishableWorkspaceEdges([
+    pkg("@paperclipai/server", {
+      publishFromCi: true,
+      dependencies: {
+        "@paperclipai/adapter-t3code-local": "workspace:*",
+        "@paperclipai/not-listed-yet": "workspace:*",
+      },
+    }),
+    pkg("@paperclipai/adapter-t3code-local", { publishFromCi: false }),
+    pkg("@paperclipai/not-listed-yet", { publishFromCi: false }),
+  ]);
+
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /@paperclipai\/not-listed-yet/);
+  assert.doesNotMatch(problems[0], /adapter-t3code-local/);
+});
+
+test("guard does not let the pending-bootstrap exception hide a package that is absent", () => {
+  const problems = findUnpublishableWorkspaceEdges([
+    pkg("@paperclipai/server", {
+      publishFromCi: true,
+      dependencies: { "@paperclipai/adapter-t3code-local": "workspace:*" },
+    }),
+  ]);
+
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /@paperclipai\/adapter-t3code-local/);
+});
+
 test("the live release manifest has no unpublishable workspace edges", () => {
   assert.deepEqual(findUnpublishableWorkspaceEdges(buildReleasePackagePlan()), []);
 });
