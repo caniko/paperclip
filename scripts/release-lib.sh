@@ -17,6 +17,47 @@ release_fail() {
   exit 1
 }
 
+# Fork-only packages keep their closure entry but must never be published from here:
+# the fork has no npm credentials for the @paperclipai scope, and a failed attempt is
+# still a publication attempt. Names come from check-release-package-bootstrap.mjs so
+# the exemption lives in one place. Dry runs and pack/verify paths are unaffected.
+reject_pending_bootstrap_publish() {
+  local package_name="$1"
+  local dry_run="${2:-false}"
+
+  if [ "$dry_run" = "true" ]; then
+    return 0
+  fi
+
+  local pending_list
+  if ! pending_list="$(node "$REPO_ROOT/scripts/check-release-package-bootstrap.mjs" --pending-bootstrap)"; then
+    release_fail "could not read the pending-bootstrap package list"
+  fi
+  if printf '%s\n' "$pending_list" | grep -Fxq -- "$package_name"; then
+    release_fail "refusing to publish ${package_name}: it is a fork-only package pending bootstrap, and this fork never publishes the @paperclipai scope"
+  fi
+  return 0
+}
+
+# Preflight the whole plan before the first publish, so a plan that contains a
+# pending-bootstrap package fails as a unit instead of after earlier packages
+# already advanced their dist-tags.
+assert_publish_plan_allowed() {
+  local package_info="$1"
+  local dry_run="${2:-false}"
+
+  if [ "$dry_run" = "true" ]; then
+    return 0
+  fi
+
+  local pkg_dir pkg_name pkg_version
+  while IFS=$'\t' read -r pkg_dir pkg_name pkg_version; do
+    [ -z "$pkg_dir" ] && continue
+    reject_pending_bootstrap_publish "$pkg_name" "false"
+  done <<< "$package_info"
+  return 0
+}
+
 git_remote_exists() {
   git -C "$REPO_ROOT" remote get-url "$1" >/dev/null 2>&1
 }

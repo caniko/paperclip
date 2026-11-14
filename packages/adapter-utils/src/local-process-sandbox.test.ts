@@ -487,6 +487,9 @@ describe("local process sandbox", () => {
 
       expect(result.exitCode, result.stderr).toBe(0);
     },
+    // The case compiles the package inside the sandbox; the child allows 60s,
+    // so the default 5s test timeout cannot cover it.
+    120_000,
   );
 
   it.runIf(Boolean(process.env.PAPERCLIP_TEST_BWRAP))(

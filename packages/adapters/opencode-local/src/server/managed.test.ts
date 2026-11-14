@@ -12,7 +12,7 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async (importOriginal) =>
 
 import { runAdapterExecutionTargetProcess } from "@paperclipai/adapter-utils/execution-target";
 import { execute } from "./execute.js";
-import { reconcileExecution } from "./managed.js";
+import { reconcileExecution, validateManagedConfig } from "./managed.js";
 
 const control = vi.mocked(runAdapterExecutionTargetProcess);
 const directories: string[] = [];
@@ -294,4 +294,20 @@ it("requires durable lifecycle hooks and preserves personal permission configura
     /permission/i,
   );
   expect(control).not.toHaveBeenCalled();
+});
+
+it("accepts the run scratch env the server injected but not a personal temp override", async () => {
+  const f = await fixture();
+  const dir = path.join(String(f.ctx.config.cwd), "run-scratch");
+  const scratch = { type: "heartbeat_run", dir, tempKeysApplied: ["TMPDIR", "TEMP", "TMP"] };
+  const validate = (env: Record<string, string>, context: Record<string, unknown>) =>
+    validateManagedConfig({ ...f.ctx, context, config: { ...f.ctx.config, env } });
+  const serverEnv = { TMPDIR: dir, TEMP: dir, TMP: dir, PAPERCLIP_RUN_SCRATCH_DIR: dir };
+  // Rejecting these makes every managed run fail before OpenCode starts.
+  expect(() => validate(serverEnv, { paperclipScratch: scratch })).not.toThrow();
+  // A temp dir the run config set itself is not server-owned and stays personal.
+  expect(() => validate({ ...serverEnv, TMPDIR: "/custom/tmp" }, { paperclipScratch: scratch })).toThrow(
+    /Paperclip-scoped/,
+  );
+  expect(() => validate(serverEnv, f.ctx.context)).toThrow(/Paperclip-scoped/);
 });

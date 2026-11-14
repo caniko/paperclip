@@ -392,8 +392,10 @@ if [ "$dry_run" = true ]; then
   release_info "  [dry-run] Would create git tag $tag_name on $CURRENT_SHA"
 else
   release_info "==> Step 5/7: Publishing packages to npm..."
+  assert_publish_plan_allowed "$VERSIONED_PACKAGE_INFO" "$dry_run"
   while IFS=$'\t' read -r pkg_dir pkg_name pkg_version; do
     [ -z "$pkg_dir" ] && continue
+    reject_pending_bootstrap_publish "$pkg_name" "$dry_run"
     release_info "  Publishing $pkg_name@$pkg_version"
     cd "$REPO_ROOT/$pkg_dir"
     publish_tool="$(package_publish_tool)"

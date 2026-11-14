@@ -49,6 +49,22 @@ describe("deployment manifest", () => {
       { ...manifest, environments: { local: { ...local, fields: { ...local.fields, config: { capacity: { maxConcurrentRuns: 1 }, host: "x" } } }, nomad: ssh } },
     ]) expect(deploymentManifestSchema.safeParse(invalid).success).toBe(false);
   });
+  it("declares only the agent heartbeat policy inside runtimeConfig", () => {
+    const heartbeat = { enabled: true, intervalSec: 300, wakeOnDemand: true, skipTimerWhenNoActionableWork: true,
+      maxDailyRuns: 5, maxConcurrentRuns: 2 };
+    const manifest = { version: 1, owner: "deployment", companies: { example: company },
+      agents: { worker: { ...agent, fields: { ...agent.fields, runtimeConfig: { heartbeat } } } } };
+    expect(deploymentManifestSchema.parse(manifest).agents.worker.fields.runtimeConfig).toEqual({ heartbeat });
+    for (const runtimeConfig of [
+      { heartbeat, fallbackEnvironmentIds: [] },
+      { heartbeat: { ...heartbeat, unknown: true } },
+      { heartbeat: { intervalSec: -1 } },
+      { heartbeat: { maxConcurrentRuns: 0 } },
+      { heartbeat: { enabled: "yes" } },
+    ]) expect(deploymentManifestSchema.safeParse({ ...manifest,
+      agents: { worker: { ...manifest.agents.worker, fields: { ...agent.fields, runtimeConfig } } },
+    }).success).toBe(false);
+  });
   it("keeps omitted fields absent instead of applying native create defaults", () => {
     const parsed = deploymentManifestSchema.parse({ version: 1, owner: "deployment", companies: { example: company }, agents: { worker: agent } });
     expect(parsed.companies.example.fields).toEqual({ name: "Example" });

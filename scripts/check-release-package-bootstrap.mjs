@@ -142,6 +142,33 @@ function collectReleasePackagesForChangedPaths(
   return changedReleasePackages;
 }
 
+// A fork-only adapter has no upstream counterpart, and this fork has no npm credentials
+// for the @paperclipai scope, so the package can never be published from here. Skip only
+// the "does not exist on npm yet" failure for these exact names; registry failures and
+// every other check still run. Remove an entry when the package is published or upstreamed.
+export const PENDING_BOOTSTRAP_PACKAGES = new Set(["@paperclipai/adapter-t3code-local"]);
+
+export function classifyChangedPackages(changedReleasePackages, inspect = inspectNpmPackage) {
+  const missingPackages = [];
+  const registryFailures = [];
+
+  for (const pkg of changedReleasePackages) {
+    const npmStatus = inspect(pkg.name);
+
+    if (npmStatus.status === "missing") {
+      if (PENDING_BOOTSTRAP_PACKAGES.has(pkg.name)) continue;
+      missingPackages.push(pkg);
+      continue;
+    }
+
+    if (npmStatus.status === "registry_error") {
+      registryFailures.push({ pkg, detail: npmStatus.detail });
+    }
+  }
+
+  return { missingPackages, registryFailures };
+}
+
 function main(changedPaths) {
   const releasePackages = buildReleasePackagePlan();
   const baseReleaseState = getBaseReleaseState(process.env.PAPERCLIP_RELEASE_BOOTSTRAP_BASE_SHA, releasePackages);
@@ -152,21 +179,7 @@ function main(changedPaths) {
     return;
   }
 
-  const missingPackages = [];
-  const registryFailures = [];
-
-  for (const pkg of changedReleasePackages) {
-    const npmStatus = inspectNpmPackage(pkg.name);
-
-    if (npmStatus.status === "missing") {
-      missingPackages.push(pkg);
-      continue;
-    }
-
-    if (npmStatus.status === "registry_error") {
-      registryFailures.push({ pkg, detail: npmStatus.detail });
-    }
-  }
+  const { missingPackages, registryFailures } = classifyChangedPackages(changedReleasePackages);
 
   if (missingPackages.length > 0) {
     const details = missingPackages
@@ -196,7 +209,11 @@ function main(changedPaths) {
 }
 
 if (process.argv[1] && normalizePath(process.argv[1]).endsWith("scripts/check-release-package-bootstrap.mjs")) {
-  main(process.argv.slice(2));
+  if (process.argv.includes("--pending-bootstrap")) {
+    for (const name of PENDING_BOOTSTRAP_PACKAGES) process.stdout.write(`${name}\n`);
+  } else {
+    main(process.argv.slice(2));
+  }
 }
 
 export {

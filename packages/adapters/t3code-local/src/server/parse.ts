@@ -47,15 +47,6 @@ export function parseT3RunResult(stdout: string): T3RunResult | null {
   return null;
 }
 
-export function parseT3StopStatus(stdout: string): string | null {
-  const lines = stdout.split(/\r?\n/);
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const record = parseJsonObject(lines[index]!);
-    if (record && typeof record.status === "string") return record.status;
-  }
-  return null;
-}
-
 export function parseT3ThreadList(stdout: string): Array<{ threadId: string; title: string }> | null {
   const line = stdout.split(/\r?\n/).reverse().find((candidate) => candidate.trim().startsWith("["));
   if (!line) return null;
@@ -93,10 +84,6 @@ export function isT3ProjectNotFound(text: string): boolean {
 
 export function isT3ThreadNotFound(text: string): boolean {
   return /thread\b[^\n]*\bwas not found|is not a thread id/i.test(text);
-}
-
-export function isT3CommandUnsupported(text: string): boolean {
-  return /\b(unknown|unrecognized|invalid)\s+(sub)?command\b/i.test(text);
 }
 
 export function firstNonEmptyLine(text: string): string {

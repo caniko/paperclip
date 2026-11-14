@@ -17,6 +17,7 @@ import { secretService, assertClaudeOAuthBindingInvariant } from "./secrets.js";
 import { agentCredentialService } from "./agent-credentials.js";
 import { agentIdentityService } from "./agent-identity.js";
 import { initializePrimaryAgent } from "./primary-agent.js";
+import { assertDeclaredRuntimeConfigUnchanged } from "./agent-configuration.js";
 import { resolveAgentRunnerTaskDriverForCompany, resolveNewAgentRunnerForCompany } from "./agent-runner-selection.js";
 
 export async function prepareAgentHire(db: Db, companyId: string, input: CreateAgentData, options?: CreateAgentOptions): Promise<CreateAgentData> {
@@ -59,7 +60,13 @@ export async function prepareAgentHire(db: Db, companyId: string, input: CreateA
     childAdapterConfig: adapterConfig, claudeLogin: options?.claudeLogin,
     decision: assertClaudeOAuthBindingInvariant({ adapterType, nextConfig: adapterConfig }),
   });
-  if (options?.setupAgentId) await notifySkillVersionRetention(db, companyId);
+  if (options?.setupAgentId) {
+    // Completing a setup draft rewrites an existing row, so declared keys stay protected here too.
+    const [setup] = await db.select({ id: agents.id, runtimeConfig: agents.runtimeConfig }).from(agents)
+      .where(eq(agents.id, options.setupAgentId));
+    if (setup) await assertDeclaredRuntimeConfigUnchanged(db, setup, runtimeConfig);
+    await notifySkillVersionRetention(db, companyId);
+  }
   return { ...data, name: uniqueName,
     appearance: data.appearance == null ? randomAgentAppearance() : agentAppearanceSchema.parse(data.appearance),
     role, adapterType, adapterConfig, permissions: normalizedPermissions, runtimeConfig };
@@ -103,6 +110,7 @@ export async function initializeAgentHire(txDb: Db, created: AgentHireRecord, op
 export async function prepareAgentHireApproval(txDb: Db, existing: AgentHireRecord, approvedPayload?: Record<string, unknown> | null): Promise<AgentConfigurationPatch> {
   const approvedPatch = approvedPayload ? configPatchFromApprovalPayload(approvedPayload) : {};
   const patch = { ...approvedPatch } as AgentConfigurationPatch;
+  if (patch.runtimeConfig !== undefined) await assertDeclaredRuntimeConfigUnchanged(txDb, existing, patch.runtimeConfig);
   const hasApprovedAdapterConfig = Object.prototype.hasOwnProperty.call(patch, "adapterConfig") && isPlainRecord(patch.adapterConfig);
   if (
     Object.prototype.hasOwnProperty.call(patch, "adapterConfig") &&

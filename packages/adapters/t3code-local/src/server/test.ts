@@ -91,6 +91,17 @@ export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promi
     message: `T3 Code CLI ${firstNonEmptyLine(version.stdout) || "found"}.`,
   });
 
+  const authHelp = await probe(["auth", "session", "issue", "--help"]);
+  if (authHelp.exitCode !== 0) {
+    checks.push({
+      code: "t3code_native_stop_unsupported",
+      level: "error",
+      message: "This `t3` CLI has no `t3 auth session issue` command, so Paperclip cannot confirm a stopped T3 Code turn.",
+      detail: firstNonEmptyLine(authHelp.stderr) || null,
+      hint: "Update T3 Code to nightly 0.1.8-nightly.20261107.4327 or later.",
+    });
+  }
+
   const list = await probe(["thread", "list", "--json"]);
   if (list.exitCode === 0) {
     checks.push({ code: "t3code_server_reachable", level: "info", message: "The T3 Code server is running." });

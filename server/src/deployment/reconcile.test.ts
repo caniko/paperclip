@@ -18,6 +18,7 @@ import { resolveEnvironmentDriverConfigForRuntime } from "../services/environmen
 import { environmentService } from "../services/environments.js";
 import { projectService } from "../services/projects.js";
 import { resourceLifecycleEvents } from "@paperclipai/db";
+import { createAgentLifecycle } from "../services/agent-lifecycle.js";
 import { budgetService } from "../services/budgets.js";
 import * as liveEvents from "../services/live-events.js";
 
@@ -752,4 +753,64 @@ it("adopts the instance-local environment and owns only the agent overflow list"
   await run(cleared);
   const [updated] = await db.select().from(agents).where(eq(agents.id, agentId));
   expect(updated.runtimeConfig).toMatchObject({ heartbeat: { enabled: false }, fallbackEnvironmentIds: [] });
+});
+
+it("declares agent heartbeat policy and merges it without clobbering runtime keys", async () => {
+  const declaration = { version: 1, owner: "agent-heartbeat", companies: { example: { fields: { name: "Agent heartbeat" } } },
+    agents: {
+      worker: { company: "example", fields: { name: "Heartbeat worker", adapterType: "process", adapterConfig: { command: "true" },
+        runtimeConfig: { heartbeat: { enabled: true, intervalSec: 300 } } } },
+      plain: { company: "example", fields: { name: "Plain worker", adapterType: "process", adapterConfig: { command: "true" } } },
+    },
+  };
+  const first = await reconcile(declaration);
+  const read = async (key: string) => (await db.select().from(agents).where(eq(agents.id, first.bindings[`agent/${key}`])))[0];
+  expect((await read("worker")).runtimeConfig).toMatchObject({ heartbeat: { enabled: true, intervalSec: 300 } });
+  const plainRuntimeConfig = (await read("plain")).runtimeConfig;
+  expect((await reconcile(declaration)).differences).toEqual([]);
+  expect((await reconcile(declaration, false)).differences).toEqual([]);
+  // Application-managed keys survive when the declaration does not own them.
+  const fallbackEnvironmentIds = ["00000000-0000-4000-8000-000000000001"];
+  await db.update(agents).set({ runtimeConfig: { fallbackEnvironmentIds, heartbeat: { enabled: true, intervalSec: 300, maxConcurrentRuns: 20 } } })
+    .where(eq(agents.id, first.bindings["agent/worker"]));
+  expect((await reconcile(declaration)).differences).toEqual([]);
+  const changed = structuredClone(declaration);
+  changed.agents.worker.fields.runtimeConfig.heartbeat.intervalSec = 600;
+  expect((await reconcile(changed)).differences.map((difference) => difference.fields)).toEqual([["heartbeat"]]);
+  expect((await read("worker")).runtimeConfig).toEqual({ fallbackEnvironmentIds,
+    heartbeat: { enabled: true, intervalSec: 600, maxConcurrentRuns: 20 } });
+  expect((await read("plain")).runtimeConfig).toEqual(plainRuntimeConfig);
+  expect((await reconcile(changed)).differences).toEqual([]);
+  // A live change to a declared key is restored; undeclared keys still survive.
+  await db.update(agents).set({ runtimeConfig: { fallbackEnvironmentIds, heartbeat: { enabled: true, intervalSec: 900, maxConcurrentRuns: 20 } } })
+    .where(eq(agents.id, first.bindings["agent/worker"]));
+  expect((await reconcile(changed)).differences.map((difference) => difference.fields)).toEqual([["runtimeConfig"]]);
+  expect((await read("worker")).runtimeConfig).toEqual({ fallbackEnvironmentIds,
+    heartbeat: { enabled: true, intervalSec: 600, maxConcurrentRuns: 20 } });
+  expect((await reconcile(changed)).differences).toEqual([]);
+  // Outside a deployment apply, the application refuses edits to declared keys but not to undeclared ones.
+  const lifecycle = createAgentLifecycle(db);
+  const worker = first.bindings["agent/worker"];
+  await expect(lifecycle.updateConfiguration(worker, { runtimeConfig: { fallbackEnvironmentIds,
+    heartbeat: { enabled: true, intervalSec: 60, maxConcurrentRuns: 20 } } }))
+    .rejects.toMatchObject({ status: 409, message: "Declaratively owned field cannot be changed" });
+  await expect(lifecycle.updateConfiguration(worker, { runtimeConfig: { fallbackEnvironmentIds,
+    heartbeat: { enabled: true, maxConcurrentRuns: 20 } } })).rejects.toMatchObject({ status: 409 });
+  await lifecycle.updateConfiguration(worker, { runtimeConfig: { fallbackEnvironmentIds: [],
+    heartbeat: { enabled: true, intervalSec: 600, maxConcurrentRuns: 5 } } });
+  expect((await read("worker")).runtimeConfig).toEqual({ fallbackEnvironmentIds: [],
+    heartbeat: { enabled: true, intervalSec: 600, maxConcurrentRuns: 5 } });
+  expect((await reconcile(changed)).differences).toEqual([]);
+  // Completing an adopted setup draft rewrites the row; declared keys stay protected there too.
+  const { companyId } = await read("worker");
+  const draftFields = { name: "Setup draft", role: "engineer", adapterType: "process", adapterConfig: { command: "true" } };
+  const draft = await lifecycle.requestHire(companyId, draftFields, { setupOnly: true, runnerResolved: true });
+  const adopting = structuredClone(changed) as typeof changed & { agents: Record<string, unknown> };
+  adopting.agents.draft = { company: "example", adopt: draft.id,
+    fields: { ...draftFields, runtimeConfig: { heartbeat: { enabled: true, intervalSec: 300 } } } };
+  await reconcile(adopting);
+  await expect(lifecycle.requestHire(companyId, { ...draftFields, runtimeConfig: { heartbeat: { enabled: false } } },
+    { setupAgentId: draft.id, runnerResolved: true })).rejects.toMatchObject({ status: 409 });
+  expect((await db.select().from(agents).where(eq(agents.id, draft.id)))[0]!.runtimeConfig)
+    .toMatchObject({ heartbeat: { enabled: true, intervalSec: 300 } });
 });

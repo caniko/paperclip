@@ -31,6 +31,8 @@ import { createInterface } from "node:readline/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
+import { PENDING_BOOTSTRAP_PACKAGES } from "./check-release-package-bootstrap.mjs";
+
 export const PLACEHOLDER_VERSION = "0.0.0";
 
 const SCOPE_RE = /^@paperclipai\/[a-z0-9][a-z0-9._-]*$/;
@@ -107,6 +109,18 @@ export function validatePackageName(packageName) {
       `refusing to publish a placeholder for ${JSON.stringify(packageName)}: ` +
         "the name must be a lowercase package inside the @paperclipai scope " +
         "(this guard prevents accidental publishes to names we do not own).",
+    );
+  }
+}
+
+// A fork-only package has no upstream counterpart and this fork has no npm credentials
+// for the @paperclipai scope, so a real bootstrap publish must never be attempted.
+// Dry runs still stage the placeholder locally.
+export function assertBootstrapAllowed(packageName, publish) {
+  if (publish && PENDING_BOOTSTRAP_PACKAGES.has(packageName)) {
+    throw new Error(
+      `refusing to bootstrap ${packageName}: it is a fork-only package pending bootstrap, ` +
+        "and this fork never publishes the @paperclipai scope",
     );
   }
 }
@@ -412,6 +426,7 @@ async function main(argv) {
   }
 
   validatePackageName(packageName);
+  assertBootstrapAllowed(packageName, publish);
 
   if (publish && !process.stdin.isTTY) {
     throw new Error(

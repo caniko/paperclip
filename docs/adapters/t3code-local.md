@@ -7,8 +7,8 @@ The `t3code_local` adapter runs Paperclip agents as threads on your local [T3 Co
 
 ## Prerequisites
 
-- T3 Code 0.1.2 or later (the first release with `t3 thread`), with the `t3` CLI on the Paperclip server's `PATH` (or set `command` to its absolute path)
-- A T3 Code server running as the same OS user as Paperclip: `t3 serve`, or `systemctl --user start t3code` when it runs as a user service. On the same machine the `t3` CLI signs in to that server as its owner; no token is needed.
+- T3 Code nightly `0.1.8-nightly.20261107.4327` or later (the tested official revision is `e455200077ce60806a01c8f28435b58860dcfc74`), with the `t3` CLI on the Paperclip server's `PATH` (or set `command` to its absolute path)
+- A T3 Code server running as the same OS user as Paperclip: `t3 serve`, or `systemctl --user start t3code` when it runs as a user service. On the same machine the `t3` CLI signs in to that server as its owner; start, send, and list need no token. The adapter issues its own short-lived session only for the native stop RPC.
 - Paperclip and the T3 Code server on the same host. The adapter runs on local execution targets only.
 
 ## Configuration Fields
@@ -40,17 +40,17 @@ The adapter stores `{ threadId, cwd, provider, model }` (`provider` and `model` 
 
 The adapter registers for cancellation before any setup. A Stop that arrives before a turn starts, including while the adapter adds the project or before it retries with a new thread, ends the run as `cancelled` without starting a turn.
 
-On timeout or cancellation of a running turn, the adapter runs `t3 thread stop <threadId> --json` before it returns, and polls until T3 Code reports that no turn of the thread is running. Only then does Paperclip treat the provider as stopped; a confirmed Stop ends the run as `cancelled`. The confirmation, including every `thread list` and `thread stop` call, must finish within `max(graceSec, 5)` seconds. When the stop cannot be confirmed in that window, the run fails with error code `t3code_stop_unverified`. A run whose thread id was never printed is found again by its title with `t3 thread list --json`.
+On timeout or cancellation of a running turn, the adapter stops the thread through T3 Code's native orchestration RPC (`orchestration.dispatchCommand` with `thread.stop`) before it returns, then polls `orchestration.getThreadProjection` until the thread has no active run, provider turn, subagent, or background work: no pending background tasks on the thread or its provider threads, no `active` provider thread, and no active `command_execution` turn item. Both checks use an allowlist of known inactive statuses, so a missing or unknown provider-thread or command status stays unconfirmed. `thread.stop` queues the interruption, so a terminal run or turn can still own background work; the stop is only confirmed once that work drains, and otherwise the wait fails closed at the deadline. Only then does Paperclip treat the provider as stopped; a confirmed Stop ends the run as `cancelled`. The adapter issues a short-lived local bearer session with `t3 auth session issue` as the same OS user, sends it only in the RPC upgrade header, and revokes it after the stop attempt. The confirmation, including every `thread list` call and the RPC stop, must finish within `max(graceSec, 5)` seconds. When the stop cannot be confirmed in that window, the run fails with error code `t3code_stop_unverified`. A run whose thread id was never printed is found again by its title with `t3 thread list --json`.
 
 Paperclip's crash recovery does not treat the `t3` process as the provider: if Paperclip restarts or loses the process, the run is not retried or continued automatically. It is held for reconciliation, as for gateway adapters, because the turn may still be running in T3 Code.
 
 ## Limits
 
-- Verified stops need `t3 thread stop`, which released `t3` CLIs do not have yet. Without it, a timed-out or cancelled run fails with `t3code_stop_unverified` and an error naming the thread: the turn may still be running in T3 Code, so stop it there.
+- Stopping uses T3 Code's official orchestration RPC (`thread.stop`), not a fork-only CLI command. Any stop RPC failure, including an unsupported method or an error naming a missing thread, produces `t3code_stop_unverified` with an error naming the thread; the adapter does not infer a stop from error text, so the turn may still be running in T3 Code.
 - The agent runs inside T3 Code's provider process, so it does not receive Paperclip's `PAPERCLIP_*` environment variables, the run JWT, or Paperclip-managed skills. T3 Code's providers use their own skills and credentials.
 - T3 Code does not report token usage or cost; runs are recorded as unpriced.
 - Model choice comes from T3 Code. Paperclip lists no models for this adapter.
 
 ## Environment Test
 
-The environment test checks that `t3 --version` runs and that `t3 thread list --json` reaches a running server. When it cannot, the hint says how to start the server.
+The environment test checks that `t3 --version` runs, that the CLI supports `t3 auth session issue` for the native stop, and that `t3 thread list --json` reaches a running server. When the server cannot be reached, the hint says how to start it; an older CLI without the session command is reported as unsupported.
