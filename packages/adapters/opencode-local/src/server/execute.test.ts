@@ -69,7 +69,13 @@ describe("OpenCode local skill injection", () => {
       });
       expect(runProcessMock).toHaveBeenCalledOnce();
       const call = runProcessMock.mock.calls[0]!;
-      expect(call[3]).toEqual(["run", "--format", "json", "--model", "openai/gpt-5", ...extraArgs]);
+      // The fork attaches selected skills as `--file` pairs between the model and extraArgs.
+      const argv = call[3] as string[];
+      expect(argv.slice(0, 5)).toEqual(["run", "--format", "json", "--model", "openai/gpt-5"]);
+      expect(argv.slice(argv.length - extraArgs.length)).toEqual(extraArgs);
+      expect(argv.slice(5, argv.length - extraArgs.length).filter((arg, i) => i % 2 === 0)).toEqual(
+        Array((argv.length - extraArgs.length - 5) / 2).fill("--file"),
+      );
       expect(call[4]).toMatchObject({ cwd: configHome, env: { PWD: configHome } });
       expect(process.env.PWD).toBe("/stale-parent-workspace");
     },
