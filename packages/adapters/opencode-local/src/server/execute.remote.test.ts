@@ -184,7 +184,7 @@ describe("opencode remote execution", () => {
       config: {
         command: "opencode",
         model: "opencode/gpt-5-nano",
-        extraArgs: ["--", "--dir"],
+        extraArgs: ["--", "--standalone"],
         ...(managed ? {
           managedAiConnection: { provider: "openrouter", method: "api_key" },
         } : {}),
@@ -268,10 +268,13 @@ describe("opencode remote execution", () => {
       `${managedRemoteWorkspace}/.paperclip-runtime/opencode/xdgConfig`,
     );
     expect(modelProbeCall?.[3].remoteExecution?.remoteCwd).toBe("/remote/workspace");
-    expect(runCall?.[2].slice(-4)).toEqual(["--dir", managedRemoteWorkspace, "--", "--dir"]);
+    expect(runCall?.[2].slice(-3)).toEqual(["--standalone", "--", "--standalone"]);
+    expect(runCall?.[2]).not.toContain("--dir");
     const call = runCall as
       | [string, string, string[], { env: Record<string, string>; remoteExecution?: { remoteCwd: string } | null }]
       | undefined;
+    expect(call?.[3].remoteExecution?.remoteCwd).toBe(managedRemoteWorkspace);
+    expect(call?.[3].env.PWD).toBe(managedRemoteWorkspace);
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_CWD).toBe(managedRemoteWorkspace);
     if (managed) {
       const home = `${managedRemoteWorkspace}/.paperclip-runtime/opencode/managed-auth/run-1`;
@@ -368,7 +371,7 @@ describe("opencode remote execution", () => {
     expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
   });
 
-  it("resumes matching remote sessions and preserves an explicit run directory", async () => {
+  it("resumes matching remote sessions and keeps an operator-selected server", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-remote-resume-"));
     cleanupDirs.push(rootDir);
     const workspaceDir = path.join(rootDir, "workspace");
@@ -403,7 +406,7 @@ describe("opencode remote execution", () => {
       config: {
         command: "opencode",
         model: "opencode/gpt-5-nano",
-        extraArgs: ["--dir", "/operator-supplied"],
+        extraArgs: ["--server", "http://operator.example"],
       },
       context: {
         paperclipWorkspace: {
@@ -431,7 +434,8 @@ describe("opencode remote execution", () => {
       | undefined;
     expect(call?.[2]).toContain("--session");
     expect(call?.[2]).toContain("session-123");
-    expect(call?.[2].slice(-2)).toEqual(["--dir", "/operator-supplied"]);
-    expect(call?.[2].filter((arg) => arg === "--dir" || arg.startsWith("--dir="))).toHaveLength(1);
+    expect(call?.[2].slice(-2)).toEqual(["--server", "http://operator.example"]);
+    expect(call?.[2]).not.toContain("--standalone");
+    expect(call?.[2]).not.toContain("--dir");
   });
 });

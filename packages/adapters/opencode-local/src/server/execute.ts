@@ -54,6 +54,7 @@ import {
   resolveLegacyPaperclipDesiredSkillNames,
 } from "@paperclipai/adapter-utils/server-utils";
 import { isOpenCodeUnknownSessionError, parseOpenCodeJsonl, createOpenCodeJsonlParser } from "./parse.js";
+import { buildOpenCodeRunArgs } from "./run-args.js";
 import {
   ensureOpenCodeModelConfiguredAndAvailable,
   isTruthyEnvFlag,
@@ -619,22 +620,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const printLogs = isTruthyEnvFlag(
       env.PAPERCLIP_OPENCODE_PRINT_LOGS ?? process.env.PAPERCLIP_OPENCODE_PRINT_LOGS,
     );
-    const buildArgs = (resumeSessionId: string | null) => {
-      const args = ["run", "--format", "json"];
-      if (printLogs) args.push("--print-logs");
-      if (resumeSessionId) args.push("--session", resumeSessionId);
-      if (model) args.push("--model", model);
-      if (variant) args.push("--variant", variant);
-      // OpenCode prefers the inherited PWD over process.cwd(). Use the realized
-      // workspace unless the operator already selected a directory explicitly.
-      const optionTerminator = extraArgs.indexOf("--");
-      const extraOptionArgs = optionTerminator === -1 ? extraArgs : extraArgs.slice(0, optionTerminator);
-      if (!extraOptionArgs.some((arg) => arg === "--dir" || arg.startsWith("--dir="))) {
-        args.push("--dir", effectiveExecutionCwd);
-      }
-      if (extraArgs.length > 0) args.push(...extraArgs);
-      return args;
-    };
+    const buildArgs = (resumeSessionId: string | null) =>
+      buildOpenCodeRunArgs({ model, variant, extraArgs, resumeSessionId, printLogs });
 
     // Remote targets receive only the prepared environment, never host keys.
     const accountingEnv = executionTargetIsRemote ? preparedRuntimeConfig.env : runtimeEnv;
@@ -677,7 +664,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ...(runtimeExecutionTarget?.kind === "remote" && runtimeExecutionTarget.transport === "sandbox"
           && runtimeExecutionTarget.providerKey === "daytona" ? { useSession: true } : {}),
         cwd,
-        env: preparedRuntimeConfig.env,
+        // OpenCode trusts PWD over the process cwd and v2 has no --dir.
+        env: { ...preparedRuntimeConfig.env, PWD: effectiveExecutionCwd },
         stdin: prompt,
         timeoutSec,
         graceSec,
