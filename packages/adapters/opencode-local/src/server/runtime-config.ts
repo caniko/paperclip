@@ -132,13 +132,12 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   const runtimeConfigPath = path.join(runtimeConfigDir, "opencode.json");
 
   await fs.mkdir(runtimeConfigDir, { recursive: true });
-  // opencode/ is isolated. Link only the operator's git identity and the gh auth its
-  // GitHub credential helper uses; other XDG configs (nix access-tokens, ...) stay out.
-  for (const entry of ["git", "gh"]) {
-    const source = path.join(sourceConfigHome, entry);
-    if (await fs.stat(source).then(() => true, () => false)) {
-      await fs.symlink(source, path.join(runtimeConfigHome, entry));
-    }
+  // opencode/ is isolated. Link only the operator's git config so host-credential runs
+  // keep their identity; managed GitHub runs pin GIT_CONFIG_GLOBAL and ignore it. gh uses
+  // GH_CONFIG_DIR, and other XDG configs (nix access-tokens, ...) stay out.
+  const sourceGitConfig = path.join(sourceConfigHome, "git");
+  if (await fs.stat(sourceGitConfig).then(() => true, () => false)) {
+    await fs.symlink(sourceGitConfig, path.join(runtimeConfigHome, "git"));
   }
   try {
     await fs.cp(sourceConfigDir, runtimeConfigDir, {
