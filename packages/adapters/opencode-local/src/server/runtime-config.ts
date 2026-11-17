@@ -125,12 +125,18 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     };
   }
 
-  const sourceConfigDir = path.join(resolveXdgConfigHome(input.env), "opencode");
+  const sourceConfigHome = resolveXdgConfigHome(input.env);
+  const sourceConfigDir = path.join(sourceConfigHome, "opencode");
   const runtimeConfigHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-config-"));
   const runtimeConfigDir = path.join(runtimeConfigHome, "opencode");
   const runtimeConfigPath = path.join(runtimeConfigDir, "opencode.json");
 
   await fs.mkdir(runtimeConfigDir, { recursive: true });
+  // Only opencode/ is isolated. Link the operator's other XDG configs (git identity,
+  // gh auth, ...) so tools the agent runs still resolve them.
+  for (const entry of await fs.readdir(sourceConfigHome).catch(() => [] as string[])) {
+    if (entry !== "opencode") await fs.symlink(path.join(sourceConfigHome, entry), path.join(runtimeConfigHome, entry));
+  }
   try {
     await fs.cp(sourceConfigDir, runtimeConfigDir, {
       recursive: true,

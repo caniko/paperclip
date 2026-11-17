@@ -54,6 +54,27 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     expect(await fs.readFile(operatorConfigPath, "utf8")).toBe(original);
   });
 
+  it("keeps the operator's git identity visible to the child without exposing operator opencode config", async () => {
+    const configHome = await makeConfigHome({ theme: "system" });
+    const gitConfigPath = path.join(configHome, "git", "config");
+    await fs.mkdir(path.dirname(gitConfigPath));
+    await fs.writeFile(gitConfigPath, "[user]\n\tname = Operator\n\temail = operator@example.test\n");
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-home-"));
+    cleanupPaths.add(home);
+
+    const prepared = await prepareOpenCodeRuntimeConfig({ env: { XDG_CONFIG_HOME: configHome }, config: {} });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+    expect(prepared.env.XDG_CONFIG_HOME).not.toBe(configHome);
+    expect((await fs.lstat(path.join(prepared.env.XDG_CONFIG_HOME, "opencode"))).isSymbolicLink()).toBe(false);
+    const ident = spawnSync("git", ["var", "GIT_AUTHOR_IDENT"], {
+      encoding: "utf8",
+      env: { PATH: process.env.PATH ?? "", HOME: home, XDG_CONFIG_HOME: prepared.env.XDG_CONFIG_HOME, GIT_CONFIG_NOSYSTEM: "1" },
+    });
+    expect(ident.stdout).toMatch(/^Operator <operator@example\.test> /);
+    await prepared.cleanup();
+    expect(await fs.readFile(gitConfigPath, "utf8")).toContain("Operator");
+  });
+
   it("stages a relocatable sandbox shell hook without changing the parent environment", async () => {
     const configHome = await makeConfigHome({ plugin: ["operator-plugin"], permission: { bash: "ask" } });
     const input = { env: { XDG_CONFIG_HOME: configHome }, config: { dangerouslySkipPermissions: false }, sandboxToolOomPreference: true };
