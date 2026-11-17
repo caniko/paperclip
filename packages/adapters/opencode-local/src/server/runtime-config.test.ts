@@ -59,6 +59,7 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     const gitConfigPath = path.join(configHome, "git", "config");
     await fs.mkdir(path.dirname(gitConfigPath));
     await fs.writeFile(gitConfigPath, "[user]\n\tname = Operator\n\temail = operator@example.test\n");
+    await fs.mkdir(path.join(configHome, "nix"));
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-home-"));
     cleanupPaths.add(home);
 
@@ -66,6 +67,7 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
     expect(prepared.env.XDG_CONFIG_HOME).not.toBe(configHome);
     expect((await fs.lstat(path.join(prepared.env.XDG_CONFIG_HOME, "opencode"))).isSymbolicLink()).toBe(false);
+    expect(await fs.readdir(prepared.env.XDG_CONFIG_HOME)).not.toContain("nix");
     const ident = spawnSync("git", ["var", "GIT_AUTHOR_IDENT"], {
       encoding: "utf8",
       env: { PATH: process.env.PATH ?? "", HOME: home, XDG_CONFIG_HOME: prepared.env.XDG_CONFIG_HOME, GIT_CONFIG_NOSYSTEM: "1" },

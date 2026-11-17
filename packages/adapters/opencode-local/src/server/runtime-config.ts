@@ -132,10 +132,13 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   const runtimeConfigPath = path.join(runtimeConfigDir, "opencode.json");
 
   await fs.mkdir(runtimeConfigDir, { recursive: true });
-  // Only opencode/ is isolated. Link the operator's other XDG configs (git identity,
-  // gh auth, ...) so tools the agent runs still resolve them.
-  for (const entry of await fs.readdir(sourceConfigHome).catch(() => [] as string[])) {
-    if (entry !== "opencode") await fs.symlink(path.join(sourceConfigHome, entry), path.join(runtimeConfigHome, entry));
+  // opencode/ is isolated. Link only the operator's git identity and the gh auth its
+  // GitHub credential helper uses; other XDG configs (nix access-tokens, ...) stay out.
+  for (const entry of ["git", "gh"]) {
+    const source = path.join(sourceConfigHome, entry);
+    if (await fs.stat(source).then(() => true, () => false)) {
+      await fs.symlink(source, path.join(runtimeConfigHome, entry));
+    }
   }
   try {
     await fs.cp(sourceConfigDir, runtimeConfigDir, {
