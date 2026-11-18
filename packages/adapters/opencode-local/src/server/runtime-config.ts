@@ -108,6 +108,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   env: Record<string, string>;
   config: Record<string, unknown>;
   targetIsRemote?: boolean;
+  includeOperatorGitConfig?: boolean;
   sandboxToolOomPreference?: boolean;
 }): Promise<PreparedOpenCodeRuntimeConfig> {
   const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
@@ -128,24 +129,29 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   const sourceConfigHome = resolveXdgConfigHome(input.env);
   const sourceConfigDir = path.join(sourceConfigHome, "opencode");
   const runtimeConfigHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-config-"));
-  const runtimeConfigDir = path.join(runtimeConfigHome, "opencode");
-  const runtimeConfigPath = path.join(runtimeConfigDir, "opencode.json");
-
-  await fs.mkdir(runtimeConfigDir, { recursive: true });
-  // opencode/ is isolated. Link only the operator's git config so host-credential runs
-  // keep their identity; managed GitHub runs pin GIT_CONFIG_GLOBAL and ignore it. gh uses
-  // GH_CONFIG_DIR, and other XDG configs (nix access-tokens, ...) stay out.
-  const sourceGitConfig = path.join(sourceConfigHome, "git");
-  if (await fs.stat(sourceGitConfig).then(() => true, () => false)) {
-    await fs.symlink(sourceGitConfig, path.join(runtimeConfigHome, "git"));
-  }
   try {
-    await fs.cp(sourceConfigDir, runtimeConfigDir, {
-      recursive: true,
-      force: true,
-      errorOnExist: false,
-      dereference: false,
-    });
+    const runtimeConfigDir = path.join(runtimeConfigHome, "opencode");
+    const runtimeConfigPath = path.join(runtimeConfigDir, "opencode.json");
+
+    await fs.mkdir(runtimeConfigDir, { recursive: true });
+    // Include operator Git settings locally while keeping global writes run-owned.
+    // The operator config is optional: skip it unless it is a readable regular file.
+    const sourceGitConfig = path.resolve(sourceConfigHome, "git", "config");
+    if (input.includeOperatorGitConfig && await fs.stat(sourceGitConfig)
+      .then(async (stat) => stat.isFile() && await fs.access(sourceGitConfig, fs.constants.R_OK).then(() => true))
+      .catch(() => false)) {
+      const runtimeGitDir = path.join(runtimeConfigHome, "git");
+      await fs.mkdir(runtimeGitDir);
+      const escaped = sourceGitConfig.replace(/[\\"\n\t\b]/g, (char) => ({ "\\": "\\\\", '"': '\\"', "\n": "\\n", "\t": "\\t", "\b": "\\b" })[char]!);
+      await fs.writeFile(path.join(runtimeGitDir, "config"), `[include]\n\tpath = "${escaped}"\n`);
+    }
+    try {
+      await fs.cp(sourceConfigDir, runtimeConfigDir, {
+        recursive: true,
+        force: true,
+        errorOnExist: false,
+        dereference: false,
+      });
   } catch (err) {
     if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
       throw err;
@@ -261,6 +267,10 @@ export async function prepareOpenCodeRuntimeConfig(input: {
       await fs.rm(runtimeConfigHome, { recursive: true, force: true });
     },
   };
+  } catch (err) {
+    await fs.rm(runtimeConfigHome, { recursive: true, force: true }).catch(() => {});
+    throw err;
+  }
 }
 
 /** Managed credentials must never leave host-only homes in a remote process. */
