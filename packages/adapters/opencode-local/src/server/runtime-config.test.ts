@@ -54,6 +54,70 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     expect(await fs.readFile(operatorConfigPath, "utf8")).toBe(original);
   });
 
+  it("keeps the operator's git identity visible to the child without exposing operator opencode config", async () => {
+    const root = await makeConfigHome({ theme: "system" });
+    const configHome = path.join(root, 'config "quoted" \\ path');
+    await fs.mkdir(configHome);
+    await fs.rename(path.join(root, "opencode"), path.join(configHome, "opencode"));
+    const gitConfigPath = path.join(configHome, "git", "config");
+    await fs.mkdir(path.dirname(gitConfigPath));
+    const original = "[user]\n\tname = Operator\n\temail = operator@example.test\n";
+    await fs.writeFile(gitConfigPath, original);
+    await fs.mkdir(path.join(configHome, "nix"));
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-home-"));
+    cleanupPaths.add(home);
+
+    const input = { env: { XDG_CONFIG_HOME: configHome }, config: {}, includeOperatorGitConfig: true };
+    const prepared = await prepareOpenCodeRuntimeConfig(input);
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+    expect(prepared.env.XDG_CONFIG_HOME).not.toBe(configHome);
+    expect((await fs.lstat(path.join(prepared.env.XDG_CONFIG_HOME, "opencode"))).isSymbolicLink()).toBe(false);
+    expect(await fs.readdir(prepared.env.XDG_CONFIG_HOME)).not.toContain("nix");
+    const runtimeGit = path.join(prepared.env.XDG_CONFIG_HOME, "git");
+    expect((await fs.lstat(runtimeGit)).isDirectory()).toBe(true);
+    expect((await fs.lstat(runtimeGit)).isSymbolicLink()).toBe(false);
+    const gitEnv = { PATH: process.env.PATH ?? "", HOME: home, XDG_CONFIG_HOME: prepared.env.XDG_CONFIG_HOME, GIT_CONFIG_NOSYSTEM: "1" };
+    const ident = spawnSync("git", ["var", "GIT_AUTHOR_IDENT"], {
+      encoding: "utf8",
+      env: gitEnv,
+    });
+    expect(ident.stdout).toMatch(/^Operator <operator@example\.test> /);
+    const write = spawnSync("git", ["config", "--global", "user.name", "Changed"], { encoding: "utf8", env: gitEnv });
+    expect(write.status).toBe(0);
+    expect(await fs.readFile(gitConfigPath, "utf8")).toBe(original);
+    expect(await fs.readFile(path.join(runtimeGit, "config"), "utf8")).toContain("Changed");
+    await prepared.cleanup();
+    expect(await fs.readFile(gitConfigPath, "utf8")).toContain("Operator");
+  });
+
+  it("skips an operator git config that is not a readable regular file", async () => {
+    // Root reads unreadable files, so only check those shapes as a normal user.
+    const shapes = process.getuid?.() === 0
+      ? ["git-file", "config-dir"] as const
+      : ["git-file", "config-dir", "unreadable", "untraversable"] as const;
+    for (const shape of shapes) {
+      const configHome = await makeConfigHome();
+      const gitDir = path.join(configHome, "git");
+      const gitConfig = path.join(gitDir, "config");
+      let locked: string | undefined;
+      if (shape === "git-file") await fs.writeFile(gitDir, "");
+      else if (shape === "config-dir") await fs.mkdir(gitConfig, { recursive: true });
+      else {
+        await fs.mkdir(gitDir);
+        await fs.writeFile(gitConfig, "[user]\n\tname = Operator\n");
+        locked = shape === "unreadable" ? gitConfig : gitDir;
+        await fs.chmod(locked, 0o000);
+      }
+      try {
+        const prepared = await prepareOpenCodeRuntimeConfig({ env: { XDG_CONFIG_HOME: configHome }, config: {}, includeOperatorGitConfig: true });
+        cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+        expect(await fs.readdir(prepared.env.XDG_CONFIG_HOME)).not.toContain("git");
+      } finally {
+        if (locked) await fs.chmod(locked, 0o700);
+      }
+    }
+  });
+
   it("stages a relocatable sandbox shell hook without changing the parent environment", async () => {
     const configHome = await makeConfigHome({ plugin: ["operator-plugin"], permission: { bash: "ask" } });
     const input = { env: { XDG_CONFIG_HOME: configHome }, config: { dangerouslySkipPermissions: false }, sandboxToolOomPreference: true };
