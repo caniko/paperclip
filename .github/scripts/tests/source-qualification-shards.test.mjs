@@ -74,7 +74,7 @@ test("all source shards retain strict reports, the two-hour deadline and their o
   assert.match(application, /name: source-proof-\$\{\{ matrix.lane \}\}/);
   assert.match(application, /retention-days: 31\n/);
   const count = Number(workflow.match(/qualification-evidence\.py artifacts source-proof- (\d+) retention\.json/)[1]);
-  assert.equal(count, lanes.length + 2, "retention must require all matrix lanes, declarations and the original RED artifact");
+  assert.equal(count, lanes.length + 2, "retention must require all matrix lanes, declarations and this run's sealed copy of the original RED evidence");
   assert.match(workflow, /needs: \[application, home_manager, expected_red, harness_identity\]/);
   for (const name of ["LANES", "HOME_MANAGER", "EXPECTED_RED", "HARNESS_IDENTITY"]) assert.ok(workflow.includes(`test "$${name}" = success`));
   const declarations = workflow.split("\n  home_manager:\n")[1].split("\n  retention:\n")[0];

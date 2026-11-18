@@ -24,7 +24,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 ORIGINAL_RED = {"artifact_id": 12146584669, "run_id": 39157504264,
                 "head": "9192d66579850b36cf10abd651b41804cfa75447",
                 "archive_sha256": "9a095663bf10d8dc1cee82888dfcb37eac059f61c750a08e00687d3193833f3d",
-                "fixture_sha256": "c6d9ba1a82820be8eff64cc6dc9658d042fe8e9cd8a3091f0c4126e910f1ff0e"}
+                "fixture_sha256": "c6d9ba1a82820be8eff64cc6dc9658d042fe8e9cd8a3091f0c4126e910f1ff0e",
+                # Bytes of the provider snapshot captured with the archive.
+                "provider_sha256": "bfe7bfd47aa1641e2b8e44e441436053ddf90990ebd02936899f2c70dd46ef94"}
 
 
 def require(condition, message):
@@ -244,6 +246,7 @@ def retain_original_red(directory):
     committed = REPOSITORY_ROOT / ".github/qualification"
     raw = (committed / "original-red.zip").read_bytes()
     metadata = (committed / "original-red-provider.json").read_bytes()
+    require(hashlib.sha256(metadata).hexdigest() == ORIGINAL_RED["provider_sha256"], "Original RED provider snapshot differs from its pin")
     reference = verify_original_red(raw, json.loads(metadata))
     (directory / "original-red.zip").write_bytes(raw)
     (directory / "original-red-provider.json").write_bytes(metadata)
