@@ -86,7 +86,12 @@ test("all source shards retain strict reports, the two-hour deadline and their o
   assert.match(declarations, /nix-instantiate "\$\{args\[@\]\}" --expr '[^']*builtins.attrNames/);
   assert.match(declarations, /nix-instantiate "\$\{args\[@\]\}" nix\/tests\/personal-declarations.nix -A "\$name"/);
   assert.match(declarations, /name: source-proof-home-manager-/);
+});
+
+test("the required F645 lane verifies committed RED without executing the fixture", () => {
   const red = workflow.split("\n  expected_red:\n")[1];
-  assert.match(red, /qualification-evidence\.py retain-original-red/);
-  assert.doesNotMatch(red, /vitest run|pnpm install|path: baseline/);
+  assert.match(red, /name: Regression evidence \/ retained original F645 RED\n/);
+  assert.match(red, /qualification-evidence\.py initialize "\$EVIDENCE"\n\s+python3 \.github\/scripts\/qualification-evidence\.py retain-original-red "\$EVIDENCE"/);
+  assert.match(red, /name: source-proof-expected-red-[^\n]+\n\s+retention-days: 31\n/);
+  assert.doesNotMatch(red, /vitest run|pnpm install|path: baseline|paperclip-red-fixture|actions\/download-artifact|gh api/);
 });

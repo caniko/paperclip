@@ -1308,9 +1308,11 @@ serialized shards. Each job retains its dry-run plan and strict JUnit reports.
 The full server group includes the chat and native-runner suites. The matrix
 contract checks complete, non-overlapping server membership and every configured
 workspace. All jobs keep the two-hour limit and attempt-1 requirement. The
-retention gate requires all fourteen application artifacts and the original RED
-artifact. Skips still fail strict acceptance; partitioning grants no coverage
-credit to a missing or unexecuted environment.
+retention gate checks all application artifacts, Home Manager declaration
+evidence, and the current run's sealed copy of the
+[original RED evidence](hosted-source-qualification.md). Skips still fail strict
+acceptance; partitioning grants no coverage credit to a missing or unexecuted
+environment.
 
 ### Complete required coverage map
 

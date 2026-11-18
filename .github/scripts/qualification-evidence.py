@@ -208,7 +208,9 @@ def expected_red(directory):
 
 
 def verify_original_red(raw, metadata, pinned=ORIGINAL_RED):
-    require(metadata["id"] == pinned["artifact_id"] and not metadata["expired"], "Original RED artifact is unavailable")
+    # The provider snapshot records availability at capture, not availability today.
+    require(metadata["id"] == pinned["artifact_id"] and metadata["expired"] is False,
+            "Original RED provider snapshot does not identify the available original at capture")
     require(metadata["workflow_run"]["id"] == pinned["run_id"]
             and metadata["workflow_run"]["head_sha"] == pinned["head"], "Original RED producer changed")
     digest = hashlib.sha256(raw).hexdigest()
@@ -239,11 +241,12 @@ def retain_original_red(directory):
     require(os.environ["GITHUB_REPOSITORY"] == "caniko/paperclip", "Original RED belongs to caniko/paperclip")
     fixture = REPOSITORY_ROOT / "packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts"
     require(sha256(fixture) == ORIGINAL_RED["fixture_sha256"], "Changed regression fixture needs a distinct evidence disposition")
-    metadata = api(f"actions/artifacts/{ORIGINAL_RED['artifact_id']}")
-    raw = subprocess.check_output(["gh", "api", f"repos/caniko/paperclip/actions/artifacts/{ORIGINAL_RED['artifact_id']}/zip"])
-    reference = verify_original_red(raw, metadata)
+    committed = REPOSITORY_ROOT / ".github/qualification"
+    raw = (committed / "original-red.zip").read_bytes()
+    metadata = (committed / "original-red-provider.json").read_bytes()
+    reference = verify_original_red(raw, json.loads(metadata))
     (directory / "original-red.zip").write_bytes(raw)
-    (directory / "original-red-provider.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    (directory / "original-red-provider.json").write_bytes(metadata)
     (directory / "original-red-reference.json").write_text(json.dumps(reference, indent=2) + "\n")
     seal(directory, "success", False)
 
