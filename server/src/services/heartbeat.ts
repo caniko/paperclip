@@ -2501,7 +2501,7 @@ export function heartbeatService(
             taskKey,
           )
         : null;
-      const savedRouterInput = parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput);
+      const savedRouterInput = atlasBinding ? {} : parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput);
       const routerHasPersistedInput = Object.keys(savedRouterInput).length > 0;
       if (agent.adapterType === "paperclip_runner") {
         const homeConfig = bindHeartbeatRunnerHomeMode(config, savedRouterInput);
@@ -2509,7 +2509,7 @@ export function heartbeatService(
       }
       const persistedRouterPoolId = routerHasPersistedInput ? readNonEmptyString(parseObject(context.aiRouterSelection).poolId) : null;
       const preconfiguredHome = agent.adapterType === "paperclip_runner" && config.homeMode === "preconfigured";
-      const requestedAiBinding = preconfiguredHome ? undefined : persistedRouterPoolId ? { mode: "router" as const, connectionId: persistedRouterPoolId } : agent.runtimeConfig?.aiConnection ? aiRuntimeConnectionBindingSchema.parse(agent.runtimeConfig.aiConnection) : undefined;
+      const requestedAiBinding = atlasBinding || preconfiguredHome ? undefined : persistedRouterPoolId ? { mode: "router" as const, connectionId: persistedRouterPoolId } : agent.runtimeConfig?.aiConnection ? aiRuntimeConnectionBindingSchema.parse(agent.runtimeConfig.aiConnection) : undefined;
       let aiBinding = requestedAiBinding?.mode === "router" ? undefined : requestedAiBinding;
       const originalAiIssueOverrides = issueAssigneeOverrides;
       if (requestedAiBinding?.mode === "router") {
@@ -2682,6 +2682,10 @@ export function heartbeatService(
         environments: environmentsSvc, binding: atlasBinding, runId: run.id, issueId,
         assertOwned: controllerLease.assertOwned,
       }) : null;
+      if (atlasBinding) {
+        const currentAgent = await getAgent(agent.id);
+        if (!currentAgent || atlasAdmissionForAgent(currentAgent, run.companyId) !== atlasBinding) throw new Error("Atlas agent binding changed after lease acquisition");
+      }
       const executionConfiguration = await timePreparation("execution_configuration", () => prepareHeartbeatExecutionConfiguration(db, {
         run, agent,
         task: { issueId, context, responsibleUserId, acceptedPlanContinuationWake, acceptedPlanWakeRoutingDecision, taskProjectContext, routineEnvContext, pinnedSkillTest },

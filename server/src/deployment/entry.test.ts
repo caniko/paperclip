@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import {
   agents,
@@ -387,6 +388,7 @@ it("refuses missing Atlas policy, but serves the Board with empty admissions", a
   const original = readFileSync(descriptorFile, "utf8");
   const atlas = { ...JSON.parse(original), executionProfile: "atlas-ssh" };
   const db = createDb(database.connectionString);
+  let survivor: ChildProcess | undefined;
   try {
     for (const policy of [undefined, { admissions: [{}] }]) {
       writeFileSync(descriptorFile, JSON.stringify({ ...atlas, atlasExecutionPolicy: policy }));
@@ -405,11 +407,30 @@ it("refuses missing Atlas policy, but serves the Board with empty admissions", a
       companyId: adoptedCompanyId, projectId: project.id, name: "Historical project directory", sourceType: "local_path", cwd: root,
       metadata: { runtimeConfig },
     }).returning();
-    await db.insert(executionWorkspaces).values({
+    const [execution] = await db.insert(executionWorkspaces).values({
       companyId: adoptedCompanyId, projectId: project.id, projectWorkspaceId: workspace.id,
       name: "Historical execution directory", mode: "isolated_workspace", strategyType: "project_primary",
       cwd: root, providerType: "local_fs", providerRef: root, metadata: { config: runtimeConfig },
-    });
+    }).returning();
+    // Seed a running process and its matching registry entry. Adoption would
+    // update providerRef and refresh the row/registry even without a restart.
+    survivor = spawn("sleep", ["300"], { cwd: root, detached: true, stdio: "ignore" });
+    await once(survivor, "spawn");
+    const runtimeId = randomUUID();
+    const [historical] = await db.insert(workspaceRuntimeServices).values({
+      id: runtimeId, companyId: adoptedCompanyId, projectId: project.id, executionWorkspaceId: execution.id,
+      projectWorkspaceId: workspace.id, scopeType: "execution_workspace", scopeId: execution.id,
+      serviceName: "survivor", lifecycle: "shared", provider: "local_process", providerRef: "historical",
+      status: "running", command: "sleep 300", cwd: root,
+    }).returning();
+    const registry = join(root, "instances/entry/runtime-services");
+    mkdirSync(registry, { recursive: true });
+    const recordFile = join(registry, `${runtimeId}.json`);
+    const record = JSON.stringify({ version: 1, serviceKey: runtimeId, profileKind: "workspace-runtime",
+      runtimeServiceId: runtimeId, serviceName: historical.serviceName, command: historical.command, cwd: root,
+      envFingerprint: "", port: null, url: null, pid: survivor.pid, processGroupId: survivor.pid,
+      provider: "local_process", startedAt: historical.startedAt.toISOString(), lastSeenAt: historical.lastUsedAt.toISOString() });
+    writeFileSync(recordFile, record);
     for (let boot = 0; boot < 2; boot++) {
       child = launch("serve");
       child.stdout!.on("data", (chunk) => { output += chunk; });
@@ -419,11 +440,19 @@ it("refuses missing Atlas policy, but serves the Board with empty admissions", a
         try { return (await (await fetch(`http://127.0.0.1:${port}/api/health`)).json()).status; }
         catch { return null; }
       }, { timeout: 90_000, interval: 200 }).toBe("ok");
-      await stop();
       expect(existsSync(marker)).toBe(false);
-      expect(await db.select().from(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.companyId, adoptedCompanyId))).toEqual([]);
+      expect(await db.select().from(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.companyId, adoptedCompanyId))).toEqual([historical]);
+      expect(readFileSync(recordFile, "utf8")).toBe(record);
+      expect(survivor.exitCode).toBeNull();
+      expect(survivor.signalCode).toBeNull();
+      await stop();
     }
   } finally {
+    if (survivor?.pid && survivor.exitCode === null && survivor.signalCode === null) {
+      const exited = once(survivor, "exit");
+      survivor.kill();
+      await exited;
+    }
     writeFileSync(descriptorFile, original);
     await db.$client.end();
     await stop();
