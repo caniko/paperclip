@@ -14,8 +14,13 @@ import { buildNativeExecutionInput } from "../native-runtime/native-execution-in
 import { nativeRuntimeContextFixture } from "../native-runtime/runtime-context.test-fixture.js";
 import { selectHeartbeatEnvironment, type HeartbeatEnvironmentSelectionInput } from "./environment-selection.js";
 import { acquireAtlasExecution } from "./atlas-execution.js";
-import type { AtlasAdmission } from "../../deployment/runtime.js";
+import { atlasExecutionPolicy, type AtlasAdmission } from "../../deployment/runtime.js";
 import type { Environment, EnvironmentLease } from "@paperclipai/shared";
+
+vi.mock("../../deployment/runtime.js", async (original) => ({
+  ...await original<typeof import("../../deployment/runtime.js")>(),
+  atlasExecutionPolicy: vi.fn(() => null),
+}));
 
 it("releases an Atlas slot if the actual acquired target differs before preparation", async () => {
   const binding: AtlasAdmission = {
@@ -23,11 +28,12 @@ it("releases an Atlas slot if the actual acquired target differs before preparat
     host: "127.0.0.1", port: 2222, username: "worker", hostKey: "ssh-ed25519 fixture", privateKeyCredential: "worker-key",
     workspaceClass: "copy-scratch", remoteWorkspacePath: "/worker/work", command: "/worker/claude", sshExecutable: "/bin/ssh",
   };
-  const environment = { id: binding.environmentId, driver: "ssh", status: "active", envVars: {}, config: {
+  const environment: Environment = { id: binding.environmentId, name: "Atlas", description: null, metadata: null,
+    createdAt: new Date(), updatedAt: new Date(), driver: "ssh", status: "active", envVars: {}, config: {
     host: binding.host, port: binding.port, username: binding.username, remoteWorkspacePath: binding.remoteWorkspacePath,
     knownHosts: `[${binding.host}]:${binding.port} ${binding.hostKey}`, strictHostKeyChecking: true,
     privateKeyCredential: binding.privateKeyCredential, workspaceRealizationMode: "copy",
-  } } as Environment;
+  } };
   const getById = vi.fn<() => Promise<Environment | null>>()
     .mockResolvedValueOnce(environment).mockResolvedValueOnce({ ...environment, driver: "local" });
   const releaseLease = vi.fn(async () => null);
@@ -103,6 +109,38 @@ describe.skipIf(!support.supported)("heartbeat environment selection boundary", 
     };
     return { input, issue, project, workspace, recover };
   }
+
+  it("denies Atlas implicit/local, unmanaged, stale, foreign and overridden bindings before selecting workspace or local/overflow state", async () => {
+    const { input } = await fixture();
+    const binding: AtlasAdmission = {
+      companyId: input.agent.companyId, agentId: input.agent.id, environmentId: randomUUID(), adapterType: "claude_local",
+      host: "127.0.0.1", port: 2222, username: "worker", hostKey: "ssh-ed25519 fixture", privateKeyCredential: "worker-key",
+      workspaceClass: "copy-scratch", remoteWorkspacePath: "/worker/work", command: "/worker/claude", sshExecutable: "/bin/ssh",
+    };
+    const getById = vi.fn(async () => null);
+    const ensureLocalEnvironment = vi.fn(async () => { throw new Error("unexpected local environment or overflow"); });
+    const getStoredById = vi.fn(async () => { throw new Error("unexpected workspace lookup"); });
+    const qualified = { ...input, agent: { ...input.agent, adapterType: "claude_local" as const,
+      defaultEnvironmentId: binding.environmentId, adapterConfig: { engine: "cli", command: binding.command }, runtimeConfig: {} },
+      services: { ...input.services, environmentsSvc: { ...input.services.environmentsSvc, getById, ensureLocalEnvironment },
+        executionWorkspacesSvc: { ...input.services.executionWorkspacesSvc, getStoredById } } };
+    vi.mocked(atlasExecutionPolicy).mockReturnValue({ admissions: [binding], home, credentialFiles: {} });
+    try {
+      for (const agent of [
+        { ...qualified.agent, defaultEnvironmentId: null }, { ...qualified.agent, defaultEnvironmentId: randomUUID() },
+        { ...qualified.agent, id: randomUUID() }, { ...qualified.agent, companyId: randomUUID() },
+        { ...qualified.agent, adapterType: "process" as const },
+        { ...qualified.agent, adapterConfig: { ...qualified.agent.adapterConfig, env: { ANTHROPIC_API_KEY: "fixture" } } },
+        { ...qualified.agent, runtimeConfig: { fallbackEnvironmentIds: [randomUUID()] } },
+      ]) await expect(selectHeartbeatEnvironment(db, { ...qualified, agent })).rejects.toThrow("No qualified Atlas");
+      await expect(selectHeartbeatEnvironment(db, { ...qualified, run: { ...qualified.run, runtimeMode: "native" } })).rejects.toThrow("controller-selected scratch");
+      expect(getById).not.toHaveBeenCalled();
+      await expect(selectHeartbeatEnvironment(db, qualified)).rejects.toThrow("environment is unavailable");
+      expect(getById).toHaveBeenCalledExactlyOnceWith(binding.environmentId);
+      expect(getStoredById).not.toHaveBeenCalled();
+      expect(ensureLocalEnvironment).not.toHaveBeenCalled();
+    } finally { vi.mocked(atlasExecutionPolicy).mockReturnValue(null); }
+  });
 
   it("keeps the admitted workspace binding when the issue points at a newer workspace", async () => {
     const { input, workspace, recover } = await fixture();

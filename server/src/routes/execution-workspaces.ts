@@ -1175,6 +1175,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
   });
 
   router.patch("/execution-workspaces/:id", validate(updateExecutionWorkspaceSchema), async (req, res) => {
+    if (atlasExecutionPolicy() && req.actor.type !== "board") throw forbidden("Atlas workspace preparation requires Board access");
     const id = req.params.id as string;
     const existing = await getAccessibleResource(req, res, svc.getById(id), "Execution workspace not found");
     if (!existing) return;

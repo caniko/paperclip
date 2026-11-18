@@ -7,14 +7,15 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
   atlasBridgeTokenDelivery,
-  loadAtlasBridgeToken,
   buildSshEnvLabFixtureConfig,
   buildSshSpawnTarget,
+  createSshCommandManagedRuntimeRunner,
   getSshEnvLabSupport,
   startSshEnvLabFixture,
   stopSshEnvLabFixture,
   type SshEnvLabFixtureState,
 } from "./ssh.js";
+import { ATLAS_CALLBACK_BRIDGE_ROUTES, authorizeSandboxCallbackBridgeRequestWithRoutes, createSandboxCallbackBridgeAsset, startSandboxCallbackBridgeServer } from "./sandbox-callback-bridge.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -28,6 +29,18 @@ async function commandAvailable(command: string): Promise<boolean> {
 }
 
 describe("SSH authentication selection", () => {
+  it("keeps Atlas bridge runtime control out of the queue allowlist", () => {
+    for (const workspace of ["/api/execution-workspaces/x", "/api/projects/p/workspaces/x"]) {
+      for (const alias of ["runtime-services", "runtime-commands"]) {
+        for (const action of ["start", "restart"]) {
+          const request = { method: "POST", path: `${workspace}/${alias}/${action}` };
+          expect(authorizeSandboxCallbackBridgeRequestWithRoutes(request, ATLAS_CALLBACK_BRIDGE_ROUTES)).not.toBeNull();
+        }
+      }
+    }
+    expect(authorizeSandboxCallbackBridgeRequestWithRoutes({ method: "GET", path: "/api/execution-workspaces/x" }, ATLAS_CALLBACK_BRIDGE_ROUTES)).toBeNull();
+  });
+
   it("delivers the Atlas bearer out of band for bridge and adapter launches and cleans it up", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "pc-atlas-auth-"));
     const fakeSsh = path.join(root, "ssh");
@@ -39,12 +52,21 @@ describe("SSH authentication selection", () => {
     const runBearer = "host-run-marker";
     const bridgeBearer = "private-bridge-marker";
     const delivery = atlasBridgeTokenDelivery(spec, bridgeBearer);
+    const asset = await createSandboxCallbackBridgeAsset();
+    let bridge: Awaited<ReturnType<typeof startSandboxCallbackBridgeServer>> | undefined;
     try {
       await delivery.deliver();
       expect((await stat(delivery.file)).mode & 0o777).toBe(0o600);
-      const bridgeLoad = loadAtlasBridgeToken(delivery.file, "PAPERCLIP_BRIDGE_TOKEN");
-      const bridge = await execFileAsync(fakeSsh, [`${bridgeLoad} && test -n "$PAPERCLIP_BRIDGE_TOKEN"`]);
-      expect(bridge.stdout + bridge.stderr).toBe("");
+      const bridgeInput = {
+        runner: createSshCommandManagedRuntimeRunner({ spec }), remoteCwd: root,
+        assetRemoteDir: path.join(root, "server"), queueDir: path.join(root, "queue"),
+        nodeCommand: process.execPath, bridgeToken: bridgeBearer, protectedBridgeTokenFile: delivery.file, bridgeAsset: asset,
+      };
+      bridge = await startSandboxCallbackBridgeServer(bridgeInput);
+      const bridgeArgv = await readFile(argvLog, "utf8");
+      expect(bridgeArgv).toContain("nohup");
+      expect(bridgeArgv).not.toContain(bridgeBearer);
+      expect(await readFile(bridge.directories.logFile, "utf8")).not.toContain(bridgeBearer);
       const launch = await buildSshSpawnTarget({ spec, command: "sh", args: ["-c", 'test -n "$PAPERCLIP_API_KEY"'],
         env: { PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: delivery.file, PAPERCLIP_API_KEY: runBearer, ANTHROPIC_API_KEY: "controller-env-marker" } });
       try {
@@ -57,8 +79,13 @@ describe("SSH authentication selection", () => {
       } finally { await launch.cleanup(); }
       const logged = await readFile(argvLog, "utf8");
       for (const marker of [runBearer, bridgeBearer, "controller-env-marker"]) expect(logged).not.toContain(marker);
+      await bridge.stop();
+      bridge = undefined;
+      await expect(startSandboxCallbackBridgeServer(bridgeInput)).rejects.toThrow("Could not start the protected Atlas callback bridge");
     } finally {
+      await bridge?.stop();
       await delivery.cleanup();
+      await asset.cleanup();
       await rm(root, { recursive: true, force: true });
     }
   });

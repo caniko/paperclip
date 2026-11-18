@@ -34,6 +34,8 @@ export type {
   SandboxAdditionalSource,
 } from "./sandbox-managed-runtime.js";
 import {
+  ATLAS_CALLBACK_BRIDGE_ROUTES,
+  authorizeSandboxCallbackBridgeRequestWithRoutes,
   createCommandManagedSandboxCallbackBridgeQueueClient,
   createSandboxCallbackBridgeAsset,
   createSandboxCallbackBridgeToken,
@@ -4513,10 +4515,6 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
     },
   ): Promise<{ status: number; headers: Record<string, string>; body: Buffer }> => {
     const method = request.method.trim().toUpperCase() || "GET";
-    if (atlasTarget && method !== "GET" && method !== "HEAD" &&
-        /\/(?:runtime-services|runtime-commands)(?:\/|$)/i.test(request.path)) {
-      return { status: 403, headers: {}, body: Buffer.from("Workspace runtime control is disabled on Atlas") };
-    }
     // The per-request debug log prints the method, the path, and the query. The
     // duplex path suppresses it, so no route or query rides a log line there. The
     // file path keeps the existing behavior.
@@ -4935,6 +4933,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
   let server: Awaited<ReturnType<typeof startSandboxCallbackBridgeServer>> | null = null;
   let worker: Awaited<ReturnType<typeof startSandboxCallbackBridgeWorker>> | null = null;
   try {
+    await protectedBearer?.deliver();
     const client = createCommandManagedSandboxCallbackBridgeQueueClient({
       runner,
       remoteCwd: target.remoteCwd,
@@ -4950,6 +4949,9 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       client,
       queueDir,
       maxBodyBytes,
+      authorizeRequest: atlasTarget
+        ? (request) => authorizeSandboxCallbackBridgeRequestWithRoutes(request, ATLAS_CALLBACK_BRIDGE_ROUTES)
+        : undefined,
       getRuntimeParentContext: input.getRuntimeParentContext,
       runtimeSpan: input.runtimeSpan,
       // The worker encodes binary bodies only at the queue boundary.
@@ -4957,7 +4959,6 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
         reservation: options?.reservation,
       }),
     });
-    await protectedBearer?.deliver();
     server = await startSandboxCallbackBridgeServer({
       runner,
       remoteCwd: target.remoteCwd,

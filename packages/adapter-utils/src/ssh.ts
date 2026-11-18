@@ -1469,7 +1469,7 @@ export function loadAtlasBridgeToken(file: string | undefined, key: "PAPERCLIP_A
   if (!file || !/^\/tmp\/paperclip-atlas-[0-9a-f]{32}\/bearer$/.test(file)) {
     throw new Error("Missing protected Atlas bridge credential");
   }
-  return `set +x; IFS= read -r ${key} < ${shellQuote(file)} && test -n "$${key}" && export ${key}`;
+  return `{ set +x; IFS= read -r ${key} < ${shellQuote(file)} && test -n "$${key}" && export ${key}; }`;
 }
 
 export function atlasBridgeTokenDelivery(spec: SshRemoteExecutionSpec, bearer: string) {

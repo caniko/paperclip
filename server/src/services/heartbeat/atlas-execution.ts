@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils";
+import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
 import type { agents } from "@paperclipai/db";
 import type { Environment } from "@paperclipai/shared";
 import { atlasExecutionPolicy, readCredential, type AtlasAdmission } from "../../deployment/runtime.js";

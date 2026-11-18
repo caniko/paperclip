@@ -797,7 +797,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
       if (atlas && (executionTarget?.kind !== "remote" || executionTarget.transport !== "ssh" || !executionTarget.spec.atlas)) {
         throw new Error("Atlas dispatch requires the qualified SSH target");
       }
-      const runtimeTools = atlas ? null : createAdapterRuntimeToolAccess({
+      const runtimeTools = atlas ? undefined : createAdapterRuntimeToolAccess({
         agentId: agent.id,
         companyId: agent.companyId,
         runId: run.id,

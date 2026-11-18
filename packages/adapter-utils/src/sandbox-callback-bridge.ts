@@ -442,6 +442,10 @@ export function authorizeSandboxCallbackBridgeRequestWithRoutes(
     : `Route not allowed: ${method} ${request.path}`;
 }
 
+export const ATLAS_CALLBACK_BRIDGE_ROUTES = DEFAULT_SANDBOX_CALLBACK_BRIDGE_ROUTE_ALLOWLIST.filter(
+  (route) => route.method === "GET" || !/runtime-(?:services|commands)/.test(route.path.source),
+);
+
 export function sanitizeSandboxCallbackBridgeHeaders(
   headers: Record<string, string>,
   allowlist: readonly string[] = DEFAULT_SANDBOX_CALLBACK_BRIDGE_HEADER_ALLOWLIST,
@@ -1735,6 +1739,28 @@ export async function startSandboxCallbackBridgeServer(input: {
   });
   if (input.protectedBridgeTokenFile) delete env.PAPERCLIP_BRIDGE_TOKEN;
   const nodeCommand = input.nodeCommand?.trim() || "node";
+  const stop = async () => {
+    const stopResult = await runSandboxBridgeControlCommand(input.runner, {
+      command: shellCommand,
+      args: shellCommandArgs([
+        `if [ -s ${shellQuote(directories.pidFile)} ]; then`,
+        `  pid="$(cat ${shellQuote(directories.pidFile)})"`,
+        "  kill \"$pid\" 2>/dev/null || true",
+        "  i=0",
+        "  while kill -0 \"$pid\" 2>/dev/null && [ \"$i\" -lt 40 ]; do",
+        "    i=$((i + 1))",
+        "    sleep 0.05",
+        "  done",
+        "fi",
+        `rm -f ${shellQuote(directories.pidFile)} ${shellQuote(directories.readyFile)}`,
+      ].join("\n")),
+      cwd: input.remoteCwd,
+      env: { [SANDBOX_EXEC_CHANNEL_ENV]: SANDBOX_EXEC_CHANNEL_BRIDGE },
+      timeoutMs,
+    });
+    if (stopResult.timedOut) throw new Error(buildRunnerFailureMessage("stop sandbox callback bridge", stopResult));
+  };
+  const start = async () => {
   const startResult = await runSandboxBridgeControlCommand(input.runner, {
     command: shellCommand,
     args: shellCommandArgs(
@@ -1813,34 +1839,18 @@ export async function startSandboxCallbackBridgeServer(input: {
     port,
     pid: typeof readyData.pid === "number" && Number.isFinite(readyData.pid) ? readyData.pid : 0,
     directories,
-    stop: async () => {
-      const stopResult = await runSandboxBridgeControlCommand(input.runner, {
-        command: shellCommand,
-        args: shellCommandArgs(
-          [
-            `if [ -s ${shellQuote(directories.pidFile)} ]; then`,
-            `  pid="$(cat ${shellQuote(directories.pidFile)})"`,
-            "  kill \"$pid\" 2>/dev/null || true",
-            "  i=0",
-            "  while kill -0 \"$pid\" 2>/dev/null && [ \"$i\" -lt 40 ]; do",
-            "    i=$((i + 1))",
-            "    sleep 0.05",
-            "  done",
-            "fi",
-            `rm -f ${shellQuote(directories.pidFile)} ${shellQuote(directories.readyFile)}`,
-          ].join("\n"),
-        ),
-        cwd: input.remoteCwd,
-        env: {
-          [SANDBOX_EXEC_CHANNEL_ENV]: SANDBOX_EXEC_CHANNEL_BRIDGE,
-        },
-        timeoutMs,
-      });
-      if (stopResult.timedOut) {
-        throw new Error(buildRunnerFailureMessage("stop sandbox callback bridge", stopResult));
-      }
-    },
+    stop,
   };
+  };
+  try {
+    return await start();
+  } catch (error) {
+    if (input.protectedBridgeTokenFile) {
+      await stop().catch(() => {});
+      throw new Error("Could not start the protected Atlas callback bridge");
+    }
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------

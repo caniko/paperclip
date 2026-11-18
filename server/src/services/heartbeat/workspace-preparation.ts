@@ -86,6 +86,7 @@ import type { workspaceOperationService } from "../workspace-operations.js";
 import type { watchLegacyControllerLease } from "../legacy-controller-lease.js";
 import type {
   createHeartbeatWorkspaceResolver,
+  ResolvedWorkspaceForRun,
   resolveExecutionWorkspaceReuseRequestForIssue,
 } from "./workspaces.js";
 import type { createHeartbeatLifecycle } from "./run-lifecycle.js";
@@ -186,7 +187,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     await input.controllerLease.assertOwned();
     const executionTarget = { ...await prepareAtlasScratch(binding), leaseId: acquired.lease.id };
     const cwd = executionTarget.spec.atlas.scratchDir;
-    const resolvedWorkspace = {
+    const resolvedWorkspace: ResolvedWorkspaceForRun = {
       cwd, source: "agent_home" as const, projectId: null, workspaceId: null, repoUrl: null, repoRef: null,
       warnings: [], baseCwdFallback: false, materializationFailures: [], workspaceHints: [],
       additionalWorkspaces: [], referencedProjectFailures: [],
@@ -195,15 +196,21 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
       cwd, baseCwd: cwd, source: "agent_home", projectId: null, workspaceId: null, repoUrl: null, repoRef: null,
       strategy: "project_primary", branchName: null, worktreePath: null, warnings: [], created: true, branchCreatedByRuntime: false,
     };
-    const workspaceConfigFreshness = resolveExecutionWorkspaceConfigFreshness({
-      hasExistingWorkspace: false, existingWorkspaceMetadata: null, inferredMetadata: null, nextMetadata: null,
-    });
     const workspaceRealization = { driver: "ssh", workspaceClass: binding.workspaceClass };
+    const latestWorkspaceConfigMetadata = buildEffectiveRunWorkspaceConfigMetadata({
+      mode: "isolated_workspace", projectId: null, projectWorkspaceId: null, strategyType: "project_primary",
+      workspaceStrategy: null, repoUrl: null, repoRef: null, configSnapshot: input.config.configSnapshot,
+      environment: { selectedEnvironmentId: binding.environmentId, driver: "ssh" }, realization: workspaceRealization,
+      secretManifest: [],
+    });
+    const workspaceConfigFreshness = resolveExecutionWorkspaceConfigFreshness({
+      hasExistingWorkspace: false, existingWorkspaceMetadata: null, nextMetadata: latestWorkspaceConfigMetadata,
+    });
     const now = Date.now();
     return {
       workspaceOwnership: undefined, resolvedWorkspace, executionWorkspace,
       hostExecutionWorkspaceConfig: {}, skipHostProvision: true,
-      latestWorkspaceConfigMetadata: null, workspaceConfigFreshness,
+      latestWorkspaceConfigMetadata, workspaceConfigFreshness,
       workspaceOperationRecorder: input.services.workspaceOperationsSvc.createRecorder({
         companyId: input.agent.companyId, heartbeatRunId: input.run.id, issueId: input.task.issueId, executionWorkspaceId: null,
       }),
