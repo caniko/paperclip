@@ -446,6 +446,9 @@ it("refuses missing Atlas policy, but serves the Board with empty admissions", a
       expect(survivor.exitCode).toBeNull();
       expect(survivor.signalCode).toBeNull();
       await stop();
+      expect(existsSync(marker)).toBe(false);
+      expect(await db.select().from(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.companyId, adoptedCompanyId))).toEqual([historical]);
+      expect(readFileSync(recordFile, "utf8")).toBe(record);
     }
   } finally {
     if (survivor?.pid && survivor.exitCode === null && survivor.signalCode === null) {
