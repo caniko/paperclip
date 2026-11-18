@@ -389,6 +389,9 @@ it("refuses missing Atlas policy, but serves the Board with empty admissions", a
   const atlas = { ...JSON.parse(original), executionProfile: "atlas-ssh" };
   const db = createDb(database.connectionString);
   let survivor: ChildProcess | undefined;
+  // Later tests boot without the Atlas fence on the same database: drop the
+  // seeded running-state fixtures so they cannot start there.
+  let cleanupSeeded = async () => {};
   try {
     for (const policy of [undefined, { admissions: [{}] }]) {
       writeFileSync(descriptorFile, JSON.stringify({ ...atlas, atlasExecutionPolicy: policy }));
@@ -431,6 +434,13 @@ it("refuses missing Atlas policy, but serves the Board with empty admissions", a
       envFingerprint: "", port: null, url: null, pid: survivor.pid, processGroupId: survivor.pid,
       provider: "local_process", startedAt: historical.startedAt.toISOString(), lastSeenAt: historical.lastUsedAt.toISOString() });
     writeFileSync(recordFile, record);
+    cleanupSeeded = async () => {
+      rmSync(recordFile, { force: true });
+      await db.delete(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.id, runtimeId));
+      await db.delete(executionWorkspaces).where(eq(executionWorkspaces.id, execution.id));
+      await db.delete(projectWorkspaces).where(eq(projectWorkspaces.id, workspace.id));
+      await db.delete(projects).where(eq(projects.id, project.id));
+    };
     for (let boot = 0; boot < 2; boot++) {
       child = launch("serve");
       child.stdout!.on("data", (chunk) => { output += chunk; });
@@ -457,6 +467,8 @@ it("refuses missing Atlas policy, but serves the Board with empty admissions", a
       await exited;
     }
     writeFileSync(descriptorFile, original);
+    await stop();
+    await cleanupSeeded();
     await db.$client.end();
     await stop();
   }
