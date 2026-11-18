@@ -1540,6 +1540,7 @@ export async function syncDirectoryToSsh(input: {
   spec: SshRemoteExecutionSpec;
   localDir: string;
   remoteDir: string;
+  createFresh?: boolean;
   exclude?: string[];
   followSymlinks?: boolean;
   onProgress?: RuntimeProgressSink;
@@ -1552,7 +1553,7 @@ export async function syncDirectoryToSsh(input: {
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
     buildRemoteShellCommand([
-      `mkdir -p ${shellQuote(input.remoteDir)}`,
+      input.createFresh ? `umask 077 && mkdir -- ${shellQuote(input.remoteDir)}` : `mkdir -p ${shellQuote(input.remoteDir)}`,
       `exec tar -xf - -C ${shellQuote(input.remoteDir)}`,
     ], input.spec),
   ];

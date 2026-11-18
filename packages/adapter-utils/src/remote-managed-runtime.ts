@@ -1,5 +1,6 @@
 import path from "node:path";
 import fs from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { GIT_ARCHIVE_EXCLUDES, PROJECT_REPOSITORIES_DIR } from "./git-workspace-sync.js";
 import {
   type SshRemoteExecutionSpec,
@@ -135,18 +136,14 @@ export async function prepareRemoteManagedRuntime(input: {
   }
   const baseWorkspaceRemoteDir = input.workspaceRemoteDir ?? input.spec.remoteCwd;
   const syncWorkspace = input.syncWorkspace !== false;
-  const workspaceRemoteDir = syncWorkspace
-    ? path.posix.join(
-        baseWorkspaceRemoteDir,
-        ".paperclip-runtime",
-        "runs",
-        input.runId,
-        "workspace",
-      )
-    : baseWorkspaceRemoteDir;
+  const workspaceRemoteDir = atlas
+    ? path.posix.join(input.spec.remoteCwd, `attempt-${randomUUID()}`)
+    : syncWorkspace
+      ? path.posix.join(baseWorkspaceRemoteDir, ".paperclip-runtime", "runs", input.runId, "workspace")
+      : baseWorkspaceRemoteDir;
   const runtimeRootDir = path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
 
-  if (atlas) await syncDirectoryToSsh({ spec: input.spec, localDir: input.workspaceLocalDir, remoteDir: workspaceRemoteDir });
+  if (atlas) await syncDirectoryToSsh({ spec: input.spec, localDir: input.workspaceLocalDir, remoteDir: workspaceRemoteDir, createFresh: true });
   const preparedWorkspace = syncWorkspace && !atlas
     ? await prepareWorkspaceForSshExecution({
         spec: input.spec,

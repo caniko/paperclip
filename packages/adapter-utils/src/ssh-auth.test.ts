@@ -1,10 +1,10 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   atlasBridgeTokenDelivery,
   buildSshEnvLabFixtureConfig,
@@ -13,11 +13,23 @@ import {
   getSshEnvLabSupport,
   startSshEnvLabFixture,
   stopSshEnvLabFixture,
+  syncDirectoryToSsh,
   type SshEnvLabFixtureState,
 } from "./ssh.js";
-import { ATLAS_CALLBACK_BRIDGE_ROUTES, authorizeSandboxCallbackBridgeRequestWithRoutes, createSandboxCallbackBridgeAsset, startSandboxCallbackBridgeServer } from "./sandbox-callback-bridge.js";
+import { ATLAS_CALLBACK_BRIDGE_ROUTES, authorizeSandboxCallbackBridgeRequestWithRoutes, createSandboxCallbackBridgeAsset, sandboxCallbackBridgeDirectories, startSandboxCallbackBridgeServer } from "./sandbox-callback-bridge.js";
+import { startAdapterExecutionTargetPaperclipBridge } from "./execution-target.js";
+import { prepareRemoteManagedRuntime } from "./remote-managed-runtime.js";
 
 const execFileAsync = promisify(execFile);
+
+async function atlasFixtureSpec(root: string) {
+  const fakeSsh = path.join(root, "ssh");
+  const argvLog = path.join(root, "argv");
+  await writeFile(fakeSsh, `#!/bin/sh\nexport PATH=${JSON.stringify(process.env.PATH || "/bin:/usr/bin")}\nprintf '%s\\n' "$@" >> '${argvLog}'\nfor arg do :; done\nexec /bin/sh -c "$arg"\n`, { mode: 0o700 });
+  return { host: "127.0.0.1", port: 2222, username: "worker", remoteCwd: root, remoteWorkspacePath: root,
+    privateKey: "fixture-key", knownHosts: "fixture-host", strictHostKeyChecking: true,
+    atlas: { sshExecutable: fakeSsh, scratchDir: root } };
+}
 
 async function commandAvailable(command: string): Promise<boolean> {
   try {
@@ -43,12 +55,8 @@ describe("SSH authentication selection", () => {
 
   it("delivers the Atlas bearer out of band for bridge and adapter launches and cleans it up", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "pc-atlas-auth-"));
-    const fakeSsh = path.join(root, "ssh");
     const argvLog = path.join(root, "argv");
-    await writeFile(fakeSsh, `#!/bin/sh\nexport PATH=${JSON.stringify(process.env.PATH || "/bin:/usr/bin")}\nprintf '%s\\n' "$@" >> '${argvLog}'\nfor arg do :; done\nexec /bin/sh -c "$arg"\n`, { mode: 0o700 });
-    const spec = { host: "127.0.0.1", port: 2222, username: "worker", remoteCwd: root, remoteWorkspacePath: root,
-      privateKey: "fixture-key", knownHosts: "fixture-host", strictHostKeyChecking: true,
-      atlas: { sshExecutable: fakeSsh, scratchDir: root } };
+    const spec = await atlasFixtureSpec(root);
     const runBearer = "host-run-marker";
     const bridgeBearer = "private-bridge-marker";
     const delivery = atlasBridgeTokenDelivery(spec, bridgeBearer);
@@ -70,7 +78,7 @@ describe("SSH authentication selection", () => {
       const launch = await buildSshSpawnTarget({ spec, command: "sh", args: ["-c", 'test -n "$PAPERCLIP_API_KEY"'],
         env: { PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: delivery.file, PAPERCLIP_API_KEY: runBearer, ANTHROPIC_API_KEY: "controller-env-marker" } });
       try {
-        expect(launch.command).toBe(fakeSsh);
+        expect(launch.command).toBe(spec.atlas.sshExecutable);
         expect(launch.args).toEqual(expect.arrayContaining(["-F", "/dev/null", "IdentityAgent=none", "ClearAllForwardings=yes", "ControlPath=none"]));
         const invocation = await execFileAsync(launch.command, launch.args, { env: {} });
         expect(invocation.stdout + invocation.stderr).toBe("");
@@ -89,6 +97,62 @@ describe("SSH authentication selection", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("forwards only canonical Atlas queue paths and does not follow redirects", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pc-atlas-queue-"));
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 302, headers: { location: "/elsewhere" } }));
+    let bridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
+    try {
+      const spec = await atlasFixtureSpec(root);
+      bridge = await startAdapterExecutionTargetPaperclipBridge({ runId: "fixture-run", adapterKey: "claude", runtimeRootDir: root,
+        target: { kind: "remote", transport: "ssh", remoteCwd: root, spec }, hostApiUrl: "http://fixture.invalid", hostApiToken: "fixture-token" });
+      expect(bridge).not.toBeNull();
+      const { requestsDir, responsesDir } = sandboxCallbackBridgeDirectories(path.join(root, "paperclip-bridge", "queue"));
+      const deny = ["/api/issues/.", "/api/issues/%2e%2e", "/api/issues/a%2fb", "/api/issues/a%5cb", "/api/issues//x",
+        "http://fixture.invalid/api/issues/x", "//fixture.invalid/api/issues/x"];
+      const paths = [...deny, "/api/issues/fixture"];
+      await Promise.all(paths.map(async (candidate, i) => {
+        const id = `fixture-${i}`;
+        const file = path.join(requestsDir, `${id}.json`);
+        await writeFile(`${file}.tmp`, JSON.stringify({ id, method: "GET", path: candidate, query: "view=fixture", headers: {}, body: "" }));
+        await rename(`${file}.tmp`, file);
+      }));
+      await vi.waitFor(async () => {
+        const statuses = await Promise.all(paths.map(async (_, i) =>
+          JSON.parse(await readFile(path.join(responsesDir, `fixture-${i}.json`), "utf8")).status));
+        expect(statuses).toEqual([...deny.map(() => 403), 302]);
+      }, { timeout: 8_000, interval: 50 });
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenCalledWith(new URL("http://fixture.invalid/api/issues/fixture?view=fixture"), expect.objectContaining({ redirect: "manual" }));
+    } finally {
+      await bridge?.stop();
+      fetch.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("allocates private Atlas directories per attempt without reusing prior results", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pc-atlas-scratch-"));
+    try {
+      const scratch = path.join(root, "local");
+      await mkdir(scratch, { mode: 0o700 });
+      const spec = await atlasFixtureSpec(root);
+      spec.atlas.scratchDir = scratch;
+      const input = { spec, runId: "same-run", adapterKey: "claude", workspaceLocalDir: scratch };
+      const first = (await prepareRemoteManagedRuntime(input)).workspaceRemoteDir;
+      const result = path.join(first, "result");
+      await writeFile(result, "keep");
+      const second = (await prepareRemoteManagedRuntime(input)).workspaceRemoteDir;
+      expect(second).not.toBe(first);
+      for (const attempt of [first, second]) {
+        expect(path.dirname(attempt)).toBe(root);
+        expect((await stat(attempt)).mode & 0o777).toBe(0o700);
+      }
+      await expect(syncDirectoryToSsh({ spec, localDir: scratch, remoteDir: first, createFresh: true })).rejects.toThrow();
+      expect(await readFile(result, "utf8")).toBe("keep");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it("does not authenticate with an agent key when the supplied key is rejected", async (context) => {
     const support = await getSshEnvLabSupport();
     if (!support.supported) context.skip(support.reason ?? "SSH fixture unavailable");

@@ -47,6 +47,7 @@ import {
   sandboxCallbackBridgeDirectories,
   startSandboxCallbackBridgeServer,
   startSandboxCallbackBridgeWorker,
+  sanitizeSandboxCallbackBridgeHeaders,
   syncRemoteTextFileWithHashSkip,
   syncRemoteTextFilesWithHashSkip,
   syncSandboxCallbackBridgeEntrypoint,
@@ -4515,6 +4516,16 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
     },
   ): Promise<{ status: number; headers: Record<string, string>; body: Buffer }> => {
     const method = request.method.trim().toUpperCase() || "GET";
+    // The queue is worker-writable. The queue worker's raw allowlist is only
+    // a prefilter; Atlas authorizes the same parsed URL that goes to fetch.
+    const rawPath = request.path;
+    const url = atlasTarget && (!rawPath.startsWith("/") || /\/\/|[\\?#\s\x00-\x1f\x7f]|%(?:2f|5c|25)/i.test(rawPath))
+      ? null : buildBridgeForwardUrl(hostApiUrl, request);
+    if (!url || (atlasTarget && (url.origin !== new URL(hostApiUrl).origin || url.pathname !== rawPath ||
+      authorizeSandboxCallbackBridgeRequestWithRoutes({ method, path: url.pathname }, ATLAS_CALLBACK_BRIDGE_ROUTES)))) {
+      return { status: 403, headers: { "content-type": "application/json" },
+        body: Buffer.from(JSON.stringify({ error: "Route not allowed by the Atlas bridge" })) };
+    }
     // The per-request debug log prints the method, the path, and the query. The
     // duplex path suppresses it, so no route or query rides a log line there. The
     // file path keeps the existing behavior.
@@ -4526,7 +4537,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       );
     }
     const headers = new Headers();
-    for (const [key, value] of Object.entries(request.headers)) {
+    for (const [key, value] of Object.entries(atlasTarget ? sanitizeSandboxCallbackBridgeHeaders(request.headers) : request.headers)) {
       if (value.trim().length === 0) continue;
       headers.set(key, value);
     }
@@ -4548,11 +4559,12 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       method,
       headers,
       signal: forwardSignal,
+      ...(atlasTarget ? { redirect: "manual" } : {}),
     };
     if (method !== "GET" && method !== "HEAD" && request.body !== undefined) {
       forwardInit.body = request.body as BodyInit;
     }
-    const response = await fetch(buildBridgeForwardUrl(hostApiUrl, request), forwardInit);
+    const response = await fetch(url, forwardInit);
     if (emitDebugLog) {
       await onLog(
         "stdout",
@@ -4949,9 +4961,6 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       client,
       queueDir,
       maxBodyBytes,
-      authorizeRequest: atlasTarget
-        ? (request) => authorizeSandboxCallbackBridgeRequestWithRoutes(request, ATLAS_CALLBACK_BRIDGE_ROUTES)
-        : undefined,
       getRuntimeParentContext: input.getRuntimeParentContext,
       runtimeSpan: input.runtimeSpan,
       // The worker encodes binary bodies only at the queue boundary.
