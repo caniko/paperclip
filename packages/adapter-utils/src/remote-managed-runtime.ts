@@ -1,4 +1,5 @@
 import path from "node:path";
+import fs from "node:fs/promises";
 import { GIT_ARCHIVE_EXCLUDES, PROJECT_REPOSITORIES_DIR } from "./git-workspace-sync.js";
 import {
   type SshRemoteExecutionSpec,
@@ -122,6 +123,16 @@ export async function prepareRemoteManagedRuntime(input: {
   // child task wires it into the workspace/asset transfers.
   onProgress?: RuntimeProgressSink;
 }): Promise<PreparedRemoteManagedRuntime> {
+  const atlas = input.spec.atlas;
+  if (atlas) {
+    const dir = await fs.lstat(input.workspaceLocalDir);
+    if (input.syncWorkspace === false || input.workspaceRemoteDir || input.additionalSources?.length ||
+        input.workspaceLocalDir !== atlas.scratchDir || !dir.isDirectory() || dir.uid !== process.getuid?.() ||
+        (dir.mode & 0o077) !== 0 || await fs.realpath(input.workspaceLocalDir) !== atlas.scratchDir ||
+        (await fs.readdir(input.workspaceLocalDir)).length !== 0) {
+      throw new Error("Atlas requires an empty controller-owned copy scratch directory");
+    }
+  }
   const baseWorkspaceRemoteDir = input.workspaceRemoteDir ?? input.spec.remoteCwd;
   const syncWorkspace = input.syncWorkspace !== false;
   const workspaceRemoteDir = syncWorkspace
@@ -135,7 +146,8 @@ export async function prepareRemoteManagedRuntime(input: {
     : baseWorkspaceRemoteDir;
   const runtimeRootDir = path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
 
-  const preparedWorkspace = syncWorkspace
+  if (atlas) await syncDirectoryToSsh({ spec: input.spec, localDir: input.workspaceLocalDir, remoteDir: workspaceRemoteDir });
+  const preparedWorkspace = syncWorkspace && !atlas
     ? await prepareWorkspaceForSshExecution({
         spec: input.spec,
         localDir: input.workspaceLocalDir,
@@ -251,6 +263,7 @@ export async function prepareRemoteManagedRuntime(input: {
     assetDirs,
     additionalSourceDirs,
     restoreWorkspace: async (onProgress?: RuntimeProgressSink) => {
+      if (atlas) return;
       if (preparedWorkspace && baselineSnapshot) {
         await restoreWorkspaceFromSshExecution({
           spec: input.spec,

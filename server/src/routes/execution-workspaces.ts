@@ -66,7 +66,8 @@ import {
   issueWorkspaceLoginHandoff,
   workspaceLoginHandoffFailureStatus,
 } from "../services/workspace-login-handoff-issuer.js";
-import { conflict, unprocessable } from "../errors.js";
+import { conflict, forbidden, unprocessable } from "../errors.js";
+import { atlasExecutionPolicy } from "../deployment/runtime.js";
 
 const WORKSPACE_CONTROL_OUTPUT_MAX_CHARS = 256 * 1024;
 
@@ -198,6 +199,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
    * from the caller, and it is reduced to a same-origin path before signing.
    */
   router.post("/execution-workspaces/:id/login-handoff", async (req, res) => {
+    if (atlasExecutionPolicy() && req.actor.type !== "board") throw forbidden("Atlas workspace login requires Board access");
     const id = req.params.id as string;
     assertBoard(req);
     const workspace = await getAccessibleResource(req, res, svc.getById(id), "Execution workspace not found");
@@ -286,6 +288,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
   });
 
   async function handleExecutionWorkspaceRuntimeCommand(req: Request, res: Response) {
+    if (atlasExecutionPolicy()) throw forbidden("Workspace runtime control is disabled on Atlas");
     const id = req.params.id as string;
     const action = String(req.params.action ?? "").trim().toLowerCase();
     if (action !== "start" && action !== "stop" && action !== "restart" && action !== "repair" && action !== "run") {

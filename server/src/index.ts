@@ -81,7 +81,7 @@ import { deliverExecutionStatuses } from "./services/execution-status-delivery.j
 import { deliverReconciledExecutions, settleUnrecoverableExecutions } from "./services/execution-recovery-resolution.js";
 import { reconcileSafeNativeReplacements } from "./services/native-runtime/native-safe-replacement.js";
 import { reconcileDeploymentOnStartup } from "./deployment/startup.js";
-import { embeddedDeploymentIdentity } from "./deployment/runtime.js";
+import { atlasExecutionPolicy, embeddedDeploymentIdentity } from "./deployment/runtime.js";
 import { acquireDeploymentLease, assertDeploymentSchemaCompatible, assertSameDeploymentDatabase } from "@paperclipai/db";
 import { reconcileAbandonedExecutionControl } from "./services/execution-control-reconciliation.js";
 import { executionControlSchedule, registerExecutionControlWork } from "./services/execution-control-work.js";
@@ -1183,7 +1183,7 @@ async function startServerWithDatabaseTeardown(
 
   // These jobs need not delay readiness, but their writes must finish before
   // an idle report can authorize sleep. Count the whole detached promise.
-  void trackIdleWork(reconcilePersistedRuntimeServicesOnStartup(db as any)
+  if (!atlasExecutionPolicy()) void trackIdleWork(reconcilePersistedRuntimeServicesOnStartup(db as any)
     .then((result) => {
       if (
         result.reconciled > 0

@@ -135,6 +135,7 @@ import {
   workspaceOperationService,
 } from "../services/index.js";
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
+import { atlasExecutionPolicy } from "../deployment/runtime.js";
 import { ONBOARDING_FIRST_TASK_SKILL_KEY, PAPERCLIP_CORE_SKILL_KEYS } from "../services/company-skills.js";
 import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
 import { assertAuthenticated, assertBoard, assertCompanyAccess, assertInstanceAdmin, buildActorSecretContext, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
@@ -596,6 +597,11 @@ export function agentRoutes(
   const KNOWN_INSTRUCTIONS_BUNDLE_KEY_SET: ReadonlySet<string> = new Set(KNOWN_INSTRUCTIONS_BUNDLE_KEYS);
 
   const router = Router();
+  router.use(/^\/(?:companies\/[^/]+\/(?:adapters\/[^/]+\/(?:login-sessions|test-environment)|setup-token-login-sessions)|agents\/[^/]+\/claude-login)(?:\/|$)/i,
+    (req, _res, next) => {
+      if (atlasExecutionPolicy() && req.actor.type !== "board") return next(forbidden("Atlas adapter login requires Board access"));
+      next();
+    });
   const managementGuard = connectionManagementGuard(db, "ai");
   const svc = agentService(db, { cancelWorkForScope: scope => heartbeat.cancelBudgetScopeWork(scope) });
   const svcLifecycle = createAgentLifecycle(db, { cancelWorkForScope: scope => heartbeat.cancelBudgetScopeWork(scope) });
@@ -603,7 +609,7 @@ export function agentRoutes(
   const approvalsSvc = approvalService(db);
   const budgets = budgetService(db);
   const environmentsSvc = environmentService(db);
-  const { resolveAdapterTestEnvironmentId, resolveAdapterTestExecutionContext, assertAdapterTestEnvironmentForCompany, assertAdapterTestEnvironmentBinding, testManagedEnvironment } = agentEnvironmentTestService(db, options.pluginWorkerManager);
+  const { resolveAdapterTestEnvironmentId, resolveAdapterTestExecutionContext, assertAdapterTestEnvironmentForCompany, assertAdapterTestEnvironmentBinding, testManagedEnvironment, testAtlasEnvironment } = agentEnvironmentTestService(db, options.pluginWorkerManager);
   const environmentRuntime = environmentRuntimeService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
@@ -3180,6 +3186,7 @@ export function agentRoutes(
   });
 
   async function validateManagedAgentBinding(req: Request, companyId: string, agentId: string, adapterType: string, config: Record<string, unknown>, binding: AiRuntimeConnectionBinding, environmentId: string | null | undefined, test: boolean, newAgent = false, validateModelCatalog = false) {
+    if (atlasExecutionPolicy()) throw forbidden("Atlas agents use worker-local provider credentials");
     if (binding.mode === "router") {
       const settings = await import("../services/instance-settings.js");
       if (!(await settings.instanceSettingsService(db).getExperimental()).enableAiConnectionRouters) throw unprocessable("Ask your instance operator to enable AI connection routing.");
@@ -3263,6 +3270,19 @@ export function agentRoutes(
     "/companies/:companyId/adapters/:type/test-environment",
     validate(testAdapterEnvironmentSchema),
     async (req, res) => {
+      if (atlasExecutionPolicy()) {
+        const { agentId, environmentId, ...overrides } = req.body;
+        if (Object.values(overrides).some((value) => value != null && (typeof value !== "object" || Object.keys(value).length > 0))) {
+          throw forbidden("Atlas tests do not accept execution overrides");
+        }
+        const saved = typeof agentId === "string" ? await svc.getById(agentId) : null;
+        const companyId = String(req.params.companyId);
+        assertCompanyAccess(req, companyId);
+        if (!saved || saved.companyId !== companyId || saved.adapterType !== req.params.type ||
+          (environmentId != null && environmentId !== saved.defaultEnvironmentId)) throw forbidden("No qualified Atlas test binding");
+        res.json(await testAtlasEnvironment(saved));
+        return;
+      }
       const companyId = req.params.companyId as string;
       let type = assertKnownAdapterType(req.params.type as string);
       await assertCanCreateAgentsForCompany(req, companyId);

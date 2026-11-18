@@ -74,7 +74,7 @@ import {
   type DuplexObservabilityRecorder,
   type Http2TelemetryEventName,
 } from "./duplex-observability.js";
-import { createSshCommandManagedRuntimeRunner, parseSshRemoteExecutionSpec, runSshCommand, shellQuote } from "./ssh.js";
+import { atlasBridgeTokenDelivery, createSshCommandManagedRuntimeRunner, parseSshRemoteExecutionSpec, runSshCommand, shellQuote } from "./ssh.js";
 import {
   ensureCommandResolvable,
   resolveCommandForLogs,
@@ -4428,6 +4428,8 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
   const queueDir = path.posix.join(bridgeRuntimeDir, "queue");
   const assetRemoteDir = path.posix.join(bridgeRuntimeDir, "server");
   const bridgeToken = createSandboxCallbackBridgeToken();
+  const atlasTarget = target.transport === "ssh" && target.spec.atlas ? target : null;
+  const protectedBearer = atlasTarget ? atlasBridgeTokenDelivery(atlasTarget.spec, bridgeToken) : null;
   const configuredAttachmentBytes = Number(process.env.PAPERCLIP_ATTACHMENT_MAX_BYTES);
   // A larger upload limit needs multipart headroom. A smaller attachment limit
   // remains enforced by the API and must not shrink unrelated JSON responses.
@@ -4511,6 +4513,10 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
     },
   ): Promise<{ status: number; headers: Record<string, string>; body: Buffer }> => {
     const method = request.method.trim().toUpperCase() || "GET";
+    if (atlasTarget && method !== "GET" && method !== "HEAD" &&
+        /\/(?:runtime-services|runtime-commands)(?:\/|$)/i.test(request.path)) {
+      return { status: 403, headers: {}, body: Buffer.from("Workspace runtime control is disabled on Atlas") };
+    }
     // The per-request debug log prints the method, the path, and the query. The
     // duplex path suppresses it, so no route or query rides a log line there. The
     // file path keeps the existing behavior.
@@ -4951,12 +4957,14 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
         reservation: options?.reservation,
       }),
     });
+    await protectedBearer?.deliver();
     server = await startSandboxCallbackBridgeServer({
       runner,
       remoteCwd: target.remoteCwd,
       assetRemoteDir,
       queueDir,
       bridgeToken,
+      protectedBridgeTokenFile: protectedBearer?.file,
       bridgeAsset,
       timeoutMs: bridgeTimeoutMs,
       maxBodyBytes,
@@ -4966,6 +4974,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
     await Promise.allSettled([
       server?.stop(),
       worker?.stop(),
+      protectedBearer?.cleanup(),
       bridgeAsset.cleanup(),
     ]);
     throw error;
@@ -4985,7 +4994,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
   return {
     env: {
       PAPERCLIP_API_URL: server.baseUrl,
-      PAPERCLIP_API_KEY: bridgeToken,
+      ...(protectedBearer ? { PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: protectedBearer.file } : { PAPERCLIP_API_KEY: bridgeToken }),
       PAPERCLIP_API_BRIDGE_MODE: "queue_v1",
       PAPERCLIP_BRIDGE_QUEUE_DIR: queueDir,
     },
@@ -4996,6 +5005,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       ]);
       await Promise.allSettled([
         worker?.stop(),
+        protectedBearer?.cleanup(),
         bridgeAsset.cleanup(),
       ]);
     },

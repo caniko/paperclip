@@ -24,6 +24,7 @@ import {
 import type { CommandManagedRuntimeRunner } from "./command-managed-runtime.js";
 import { preferredShellForSandbox, shellCommandArgs } from "./sandbox-shell.js";
 import type { RunProcessResult } from "./server-utils.js";
+import { loadAtlasBridgeToken } from "./ssh.js";
 
 const DEFAULT_BRIDGE_TOKEN_BYTES = 24;
 const DEFAULT_BRIDGE_POLL_INTERVAL_MS = 100;
@@ -1690,6 +1691,7 @@ export async function syncSandboxCallbackBridgeEntrypoint(input: {
 }
 
 export async function startSandboxCallbackBridgeServer(input: {
+  protectedBridgeTokenFile?: string;
   runner: CommandManagedRuntimeRunner;
   remoteCwd: string;
   assetRemoteDir: string;
@@ -1731,11 +1733,15 @@ export async function startSandboxCallbackBridgeServer(input: {
     maxQueueDepth: input.maxQueueDepth,
     maxBodyBytes: input.maxBodyBytes,
   });
+  if (input.protectedBridgeTokenFile) delete env.PAPERCLIP_BRIDGE_TOKEN;
   const nodeCommand = input.nodeCommand?.trim() || "node";
   const startResult = await runSandboxBridgeControlCommand(input.runner, {
     command: shellCommand,
     args: shellCommandArgs(
       [
+        ...(input.protectedBridgeTokenFile
+          ? [`${loadAtlasBridgeToken(input.protectedBridgeTokenFile, "PAPERCLIP_BRIDGE_TOKEN")} || exit 1`]
+          : []),
         `mkdir -p ${shellQuote(directories.requestsDir)} ${shellQuote(directories.responsesDir)} ${shellQuote(directories.logsDir)}`,
         `rm -f ${shellQuote(directories.readyFile)} ${shellQuote(directories.pidFile)}`,
         `nohup ${shellQuote(nodeCommand)} ${shellQuote(remoteEntrypoint)} ` +

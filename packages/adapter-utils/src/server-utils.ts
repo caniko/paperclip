@@ -3653,7 +3653,7 @@ async function resolveSpawnTarget(
 ): Promise<SpawnTarget> {
   const remote = options.remoteExecution ?? null;
   if (remote) {
-    const sshResolved = await resolveCommandPath("ssh", process.cwd(), env);
+    const sshResolved = remote.atlas?.sshExecutable ?? await resolveCommandPath("ssh", process.cwd(), env);
     if (!sshResolved) {
       throw new Error('Command not found in PATH: "ssh"');
     }
@@ -4697,7 +4697,7 @@ export async function ensureCommandResolvable(
   } = {},
 ) {
   if (options.remoteExecution) {
-    const resolvedSsh = await resolveCommandPath("ssh", process.cwd(), env);
+    const resolvedSsh = options.remoteExecution.atlas?.sshExecutable ?? await resolveCommandPath("ssh", process.cwd(), env);
     if (resolvedSsh) return;
     throw new Error('Command not found in PATH: "ssh"');
   }
@@ -4770,7 +4770,7 @@ export async function runChildProcess(
       localProcessSandbox: opts.localProcessSandbox ?? null,
     })
       .then((target) => {
-        const childEnv = { ...mergedEnv, ...target.env };
+        const childEnv = opts.remoteExecution?.atlas ? {} : { ...mergedEnv, ...target.env };
         for (const [key, value] of Object.entries(childEnv)) {
           if (value === undefined) delete childEnv[key];
         }

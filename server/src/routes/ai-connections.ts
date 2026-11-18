@@ -30,6 +30,7 @@ import {
 } from "@paperclipai/shared";
 import { assertBoard, assertBoardOrAgent, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { forbidden, notFound, unprocessable } from "../errors.js";
+import { atlasExecutionPolicy } from "../deployment/runtime.js";
 import { accessService } from "../services/access.js";
 import { logActivity } from "../services/activity-log.js";
 import { aiConnectionRouterService } from "../services/ai-connection-router.js";
@@ -151,6 +152,10 @@ export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLo
     if (!supportsLocalAiLogin(options)) throw unprocessable("Server-host subscription sign-in is unavailable on this hosted instance. Choose a supported sign-in environment or use an API key.");
   }
   const router = Router();
+  router.use(/^\/companies\/[^/]+\/ai-connections\/(?:login|local)(?:\/|$)/i, (req, _res, next) => {
+    if (atlasExecutionPolicy() && req.actor.type !== "board") return next(forbidden("Atlas provider enrollment requires Board access"));
+    next();
+  });
   const managementGuard = connectionManagementGuard(db, "ai");
   const service = aiConnectionService(db);
   const localLogin = localAiLoginService(db);

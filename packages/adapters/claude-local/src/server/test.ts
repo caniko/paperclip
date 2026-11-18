@@ -90,6 +90,7 @@ export async function testEnvironment(
   const config = parseObject(ctx.config);
   let command = asString(config.command, "claude");
   const target = ctx.executionTarget ?? null;
+  const atlas = target?.kind === "remote" && target.transport === "ssh" && target.spec.atlas;
   const targetIsRemote = target?.kind === "remote";
   const targetIsSandbox = target?.kind === "remote" && target.transport === "sandbox";
   const cwd = resolveAdapterExecutionTargetCwd(target, asString(config.cwd, ""), process.cwd());
@@ -150,7 +151,7 @@ export async function testEnvironment(
       helloProbeTimeoutSec: asNumber(config.helloProbeTimeoutSec, targetIsSandbox ? 90 : 45),
     })),
   );
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  const runtimeEnv = atlas ? {} : ensurePathInEnv({ ...process.env, ...env });
   let localRuntimeCommand: string | null = null;
   try {
     await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, runtimeEnv);
@@ -364,6 +365,7 @@ export async function testEnvironment(
       }
 
       const args = ["--print", "-", "--output-format", "stream-json", "--verbose"];
+      if (atlas) args.push("--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config");
       if (config.managedAiConnection) args.push("--setting-sources", "user");
       args.push(...buildClaudeProbePermissionArgs({
         dangerouslySkipPermissions,

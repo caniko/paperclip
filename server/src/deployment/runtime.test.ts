@@ -2,7 +2,8 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { deploymentEnvironment, readCredential, validateDeploymentConfig } from "./runtime.js";
+import { chmodSync } from "node:fs";
+import { deploymentDescriptorSchema, deploymentEnvironment, readCredential, validateDeploymentConfig } from "./runtime.js";
 
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true })));
@@ -37,10 +38,20 @@ describe("declarative startup credentials", () => {
   it("refuses public credentials with redacted errors", () => {
     const d = mkdtempSync(join(tmpdir(), "paperclip-credential-")); dirs.push(d);
     const file = join(d, "secret"); writeFileSync(file, "do-not-print", { mode: 0o644 });
+    chmodSync(file, 0o644);
     expect(() => readCredential(file)).toThrow("publicly readable");
     try { readCredential(file); } catch (e) { expect(String(e)).not.toContain("do-not-print"); }
   });
   it("rejects unknown config fields instead of silently preserving typos", () => {
     expect(() => validateDeploymentConfig({ server: { porrt: 3100 } })).toThrow("server.porrt");
+  });
+  it("requires an explicit, strict Atlas admission policy, including for a closed Board", () => {
+    const descriptor = { version: 1, home: "/var/lib/paperclip", instance: "one", configFile: "/config.json", executionProfile: "atlas-ssh" };
+    for (const policy of [undefined, {}, { admissions: null }, { admissions: [{}] }, { admissions: [], fallback: "local" }]) {
+      expect(deploymentDescriptorSchema.safeParse({ ...descriptor, atlasExecutionPolicy: policy }).success).toBe(false);
+    }
+    expect(deploymentDescriptorSchema.safeParse({ ...descriptor, atlasExecutionPolicy: { admissions: [] } }).success).toBe(true);
+    expect(deploymentDescriptorSchema.safeParse({ ...descriptor, executionProfile: "trusted-local" }).success).toBe(true);
+    expect(deploymentDescriptorSchema.safeParse({ ...descriptor, executionProfile: "remote-only" }).success).toBe(true);
   });
 });

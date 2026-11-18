@@ -13,6 +13,29 @@ import { instanceSettingsService } from "../instance-settings.js";
 import { buildNativeExecutionInput } from "../native-runtime/native-execution-input.js";
 import { nativeRuntimeContextFixture } from "../native-runtime/runtime-context.test-fixture.js";
 import { selectHeartbeatEnvironment, type HeartbeatEnvironmentSelectionInput } from "./environment-selection.js";
+import { acquireAtlasExecution } from "./atlas-execution.js";
+import type { AtlasAdmission } from "../../deployment/runtime.js";
+import type { Environment, EnvironmentLease } from "@paperclipai/shared";
+
+it("releases an Atlas slot if the actual acquired target differs before preparation", async () => {
+  const binding: AtlasAdmission = {
+    companyId: "company", agentId: "agent", environmentId: "environment", adapterType: "claude_local",
+    host: "127.0.0.1", port: 2222, username: "worker", hostKey: "ssh-ed25519 fixture", privateKeyCredential: "worker-key",
+    workspaceClass: "copy-scratch", remoteWorkspacePath: "/worker/work", command: "/worker/claude", sshExecutable: "/bin/ssh",
+  };
+  const environment = { id: binding.environmentId, driver: "ssh", status: "active", envVars: {}, config: {
+    host: binding.host, port: binding.port, username: binding.username, remoteWorkspacePath: binding.remoteWorkspacePath,
+    knownHosts: `[${binding.host}]:${binding.port} ${binding.hostKey}`, strictHostKeyChecking: true,
+    privateKeyCredential: binding.privateKeyCredential, workspaceRealizationMode: "copy",
+  } } as Environment;
+  const getById = vi.fn<() => Promise<Environment | null>>()
+    .mockResolvedValueOnce(environment).mockResolvedValueOnce({ ...environment, driver: "local" });
+  const releaseLease = vi.fn(async () => null);
+  await expect(acquireAtlasExecution({ binding, issueId: null, runId: "run", environments: {
+    getById, acquireLease: vi.fn(async () => ({ id: "lease", environmentId: environment.id }) as EnvironmentLease), releaseLease,
+  } })).rejects.toThrow("differs from the controller pin");
+  expect(releaseLease).toHaveBeenCalledExactlyOnceWith("lease", "failed");
+});
 
 const restoration = vi.hoisted(() => ({ removed: false }));
 vi.mock("../git-workspace-restoration.js", async importOriginal => {

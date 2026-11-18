@@ -6,6 +6,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
+  atlasBridgeTokenDelivery,
+  loadAtlasBridgeToken,
   buildSshEnvLabFixtureConfig,
   buildSshSpawnTarget,
   getSshEnvLabSupport,
@@ -26,6 +28,40 @@ async function commandAvailable(command: string): Promise<boolean> {
 }
 
 describe("SSH authentication selection", () => {
+  it("delivers the Atlas bearer out of band for bridge and adapter launches and cleans it up", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pc-atlas-auth-"));
+    const fakeSsh = path.join(root, "ssh");
+    const argvLog = path.join(root, "argv");
+    await writeFile(fakeSsh, `#!/bin/sh\nexport PATH=${JSON.stringify(process.env.PATH || "/bin:/usr/bin")}\nprintf '%s\\n' "$@" >> '${argvLog}'\nfor arg do :; done\nexec /bin/sh -c "$arg"\n`, { mode: 0o700 });
+    const spec = { host: "127.0.0.1", port: 2222, username: "worker", remoteCwd: root, remoteWorkspacePath: root,
+      privateKey: "fixture-key", knownHosts: "fixture-host", strictHostKeyChecking: true,
+      atlas: { sshExecutable: fakeSsh, scratchDir: root } };
+    const runBearer = "host-run-marker";
+    const bridgeBearer = "private-bridge-marker";
+    const delivery = atlasBridgeTokenDelivery(spec, bridgeBearer);
+    try {
+      await delivery.deliver();
+      expect((await stat(delivery.file)).mode & 0o777).toBe(0o600);
+      const bridgeLoad = loadAtlasBridgeToken(delivery.file, "PAPERCLIP_BRIDGE_TOKEN");
+      const bridge = await execFileAsync(fakeSsh, [`${bridgeLoad} && test -n "$PAPERCLIP_BRIDGE_TOKEN"`]);
+      expect(bridge.stdout + bridge.stderr).toBe("");
+      const launch = await buildSshSpawnTarget({ spec, command: "sh", args: ["-c", 'test -n "$PAPERCLIP_API_KEY"'],
+        env: { PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: delivery.file, PAPERCLIP_API_KEY: runBearer, ANTHROPIC_API_KEY: "controller-env-marker" } });
+      try {
+        expect(launch.command).toBe(fakeSsh);
+        expect(launch.args).toEqual(expect.arrayContaining(["-F", "/dev/null", "IdentityAgent=none", "ClearAllForwardings=yes", "ControlPath=none"]));
+        const invocation = await execFileAsync(launch.command, launch.args, { env: {} });
+        expect(invocation.stdout + invocation.stderr).toBe("");
+        await delivery.cleanup();
+        await expect(execFileAsync(launch.command, launch.args, { env: {} })).rejects.toThrow();
+      } finally { await launch.cleanup(); }
+      const logged = await readFile(argvLog, "utf8");
+      for (const marker of [runBearer, bridgeBearer, "controller-env-marker"]) expect(logged).not.toContain(marker);
+    } finally {
+      await delivery.cleanup();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   it("does not authenticate with an agent key when the supplied key is rejected", async (context) => {
     const support = await getSshEnvLabSupport();
     if (!support.supported) context.skip(support.reason ?? "SSH fixture unavailable");

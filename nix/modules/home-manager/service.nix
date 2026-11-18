@@ -68,11 +68,11 @@
       localEncrypted.keyFilePath = cfg.encryptionKeyFile;
     };
   };
-  descriptor = json.generate "paperclip-${cfg.instance}-deployment.json" {
+  descriptor = json.generate "paperclip-${cfg.instance}-deployment.json" ({
     version = 1;
     home = cfg.dataDir;
     inherit (cfg) instance;
-    executionProfile = "trusted-local";
+    inherit (cfg) executionProfile;
     apiUrl = cfg.localApiUrl;
     configFile = application;
     manifestFile = json.generate "paperclip-${cfg.instance}-manifest.json" (cfg.manifest
@@ -95,7 +95,7 @@
       inherit (cfg.operator) email name;
       passwordFile = cfg.operator.passwordFile;
     };
-  };
+  } // lib.optionalAttrs (cfg.atlasExecutionPolicy != null) {inherit (cfg) atlasExecutionPolicy;});
 in {
   options.services.paperclip = {
     enable = lib.mkEnableOption "an authenticated, persistent Paperclip user service with embedded PostgreSQL";
@@ -138,6 +138,17 @@ in {
       type = lib.types.str;
       default = "http://127.0.0.1:${toString cfg.port}";
       description = "API URL that local agents and runners receive as PAPERCLIP_API_URL, independent of publicBaseUrl.";
+    };
+    executionProfile = lib.mkOption {
+      type = lib.types.enum ["trusted-local" "remote-only" "atlas-ssh"];
+      default = "trusted-local";
+      description = "Controller execution profile. Atlas SSH requires an explicit admission policy.";
+    };
+    atlasExecutionPolicy = lib.mkOption {
+      type = lib.types.nullOr json.type;
+      default = null;
+      example = {admissions = [];};
+      description = "Controller-owned Atlas SSH admission policy. Only credential references, never credential contents. Empty admissions permit Board access but no agent runs.";
     };
     manifest = lib.mkOption {
       inherit (json) type;

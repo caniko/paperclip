@@ -7,15 +7,38 @@ export { readDeploymentCredential as readCredential } from "./credentials.js";
 
 export const runtimeFile = z.string().refine((p) => isAbsolute(p) && normalize(p) === p
   && p !== "/" && !p.startsWith("/nix/store/"), "Expected an absolute runtime file outside the Nix store");
+const credentialName = z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/);
+const executablePath = z.string().regex(/^\/(?:[a-zA-Z0-9_+.-]+\/)*[a-zA-Z0-9_+.-]+$/)
+  .refine((p) => normalize(p) === p && !p.split("/").some((part) => part === "." || part === ".."));
+const atlasAdmissionSchema = z.object({
+  companyId: z.string().uuid(),
+  agentId: z.string().uuid(),
+  adapterType: z.literal("claude_local"),
+  environmentId: z.string().uuid(),
+  workspaceClass: z.literal("copy-scratch"),
+  command: executablePath,
+  sshExecutable: executablePath,
+  host: z.enum(["127.0.0.1", "::1"]),
+  port: z.number().int().min(1).max(65535),
+  username: z.string().regex(/^[a-z_][a-z0-9_-]{0,63}$/).refine((user) => user !== "root"),
+  hostKey: z.string().regex(/^ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$/),
+  privateKeyCredential: credentialName,
+  remoteWorkspacePath: executablePath,
+}).strict();
+export type AtlasAdmission = Readonly<z.infer<typeof atlasAdmissionSchema>>;
+const atlasExecutionPolicySchema = z.object({ admissions: z.array(atlasAdmissionSchema) }).strict()
+  .refine(({ admissions }) => new Set(admissions.map(({ agentId }) => agentId)).size === admissions.length);
+
 export const deploymentDescriptorSchema = z.object({
   version: z.literal(1),
   home: runtimeFile,
   instance: z.string().regex(/^[a-z][a-z0-9_-]{0,30}$/),
-  executionProfile: z.enum(["trusted-local", "remote-only"]).optional(),
+  executionProfile: z.enum(["trusted-local", "remote-only", "atlas-ssh"]).optional(),
+  atlasExecutionPolicy: atlasExecutionPolicySchema.optional(),
   configFile: z.string(),
   apiUrl: z.string().url().optional(),
   manifestFile: z.string().optional(),
-  credentialFiles: z.record(z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/), runtimeFile).default({}),
+  credentialFiles: z.record(credentialName, runtimeFile).default({}),
   serverCredentials: z.object({
     auth: runtimeFile.optional(),
     oidc: runtimeFile.optional(),
@@ -29,8 +52,16 @@ export const deploymentDescriptorSchema = z.object({
     passwordFile: runtimeFile,
   }).strict().optional(),
   bootstrap: z.object({ email: z.string().email(), name: z.string().min(1), passwordFile: runtimeFile }).strict().optional(),
-}).strict();
+}).strict().refine((d) => d.executionProfile === "atlas-ssh"
+  ? d.atlasExecutionPolicy !== undefined && d.atlasExecutionPolicy.admissions.every(
+    ({ privateKeyCredential }) => Object.hasOwn(d.credentialFiles, privateKeyCredential))
+  : d.atlasExecutionPolicy === undefined);
 export type DeploymentDescriptor = z.infer<typeof deploymentDescriptorSchema>;
+
+let atlasDeployment: { readonly admissions: readonly AtlasAdmission[]; readonly home: string; readonly credentialFiles: Readonly<Record<string, string>> } | null = null;
+export function atlasExecutionPolicy() {
+  return atlasDeployment;
+}
 
 export class UnqualifiedRemoteExecutionError extends Error {
   constructor() {
@@ -74,6 +105,9 @@ export function loadDeploymentDescriptor(file: string): DeploymentDescriptor {
   const descriptor = parsed.data;
   if (descriptor.executionProfile === "remote-only") throw new UnqualifiedRemoteExecutionError();
   const config = validateDeploymentConfig(readJson(descriptor.configFile));
+  if (descriptor.executionProfile === "atlas-ssh" && config.server.deploymentMode !== "authenticated") {
+    throw new Error("Atlas SSH requires authenticated Board access");
+  }
   if (config.database.connectionString) throw new Error("Database connections must use runtime credential files");
   if (descriptor.manifestFile && !deploymentManifestSchema.safeParse(readJson(descriptor.manifestFile)).success) {
     throw new Error("Invalid deployment manifest");
@@ -122,6 +156,11 @@ export function deploymentEnvironment(d: DeploymentDescriptor, inherited: NodeJS
     readCredential(d.serverCredentials.encryption);
     env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = d.serverCredentials.encryption;
   }
+  atlasDeployment = d.executionProfile === "atlas-ssh" ? Object.freeze({
+    home: d.home,
+    admissions: Object.freeze(d.atlasExecutionPolicy!.admissions.map((binding) => Object.freeze({ ...binding }))),
+    credentialFiles: Object.freeze({ ...d.credentialFiles }),
+  }) : null;
   return env;
 }
 

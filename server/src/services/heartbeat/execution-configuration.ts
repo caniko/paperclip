@@ -90,12 +90,25 @@ export interface HeartbeatExecutionConfigurationInput {
   onIdentityRedactorPrepared: (redactor: ReturnType<typeof createAgentIdentityRedactor>) => void;
 }
 
+import { atlasAdmissionForAgent } from "./atlas-execution.js";
+
 /** Assembles effective run configuration; the executor retains cleanup ownership. */
 export async function prepareHeartbeatExecutionConfiguration(db: Db, input: HeartbeatExecutionConfigurationInput) {
   const { run, agent, onFailureSecretsResolved, onManagedAiRuntimeAcquired, onIdentityRedactorPrepared } = input;
   const time = createHeartbeatPreparationTiming(run.id);
   const { issueId, context, responsibleUserId, acceptedPlanContinuationWake, acceptedPlanWakeRoutingDecision, taskProjectContext, routineEnvContext, pinnedSkillTest } = input.task;
   const { selectedEnvironmentId, selectedEnvironmentForConfig, resolvedInstanceSettings, persistedNativeExecutionInput } = input.environment;
+  const atlas = atlasAdmissionForAgent(agent, run.companyId);
+  if (atlas) {
+    const mergedConfig: Record<string, unknown> = { ...agent.adapterConfig, engine: "cli", command: atlas.command };
+    return {
+      prepared: true as const, mergedConfig, resolvedConfig: mergedConfig, runtimeConfig: { ...mergedConfig, env: {} },
+      configSnapshot: buildExecutionWorkspaceConfigSnapshot(mergedConfig, selectedEnvironmentId),
+      runScopedMentionedSkillKeys: [], githubSelection: { configured: false as const }, useHostGitHub: false,
+      configuredTaskEnvironment: {}, secretKeys: new Set<string>(), secretManifest: [], runtimeSkillEntries: [],
+      nativeRunnerPreparationSpans: [] as NativeRunHistoricalSpan[], agentIdentity: undefined, observability: undefined,
+    };
+  }
   const sourceWorkspaceConfig = agent.adapterType === "paperclip_runner"
     ? { ...input.config.sourceWorkspaceConfig,
         homeMode: bindHeartbeatRunnerHomeMode(parseObject(agent.adapterConfig), persistedNativeExecutionInput).homeMode }

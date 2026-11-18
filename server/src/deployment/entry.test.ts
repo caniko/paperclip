@@ -10,6 +10,10 @@ import {
   agents,
   authUsers,
   companies,
+  executionWorkspaces,
+  projects,
+  projectWorkspaces,
+  workspaceRuntimeServices,
   companyMemberships,
   companySecretVersions,
   createDb,
@@ -375,6 +379,54 @@ it("fails closed for the unqualified remote-only profile before publishing readi
     await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
   } finally {
     writeFileSync(descriptorFile, original);
+  }
+}, 240000);
+
+it("refuses missing Atlas policy, but serves the Board with empty admissions", async () => {
+  await stop();
+  const original = readFileSync(descriptorFile, "utf8");
+  const atlas = { ...JSON.parse(original), executionProfile: "atlas-ssh" };
+  const db = createDb(database.connectionString);
+  try {
+    for (const policy of [undefined, { admissions: [{}] }]) {
+      writeFileSync(descriptorFile, JSON.stringify({ ...atlas, atlasExecutionPolicy: policy }));
+      const result = await command("serve");
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("configuration");
+      await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
+    }
+    writeFileSync(descriptorFile, JSON.stringify({ ...atlas, atlasExecutionPolicy: { admissions: [] } }));
+    const marker = join(root, "must-not-start-runtime");
+    const runtimeConfig = { desiredState: "running", workspaceRuntime: { services: [{
+      name: "historical", command: `touch '${marker}'`, lifecycle: "shared", stopPolicy: { type: "manual" },
+    }] } };
+    const [project] = await db.insert(projects).values({ companyId: adoptedCompanyId, name: "Historical Atlas runtime" }).returning();
+    const [workspace] = await db.insert(projectWorkspaces).values({
+      companyId: adoptedCompanyId, projectId: project.id, name: "Historical project directory", sourceType: "local_path", cwd: root,
+      metadata: { runtimeConfig },
+    }).returning();
+    await db.insert(executionWorkspaces).values({
+      companyId: adoptedCompanyId, projectId: project.id, projectWorkspaceId: workspace.id,
+      name: "Historical execution directory", mode: "isolated_workspace", strategyType: "project_primary",
+      cwd: root, providerType: "local_fs", providerRef: root, metadata: { config: runtimeConfig },
+    });
+    for (let boot = 0; boot < 2; boot++) {
+      child = launch("serve");
+      child.stdout!.on("data", (chunk) => { output += chunk; });
+      child.stderr!.on("data", (chunk) => { output += chunk; });
+      await expect.poll(async () => {
+        if (child?.exitCode !== null) throw new Error(`Launcher exited: ${output}`);
+        try { return (await (await fetch(`http://127.0.0.1:${port}/api/health`)).json()).status; }
+        catch { return null; }
+      }, { timeout: 90_000, interval: 200 }).toBe("ok");
+      await stop();
+      expect(existsSync(marker)).toBe(false);
+      expect(await db.select().from(workspaceRuntimeServices).where(eq(workspaceRuntimeServices.companyId, adoptedCompanyId))).toEqual([]);
+    }
+  } finally {
+    writeFileSync(descriptorFile, original);
+    await db.$client.end();
+    await stop();
   }
 }, 240000);
 

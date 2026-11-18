@@ -45,7 +45,8 @@ import {
 } from "@paperclipai/shared";
 import { and, desc, eq, gte, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { asNumber, asString, parseObject, renderTemplate } from "../adapters/utils.js";
-import { conflict, unprocessable } from "../errors.js";
+import { conflict, forbidden, unprocessable } from "../errors.js";
+import { atlasExecutionPolicy } from "../deployment/runtime.js";
 import { withExecutionWorkspaceLifecycleLock } from "./execution-workspace-lifecycle-lock.js";
 import { resolveHomeAwarePath } from "../home-paths.js";
 import { hasVerifiedWorktreeSeedManifest, isVerifiedWorktreeSeedManifest } from "../worktree-seed-manifest.js";
@@ -7780,6 +7781,7 @@ async function withRuntimeStartMutexes<T>(
 export async function ensureRuntimeServicesForRun(
   input: EnsureRuntimeServicesForRunInput,
 ): Promise<RuntimeServiceRef[]> {
+  if (atlasExecutionPolicy()) return [];
   const services = selectRuntimeServiceEntries({
     config: input.config,
     respectDesiredStates: true,
@@ -8226,6 +8228,7 @@ async function startRuntimeServicesForWorkspaceControlInvocation(
 export async function startRuntimeServicesForWorkspaceControl(
   input: StartRuntimeServicesForWorkspaceControlInput,
 ): Promise<RuntimeServiceRef[]> {
+  if (atlasExecutionPolicy()) throw forbidden("Workspace runtime control is disabled on Atlas");
   const services = selectRuntimeServiceEntries({
     config: input.config,
     serviceIndex: input.serviceIndex,
@@ -8587,6 +8590,7 @@ export async function refreshPersistedRuntimeServiceHealth(input: {
 }
 
 export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
+  if (atlasExecutionPolicy()) return { reconciled: 0, adopted: 0, stopped: 0, backfilled: 0, restarted: 0, restartFailed: 0, exposureReservationDrift: 0 };
   const rows = await db
     .select()
     .from(workspaceRuntimeServices)
@@ -8919,6 +8923,7 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
 }
 
 export async function restartDesiredRuntimeServicesOnStartup(db: Db) {
+  if (atlasExecutionPolicy()) return { restarted: 0, failed: 0 };
   let restarted = 0;
   let failed = 0;
 

@@ -79,6 +79,7 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
 
 import { createPromptContextFixture } from "@paperclipai/adapter-utils/test-fixtures/prompt-context";
 import { execute } from "./execute.js";
+import { prepareAdapterExecutionTargetRuntime } from "@paperclipai/adapter-utils/execution-target";
 import { resetClaudeCliCapabilitiesCacheForTests } from "./cli-capabilities.js";
 
 describe("claude remote execution", () => {
@@ -93,6 +94,28 @@ describe("claude remote execution", () => {
       if (!dir) continue;
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
+  });
+
+  it.each([true, false])("never imports Atlas scratch on asset failure or finalization (failure=%s)", async (fail) => {
+    const scratch = await mkdtemp(path.join(os.tmpdir(), "paperclip-atlas-copy-"));
+    cleanupDirs.push(scratch);
+    const restore = vi.fn();
+    syncDirectoryToSsh.mockResolvedValueOnce(undefined);
+    if (fail) syncDirectoryToSsh.mockRejectedValueOnce(new Error("asset staging failed"));
+    const preparation = prepareAdapterExecutionTargetRuntime({
+      target: { kind: "remote", transport: "ssh", environmentId: null, leaseId: null, remoteCwd: "/work",
+        spec: { host: "127.0.0.1", port: 2222, username: "worker", privateKey: "fixture", knownHosts: "fixture",
+          strictHostKeyChecking: true, remoteWorkspacePath: "/work", remoteCwd: "/work",
+          atlas: { scratchDir: scratch, sshExecutable: "/bin/ssh" } } },
+      adapterKey: "claude", runId: "atlas-test", workspaceLocalDir: scratch,
+      assets: [{ key: "mcp-config", localDir: scratch, restore }],
+    });
+    if (fail) await expect(preparation).rejects.toThrow("asset staging failed");
+    else await (await preparation).restoreWorkspace();
+    expect(syncDirectoryToSsh).toHaveBeenCalledTimes(2);
+    expect(prepareWorkspaceForSshExecution).not.toHaveBeenCalled();
+    expect(restoreWorkspaceFromSshExecution).not.toHaveBeenCalled();
+    expect(restore).not.toHaveBeenCalled();
   });
 
   it("prepares the workspace, syncs Claude runtime assets, and restores workspace changes for remote SSH execution", async () => {
