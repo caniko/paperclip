@@ -536,7 +536,7 @@ Gaps: Provider fixtures do not qualify live provider setup or availability.
 ### `get-companies-ai-connections-usage`
 
 API: `present` — `GET /api/companies/{companyId}/ai-connections/{connectionId}/usage`; JSON REST.
-Agent access: `available` — agent REST and default native `search_api` / `call_api`.
+Agent access: `available` — agent REST and default native `search_api` / `call_api` outside Atlas. In Atlas, provider usage probes are Board-only.
 Policy: `tools:manage_connections`; [shared management policy](../../doc/plans/2026-10-13-connection-api-parity.md#authorization-contract). Resolved resources and every affected target are checked; personal ownership remains the responsible user.
 Evidence: `source-only` — [route](../../server/src/routes/ai-connections.ts); reviewed in the working tree based on the source commit above.
 Verification: `not-run` — individual operation not executed in this audit; shared authorization and representative family flows are exercised by the authenticated integration suite. Follow the route schema, inspect persistence/audit, and assert owner, scope and revoked-authority denial.
@@ -554,7 +554,7 @@ Gaps: This individual operation has source review but no recorded HTTP verificat
 ### `post-companies-ai-connections`
 
 API: `present` — `POST /api/companies/{companyId}/ai-connections`; JSON REST.
-Agent access: `available` — agent REST and default native `search_api` / `call_api`.
+Agent access: `available` — agent REST and default native `search_api` / `call_api` outside Atlas. In Atlas, manual provider enrollment is Board-only.
 Policy: `tools:manage_connections`; explicitly supplying ownership, `agentIds`, or `allAgents` also requires `tools:manage_profiles`. [shared management policy](../../doc/plans/2026-10-13-connection-api-parity.md#authorization-contract). Resolved resources and every affected target are checked; personal ownership remains the responsible user.
 Evidence: `verified` — [route](../../server/src/routes/ai-connections.ts); reviewed in the working tree based on the source commit above. [Authenticated fixtures](../../server/src/__tests__/connection-management.integration.test.ts) passed with database persistence and actual bearer/session middleware.
 Verification: `passed` — deterministic provider fixtures / local assembled server; no live provider qualification.
@@ -599,7 +599,7 @@ Gaps: This individual operation has source review but no recorded HTTP verificat
 ### `get-companies-adapters-models`
 
 API: `present` — `GET /api/companies/{companyId}/adapters/{type}/models`; JSON REST.
-Agent access: `available` — existing REST/native runtime tool or scoped gateway client, as documented by the linked route.
+Agent access: `available` — existing REST/native runtime tool or scoped gateway client outside Atlas. In Atlas, provider discovery is Board-only.
 Policy: Existing run-bound tool, scoped credential lease, execution policy, or assigned-email-agent checks; connection-management grants do not bypass these controls.
 Evidence: `source-only` — [route](../../server/src/routes/agents.ts); reviewed in the working tree based on the source commit above.
 Verification: `not-run` — individual operation not executed in this audit; shared authorization and representative family flows are exercised by the authenticated integration suite. Follow the route schema, inspect persistence/audit, and assert owner, scope and revoked-authority denial.

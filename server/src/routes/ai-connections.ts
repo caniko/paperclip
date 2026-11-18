@@ -5,7 +5,7 @@ export { validateAiApiKey } from "../services/ai-api-key-test.js";
 import { supportsLocalAiLogin } from "../services/local-ai-login-policy.js";
 import { localAiLoginService } from "../services/local-ai-login.js";
 import { z } from "zod";
-import { Router, type Request } from "express";
+import { Router, type Request, type RequestHandler } from "express";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   type Db,
@@ -152,10 +152,11 @@ export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLo
     if (!supportsLocalAiLogin(options)) throw unprocessable("Server-host subscription sign-in is unavailable on this hosted instance. Choose a supported sign-in environment or use an API key.");
   }
   const router = Router();
-  router.use(/^\/companies\/[^/]+\/ai-connections\/(?:login|local)(?:\/|$)/i, (req, _res, next) => {
+  const requireAtlasProviderBoard: RequestHandler = (req, _res, next) => {
     if (atlasExecutionPolicy() && req.actor.type !== "board") return next(forbidden("Atlas provider enrollment requires Board access"));
     next();
-  });
+  };
+  router.use(/^\/companies\/[^/]+\/ai-connections\/(?:login|local)(?:\/|$)/i, requireAtlasProviderBoard);
   const managementGuard = connectionManagementGuard(db, "ai");
   const service = aiConnectionService(db);
   const localLogin = localAiLoginService(db);
@@ -244,7 +245,7 @@ export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLo
     } satisfies AiConnectionList);
   });
   router.get(
-    "/companies/:companyId/ai-connections/:connectionId/usage", managementGuard("connections:read", "GET /companies/:companyId/ai-connections/:connectionId/usage", { personal: true }),
+    "/companies/:companyId/ai-connections/:connectionId/usage", requireAtlasProviderBoard, managementGuard("connections:read", "GET /companies/:companyId/ai-connections/:connectionId/usage", { personal: true }),
     async (req, res) => {
       const companyId = req.params.companyId as string;
       assertBoardOrAgent(req);
@@ -298,7 +299,7 @@ export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLo
     },
   );
   router.post(
-    "/companies/:companyId/ai-connections", managementGuard("connections:configure", "POST /companies/:companyId/ai-connections", { personal: true }),
+    "/companies/:companyId/ai-connections", requireAtlasProviderBoard, managementGuard("connections:configure", "POST /companies/:companyId/ai-connections", { personal: true }),
     validate(createAiConnectionSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;

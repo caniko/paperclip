@@ -201,7 +201,8 @@ remain errors. Unqualified sandbox upgrades first use the agent-scoped
 authorization as saving the upgrade. The server resolves the saved computer;
 `expectedEnvironmentId` rejects stale state and cannot select another computer.
 Qualification checks company binding, returns only its receipt, and audits within
-the agent's company. General instance environment probes still require instance
+the agent's company. Atlas disables sandbox runner qualification, including for
+Board callers. General instance environment probes still require instance
 admin. An existing native agent's clean configuration Test uses the same
 saved-computer qualification before its runtime test. A current proof is reused;
 a missing or stale proof requires a real successful probe and verified cleanup.

@@ -4,6 +4,8 @@ import type { AdapterEnvironmentTestResult } from "@paperclipai/adapter-utils";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE, aiRuntimeConnectionBindingSchema } from "@paperclipai/shared";
 import { isForbiddenConfigEnvKey, parseObject } from "@paperclipai/adapter-utils/server-utils";
 import { requireServerAdapter } from "../adapters/index.js";
+import { atlasExecutionPolicy } from "../deployment/runtime.js";
+import { forbidden } from "../errors.js";
 import { agentEnvironmentTestService } from "./agent-environment-test.js";
 import { aiConnectionRouterService } from "./ai-connection-router.js";
 import { aiConnectionService } from "./ai-connections.js";
@@ -40,6 +42,7 @@ export function agentHarnessVerificationService(db: Db, manager: PluginWorkerMan
   const secrets = secretService(db);
   const environments = environmentService(db);
   async function verify(snapshot: LifecycleAgent): Promise<"complete" | "pending"> {
+    if (atlasExecutionPolicy()) throw forbidden("Atlas requires a qualified saved agent for runtime tests");
     const [agent] = await db.select().from(agents).where(and(eq(agents.id, snapshot.id), eq(agents.lifecycleVersion, snapshot.lifecycleVersion)));
     if (!agent) return "pending";
     if (agent.adapterType === "paperclip_runner" && ["openai_dot", "grok_bot"].includes(String(agent.adapterConfig.provider))) {

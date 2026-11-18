@@ -12,6 +12,7 @@ import { aiConnectionService } from "../services/ai-connections.js";
 import { readAiConnectionConfigurationFailure } from "../services/ai-connection-configuration-failure.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import * as deploymentRuntime from "../deployment/runtime.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describePostgres = support.supported ? describe : describe.skip;
@@ -76,6 +77,15 @@ describePostgres("saved harness account preflight", () => {
     await database?.cleanup();
     vi.unstubAllEnvs();
     if (home) await rm(home, { recursive: true, force: true });
+  });
+
+  it("rejects Atlas lifecycle verification before reading saved configuration", async () => {
+    vi.spyOn(deploymentRuntime, "atlasExecutionPolicy").mockReturnValue({ admissions: [], home, credentialFiles: {} });
+    const select = vi.spyOn(db, "select");
+    await expect(verify()).rejects.toMatchObject({ status: 403 });
+    expect(select).not.toHaveBeenCalled();
+    expect(allocate).not.toHaveBeenCalled();
+    expect(probe).not.toHaveBeenCalled();
   });
 
   it("rejects a missing default before allocating a target", async () => {

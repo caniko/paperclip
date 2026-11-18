@@ -3062,6 +3062,7 @@ export function agentRoutes(
   router.get("/companies/:companyId/adapters/:type/models", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
+    if (atlasExecutionPolicy() && req.actor.type !== "board") throw forbidden("Atlas provider discovery requires Board access");
     const type = assertKnownAdapterType(req.params.type as string);
     const pendingAcpxProfile = type === "paperclip_runner" && req.query.provider === "acpx"
       ? PAPERCLIP_RUNNER_ACPX_PROFILES.find(profile => profile.value === req.query.acpxAgent && !profile.qualified)

@@ -199,7 +199,6 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
    * from the caller, and it is reduced to a same-origin path before signing.
    */
   router.post("/execution-workspaces/:id/login-handoff", async (req, res) => {
-    if (atlasExecutionPolicy() && req.actor.type !== "board") throw forbidden("Atlas workspace login requires Board access");
     const id = req.params.id as string;
     assertBoard(req);
     const workspace = await getAccessibleResource(req, res, svc.getById(id), "Execution workspace not found");

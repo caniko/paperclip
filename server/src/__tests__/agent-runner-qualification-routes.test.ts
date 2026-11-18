@@ -12,7 +12,13 @@ import { errorHandler } from "../middleware/error-handler.js";
 import { environmentService } from "../services/environments.js";
 import { resolveEnvironmentDriverConfigForRuntime } from "../services/environment-config.js";
 import { fingerprintEnvironmentSandboxProviderConfig, SANDBOX_PLATFORM_PROBE_METADATA_KEY } from "../services/environment-custom-image-runtime.js";
+import { atlasExecutionPolicy } from "../deployment/runtime.js";
+import { qualifyAgentRunner } from "../services/agent-runner-qualification.js";
+import { aiConnectionRoutes } from "../routes/ai-connections.js";
 
+vi.mock("../deployment/runtime.js", async (original) => ({
+  ...await original<typeof import("../deployment/runtime.js")>(), atlasExecutionPolicy: vi.fn(() => null),
+}));
 const probe = vi.hoisted(() => vi.fn());
 vi.mock("../services/environment-probe.js", async original => ({
   ...await original<object>(), probeEnvironment: probe,
@@ -57,6 +63,38 @@ describe.skipIf(!support.supported)("agent-scoped runner qualification", () => {
     app.use(errorHandler);
   });
   const qualify = () => request(app).post(`/api/agents/${agentId}/qualify-runner`).send({ expectedEnvironmentId: environmentId });
+
+  it("disables Atlas qualification before reading the sandbox configuration", async () => {
+    vi.mocked(atlasExecutionPolicy).mockReturnValueOnce({ admissions: [], home: "/unused", credentialFiles: {} });
+    await expect(qualifyAgentRunner({} as typeof db, { companyId, defaultEnvironmentId: environmentId, adapterType: "claude_local" }, environmentId))
+      .rejects.toMatchObject({ status: 403 });
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("rejects Atlas agent provider probes before connection selection or enrollment", async () => {
+    vi.mocked(atlasExecutionPolicy).mockReturnValue({ admissions: [], home: "/unused", credentialFiles: {} });
+    try {
+      const agentApp = express();
+      agentApp.use(express.json());
+      agentApp.use((req, _res, next) => {
+        req.actor = { type: "agent", source: "agent_key", agentId, companyId };
+        next();
+      });
+      agentApp.use("/api", agentRoutes(db), aiConnectionRoutes(db));
+      agentApp.use(errorHandler);
+      const api = request(agentApp);
+      const companyPath = `/api/companies/${companyId}`;
+      for (const acpxAgent of ["antigravity", "copilot"]) {
+        await api.get(`${companyPath}/adapters/paperclip_runner/models`)
+          .query({ provider: "acpx", acpxAgent, aiConnection: "invalid" })
+          .expect(403, { error: "Atlas provider discovery requires Board access" });
+      }
+      await api.post(`${companyPath}/ai-connections`).send({})
+        .expect(403, { error: "Atlas provider enrollment requires Board access" });
+      await api.get(`${companyPath}/ai-connections/${randomUUID()}/usage`)
+        .expect(403, { error: "Atlas provider enrollment requires Board access" });
+    } finally { vi.mocked(atlasExecutionPolicy).mockReturnValue(null); }
+  });
 
   it.each(["claude_local", "grok_local"])("allows the company owner to qualify %s without instance admin and keeps the generic probe restricted", async adapterType => {
     await db.update(agents).set({ adapterType }).where(eq(agents.id, agentId));
