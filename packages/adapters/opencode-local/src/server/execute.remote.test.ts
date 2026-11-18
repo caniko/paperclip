@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -52,7 +52,7 @@ const {
     stderr: "",
     exitCode: 0,
   })),
-  syncDirectoryToSsh: vi.fn(async () => undefined),
+  syncDirectoryToSsh: vi.fn(async (_input: { localDir: string; remoteDir: string }) => {}),
   startAdapterExecutionTargetPaperclipBridge: vi.fn(async () => ({
     env: {
       PAPERCLIP_API_URL: "http://127.0.0.1:4310",
@@ -165,6 +165,12 @@ describe("opencode remote execution", () => {
     const managedRemoteWorkspace = "/remote/workspace/.paperclip-runtime/runs/run-1/workspace";
     await mkdir(workspaceDir, { recursive: true });
     await mkdir(alternateWorkspaceDir, { recursive: true });
+    await mkdir(path.join(rootDir, "config", "git"), { recursive: true });
+    await writeFile(path.join(rootDir, "config", "git", "config"), "[user]\n name = Operator\n");
+    let stagedConfigEntries: string[] | undefined;
+    syncDirectoryToSsh.mockImplementation(async (input: { localDir: string; remoteDir: string }) => {
+      if (input.remoteDir.endsWith("/xdgConfig")) stagedConfigEntries = await readdir(input.localDir);
+    });
 
     const result = await execute({
       runId: "run-1",
@@ -242,6 +248,8 @@ describe("opencode remote execution", () => {
     });
     expect(prepareWorkspaceForSshExecution).toHaveBeenCalledTimes(1);
     expect(syncDirectoryToSsh).toHaveBeenCalledTimes(2);
+    expect(stagedConfigEntries).toContain("opencode");
+    expect(stagedConfigEntries).not.toContain("git");
     expect(syncDirectoryToSsh).toHaveBeenCalledWith(expect.objectContaining({
       remoteDir: `${managedRemoteWorkspace}/.paperclip-runtime/opencode/xdgConfig`,
     }));

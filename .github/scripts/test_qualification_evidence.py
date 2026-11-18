@@ -9,7 +9,7 @@ import tempfile
 import unittest
 import zipfile
 from unittest.mock import patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 spec = importlib.util.spec_from_file_location("evidence", Path(__file__).with_name("qualification-evidence.py"))
 evidence = importlib.util.module_from_spec(spec)
@@ -295,6 +295,7 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(result["original_cases"], 23)
         self.assertEqual(result["original_assertion_failures"], 20)
         for mutated_raw, mutated_metadata in [(raw + b"tampered", metadata), (raw, {**metadata, "expired": True}),
+                (raw, {**metadata, "digest": "sha256:" + "0" * 64}),
                 (raw, {**metadata, "workflow_run": {"id": source["run_id"], "head_sha": "other"}})]:
             with self.subTest(metadata=mutated_metadata), self.assertRaises(RuntimeError):
                 evidence.verify_original_red(mutated_raw, mutated_metadata, pinned)
@@ -302,6 +303,30 @@ class ReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "member"):
             evidence.verify_original_red(changed, {**metadata, "digest": "sha256:" + hashlib.sha256(changed).hexdigest()},
                                          {**pinned, "archive_sha256": hashlib.sha256(changed).hexdigest()})
+
+    def test_retains_the_committed_original_after_github_expires_it(self):
+        (self.root / "source.json").write_text('{"initialized":true,"head":"candidate"}')
+        unavailable = HTTPError("https://api.github.com/", 404, "Not Found", None, None)
+        with patch.object(evidence, "api", side_effect=unavailable), \
+                patch.object(evidence.subprocess, "check_output", side_effect=AssertionError("Unexpected subprocess")):
+            evidence.retain_original_red(self.root)
+        reference = json.loads((self.root / "original-red-reference.json").read_text())
+        self.assertTrue(reference["historical_reference"])
+        self.assertFalse(reference["execution_credit"])
+        self.assertEqual(reference["original_cases"], 23)
+        self.assertEqual(reference["original_assertion_failures"], 20)
+        receipt = json.loads((self.root / "receipt.json").read_text())
+        self.assertEqual(receipt["head"], "candidate")
+        self.assertFalse(receipt["qualified"])
+        for name in ["original-red.zip", "original-red-provider.json", "original-red-reference.json"]:
+            self.assertEqual(receipt["members"][name], evidence.sha256(self.root / name))
+        self.assertEqual(receipt["members"]["original-red.zip"], evidence.ORIGINAL_RED["archive_sha256"])
+
+    def test_retained_original_rejects_a_changed_successor_fixture(self):
+        with patch.object(evidence, "sha256", return_value="different-fixture"), \
+                self.assertRaisesRegex(RuntimeError, "Changed regression fixture"):
+            evidence.retain_original_red(self.root)
+        self.assertFalse((self.root / "original-red-reference.json").exists())
 
     def test_provider_archive_requires_exact_source_harness_remaining_retention_and_complete_members(self):
         expected = {"repository": "caniko/paperclip", "pull_request": 5, "head": "candidate", "base": "base",
