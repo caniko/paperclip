@@ -306,13 +306,13 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-      - name: Bind successor and retain the immutable original without re-execution
+      - name: Bind successor and verify the committed original RED archive
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           EVIDENCE="$RUNNER_TEMP/qualification"
           mkdir -p "$EVIDENCE"
-          printf '%s\n' "EVIDENCE=$EVIDENCE" "PAPERCLIP_HOME=$RUNNER_TEMP/paperclip-red-fixture" "PAPERCLIP_CONFIG=$RUNNER_TEMP/paperclip-red-fixture/config.json" >> "$GITHUB_ENV"
+          printf '%s\n' "EVIDENCE=$EVIDENCE" >> "$GITHUB_ENV"
           python3 .github/scripts/qualification-evidence.py initialize "$EVIDENCE"
           python3 .github/scripts/qualification-evidence.py retain-original-red "$EVIDENCE"
       - name: Bind failed original evidence

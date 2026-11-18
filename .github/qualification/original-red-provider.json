@@ -1,0 +1,20 @@
+{
+  "id": 12146584669,
+  "node_id": "MDg6QXJ0aWZhY3QxMjE0NjU4NDY2OQ==",
+  "name": "source-proof-expected-red-9192d66579850b36cf10abd651b41804cfa75447-1",
+  "size_in_bytes": 9679,
+  "url": "https://api.github.com/repos/caniko/paperclip/actions/artifacts/12146584669",
+  "archive_download_url": "https://api.github.com/repos/caniko/paperclip/actions/artifacts/12146584669/zip",
+  "expired": false,
+  "digest": "sha256:9a095663bf10d8dc1cee82888dfcb37eac059f61c750a08e00687d3193833f3d",
+  "created_at": "2026-10-18T19:12:12Z",
+  "updated_at": "2026-10-18T19:12:12Z",
+  "expires_at": "2026-11-18T19:12:11Z",
+  "workflow_run": {
+    "id": 39157504264,
+    "repository_id": 1389759085,
+    "head_repository_id": 1389759085,
+    "head_branch": "feat/fleet-executor-selection-20261009",
+    "head_sha": "9192d66579850b36cf10abd651b41804cfa75447"
+  }
+}
