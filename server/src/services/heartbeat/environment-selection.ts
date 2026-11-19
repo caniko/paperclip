@@ -35,6 +35,7 @@ import { WorkspaceBusyDeferral, environmentCapacityDeferral, type createHeartbea
 import { ConfigurationIncompleteFailure } from "./run-preparation.js";
 import { resolveNativeRecoveryExecutionWorkspaceBinding, resolveExecutionWorkspaceReuseRequestForIssue, WorkspaceValidationFailure } from "./workspaces.js";
 import { environmentOverflowDeps, selectOverflowEnvironmentId } from "./environment-overflow.js";
+import { assertAtlasEnvironment, atlasAdmissionForAgent } from "./atlas-execution.js";
 
 type Issue = typeof issues.$inferSelect;
 
@@ -93,6 +94,39 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
   } = input.policy;
   const { config, sourceWorkspaceConfig, issueAssigneeOverrides } = input.config;
   const { executionWorkspacesSvc, environmentsSvc, instanceSettings, findSharedWorkspaceHolder, findExecutionWorkspaceHolder } = input.services;
+  const atlasBinding = atlasAdmissionForAgent(agent, agent.companyId);
+  if (atlasBinding) {
+    if (run.runtimeMode === "native" || trustPreset.kind !== "standard" ||
+        issueAssigneeOverrides || issueRef?.projectWorkspaceId || issueRef?.executionWorkspaceId || boundSourceWorkspace ||
+        hasSelectedWorkspaceSource || workspaceProjectContext?.hasWorkspace || taskWorkspaceIntent || issueExecutionWorkspaceSettings ||
+        projectExecutionWorkspacePolicy || input.task.freshWorkspace) {
+      throw new Error("Atlas permits only fresh controller-selected scratch without execution overrides");
+    }
+    const selectedEnvironmentForConfig = await environmentsSvc.getById(atlasBinding.environmentId);
+    assertAtlasEnvironment(atlasBinding, selectedEnvironmentForConfig);
+    const resolvedInstanceSettings = await instanceSettings.get();
+    const executionPolicy = {
+      executionMode: resolvedInstanceSettings.general.executionMode,
+      managedSandboxOnly: (await instanceSettings.getExperimental()).enableManagedSandboxOnly === true,
+    };
+    if (executionPolicy.managedSandboxOnly || isExecutionForcedToKubernetes(executionPolicy)) {
+      throw new Error("Instance execution policy conflicts with the Atlas SSH profile");
+    }
+    const workspaceReuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
+      issueExecutionWorkspaceId: null, issueExecutionWorkspacePreference: null, existingExecutionWorkspaceStatus: null,
+    });
+    return {
+      persistedRunnerProfile: {}, persistedNativeExecutionInput: null, isDotRun: false,
+      existingExecutionWorkspace: null, nativeRecoveryExecutionWorkspaceId: null, workspaceReuseRequest,
+      requestedShouldReuseExisting: false, reusableExistingExecutionWorkspace: null, requestedReusableExecutionWorkspaceConfig: null,
+      localEnvironment: selectedEnvironmentForConfig, resolvedInstanceSettings,
+      environmentResolution: { source: "agent" as const, environmentId: atlasBinding.environmentId },
+      effectiveExecutionWorkspaceMode: "isolated_workspace" as const,
+      executionPolicy, selectedEnvironmentId: atlasBinding.environmentId, selectedEnvironmentForConfig,
+      nativeChatWorkspaceScope: null, nativeChatExpectedCwd: null, materializeNativeChatWorktree: false,
+      explicitTaskDirectory: false, useIsolatedTaskDirectory: false,
+    };
+  }
   // A native run's execution input is immutable once persisted. Recovery must therefore
   // restore the workspace bound to that input rather than consulting the issue's current
   // workspace pointer: a newer run may already have moved or cleared the issue binding while

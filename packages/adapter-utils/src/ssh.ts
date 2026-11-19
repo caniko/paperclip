@@ -23,7 +23,11 @@ import {
   type RuntimeProgressSink,
 } from "./runtime-progress.js";
 
+import { atlasSshEnv } from "./remote-execution-env.js";
+
 export interface SshConnectionConfig {
+  /** Set only by the controller's qualified target resolver, never by adapter config. */
+  atlas?: Readonly<{ sshExecutable: string; scratchDir: string; probe?: true }>;
   host: string;
   port: number;
   username: string;
@@ -60,7 +64,7 @@ export function createSshCommandManagedRuntimeRunner(input: {
       const command = commandInput.command.trim();
       const args = commandInput.args ?? [];
       const cwd = commandInput.cwd || defaultCwd;
-      const envEntries = Object.entries(commandInput.env ?? {})
+      const envEntries = Object.entries(input.spec.atlas ? atlasSshEnv(commandInput.env) : commandInput.env ?? {})
         .filter((entry): entry is [string, string] => typeof entry[1] === "string");
       for (const [key] of envEntries) {
         if (!isValidShellEnvKey(key)) {
@@ -199,6 +203,7 @@ async function execFileText(
   options: {
     timeout?: number;
     maxBuffer?: number;
+    env?: NodeJS.ProcessEnv;
   } = {},
 ): Promise<SshCommandResult> {
   return await new Promise<SshCommandResult>((resolve, reject) => {
@@ -208,6 +213,7 @@ async function execFileText(
       {
         timeout: options.timeout ?? 15_000,
         maxBuffer: options.maxBuffer ?? 1024 * 128,
+        env: options.env,
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -230,11 +236,13 @@ async function spawnText(
     stdin?: string;
     timeout?: number;
     maxBuffer?: number;
+    env?: NodeJS.ProcessEnv;
   } = {},
 ): Promise<SshCommandResult> {
   return await new Promise<SshCommandResult>((resolve, reject) => {
     const child = spawn(file, args, {
       stdio: [options.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
+      env: options.env,
     });
 
     const maxBuffer = options.maxBuffer ?? 1024 * 128;
@@ -376,7 +384,7 @@ async function withTempFile(
 }
 
 async function createSshAuthArgs(
-  config: Pick<SshConnectionConfig, "privateKey" | "knownHosts" | "strictHostKeyChecking">,
+  config: Pick<SshConnectionConfig, "privateKey" | "knownHosts" | "strictHostKeyChecking" | "atlas">,
 ): Promise<{ args: string[]; cleanup: () => Promise<void> }> {
   const tempFiles: Array<() => Promise<void>> = [];
   const sshArgs = [
@@ -387,6 +395,17 @@ async function createSshAuthArgs(
     "-o",
     `StrictHostKeyChecking=${config.strictHostKeyChecking ? "yes" : "no"}`,
   ];
+  if (config.atlas) {
+    if (!config.privateKey || !config.strictHostKeyChecking || !config.knownHosts || !path.isAbsolute(config.atlas.sshExecutable)) {
+      throw new Error("Incomplete pinned Atlas SSH transport");
+    }
+    sshArgs.push("-F", "/dev/null", "-T", ...[
+      "GlobalKnownHostsFile=/dev/null", "KnownHostsCommand=none", "UpdateHostKeys=no", "VerifyHostKeyDNS=no",
+      "ControlMaster=no", "ControlPath=none", "ControlPersist=no", "ProxyCommand=none", "ProxyJump=none",
+      "PermitLocalCommand=no", "ClearAllForwardings=yes", "ForwardAgent=no", "ForwardX11=no",
+      "PreferredAuthentications=publickey", "RequestTTY=no", "HostKeyAlgorithms=ssh-ed25519", "AddKeysToAgent=no",
+    ].flatMap((option) => ["-o", option]));
+  }
 
   if (config.strictHostKeyChecking) {
     if (config.knownHosts) {
@@ -663,13 +682,14 @@ async function streamLocalFileToSsh(input: {
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    buildRemoteShellCommand([`exec sh -c ${shellQuote(input.remoteScript)}`]),
+    buildRemoteShellCommand([`exec sh -c ${shellQuote(input.remoteScript)}`], input.spec),
   ];
 
   await new Promise<void>((resolve, reject) => {
     const source = createReadStream(input.localFile);
-    const ssh = spawn("ssh", sshArgs, {
+    const ssh = spawn(input.spec.atlas?.sshExecutable ?? "ssh", sshArgs, {
       stdio: ["pipe", "ignore", "pipe"],
+      env: input.spec.atlas ? {} : undefined,
     });
 
     let sshStderr = "";
@@ -730,12 +750,13 @@ async function streamSshToLocalFile(input: {
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    buildRemoteShellCommand([`exec sh -c ${shellQuote(input.remoteScript)}`]),
+    buildRemoteShellCommand([`exec sh -c ${shellQuote(input.remoteScript)}`], input.spec),
   ];
 
   await new Promise<void>((resolve, reject) => {
-    const ssh = spawn("ssh", sshArgs, {
+    const ssh = spawn(input.spec.atlas?.sshExecutable ?? "ssh", sshArgs, {
       stdio: ["ignore", "pipe", "pipe"],
+      env: input.spec.atlas ? {} : undefined,
     });
     const sink = createWriteStream(input.localFile, { mode: 0o600 });
 
@@ -1353,7 +1374,8 @@ export function buildKnownHostsEntry(input: {
   return `[${input.host}]:${input.port} ${input.publicKey.trim()}`;
 }
 
-function buildRemoteShellCommand(commandLines: string[]): string {
+function buildRemoteShellCommand(commandLines: string[], config: SshConnectionConfig): string {
+  if (config.atlas) return `exec sh -c ${shellQuote(commandLines.join(" && "))}`;
   // Every SSH path needs the target's login PATH, including tar and Git
   // streams. Keep profile I/O separate from command/archive I/O: a profile
   // can print a banner or read stdin, but must not alter the transferred bytes.
@@ -1403,7 +1425,7 @@ export async function runSshCommand(
     const auth = await createSshAuthArgs(config);
     cleanup = auth.cleanup;
     const sshArgs = [...auth.args];
-    const envEntries = Object.entries(options.env ?? {})
+    const envEntries = Object.entries(config.atlas ? atlasSshEnv(options.env) : options.env ?? {})
       .filter((entry): entry is [string, string] => typeof entry[1] === "string");
     for (const [key] of envEntries) {
       if (!isValidShellEnvKey(key)) {
@@ -1417,7 +1439,7 @@ export async function runSshCommand(
       envArgs.length > 0
         ? `exec env ${envArgs.join(" ")} sh -c ${shellQuote(remoteCommand)}`
         : `exec sh -c ${shellQuote(remoteCommand)}`,
-    ]);
+    ], config);
 
     sshArgs.push(
       "-p",
@@ -1427,18 +1449,47 @@ export async function runSshCommand(
     );
 
     return options.stdin != null
-      ? await spawnText("ssh", sshArgs, {
+      ? await spawnText(config.atlas?.sshExecutable ?? "ssh", sshArgs, {
           stdin: options.stdin,
+          env: config.atlas ? {} : undefined,
           timeout: options.timeoutMs ?? 15_000,
           maxBuffer: options.maxBuffer ?? 1024 * 128,
         })
-      : await execFileText("ssh", sshArgs, {
+      : await execFileText(config.atlas?.sshExecutable ?? "ssh", sshArgs, {
+          env: config.atlas ? {} : undefined,
           timeout: options.timeoutMs ?? 15_000,
           maxBuffer: options.maxBuffer ?? 1024 * 128,
         });
   } finally {
     await cleanup();
   }
+}
+
+export function loadAtlasBridgeToken(file: string | undefined, key: "PAPERCLIP_API_KEY" | "PAPERCLIP_BRIDGE_TOKEN"): string {
+  if (!file || !/^\/tmp\/paperclip-atlas-[0-9a-f]{32}\/bearer$/.test(file)) {
+    throw new Error("Missing protected Atlas bridge credential");
+  }
+  return `{ set +x; IFS= read -r ${key} < ${shellQuote(file)} && test -n "$${key}" && export ${key}; }`;
+}
+
+export function atlasBridgeTokenDelivery(spec: SshRemoteExecutionSpec, bearer: string) {
+  const dir = `/tmp/paperclip-atlas-${randomUUID().replaceAll("-", "")}`;
+  const file = `${dir}/bearer`;
+  return {
+    file,
+    async deliver() {
+      try {
+        await runSshCommand(spec, `umask 077; mkdir ${shellQuote(dir)} && cat > ${shellQuote(file)} && test -s ${shellQuote(file)}`, {
+          stdin: `${bearer}\n`,
+        });
+      } catch {
+        throw new Error("Could not deliver protected Atlas bridge credential");
+      }
+    },
+    async cleanup() {
+      await runSshCommand(spec, `rm -f ${shellQuote(file)} && rmdir ${shellQuote(dir)}`).catch(() => {});
+    },
+  };
 }
 
 export async function buildSshSpawnTarget(input: {
@@ -1456,18 +1507,20 @@ export async function buildSshSpawnTarget(input: {
       throw new Error(`Invalid SSH environment variable key: ${key}`);
     }
   }
+  const loadToken = input.spec.atlas && !input.spec.atlas.probe ? loadAtlasBridgeToken(input.env.PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE, "PAPERCLIP_API_KEY") : null;
   const auth = await createSshAuthArgs(input.spec);
   const sshArgs = [...auth.args];
-  const envArgs = Object.entries(input.env)
+  const envArgs = Object.entries(input.spec.atlas?.probe ? {} : input.spec.atlas ? atlasSshEnv(input.env) : input.env)
     .filter((entry): entry is [string, string] => typeof entry[1] === "string")
     .map(([key, value]) => `${key}=${shellQuote(value)}`);
   const remoteCommandParts = [shellQuote(input.command), ...input.args.map((arg) => shellQuote(arg))].join(" ");
   const remoteShellCommand = buildRemoteShellCommand([
     `cd ${shellQuote(input.spec.remoteCwd)}`,
+    ...(loadToken ? [loadToken] : []),
     envArgs.length > 0
       ? `exec env ${envArgs.join(" ")} ${remoteCommandParts}`
       : `exec ${remoteCommandParts}`,
-  ]);
+  ], input.spec);
 
   sshArgs.push(
     "-p",
@@ -1477,7 +1530,7 @@ export async function buildSshSpawnTarget(input: {
   );
 
   return {
-    command: "ssh",
+    command: input.spec.atlas?.sshExecutable ?? "ssh",
     args: sshArgs,
     cleanup: auth.cleanup,
   };
@@ -1487,6 +1540,7 @@ export async function syncDirectoryToSsh(input: {
   spec: SshRemoteExecutionSpec;
   localDir: string;
   remoteDir: string;
+  createFresh?: boolean;
   exclude?: string[];
   followSymlinks?: boolean;
   onProgress?: RuntimeProgressSink;
@@ -1499,9 +1553,9 @@ export async function syncDirectoryToSsh(input: {
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
     buildRemoteShellCommand([
-      `mkdir -p ${shellQuote(input.remoteDir)}`,
+      input.createFresh ? `umask 077 && mkdir -- ${shellQuote(input.remoteDir)}` : `mkdir -p ${shellQuote(input.remoteDir)}`,
       `exec tar -xf - -C ${shellQuote(input.remoteDir)}`,
-    ]),
+    ], input.spec),
   ];
 
   // tar's archive size isn't known until tar finishes, so estimate it from the
@@ -1538,8 +1592,9 @@ export async function syncDirectoryToSsh(input: {
       stdio: ["ignore", "pipe", "pipe"],
       env: tarSpawnEnv(),
     });
-    const ssh = spawn("ssh", sshArgs, {
+    const ssh = spawn(input.spec.atlas?.sshExecutable ?? "ssh", sshArgs, {
       stdio: ["pipe", "ignore", "pipe"],
+      env: input.spec.atlas ? {} : undefined,
     });
 
     let tarStderr = "";
@@ -1639,7 +1694,7 @@ export async function syncDirectoryFromSsh(input: {
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    buildRemoteShellCommand([`exec sh -c ${shellQuote(remoteTarScript)}`]),
+    buildRemoteShellCommand([`exec sh -c ${shellQuote(remoteTarScript)}`], input.spec),
   ];
 
   // The remote tar size isn't known locally, so probe the remote directory for
@@ -1659,8 +1714,9 @@ export async function syncDirectoryFromSsh(input: {
 
   try {
     await new Promise<void>((resolve, reject) => {
-      const ssh = spawn("ssh", sshArgs, {
+      const ssh = spawn(input.spec.atlas?.sshExecutable ?? "ssh", sshArgs, {
         stdio: ["ignore", "pipe", "pipe"],
+        env: input.spec.atlas ? {} : undefined,
       });
       const tar = spawn("tar", ["-xf", "-", "-C", stagingDir], {
         stdio: ["pipe", "ignore", "pipe"],

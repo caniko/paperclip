@@ -10,8 +10,8 @@ try {
   if (!file || extra.length || !["serve", "plan", "apply", "check"].includes(command)) {
     throw new Error("Usage: paperclip-deployment <descriptor.json> [serve|plan|apply|check]");
   }
-  process.umask(0o077);
   const descriptor = loadDeploymentDescriptor(file);
+  process.umask(0o077);
   const env = deploymentEnvironment(descriptor, process.env);
   for (const key of Object.keys(process.env)) delete process.env[key];
   Object.assign(process.env, env, { PAPERCLIP_DEPLOYMENT_FILE: file });

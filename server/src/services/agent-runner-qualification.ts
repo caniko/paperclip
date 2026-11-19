@@ -1,6 +1,7 @@
 import type { Db } from "@paperclipai/db";
 import type { Agent, EnvironmentProbeResult } from "@paperclipai/shared";
-import { conflict, unprocessable } from "../errors.js";
+import { atlasExecutionPolicy } from "../deployment/runtime.js";
+import { conflict, forbidden, unprocessable } from "../errors.js";
 import { resolveAgentRunnerEnvironmentForCompany } from "./agent-runner-selection.js";
 import { probeEnvironment, readSandboxPlatformQualification } from "./environment-probe.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
@@ -11,6 +12,7 @@ export async function qualifyAgentRunner(
   expectedEnvironmentId: string,
   pluginWorkerManager?: PluginWorkerManager,
 ): Promise<EnvironmentProbeResult> {
+  if (atlasExecutionPolicy()) throw forbidden("Sandbox runner qualification is disabled in Atlas");
   if (!["claude_local", "codex_local", "grok_local", "paperclip_runner"].includes(agent.adapterType)) {
     throw unprocessable("This agent does not support computer qualification.");
   }

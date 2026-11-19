@@ -68,6 +68,12 @@ export function claudeCliVersionAtLeast(version: string, minimum: string): boole
   return true;
 }
 
+function withoutAtlasBridge(target: AdapterExecutionTarget | null | undefined) {
+  return target?.kind === "remote" && target.transport === "ssh" && target.spec.atlas
+    ? { ...target, spec: { ...target.spec, atlas: { ...target.spec.atlas, probe: true as const } } }
+    : target;
+}
+
 async function probeClaudeCommandVersion(input: {
   runId: string;
   command: string;
@@ -79,7 +85,7 @@ async function probeClaudeCommandVersion(input: {
 }): Promise<string | null> {
   const version = await runAdapterExecutionTargetProcess(
     input.runId,
-    input.target,
+    withoutAtlasBridge(input.target),
     input.command,
     ["--version"],
     {
@@ -121,7 +127,7 @@ async function probeClaudeCommandSupportsEffortFlag(input: {
 }): Promise<boolean | null> {
   const help = await runAdapterExecutionTargetProcess(
     input.runId,
-    input.target,
+    withoutAtlasBridge(input.target),
     input.command,
     ["--help"],
     {

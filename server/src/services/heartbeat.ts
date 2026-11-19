@@ -37,6 +37,7 @@ import { observabilitySecretValues } from "@paperclipai/adapter-utils/agent-obse
 import { prepareHeartbeatSession, resolveHeartbeatAdapterSession } from "./heartbeat/session-preparation.js";
 import { prepareHeartbeatTaskContext } from "./heartbeat/task-context.js";
 import { selectHeartbeatEnvironment } from "./heartbeat/environment-selection.js";
+import { acquireAtlasExecution, assertAtlasDispatch, assertAtlasEnvironment, atlasAdmissionForAgent } from "./heartbeat/atlas-execution.js";
 import { reconcileMuseNativeTerminalRun } from "./native-runtime/muse-terminal-reconciliation.js";
 import { prepareHeartbeatWorkspace } from "./heartbeat/workspace-preparation.js";
 import { executeHeartbeatRuntime, NativeSessionResumeScheduledError, NativeWorkspaceFinalizeScheduledError } from "./heartbeat/runtime-execution.js";
@@ -2043,6 +2044,10 @@ export function heartbeatService(
         return;
       }
       let agent = loadedAgent;
+      const atlasBinding = atlasAdmissionForAgent(agent, run.companyId);
+      if (atlasBinding && (run.runtimeMode === "native" || runOptions.nativeRestartRecovery)) {
+        throw new Error("Atlas cannot resume a native or historical runtime");
+      }
 
       // The claimed adapter identity is immutable recovery evidence. Do not
       // execute a newly selected adapter under a previous adapter's claim.
@@ -2496,7 +2501,7 @@ export function heartbeatService(
             taskKey,
           )
         : null;
-      const savedRouterInput = parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput);
+      const savedRouterInput = atlasBinding ? {} : parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput);
       const routerHasPersistedInput = Object.keys(savedRouterInput).length > 0;
       if (agent.adapterType === "paperclip_runner") {
         const homeConfig = bindHeartbeatRunnerHomeMode(config, savedRouterInput);
@@ -2504,7 +2509,7 @@ export function heartbeatService(
       }
       const persistedRouterPoolId = routerHasPersistedInput ? readNonEmptyString(parseObject(context.aiRouterSelection).poolId) : null;
       const preconfiguredHome = agent.adapterType === "paperclip_runner" && config.homeMode === "preconfigured";
-      const requestedAiBinding = preconfiguredHome ? undefined : persistedRouterPoolId ? { mode: "router" as const, connectionId: persistedRouterPoolId } : agent.runtimeConfig?.aiConnection ? aiRuntimeConnectionBindingSchema.parse(agent.runtimeConfig.aiConnection) : undefined;
+      const requestedAiBinding = atlasBinding || preconfiguredHome ? undefined : persistedRouterPoolId ? { mode: "router" as const, connectionId: persistedRouterPoolId } : agent.runtimeConfig?.aiConnection ? aiRuntimeConnectionBindingSchema.parse(agent.runtimeConfig.aiConnection) : undefined;
       let aiBinding = requestedAiBinding?.mode === "router" ? undefined : requestedAiBinding;
       const originalAiIssueOverrides = issueAssigneeOverrides;
       if (requestedAiBinding?.mode === "router") {
@@ -2673,6 +2678,14 @@ export function heartbeatService(
         services: { executionWorkspacesSvc, environmentsSvc, instanceSettings, findSharedWorkspaceHolder, findExecutionWorkspaceHolder },
       }));
       let nativeChatExpectedCwd = selectedNativeChatExpectedCwd;
+      const atlasLease = atlasBinding ? await acquireAtlasExecution({
+        environments: environmentsSvc, binding: atlasBinding, runId: run.id, issueId,
+        assertOwned: controllerLease.assertOwned,
+      }) : null;
+      if (atlasBinding) {
+        const currentAgent = await getAgent(agent.id);
+        if (!currentAgent || atlasAdmissionForAgent(currentAgent, run.companyId) !== atlasBinding) throw new Error("Atlas agent binding changed after lease acquisition");
+      }
       const executionConfiguration = await timePreparation("execution_configuration", () => prepareHeartbeatExecutionConfiguration(db, {
         run, agent,
         task: { issueId, context, responsibleUserId, acceptedPlanContinuationWake, acceptedPlanWakeRoutingDecision, taskProjectContext, routineEnvContext, pinnedSkillTest },
@@ -2764,6 +2777,7 @@ export function heartbeatService(
           selectedEnvironmentForConfig,
           environmentResolution,
           resolvedInstanceSettings,
+          atlasLease,
         },
         config: {
           mergedConfig,
@@ -2971,7 +2985,7 @@ export function heartbeatService(
       if (issueId && (!executionTarget || executionTarget.kind === "local")) {
         await recordLegacyCaseHandoffCleanupIntent(db, { runId: run.id, issueId, controllerBootId: legacyControllerBootId, scratch: runScratch });
       }
-      const gitExecutionEnv = workspaceOwnership ? parseObject(runtimeConfig.env) as Record<string, string> : await timePreparation("github_environment", () => prepareGitHubExecutionEnvironment({
+      const gitExecutionEnv = atlasBinding ? {} : workspaceOwnership ? parseObject(runtimeConfig.env) as Record<string, string> : await timePreparation("github_environment", () => prepareGitHubExecutionEnvironment({
         target: executionTarget,
         cwd: executionWorkspace.cwd,
         env: Object.fromEntries(
@@ -2989,7 +3003,7 @@ export function heartbeatService(
       runtimeConfig = { ...runtimeConfig, env: gitExecutionEnv };
       for (const key of MANAGED_GITHUB_TOKEN_KEYS) secretKeys.add(key);
       context.githubAuthenticationMode = useHostGitHub ? "host" : "managed";
-      if (!workspaceOwnership && !useHostGitHub) {
+      if (!atlasBinding && !workspaceOwnership && !useHostGitHub) {
         const githubLaunchers = await timePreparation("github_launchers", () => prepareHeartbeatGitHubLaunchers({
           native: agent.adapterType === "paperclip_runner",
           githubConfigured: githubSelection.configured,
@@ -3087,7 +3101,7 @@ export function heartbeatService(
         branchName: executionWorkspace.branchName,
         worktreePath: executionWorkspace.worktreePath,
         realization: workspaceRealization,
-        agentHome: await (async () => {
+        agentHome: atlasBinding ? executionWorkspace.cwd : await (async () => {
           const home = resolveDefaultAgentWorkspaceDir(agent.id);
           await fs.mkdir(home, { recursive: true });
           return home;
@@ -3128,7 +3142,7 @@ export function heartbeatService(
           executionWorkspace: { branchName: executionWorkspace.branchName },
         };
       }
-      prepareHeartbeatRuntimeServiceIntents({ hostExecutionWorkspaceConfig, context, trustPreset });
+      if (!atlasBinding) prepareHeartbeatRuntimeServiceIntents({ hostExecutionWorkspaceConfig, context, trustPreset });
       if (
         !issueContext && executionWorkspace.projectId &&
         !readNonEmptyString(context.projectId)
@@ -3275,7 +3289,7 @@ export function heartbeatService(
               typeof entry[0] === "string" && typeof entry[1] === "string",
           ),
         );
-        const runtimeServices = workspaceOwnership ? [] : await timePreparation("runtime_services", () => startHeartbeatRuntimeServices(db, {
+        const runtimeServices = atlasBinding || workspaceOwnership ? [] : await timePreparation("runtime_services", () => startHeartbeatRuntimeServices(db, {
           run, agent, issueId, issueRef, executionWorkspace, context, issuesSvc, onLog,
           persistedExecutionWorkspace, hostExecutionWorkspaceConfig, skipHostProvision, adapterEnv, workspaceOperationRecorder,
         }));
@@ -3307,7 +3321,7 @@ export function heartbeatService(
         const nativeRuntimeResolution = resolveHeartbeatNativeRuntimeMode({
           persisted: run,
           enabled:
-            resolvedInstanceSettings.experimental.enableNativeRunner === true,
+            !atlasBinding && resolvedInstanceSettings.experimental.enableNativeRunner === true,
           museEnabled: resolvedInstanceSettings.experimental.enableMuse === true,
           grokEnabled: resolvedInstanceSettings.experimental.enableGrokBot === true && resolvedInstanceSettings.experimental.enablePublicMcp === true,
           dotEnabled: resolvedInstanceSettings.experimental.enableOpenAiDot === true
@@ -3327,7 +3341,7 @@ export function heartbeatService(
         const hasInstructionFilesystem = nativeRuntimeResolution.kind !== "native"
           ? adapter.supportsInstructionsBundle === true
           : nativeRuntimeHasInstructionFilesystem(nativeRuntimeResolution.profile.backend);
-        runtimeConfig = await timePreparation("instructions", () => preparedInstructions.prepare({ runtimeConfig, nativeRuntimeResolution, hasInstructionFilesystem }));
+        if (!atlasBinding) runtimeConfig = await timePreparation("instructions", () => preparedInstructions.prepare({ runtimeConfig, nativeRuntimeResolution, hasInstructionFilesystem }));
         const runtimeSelection = await timePreparation("runtime_selection", () => selectHeartbeatRuntime(db, {
           run,
           agent,
@@ -3400,6 +3414,12 @@ export function heartbeatService(
         if (!runtimeSelection.selected) return;
         const { nativeExecution, nativeRunnerInstanceId, getNativeFreshSessionHandoff } = runtimeSelection;
         nativeWorkspaceSync = runtimeSelection.nativeWorkspaceSync;
+        if (atlasBinding) {
+          const currentAgent = await getAgent(agent.id);
+          if (!currentAgent || atlasAdmissionForAgent(currentAgent, run.companyId) !== atlasBinding) throw new Error("Atlas agent binding changed before dispatch");
+          assertAtlasEnvironment(atlasBinding, await environmentsSvc.getById(selectedEnvironmentId));
+          assertAtlasDispatch(atlasBinding, executionTarget, runtimeConfig, executionWorkspace.cwd);
+        }
         const execution = await measureRunPhase("execution.runtime", () => executeHeartbeatRuntime(db, {
           run, agent, options,
           task: {

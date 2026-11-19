@@ -2,6 +2,12 @@ import { sql } from "drizzle-orm";
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { atlasExecutionPolicy } from "../deployment/runtime.js";
+
+vi.mock("../deployment/runtime.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../deployment/runtime.js")>(),
+  atlasExecutionPolicy: vi.fn(() => null),
+}));
 
 // Isolate runtime-management guards; real database privacy is covered by
 // privacy-production-review.test.ts.
@@ -215,6 +221,22 @@ describe("workspace runtime service route authorization", () => {
   const projectId = "11111111-1111-4111-8111-111111111111";
   const workspaceId = "22222222-2222-4222-8222-222222222222";
   const executionWorkspaceId = "33333333-3333-4333-8333-333333333333";
+
+  it("refuses starts and restarts through either Atlas runtime-control alias before resource access", async () => {
+    vi.mocked(atlasExecutionPolicy).mockReturnValue({ admissions: [], home: "/unused", credentialFiles: {} });
+    try {
+      const actor = { type: "board", userId: "operator", isInstanceAdmin: true };
+      const project = request(await createProjectApp(actor));
+      const execution = request(await createExecutionWorkspaceApp(actor));
+      for (const alias of ["runtime-services", "runtime-commands"]) {
+        for (const action of ["start", "restart", "run"]) {
+          await project.post(`/api/projects/${projectId}/workspaces/${workspaceId}/${alias}/${action}`).send({}).expect(403);
+          await execution.post(`/api/execution-workspaces/${executionWorkspaceId}/${alias}/${action}`).send({}).expect(403);
+        }
+      }
+      expect(mockWorkspaceRuntimeLeaseService.claim).not.toHaveBeenCalled();
+    } finally { vi.mocked(atlasExecutionPolicy).mockReturnValue(null); }
+  }, 60_000);
 
   beforeEach(() => {
     vi.clearAllMocks();

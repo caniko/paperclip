@@ -86,6 +86,7 @@ import type { workspaceOperationService } from "../workspace-operations.js";
 import type { watchLegacyControllerLease } from "../legacy-controller-lease.js";
 import type {
   createHeartbeatWorkspaceResolver,
+  ResolvedWorkspaceForRun,
   resolveExecutionWorkspaceReuseRequestForIssue,
 } from "./workspaces.js";
 import type { createHeartbeatLifecycle } from "./run-lifecycle.js";
@@ -98,6 +99,9 @@ type WorkspaceResolver = ReturnType<typeof createHeartbeatWorkspaceResolver>;
 type WorkspaceMetadataInput = Parameters<typeof buildEffectiveRunWorkspaceConfigMetadata>[0];
 
 /** Prepares the workspace and environment; dispatch and terminal lease release stay with the caller. */
+import { buildEnvironmentLeaseContext } from "../environment-runtime.js";
+import { acquireAtlasExecution, atlasAdmissionForAgent, assertAtlasEnvironment, prepareAtlasScratch } from "./atlas-execution.js";
+
 export interface HeartbeatWorkspacePreparationInput {
   run: typeof heartbeatRuns.$inferSelect;
   agent: typeof agents.$inferSelect;
@@ -128,6 +132,7 @@ export interface HeartbeatWorkspacePreparationInput {
     executionPolicy: Parameters<typeof evaluateExecutionAllowlist>[0];
   };
   environment: {
+    atlasLease?: Awaited<ReturnType<typeof acquireAtlasExecution>> | null;
     selectedEnvironmentId: string;
     localEnvironment: Environment;
     selectedEnvironmentForConfig: Environment | null;
@@ -171,6 +176,53 @@ function readNonEmptyString(value: unknown): string | null {
 }
 
 export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspacePreparationInput) {
+  const binding = atlasAdmissionForAgent(input.agent, input.run.companyId);
+  if (binding) {
+    const acquired = input.environment.atlasLease;
+    if (!acquired || input.environment.selectedEnvironmentId !== binding.environmentId ||
+        input.config.runtimeConfig.command !== binding.command || input.config.runtimeConfig.engine !== "cli") {
+      throw new Error("Atlas workspace preparation requires a qualified lease and CLI command");
+    }
+    assertAtlasEnvironment(binding, acquired.environment);
+    await input.controllerLease.assertOwned();
+    const executionTarget = { ...await prepareAtlasScratch(binding), leaseId: acquired.lease.id };
+    const cwd = executionTarget.spec.atlas.scratchDir;
+    const resolvedWorkspace: ResolvedWorkspaceForRun = {
+      cwd, source: "agent_home" as const, projectId: null, workspaceId: null, repoUrl: null, repoRef: null,
+      warnings: [], baseCwdFallback: false, materializationFailures: [], workspaceHints: [],
+      additionalWorkspaces: [], referencedProjectFailures: [],
+    };
+    const executionWorkspace: RealizedExecutionWorkspace = {
+      cwd, baseCwd: cwd, source: "agent_home", projectId: null, workspaceId: null, repoUrl: null, repoRef: null,
+      strategy: "project_primary", branchName: null, worktreePath: null, warnings: [], created: true, branchCreatedByRuntime: false,
+    };
+    const workspaceRealization = { driver: "ssh", workspaceClass: binding.workspaceClass };
+    const latestWorkspaceConfigMetadata = buildEffectiveRunWorkspaceConfigMetadata({
+      mode: "isolated_workspace", projectId: null, projectWorkspaceId: null, strategyType: "project_primary",
+      workspaceStrategy: null, repoUrl: null, repoRef: null, configSnapshot: input.config.configSnapshot,
+      environment: { selectedEnvironmentId: binding.environmentId, driver: "ssh" }, realization: workspaceRealization,
+      secretManifest: [],
+    });
+    const workspaceConfigFreshness = resolveExecutionWorkspaceConfigFreshness({
+      hasExistingWorkspace: false, existingWorkspaceMetadata: null, nextMetadata: latestWorkspaceConfigMetadata,
+    });
+    const now = Date.now();
+    return {
+      workspaceOwnership: undefined, resolvedWorkspace, executionWorkspace,
+      hostExecutionWorkspaceConfig: {}, skipHostProvision: true,
+      latestWorkspaceConfigMetadata, workspaceConfigFreshness,
+      workspaceOperationRecorder: input.services.workspaceOperationsSvc.createRecorder({
+        companyId: input.agent.companyId, heartbeatRunId: input.run.id, issueId: input.task.issueId, executionWorkspaceId: null,
+      }),
+      reusedExecutionWorkspace: false, persistedExecutionWorkspace: null, projectRepositoryPaths: [],
+      resolvedWorkspaceReusePolicy: resolveExecutionWorkspaceReuseProvisioningPolicy({ requestedShouldReuseExisting: false, workspaceConfigFreshness }),
+      environmentAcquireStartedAtMs: now, environmentRealizeEndedAtMs: now,
+      selectedEnvironment: acquired.environment,
+      activeEnvironmentLease: { ...acquired, leaseContext: buildEnvironmentLeaseContext({ persistedExecutionWorkspace: null }) },
+      realizationResult: { ...acquired, workspaceRealization, executionTarget, remoteExecution: null, persistedExecutionWorkspace: null },
+      workspaceRealization, executionTarget, workspaceRestoreSource: acquired.lease,
+    };
+  }
   const sourceIssueId = input.reuse.reusableExistingExecutionWorkspace?.sourceIssueId
     ?? input.reuse.existingExecutionWorkspace?.sourceIssueId ?? input.task.issueId;
   if (!sourceIssueId || input.reuse.isDotRun) return prepareHeartbeatWorkspaceLocked(db, input);

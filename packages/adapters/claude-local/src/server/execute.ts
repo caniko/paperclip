@@ -176,6 +176,7 @@ function resolveClaudeBillingType(env: Record<string, string>): "api" | "subscri
 
 async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<ClaudeRuntimeConfig> {
   const { runId, agent, config, context, runtimeCommandSpec, executionTarget, authToken } = input;
+  const atlas = executionTarget?.kind === "remote" && executionTarget.transport === "ssh" && executionTarget.spec.atlas;
   const onLog = input.onLog ?? (async () => {});
 
   const command = asString(config.command, "claude");
@@ -312,12 +313,12 @@ async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<Cl
   if (isOpenRouterUrl(env.ANTHROPIC_BASE_URL ?? process.env.ANTHROPIC_BASE_URL)) {
     env.ANTHROPIC_CUSTOM_HEADERS = openRouterClaudeHeaders(env.ANTHROPIC_CUSTOM_HEADERS ?? process.env.ANTHROPIC_CUSTOM_HEADERS);
   }
-  if (authToken) {
+  if (authToken && !atlas) {
     env.PAPERCLIP_API_KEY = authToken;
   }
 
   const runtimeEnv = Object.fromEntries(
-    Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
+    Object.entries(atlas ? env : ensurePathInEnv({ ...process.env, ...env })).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
@@ -426,6 +427,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
+  const atlas = ctx.executionTarget?.kind === "remote" && ctx.executionTarget.transport === "ssh" && ctx.executionTarget.spec.atlas;
   const executionTarget = readAdapterExecutionTarget({
     executionTarget: ctx.executionTarget,
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
@@ -741,9 +743,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       runtimeRootDir: preparedExecutionTargetRuntime?.runtimeRootDir,
       adapterKey: "claude",
       timeoutSec,
-      hostApiToken: env.PAPERCLIP_API_KEY,
+      hostApiToken: atlas ? authToken : env.PAPERCLIP_API_KEY,
       onLog,
     });
+    if (atlas && !paperclipBridge) throw new Error("Atlas requires a protected callback bridge");
     if (paperclipBridge) {
       Object.assign(env, paperclipBridge.env);
       const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
@@ -760,7 +763,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let effectiveEffort = effort;
 
   const runtimeSessionParams = parseObject(runtime.sessionParams);
-  const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
+  const runtimeSessionId = atlas ? "" : asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
   const runtimeSessionCwd = asString(runtimeSessionParams.cwd, "");
   const runtimeRemoteExecution = parseObject(runtimeSessionParams.remoteExecution);
   const runtimePromptBundleKey = asString(runtimeSessionParams.promptBundleKey, "");
@@ -866,7 +869,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (attemptInstructionsFilePath && !resumeSessionId) {
       args.push("--append-system-prompt-file", attemptInstructionsFilePath);
     }
-    if (runtimeMcpServers.length > 0) {
+    if (atlas || runtimeMcpServers.length > 0) {
       args.push("--mcp-config", effectiveMcpConfigPath, "--strict-mcp-config");
     }
     args.push("--add-dir", effectivePromptBundleAddDir);

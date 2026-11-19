@@ -27,6 +27,7 @@ import {
   attachPaperclipSessionMetadataToSessionParams,
 } from "./workspaces.js";
 import { recordLegacyWorkspaceRestoreFailure } from "../legacy-execution-recovery.js";
+import { atlasExecutionPolicy } from "../../deployment/runtime.js";
 import { configuredEnvironmentProjection } from "../../vendor/paperclip-runner/index.js";
 import { buildAgentIdentityEnv } from "@paperclipai/adapter-utils/server-utils";
 import { externalObjectService } from "../external-objects.js";
@@ -792,13 +793,17 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
             }
           : {}),
       };
-      const runtimeTools = createAdapterRuntimeToolAccess({
+      const atlas = atlasExecutionPolicy();
+      if (atlas && (executionTarget?.kind !== "remote" || executionTarget.transport !== "ssh" || !executionTarget.spec.atlas)) {
+        throw new Error("Atlas dispatch requires the qualified SSH target");
+      }
+      const runtimeTools = atlas ? undefined : createAdapterRuntimeToolAccess({
         agentId: agent.id,
         companyId: agent.companyId,
         runId: run.id,
         responsibleUserId: run.responsibleUserId,
       });
-      if (!runtimeTools) {
+      if (!runtimeTools && !atlas) {
         logger.warn(
           {
             companyId: agent.companyId,
@@ -808,7 +813,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
           "runtime connection tools could not be delivered",
         );
       }
-      const runtimeMcpServers = await buildPaperclipRuntimeMcpServers({
+      const runtimeMcpServers = atlas ? [] : await buildPaperclipRuntimeMcpServers({
         db,
         agent,
         runId: run.id,
@@ -823,7 +828,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
           connectionId: "paperclip-runtime-tools",
         });
       }
-      if (authToken && configuredPaperclipApiBaseUrl() && issueRef) {
+      if (!atlas && authToken && configuredPaperclipApiBaseUrl() && issueRef) {
         runtimeMcpServers.unshift({ name: "Paperclip projects", url: `${paperclipApiBaseUrl()}/api/mcp/project-tools`,
           token: authToken, connectionId: "paperclip-project-tools" });
       }
@@ -834,7 +839,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
       if (runtimeTools && runtimeToolDelivery === "invocation_context") {
         adapterContext.paperclipRuntimeTools = runtimeTools;
       }
-      const managedMcpConfig = await measureRunPhase("execution.mcp_handoff", () => createManagedMcpRunConfig({
+      const managedMcpConfig = atlas ? null : await measureRunPhase("execution.mcp_handoff", () => createManagedMcpRunConfig({
         db,
         agent,
         runId: run.id,
@@ -861,7 +866,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
               context: adapterContext,
               executionContinuation: executionContinuation ?? null,
               runtimeCommandSpec:
-                adapter.getRuntimeCommandSpec?.(runtimeConfig) ?? null,
+                atlas ? null : adapter.getRuntimeCommandSpec?.(runtimeConfig) ?? null,
               workspaceOwnership,
               executionTarget,
               executionTransport: remoteExecution

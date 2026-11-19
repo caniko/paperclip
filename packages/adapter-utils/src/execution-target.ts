@@ -34,6 +34,8 @@ export type {
   SandboxAdditionalSource,
 } from "./sandbox-managed-runtime.js";
 import {
+  ATLAS_CALLBACK_BRIDGE_ROUTES,
+  authorizeSandboxCallbackBridgeRequestWithRoutes,
   createCommandManagedSandboxCallbackBridgeQueueClient,
   createSandboxCallbackBridgeAsset,
   createSandboxCallbackBridgeToken,
@@ -45,6 +47,7 @@ import {
   sandboxCallbackBridgeDirectories,
   startSandboxCallbackBridgeServer,
   startSandboxCallbackBridgeWorker,
+  sanitizeSandboxCallbackBridgeHeaders,
   syncRemoteTextFileWithHashSkip,
   syncRemoteTextFilesWithHashSkip,
   syncSandboxCallbackBridgeEntrypoint,
@@ -74,7 +77,7 @@ import {
   type DuplexObservabilityRecorder,
   type Http2TelemetryEventName,
 } from "./duplex-observability.js";
-import { createSshCommandManagedRuntimeRunner, parseSshRemoteExecutionSpec, runSshCommand, shellQuote } from "./ssh.js";
+import { atlasBridgeTokenDelivery, createSshCommandManagedRuntimeRunner, parseSshRemoteExecutionSpec, runSshCommand, shellQuote } from "./ssh.js";
 import {
   ensureCommandResolvable,
   resolveCommandForLogs,
@@ -4428,6 +4431,8 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
   const queueDir = path.posix.join(bridgeRuntimeDir, "queue");
   const assetRemoteDir = path.posix.join(bridgeRuntimeDir, "server");
   const bridgeToken = createSandboxCallbackBridgeToken();
+  const atlasTarget = target.transport === "ssh" && target.spec.atlas ? target : null;
+  const protectedBearer = atlasTarget ? atlasBridgeTokenDelivery(atlasTarget.spec, bridgeToken) : null;
   const configuredAttachmentBytes = Number(process.env.PAPERCLIP_ATTACHMENT_MAX_BYTES);
   // A larger upload limit needs multipart headroom. A smaller attachment limit
   // remains enforced by the API and must not shrink unrelated JSON responses.
@@ -4511,6 +4516,16 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
     },
   ): Promise<{ status: number; headers: Record<string, string>; body: Buffer }> => {
     const method = request.method.trim().toUpperCase() || "GET";
+    // The queue is worker-writable. The queue worker's raw allowlist is only
+    // a prefilter; Atlas authorizes the same parsed URL that goes to fetch.
+    const rawPath = request.path;
+    const url = atlasTarget && (!rawPath.startsWith("/") || /\/\/|[\\?#\s\x00-\x1f\x7f]|%(?:2f|5c|25)/i.test(rawPath))
+      ? null : buildBridgeForwardUrl(hostApiUrl, request);
+    if (!url || (atlasTarget && (url.origin !== new URL(hostApiUrl).origin || url.pathname !== rawPath ||
+      authorizeSandboxCallbackBridgeRequestWithRoutes({ method, path: url.pathname }, ATLAS_CALLBACK_BRIDGE_ROUTES)))) {
+      return { status: 403, headers: { "content-type": "application/json" },
+        body: Buffer.from(JSON.stringify({ error: "Route not allowed by the Atlas bridge" })) };
+    }
     // The per-request debug log prints the method, the path, and the query. The
     // duplex path suppresses it, so no route or query rides a log line there. The
     // file path keeps the existing behavior.
@@ -4522,7 +4537,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       );
     }
     const headers = new Headers();
-    for (const [key, value] of Object.entries(request.headers)) {
+    for (const [key, value] of Object.entries(atlasTarget ? sanitizeSandboxCallbackBridgeHeaders(request.headers) : request.headers)) {
       if (value.trim().length === 0) continue;
       headers.set(key, value);
     }
@@ -4544,11 +4559,12 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       method,
       headers,
       signal: forwardSignal,
+      ...(atlasTarget ? { redirect: "manual" } : {}),
     };
     if (method !== "GET" && method !== "HEAD" && request.body !== undefined) {
       forwardInit.body = request.body as BodyInit;
     }
-    const response = await fetch(buildBridgeForwardUrl(hostApiUrl, request), forwardInit);
+    const response = await fetch(url, forwardInit);
     if (emitDebugLog) {
       await onLog(
         "stdout",
@@ -4929,6 +4945,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
   let server: Awaited<ReturnType<typeof startSandboxCallbackBridgeServer>> | null = null;
   let worker: Awaited<ReturnType<typeof startSandboxCallbackBridgeWorker>> | null = null;
   try {
+    await protectedBearer?.deliver();
     const client = createCommandManagedSandboxCallbackBridgeQueueClient({
       runner,
       remoteCwd: target.remoteCwd,
@@ -4957,6 +4974,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       assetRemoteDir,
       queueDir,
       bridgeToken,
+      protectedBridgeTokenFile: protectedBearer?.file,
       bridgeAsset,
       timeoutMs: bridgeTimeoutMs,
       maxBodyBytes,
@@ -4966,6 +4984,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
     await Promise.allSettled([
       server?.stop(),
       worker?.stop(),
+      protectedBearer?.cleanup(),
       bridgeAsset.cleanup(),
     ]);
     throw error;
@@ -4985,7 +5004,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
   return {
     env: {
       PAPERCLIP_API_URL: server.baseUrl,
-      PAPERCLIP_API_KEY: bridgeToken,
+      ...(protectedBearer ? { PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: protectedBearer.file } : { PAPERCLIP_API_KEY: bridgeToken }),
       PAPERCLIP_API_BRIDGE_MODE: "queue_v1",
       PAPERCLIP_BRIDGE_QUEUE_DIR: queueDir,
     },
@@ -4996,6 +5015,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       ]);
       await Promise.allSettled([
         worker?.stop(),
+        protectedBearer?.cleanup(),
         bridgeAsset.cleanup(),
       ]);
     },

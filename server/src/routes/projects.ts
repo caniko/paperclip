@@ -34,6 +34,7 @@ import { trackProjectCreated } from "@paperclipai/shared/telemetry";
 import { validate } from "../middleware/validate.js";
 import { accessService, projectService, logActivity, workspaceOperationService } from "../services/index.js";
 import { conflict, forbidden, unprocessable } from "../errors.js";
+import { atlasExecutionPolicy } from "../deployment/runtime.js";
 import { externalObjectService } from "../services/external-objects.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
@@ -741,6 +742,7 @@ export function projectRoutes(db: Db) {
   );
 
   async function handleProjectWorkspaceRuntimeCommand(req: Request, res: Response) {
+    if (atlasExecutionPolicy()) throw forbidden("Workspace runtime control is disabled on Atlas");
     const id = req.params.id as string;
     const workspaceId = req.params.workspaceId as string;
     const action = String(req.params.action ?? "").trim().toLowerCase();

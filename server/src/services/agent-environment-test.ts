@@ -10,6 +10,8 @@ import { parseObject } from "@paperclipai/adapter-utils/server-utils";
 import { aiRoutingHarness, ADAPTER_AUTH_MISSING_CHECK_CODE, AI_CONNECTION_CAPABILITIES, type AiConnectionBinding } from "@paperclipai/shared";
 import { requireServerAdapter } from "../adapters/index.js";
 import { forbidden, HttpError, unprocessable } from "../errors.js";
+import { atlasExecutionPolicy } from "../deployment/runtime.js";
+import { acquireAtlasExecution, atlasAdmissionForAgent, prepareAtlasScratch } from "./heartbeat/atlas-execution.js";
 import { isCloudManagedInstance } from "./cloud-instance.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { environmentService } from "./environments.js";
@@ -44,6 +46,7 @@ export function agentEnvironmentTestService(db: Db, pluginWorkerManager?: Plugin
   // Resolve this before secrets or probes so a default remote environment can
   // never accidentally validate the account on the control-plane host.
   async function resolveAdapterTestEnvironmentId(companyId: string, environmentId: string | null | undefined, copilot = false) {
+    if (atlasExecutionPolicy()) throw forbidden("Atlas requires a qualified saved agent for runtime tests");
     if (copilot && (await instanceSettings.getGeneral()).executionMode === "kubernetes") {
       const kubernetes = await environmentsSvc.findKubernetesEnvironment(companyId);
       if (!kubernetes) throw unprocessable("The Kubernetes execution environment is unavailable.", { code: "copilot_environment_unavailable" });
@@ -92,6 +95,7 @@ export function agentEnvironmentTestService(db: Db, pluginWorkerManager?: Plugin
     sandboxIdentityCheck?: AdapterEnvironmentCheck | null;
     release: (status?: "released" | "failed") => Promise<void>;
   }> {
+    if (atlasExecutionPolicy()) throw forbidden("Atlas requires a qualified saved agent for runtime tests");
     const noopRelease = async () => {};
 
     if (!input.environmentId) {
@@ -638,5 +642,21 @@ export function agentEnvironmentTestService(db: Db, pluginWorkerManager?: Plugin
   }
 
 
-  return { resolveAdapterTestEnvironmentId, resolveAdapterTestExecutionContext, assertAdapterTestEnvironmentForCompany, assertAdapterTestEnvironmentBinding, testManagedEnvironment };
+  async function testAtlasEnvironment(agent: Parameters<typeof atlasAdmissionForAgent>[0]) {
+    const binding = atlasAdmissionForAgent(agent, agent.companyId);
+    if (!binding) throw forbidden("No qualified Atlas test binding");
+    const { environment, lease } = await acquireAtlasExecution({ environments: environmentsSvc, binding, runId: null, issueId: null });
+    try {
+      const target = await prepareAtlasScratch(binding);
+      const executionTarget = { ...target, leaseId: lease.id, spec: { ...target.spec, atlas: { ...target.spec.atlas, probe: true as const } } };
+      return await requireServerAdapter("claude_local").testEnvironment({
+        companyId: agent.companyId, adapterType: "claude_local", config: { ...agent.adapterConfig },
+        executionTarget, environmentName: environment.name,
+      });
+    } finally {
+      await environmentsSvc.releaseLease(lease.id, "released");
+    }
+  }
+
+  return { resolveAdapterTestEnvironmentId, resolveAdapterTestExecutionContext, assertAdapterTestEnvironmentForCompany, assertAdapterTestEnvironmentBinding, testManagedEnvironment, testAtlasEnvironment };
 }
