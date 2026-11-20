@@ -407,20 +407,22 @@ async function admit(service: ManagedService, admission: Admission, body: Body, 
   if (phase === "stopping") throw new Error("Managed OpenCode run was stopped");
   await service.setEnvironment(`${sessionRoute(sessionID)}/environment`, body.environment);
   signal?.throwIfAborted();
-  if (phase === "created") {
-    await markPhase(service, root, sessionID, "dispatching");
+  if (phase === "created" || phase === "dispatching") {
+    if (phase === "created") await markPhase(service, root, sessionID, "dispatching");
+    // An unanswered dispatch is replayed: upstream admits a reused message id at
+    // most once, and a concurrent loser gets 409 once the winner was promoted.
     const accepted = await service.request(`${sessionRoute(sessionID)}/prompt`, "POST", {
       ...body.prompt, id: inputID, delivery: "queue", resume: false,
     }).then(objectData).catch(async (error) => {
+      if (error instanceof OpenCodeHttpError && error.status === 409 &&
+        ((await inbox(service, sessionID)).some(({ id }) => id === inputID) || await promptProjected(service, admission)))
+        return undefined;
       if (error instanceof OpenCodeHttpError && error.status === 400)
         await markPhase(service, root, sessionID, "stopping");
       throw error;
     });
-    if (accepted.id !== inputID || accepted.sessionID !== sessionID || accepted.type !== "user")
+    if (accepted && (accepted.id !== inputID || accepted.sessionID !== sessionID || accepted.type !== "user"))
       throw new Error("Managed OpenCode prompt admission does not match the checkpoint");
-  } else if (phase === "dispatching" &&
-    !(await inbox(service, sessionID)).some(({ id }) => id === inputID) && !await promptProjected(service, admission)) {
-    throw new Error("Managed OpenCode prior prompt admission is unresolved");
   }
   if (phase !== "admitted") await markPhase(service, root, sessionID, "admitted");
   await service.assertCurrent();
@@ -509,8 +511,6 @@ async function stop(service: ManagedService, admission: Admission, body: Pick<Bo
     return { ...receipt(service, admission, true), settled: true };
   }
   const phase = verifyRoot(root, admission, body);
-  if (phase === "dispatching" && !(await inbox(service, admission.sessionID)).some(({ id }) => id === admission.inputID) &&
-    !await promptProjected(service, admission)) return receipt(service, admission, true);
   if (phase !== "stopping") await markPhase(service, root, admission.sessionID, "stopping");
   const family = await members(service, root);
   await Promise.all(family.map(async (item) => {
@@ -523,7 +523,20 @@ async function stop(service: ManagedService, admission: Admission, body: Pick<Bo
   const first = await observe(service, admission, body, true);
   if (!first.settled) return first;
   await pause();
-  return observe(service, admission, body, true);
+  const settled = await observe(service, admission, body, true);
+  if (!settled.settled || await promptProjected(service, admission)) return settled;
+  // A cancelled inbox id can be admitted again, so a late original dispatch could
+  // still queue the prompt. Deleting the run's own root fences it: an earlier
+  // insert is removed with the session, a later one fails its session key.
+  await service.request(sessionRoute(admission.sessionID), "DELETE").catch((error) => {
+    if (!notFound(error)) throw error;
+  });
+  await service.request(sessionRoute(admission.sessionID)).then(
+    () => { throw new Error("Managed OpenCode root still exists after Stop"); },
+    (error) => { if (!notFound(error)) throw error; },
+  );
+  await service.assertCurrent();
+  return { ...receipt(service, admission, true), settled: true };
 }
 
 async function readResult(service: ManagedService, admission: Admission, observation: Receipt): Promise<Receipt["result"]> {

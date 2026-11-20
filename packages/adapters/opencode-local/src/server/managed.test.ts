@@ -31,7 +31,8 @@ function fixture(target: AdapterExecutionTarget | null = null, files = ["/worksp
   let busyChild = false;
   let jobs = false;
   let backendID = "upstream:db";
-  let admissionLost = false;
+  let admissionLost = 0;
+  let restartOnLoss = false;
   const ctx = {
     runId: "run",
     agent: { companyId: "company", id: "agent" },
@@ -96,6 +97,11 @@ function fixture(target: AdapterExecutionTarget | null = null, files = ["/worksp
     }
     if (route === "/api/experimental/job") return json(jobs ? [{ id: "job" }] : []);
     if (route.startsWith("/api/experimental/session/") && route.endsWith("/wait")) return empty();
+    if (root && route === `/api/session/${root.id}` && method === "DELETE") {
+      root = undefined;
+      inbox = [];
+      return empty();
+    }
     if (route === `/api/session/${root?.id}` && method === "PATCH") {
       root = { ...root!, ...body };
       return empty();
@@ -104,7 +110,11 @@ function fixture(target: AdapterExecutionTarget | null = null, files = ["/worksp
     if (route.endsWith("/prompt")) {
       expect(body.resume).toBe(false);
       expect(body.delivery).toBe("queue");
-      if (admissionLost) throw new Error("Lost admission acknowledgement");
+      if (admissionLost > 0) {
+        admissionLost--;
+        if (restartOnLoss) { pid++; active = false; }
+        throw new Error("Lost admission acknowledgement");
+      }
       prompt = { id: body.id, sessionID: root?.id, type: "user", delivery: "queue" };
       inbox = [prompt];
       return json(prompt);
@@ -148,7 +158,7 @@ function fixture(target: AdapterExecutionTarget | null = null, files = ["/worksp
     setJobs: (value: boolean) => { jobs = value; },
     restart: () => { pid++; active = false; },
     setBackendID: (value: string) => { backendID = value; },
-    loseAdmission: () => { admissionLost = true; },
+    loseAdmission: (times = Infinity, restart = false) => { admissionLost = times; restartOnLoss = restart; },
   };
 }
 
@@ -244,13 +254,22 @@ it("does not arm work after cancellation before admission", async () => {
   expect(f.stopped).toHaveBeenCalledOnce();
 });
 
-it("does not re-send or release an uncertain admission without an inbox or message receipt", async () => {
+it("replays an unanswered dispatch with the same message id", async () => {
+  const f = fixture();
+  f.loseAdmission(1, true);
+  expect(await f.execute()).toMatchObject({ exitCode: 0, summary: "Finished" });
+  const prompts = f.http.mock.calls.filter(([url]) => String(url).endsWith("/prompt"));
+  expect(prompts).toHaveLength(2);
+  expect(new Set(prompts.map(([, init]) => JSON.parse(String(init.body)).id)).size).toBe(1);
+});
+
+it("releases an unanswered dispatch on Stop by deleting the run's own session", async () => {
   const f = fixture();
   f.loseAdmission();
-  await expect(f.execute()).rejects.toMatchObject({ code: "opencode_managed_stop_pending" });
-  expect(await reconcileExecution(f.checkpoint())).toBe("pending");
-  expect(f.operations.filter((item) => item.endsWith("/prompt"))).toHaveLength(1);
-  expect(f.stopped).not.toHaveBeenCalled();
+  expect(await f.execute()).toMatchObject({ exitCode: 1, signal: "SIGTERM" });
+  expect(f.operations.some((item) => /^DELETE \/api\/session\/[^/]+$/.test(item))).toBe(true);
+  expect(await reconcileExecution(f.checkpoint())).toBe("settled");
+  expect(f.stopped).toHaveBeenCalledOnce();
 });
 
 it("keeps a verified settlement if the final progress write fails", async () => {
