@@ -165,25 +165,44 @@ memory limit. A separate OpenCode unit retains its own resource limits.
 
 ### Existing managed OpenCode backend
 
-An `opencode_local` agent can set `adapterConfig.managedService = true` to use
-the user's existing compatible backend. Set `dangerouslySkipPermissions = false`
-and an explicit `provider/model` identifier. The backend owns authentication,
-integrations, permissions, HOME, and XDG configuration. The adapter passes only
-run-specific Paperclip variables and file context. It does not start or replace
-the backend. Managed execution currently requires local placement.
+An `opencode_local` agent can set `adapterConfig.managedService = true` to use a
+running stock OpenCode 2.3.2 user service (`opencode serve --service`) on Linux.
+Set `dangerouslySkipPermissions = false` and an explicit `provider/model`
+identifier without a variant. Run the controller or native SSH command as the
+service user. The execution host needs Node.js, the OpenCode CLI, and readable
+`/proc` entries for the backend. On SSH, the selected workspace and run scratch
+paths must exist on that host, and its tools must be able to reach the Paperclip
+API address supplied to the run. The adapter does not start or replace the
+backend. Standalone execution never resumes a managed root.
 
-This mode requires OpenCode's authenticated `session external` protocol and
-Paperclip's durable checkpoint and cancellation hooks. Each run gets a separate
-owned root. The encrypted checkpoint binds the original request bytes, SHA-256,
-backend identity, and selected target before admission. Recovery sends Stop with
-those same bytes. It retains ownership until all owned sessions, pending inputs,
-and background jobs settle. A backend process restart requires current-generation
-environment reconciliation. A different backend database cannot accept the old
-checkpoint. Standalone execution never resumes a managed root.
+The adapter uses `opencode service status` and the authenticated local service
+registration. The encrypted checkpoint binds the request bytes, SHA-256, target,
+and backend database identity before any session write. Each run gets a separate,
+deterministic root and prompt ID. Session metadata binds the root to the checkpoint.
+The adapter admits the input without starting it, then steers that existing
+inbox item to start execution. It does not resend a prompt whose admission is
+uncertain. The backend keeps its own authentication, permissions, and tools.
+For root-session shells, the adapter overlays Paperclip and server-owned scratch
+variables on the process's launch environment and saved service environment.
+Restart the service after changing its saved environment; `/proc` only exposes
+the launch environment. The session override is process-local and does not
+automatically follow child sessions. Paperclip reapplies it when it reconnects
+to the same database after a restart. OpenCode may resume a claimed turn before
+Paperclip reconnects, so the first resumed command can miss the run variables.
 
-Focused adapter tests use a simulated control transport. OpenCode's core,
-authenticated API, and CLI tests exercise the protocol separately. These checks
-do not establish real-provider execution or live restart and restore acceptance.
+The adapter checks the owned root and its descendants for active or unfinished
+turns, pending inbox items, and running or undelivered background jobs. It
+requires two quiet observations 250 ms apart. Stop cancels pending inbox items,
+interrupts foreground execution, and waits for its cleanup. OpenCode 2.3.2 has
+no public cancellation route for independent background jobs; those jobs keep
+ownership pending until they settle. These separate reads are not an atomic
+fence against new work. Do not drive or delete a managed session from another
+client while Paperclip owns it.
+
+Settle any outstanding fork-era runs using the old backend before upgrading.
+The new client does not translate old Stop checkpoints or use a replacement
+database to prove their settlement. Fixture checks do not qualify a live SSH
+target, provider, or backend restart.
 
 The launcher fixture also starts its own persistent embedded PostgreSQL cluster.
 It checks that a controller restart and native database backup restoration retain
@@ -193,9 +212,10 @@ It uses a disposable instance and does not qualify an installed user service.
 
 A Paperclip database dump does not contain the managed OpenCode backend's state.
 Preserve that backend's complete database and associated files separately. Its
-durable identity, external ownership, pending inbox, execution claims, descendants,
-and jobs must survive recovery together. Session transcript export/import carries
-settled messages and is not a managed-execution backup or restore mechanism.
+session metadata, pending inbox, execution claims, descendants, and jobs must
+survive recovery together. The adapter refuses a replacement database file,
+including a restored copy with a different filesystem identity, for outstanding
+checkpoints. Session transcript export/import is not a managed-execution backup.
 
 Hosted source lanes collect their native Vitest shard before execution. The
 source-bound environment policy identifies default cases and retains every
