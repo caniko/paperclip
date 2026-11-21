@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
@@ -7,9 +9,9 @@ import { serverRunScratchEnv } from "@paperclipai/adapter-utils/run-scratch-env"
 import {
   adapterExecutionTargetRemoteCwd,
   readAdapterExecutionTarget,
-  runAdapterExecutionTargetProcess,
   type AdapterExecutionTarget,
 } from "@paperclipai/adapter-utils/execution-target";
+import { discoverManagedService, OpenCodeHttpError, type ManagedService } from "./managed-service.js";
 
 type Admission = {
   version: 1;
@@ -25,8 +27,17 @@ type Admission = {
   sessionID: string;
   inputID: string;
 };
-type Backend = { version: 1; backendID: string; backendGeneration: string };
-type Receipt = Backend & {
+type Body = {
+  owner: string;
+  location: { directory: string };
+  model: { providerID: string; id: string };
+  environment: Record<string, string>;
+  prompt: { text: string; files: Array<{ uri: string; name?: string }> };
+};
+type Receipt = {
+  version: 1;
+  backendID: string;
+  backendGeneration: string;
   key: string;
   bodySha256: string;
   sessionID: string;
@@ -88,14 +99,19 @@ export async function executeManaged(
 ): Promise<AdapterExecutionResult> {
   const target = input.target ?? { kind: "local" };
   const base = { runId: ctx.runId, command: input.command, cwd: input.cwd, target };
-  const backend = readBackend(await control(base, "info"));
   const id = createHash("sha256").update(`${ctx.agent.companyId}\0${ctx.agent.id}\0${ctx.runId}`).digest("hex");
   const model = asString(ctx.config.model, "").trim();
   const slash = model.indexOf("/");
   // Variants are backend-owned (see validateManagedConfig); OpenCode would split "#variant" out of the id.
   if (slash <= 0 || slash === model.length - 1 || model.includes("#"))
     throw new Error("Managed OpenCode requires a provider/model identifier without a variant");
-  const body = JSON.stringify({
+  let backend = await discoverManagedService(base);
+  const files = await Promise.all(input.files.map(async (file) =>
+    target.kind === "remote"
+      ? { uri: `data:text/plain;base64,${(await readFile(file)).toString("base64")}`, name: basename(file) }
+      : { uri: pathToFileURL(file).href },
+  ));
+  const requestBody = {
     version: 1,
     backendID: backend.backendID,
     owner: `paperclip:${ctx.agent.companyId}:${ctx.agent.id}`,
@@ -104,8 +120,9 @@ export async function executeManaged(
     location: { directory: adapterExecutionTargetRemoteCwd(target, input.cwd) },
     model: { providerID: model.slice(0, slash), id: model.slice(slash + 1) },
     environment: input.environment,
-    prompt: { text: input.prompt, files: input.files.map((file) => ({ uri: pathToFileURL(file).href })) },
-  });
+    prompt: { text: input.prompt, files },
+  };
+  const body = JSON.stringify(requestBody);
   const admission: Admission = {
     ...base,
     version: 1,
@@ -125,28 +142,50 @@ export async function executeManaged(
   const deadline = timeout ? Date.now() + timeout : Infinity;
   let latest: Receipt | undefined;
   let failure = false;
+  const reconnect = async (error: unknown) => {
+    const replacement = await rediscover(admission, deadline, ctx.signal);
+    if (replacement.generation === backend.generation) throw error;
+    backend = replacement;
+  };
   try {
-    if (!ctx.signal?.aborted) latest = readReceipt(await control(admission, "admit"), admission);
-    while (!ctx.signal?.aborted && Date.now() < deadline && latest && !latest.settled) {
-      if (!latest.stopRequested)
-        latest = readReceipt(await control(admission, "resume", latest.backendGeneration), admission);
-      // A verified settlement wins; only unsettled work is fenced when its observation cannot be recorded.
+    if (!ctx.signal?.aborted) {
+      await admit(backend, admission, requestBody, ctx.signal).catch(async (error) => {
+        await reconnect(error);
+        await admit(backend, admission, requestBody, ctx.signal);
+      });
+    }
+    while (!ctx.signal?.aborted) {
+      try {
+        latest = await observe(backend, admission, requestBody);
+        if (latest.settled) {
+          await pause(ctx.signal);
+          latest = await observe(backend, admission, requestBody);
+          if (latest.settled) latest.result = await readResult(backend, admission, latest);
+        }
+      } catch (error) {
+        await reconnect(error);
+        await restoreEnvironment(backend, admission, requestBody, ctx.signal);
+        continue;
+      }
       if (latest.settled) break;
+      if (Date.now() >= deadline) break;
       await ctx.onExecutionProgress?.({ version: 1, backendID: admission.backendID, receipt: latest });
-      latest = readReceipt(await control(admission, "status"), admission);
-      if (!latest.settled)
-        await setTimeout(250, undefined, { signal: ctx.signal }).catch((error) => {
-          if (!ctx.signal?.aborted) throw error;
-        });
+      await pause(ctx.signal);
     }
   } catch {
-    // An uncertain admission is fenced by Stop using the original bytes; never replay admit or select another backend.
-    failure = true;
+    failure = !ctx.signal?.aborted;
   }
   const timedOut = !failure && !ctx.signal?.aborted && !latest?.settled && Date.now() >= deadline;
   if (!latest?.settled || ctx.signal?.aborted || failure) {
-    latest = await control(admission, "stop")
-      .then((value) => readReceipt(value, admission))
+    latest = await discoverBoundService(admission)
+      .then(async (service) => {
+        const stopped = await stop(service, admission, requestBody);
+        if (stopped.settled && stopped.admitted)
+          stopped.result = await promptProjected(service, admission)
+            .then((projected) => projected ? readResult(service, admission, stopped) : undefined)
+            .catch(() => undefined);
+        return stopped;
+      })
       .catch(() => undefined);
     if (!latest?.stopRequested || !latest.settled)
       throw Object.assign(
@@ -241,103 +280,309 @@ export async function reconcileExecution(raw: Record<string, unknown>): Promise<
     // Model.Ref and rejects excess properties, so such a body was never admitted and owns nothing.
     const model = body.model;
     if (model && typeof model === "object" && "provider" in model && !("providerID" in model)) return "settled";
-    const receipt = readReceipt(await control(admission, "stop"), admission);
+    if (body.version !== 1 || !admission.backendID.startsWith("upstream:") ||
+      !/^ses_external_[\da-f]{64}$/.test(admission.sessionID) ||
+      admission.inputID !== admission.sessionID.replace(/^ses_/, "msg_") ||
+      admission.key !== admission.sessionID.replace(/^ses_external_/, "paperclip:") ||
+      typeof body.owner !== "string")
+      return "pending";
+    const receipt = await stop(await discoverBoundService(admission), admission, { owner: body.owner });
     return receipt.stopRequested && receipt.settled ? "settled" : "pending";
   } catch {
     return "pending";
   }
 }
 
-async function control(
-  base: Pick<Admission, "runId" | "command" | "cwd" | "target"> & Partial<Admission>,
-  operation: string,
-  backendGeneration?: string,
-): Promise<unknown> {
-  const result = await runAdapterExecutionTargetProcess(
-    `${base.runId}:opencode-control`,
-    base.target,
-    base.command,
-    ["session", "external", operation],
-    {
-      cwd: base.cwd,
-      env: {},
-      stdin:
-        operation === "info"
-          ? undefined
-          : JSON.stringify({ key: base.key, body: base.body, ...(backendGeneration ? { backendGeneration } : {}) }),
-      timeoutSec: 15,
-      graceSec: 5,
-      onLog: async () => {},
-    },
+const sessionRoute = (id: string) => `/api/session/${encodeURIComponent(id)}`;
+const inboxRoute = (id: string, item: string) => `${sessionRoute(id)}/inbox/${encodeURIComponent(item)}`;
+const pause = (signal?: AbortSignal) => setTimeout(250, undefined, { signal }).catch((error) => {
+  if (!signal?.aborted) throw error;
+});
+const notFound = (error: unknown) => error instanceof OpenCodeHttpError && error.status === 404;
+
+async function discoverBoundService(admission: Admission) {
+  const service = await discoverManagedService(admission);
+  if (service.backendID !== admission.backendID) throw new Error("Managed OpenCode database changed");
+  return service;
+}
+
+async function rediscover(admission: Admission, deadline: number, signal?: AbortSignal) {
+  const retryUntil = Math.min(deadline, Date.now() + 5000);
+  for (;;) {
+    signal?.throwIfAborted();
+    try {
+      return await discoverBoundService(admission);
+    } catch (error) {
+      if (Date.now() >= retryUntil) throw error;
+      await pause(signal);
+    }
+  }
+}
+
+function arrayData(raw: unknown) {
+  const { data } = parseObject(raw);
+  if (!Array.isArray(data)) throw new Error("Invalid managed OpenCode collection");
+  return data.map(parseObject);
+}
+
+function objectData(raw: unknown) {
+  const { data } = parseObject(raw);
+  if (!data || typeof data !== "object" || Array.isArray(data))
+    throw new Error("Invalid managed OpenCode response");
+  return parseObject(data);
+}
+
+function ownerFields(admission: Admission, body: Pick<Body, "owner">) {
+  return { paperclipOwner: body.owner, paperclipAdmissionSha256: admission.bodySha256 };
+}
+
+function verifyRoot(root: Record<string, unknown>, admission: Admission, body: Pick<Body, "owner">) {
+  const metadata = parseObject(root.metadata);
+  if (root.id !== admission.sessionID || root.parentID != null ||
+    Object.entries(ownerFields(admission, body)).some(([key, value]) => metadata[key] !== value))
+    throw new Error("Managed OpenCode root does not match the immutable admission");
+  const phase = metadata.paperclipPhase ?? "created";
+  if (phase !== "created" && phase !== "dispatching" && phase !== "admitted" && phase !== "stopping")
+    throw new Error("Invalid managed OpenCode admission phase");
+  return phase;
+}
+
+async function markPhase(service: ManagedService, root: Record<string, unknown>, id: string, phase: string) {
+  await service.request(sessionRoute(id), "PATCH", { metadata: { ...parseObject(root.metadata), paperclipPhase: phase } });
+}
+
+async function inbox(service: ManagedService, id: string) {
+  const items = arrayData(await service.request(`${sessionRoute(id)}/inbox`));
+  if (items.some((item) => typeof item.id !== "string" || item.sessionID !== id))
+    throw new Error("Invalid managed OpenCode inbox");
+  return items;
+}
+
+async function promptProjected(service: ManagedService, admission: Admission) {
+  try {
+    const message = objectData(await service.request(`${sessionRoute(admission.sessionID)}/message/${admission.inputID}`));
+    if (message.id !== admission.inputID || message.type !== "user") throw new Error("Invalid managed OpenCode prompt");
+    return true;
+  } catch (error) {
+    if (notFound(error)) return false;
+    throw error;
+  }
+}
+
+async function armPrompt(service: ManagedService, admission: Admission, body: Body, signal?: AbortSignal) {
+  const pending = (await inbox(service, admission.sessionID)).find(({ id }) => id === admission.inputID);
+  if (!pending) return;
+  const root = objectData(await service.request(sessionRoute(admission.sessionID)));
+  if (verifyRoot(root, admission, body) !== "admitted") throw new Error("Managed OpenCode run is not ready to resume");
+  const active = objectData(await service.request("/api/session/active"));
+  if (Object.hasOwn(active, admission.sessionID)) return;
+  const route = inboxRoute(admission.sessionID, admission.inputID);
+  signal?.throwIfAborted();
+  try {
+    if (pending.delivery === "steer") await service.request(route, "PATCH", { delivery: "queue" });
+    signal?.throwIfAborted();
+    await service.request(route, "PATCH", { delivery: "steer" });
+  } catch (error) {
+    if (!(error instanceof OpenCodeHttpError && error.status === 409 && await promptProjected(service, admission)))
+      throw error;
+  }
+}
+
+async function restoreEnvironment(service: ManagedService, admission: Admission, body: Body, signal?: AbortSignal) {
+  const root = objectData(await service.request(sessionRoute(admission.sessionID)));
+  if (verifyRoot(root, admission, body) !== "admitted")
+    throw new Error("Managed OpenCode prompt is not admitted for execution");
+  await service.setEnvironment(`${sessionRoute(admission.sessionID)}/environment`, body.environment);
+  await armPrompt(service, admission, body, signal);
+}
+
+async function admit(service: ManagedService, admission: Admission, body: Body, signal?: AbortSignal) {
+  const { sessionID, inputID } = admission;
+  await service.assertCurrent();
+  signal?.throwIfAborted();
+  const root = objectData(await service.request("/api/session", "POST", {
+    id: sessionID, location: body.location, model: body.model, metadata: ownerFields(admission, body),
+  }));
+  const phase = verifyRoot(root, admission, body);
+  if (phase === "stopping") throw new Error("Managed OpenCode run was stopped");
+  await service.setEnvironment(`${sessionRoute(sessionID)}/environment`, body.environment);
+  signal?.throwIfAborted();
+  if (phase === "created" || phase === "dispatching") {
+    if (phase === "created") await markPhase(service, root, sessionID, "dispatching");
+    // An unanswered dispatch is replayed: upstream admits a reused message id at
+    // most once, and a concurrent loser gets 409 once the winner was promoted.
+    const accepted = await service.request(`${sessionRoute(sessionID)}/prompt`, "POST", {
+      ...body.prompt, id: inputID, delivery: "queue", resume: false,
+    }).then(objectData).catch(async (error) => {
+      if (error instanceof OpenCodeHttpError && error.status === 409 &&
+        ((await inbox(service, sessionID)).some(({ id }) => id === inputID) || await promptProjected(service, admission)))
+        return undefined;
+      if (error instanceof OpenCodeHttpError && error.status === 400)
+        await markPhase(service, root, sessionID, "stopping");
+      throw error;
+    });
+    if (accepted && (accepted.id !== inputID || accepted.sessionID !== sessionID || accepted.type !== "user"))
+      throw new Error("Managed OpenCode prompt admission does not match the checkpoint");
+  }
+  if (phase !== "admitted") await markPhase(service, root, sessionID, "admitted");
+  await service.assertCurrent();
+  await armPrompt(service, admission, body, signal);
+}
+
+async function members(service: ManagedService, root: Record<string, unknown>) {
+  const family = [root];
+  const seen = new Set([root.id]);
+  for (const parent of family) {
+    const query = new URLSearchParams({ parentID: String(parent.id), limit: "100" });
+    const cursors = new Set<string>();
+    for (;;) {
+      const page = parseObject(await service.request(`/api/session?${query}`));
+      const children = arrayData(page);
+      for (const child of children) {
+        if (typeof child.id !== "string" || !child.id.startsWith("ses") || child.parentID !== parent.id ||
+          seen.has(child.id) || seen.size >= 256)
+          throw new Error("Invalid managed OpenCode session lineage");
+        seen.add(child.id);
+        family.push(child);
+      }
+      const next = parseObject(page.cursor).next;
+      if (next == null) break;
+      if (typeof next !== "string" || !next || cursors.has(next) || !children.length)
+        throw new Error("Invalid managed OpenCode lineage cursor");
+      cursors.add(next);
+      query.delete("parentID");
+      query.set("cursor", next);
+    }
+  }
+  return family;
+}
+
+function receipt(service: ManagedService, admission: Admission, stopRequested: boolean): Receipt {
+  return {
+    version: 1, backendID: service.backendID, backendGeneration: service.generation,
+    key: admission.key, bodySha256: admission.bodySha256, sessionID: admission.sessionID, inputID: admission.inputID,
+    admitted: false, stopRequested, settled: false, lineage: [],
+  };
+}
+
+async function observe(
+  service: ManagedService, admission: Admission, body: Pick<Body, "owner">, stopping = false,
+): Promise<Receipt> {
+  await service.assertCurrent();
+  const { sessionID } = admission;
+  const observation = receipt(service, admission, stopping);
+  const root = objectData(await service.request(sessionRoute(sessionID)));
+  const phase = verifyRoot(root, admission, body);
+  const family = await members(service, root);
+  const jobs = arrayData(await service.request(`/api/experimental/job?${new URLSearchParams({ sessionID, descendants: "true" })}`));
+  const pending = await Promise.all(family.map((member) => inbox(service, String(member.id))));
+  const active = objectData(await service.request("/api/session/active"));
+  observation.admitted = phase === "admitted" || (phase === "stopping" && await promptProjected(service, admission));
+  observation.lineage = family.map((member, index) => {
+    if (!member.time || typeof member.time !== "object" || Array.isArray(member.time))
+      throw new Error("Invalid managed OpenCode session time");
+    const time = parseObject(member.time);
+    if ([time.busy, time.idle].some((value) => value !== undefined && (typeof value !== "number" || !Number.isFinite(value))))
+      throw new Error("Invalid managed OpenCode session time");
+    const isActive = Object.hasOwn(active, String(member.id));
+    return {
+      sessionID: String(member.id), active: isActive, pending: pending[index]!.length,
+      suspended: !isActive && typeof time.busy === "number" && (typeof time.idle !== "number" || time.busy > time.idle),
+      outcome: ["succeeded", "failed", "interrupted"].includes(String(member.outcome)) ? String(member.outcome) : undefined,
+    };
+  });
+  observation.settled =
+    jobs.length === 0 &&
+    observation.lineage.every((member) => !member.active && !member.suspended && member.pending === 0) &&
+    (stopping ? phase === "stopping" : (phase === "admitted" && observation.lineage[0]?.outcome !== undefined &&
+      await promptProjected(service, admission)));
+  await service.assertCurrent();
+  return observation;
+}
+
+async function stop(service: ManagedService, admission: Admission, body: Pick<Body, "owner">) {
+  await service.assertCurrent();
+  const root = await service.request(sessionRoute(admission.sessionID)).then(objectData).catch((error) => {
+    if (notFound(error)) return undefined;
+    throw error;
+  });
+  if (!root) {
+    await service.assertCurrent();
+    return { ...receipt(service, admission, true), settled: true };
+  }
+  const phase = verifyRoot(root, admission, body);
+  if (phase !== "stopping") await markPhase(service, root, admission.sessionID, "stopping");
+  const family = await members(service, root);
+  await Promise.all(family.map(async (item) => {
+    const id = String(item.id);
+    for (const pending of await inbox(service, id))
+      await service.request(inboxRoute(id, String(pending.id)), "DELETE");
+    await service.request(`${sessionRoute(id)}/interrupt`, "POST");
+    await service.request(`/api/experimental/session/${encodeURIComponent(id)}/wait`, "POST");
+  }));
+  const first = await observe(service, admission, body, true);
+  if (!first.settled) return first;
+  await pause();
+  const settled = await observe(service, admission, body, true);
+  if (!settled.settled || await promptProjected(service, admission)) return settled;
+  // A cancelled inbox id can be admitted again, so a late original dispatch could
+  // still queue the prompt. Deleting the run's own root fences it: an earlier
+  // insert is removed with the session, a later one fails its session key.
+  await service.request(sessionRoute(admission.sessionID), "DELETE").catch((error) => {
+    if (!notFound(error)) throw error;
+  });
+  await service.request(sessionRoute(admission.sessionID)).then(
+    () => { throw new Error("Managed OpenCode root still exists after Stop"); },
+    (error) => { if (!notFound(error)) throw error; },
   );
-  if (result.exitCode !== 0 || result.signal || result.timedOut)
-    throw new Error("Managed OpenCode control channel is unavailable");
-  return JSON.parse(result.stdout);
+  await service.assertCurrent();
+  return { ...receipt(service, admission, true), settled: true };
 }
 
-function readBackend(raw: unknown): Backend {
-  const record = parseObject(raw);
-  if (
-    record.version !== 1 ||
-    typeof record.backendID !== "string" ||
-    !record.backendID ||
-    typeof record.backendGeneration !== "string" ||
-    !record.backendGeneration
-  )
-    throw new Error("Invalid managed OpenCode backend identity");
-  return record as Backend;
-}
-
-function readReceipt(raw: unknown, admission: Admission): Receipt {
-  const backend = readBackend(raw);
-  const record = parseObject(raw);
-  if (
-    backend.backendID !== admission.backendID ||
-    record.key !== admission.key ||
-    record.bodySha256 !== admission.bodySha256 ||
-    record.sessionID !== admission.sessionID ||
-    record.inputID !== admission.inputID ||
-    ![record.admitted, record.stopRequested, record.settled].every((value) => typeof value === "boolean") ||
-    !Array.isArray(record.lineage)
-  )
-    throw new Error("Managed OpenCode ownership receipt does not match the immutable admission");
-  for (const rawMember of record.lineage) {
-    const member = parseObject(rawMember);
-    if (
-      typeof member.sessionID !== "string" ||
-      typeof member.active !== "boolean" ||
-      typeof member.suspended !== "boolean" ||
-      typeof member.pending !== "number" ||
-      !Number.isInteger(member.pending) ||
-      member.pending < 0 ||
-      (record.settled && (member.active || member.suspended || member.pending !== 0))
-    )
-      throw new Error("Invalid managed OpenCode lineage settlement");
+async function readResult(service: ManagedService, admission: Admission, observation: Receipt): Promise<Receipt["result"]> {
+  const tokens = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } };
+  let costUsd = 0;
+  for (const member of observation.lineage) {
+    const info = objectData(await service.request(sessionRoute(member.sessionID)));
+    const usage = parseObject(info.tokens);
+    const cache = parseObject(usage.cache);
+    const count = (value: unknown) => {
+      if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+        throw new Error("Invalid managed OpenCode token count");
+      return value;
+    };
+    tokens.input += count(usage.input);
+    tokens.output += count(usage.output);
+    tokens.reasoning += count(usage.reasoning);
+    tokens.cache.read += count(cache.read);
+    tokens.cache.write += count(cache.write);
+    if (typeof info.cost !== "number" || !Number.isFinite(info.cost) || info.cost < 0)
+      throw new Error("Invalid managed OpenCode cost");
+    costUsd += info.cost;
   }
-  if (
-    record.settled &&
-    record.admitted &&
-    !record.lineage.some((member) => parseObject(member).sessionID === admission.sessionID)
-  )
-    throw new Error("Managed OpenCode settlement omits the owned root");
-  if (record.result !== undefined) {
-    const result = parseObject(record.result);
-    const tokens = parseObject(result.tokens),
-      cache = parseObject(tokens.cache);
-    if (
-      typeof result.summary !== "string" ||
-      !(typeof result.costUsd === "number" && Number.isFinite(result.costUsd) && result.costUsd >= 0) ||
-      // Accounting persists each recorded usage total as a nonnegative 32-bit integer.
-      ![tokens.input, tokens.output, tokens.reasoning, cache.read, cache.write].every(
-        (value) => Number.isInteger(value) && (value as number) >= 0,
-      ) ||
-      [
-        (tokens.input as number) + (cache.write as number),
-        (tokens.output as number) + (tokens.reasoning as number),
-        cache.read as number,
-      ].some((value) => value > 2_147_483_647)
-    )
-      throw new Error("Invalid managed OpenCode accounting receipt");
+  if (!Number.isFinite(costUsd) || [tokens.input + tokens.cache.write, tokens.output + tokens.reasoning, tokens.cache.read]
+    .some((value) => value > 2_147_483_647)) throw new Error("Invalid managed OpenCode accounting");
+  let summary = "";
+  const query = new URLSearchParams({ type: "assistant", limit: "50", order: "desc" });
+  const cursors = new Set<string>();
+  while (!summary) {
+    const page = parseObject(await service.request(`${sessionRoute(admission.sessionID)}/message?${query}`));
+    const messages = arrayData(page);
+    const message = messages.find((item) => item.type === "assistant" && typeof parseObject(item.time).completed === "number");
+    if (message) {
+      if (!Array.isArray(message.content)) throw new Error("Invalid managed OpenCode assistant message");
+      summary = message.content.map(parseObject).filter((part) => part.type === "text")
+        .map((part) => typeof part.text === "string" ? part.text : "").join("").slice(0, 2000);
+      break;
+    }
+    const next = parseObject(page.cursor).next;
+    if (summary || next == null) break;
+    if (typeof next !== "string" || !next || cursors.has(next) || !messages.length)
+      throw new Error("Invalid managed OpenCode message cursor");
+    cursors.add(next);
+    query.delete("order");
+    query.set("cursor", next);
   }
-  return record as Receipt;
+  await service.assertCurrent();
+  return { summary, costUsd, tokens };
 }

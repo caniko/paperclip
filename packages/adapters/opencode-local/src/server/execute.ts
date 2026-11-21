@@ -277,7 +277,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     executionCwd: effectiveExecutionCwd,
   });
   if (config.managedService === true) {
-    if (executionTargetIsRemote) throw new Error("Managed OpenCode currently requires a local execution environment");
+    if (executionTarget?.kind === "remote" && executionTarget.transport !== "ssh")
+      throw new Error("Managed OpenCode requires a native SSH environment");
     await hydrateFreshSessionHandoff(ctx, { resumedSession: false });
     const sections = selectPaperclipPromptSections(context, { resumedSession: false, includeCommunicationGuidance: false });
     const instructions = asString(config.instructionsFilePath, "").trim();
