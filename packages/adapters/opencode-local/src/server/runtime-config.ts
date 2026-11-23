@@ -1,4 +1,5 @@
 import { isOpenRouterUrl, openRouterAttributionHeaders } from "@paperclipai/adapter-utils/openrouter-attribution";
+import { atlasSshEnv } from "@paperclipai/adapter-utils/remote-execution-env";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -108,9 +109,18 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   env: Record<string, string>;
   config: Record<string, unknown>;
   targetIsRemote?: boolean;
+  targetIsAtlas?: boolean;
   includeOperatorGitConfig?: boolean;
   sandboxToolOomPreference?: boolean;
 }): Promise<PreparedOpenCodeRuntimeConfig> {
+  if (input.targetIsAtlas) {
+    // Only the protected bridge may introduce callback settings after the probe.
+    const env = Object.fromEntries(Object.entries(atlasSshEnv(input.env)).filter(
+      ([key]) => !key.startsWith("PAPERCLIP_API_") && !key.startsWith("PAPERCLIP_BRIDGE_"),
+    ));
+    return { env, notes: [], cleanup: async () => {} };
+  }
+
   const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
 
   // For remote execution targets the host XDG_CONFIG_HOME path is meaningless
@@ -271,6 +281,13 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     await fs.rm(runtimeConfigHome, { recursive: true, force: true }).catch(() => {});
     throw err;
   }
+}
+
+/** Only server-admitted pins are used by the Atlas run and hello probe. */
+export function atlasOpenCodeRunArgs(config: Record<string, unknown>): string[] | null {
+  const { model, variant, standalone } = config;
+  if (standalone !== true || typeof model !== "string" || !model || typeof variant !== "string" || !variant) return null;
+  return ["run", "--standalone", "--format", "json", "--model", model, "--variant", variant];
 }
 
 /** Managed credentials must never leave host-only homes in a remote process. */

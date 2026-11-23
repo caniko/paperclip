@@ -118,7 +118,22 @@ default loopback on the controller port) is the `PAPERCLIP_API_URL` that local
 agents and runners receive, so they need not go through the proxy.
 
 `remote-only` is reserved and refuses every command before credentials, adapter
-loading, or database changes. The supported profile is `trusted-local`.
+loading, or database changes. Use `trusted-local` for ordinary controller execution.
+
+`atlas-ssh` requires authenticated Board access and an explicit
+`atlasExecutionPolicy.admissions` list. An empty list admits no agent runs.
+For an `opencode_local` admission, pin the company, agent, SSH environment and
+`copy-scratch` workspace, the worker command and SSH identity, and
+`standalone: true`, `model: "provider/model"`, and `variant`. The saved agent
+must use `engine: "cli"` and match the pinned command, model, variant and
+standalone setting. Caller arguments, environment variables and provider
+overrides are not accepted.
+
+The worker supplies OpenCode configuration, provider credentials and project
+config policy. Model and saved-agent hello probes receive no Paperclip API
+credentials. An actual run requires the protected callback bridge before
+launch; the controller's Paperclip JWT stays on the controller. Scratch data
+is not copied back, and there is no managed or local fallback.
 
 ### User-managed controller
 

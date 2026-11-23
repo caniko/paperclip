@@ -1,4 +1,4 @@
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -94,6 +94,40 @@ describe("opencode remote environment diagnostics", () => {
     vi.unstubAllEnvs();
     await rm(configHome, { recursive: true, force: true });
     await Promise.all(configHomes.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
+  });
+
+  it("runs an Atlas hello probe in the realized scratch without controller config, credentials or caller args", async () => {
+    await mkdir(path.join(configHome, "opencode"));
+    await writeFile(path.join(configHome, "opencode", "opencode.json"), '{"marker":"controller-only"}');
+    vi.stubEnv("OPENAI_API_KEY", "controller-provider-key");
+    const target: AdapterExecutionTarget = {
+      kind: "remote", transport: "ssh", environmentId: "atlas", leaseId: "probe", remoteCwd: "/remote/workspace",
+      spec: { host: "127.0.0.1", port: 2222, username: "worker", remoteCwd: "/remote/workspace",
+        remoteWorkspacePath: "/remote/workspace", privateKey: "fixture-key", knownHosts: "fixture-host", strictHostKeyChecking: true,
+        atlas: { sshExecutable: "/bin/ssh", scratchDir: "/controller/atlas-scratch", probe: true } },
+    };
+    const ctx = { companyId: "company-1", adapterType: "opencode_local", executionTarget: target,
+      config: { command: "/worker/opencode", standalone: true, model: "openai/gpt-4.1", variant: "high",
+        extraArgs: ["--attach", "http://caller.invalid"], managedAiConnection: true,
+        env: { PAPERCLIP_API_KEY: "fake-jwt", XDG_CONFIG_HOME: configHome } } };
+    const result = await testEnvironment(ctx);
+    expect(result.checks).toContainEqual(expect.objectContaining({ code: "opencode_hello_probe_passed" }));
+    expect(prepareAdapterExecutionTargetRuntime).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      workspaceLocalDir: "/controller/atlas-scratch", assets: [],
+    }));
+    const runtimeCwd = "/remote/workspace/.paperclip-runtime/runs/test/workspace";
+    expect(runAdapterExecutionTargetProcess).toHaveBeenCalledExactlyOnceWith(
+      expect.any(String), expect.objectContaining({ remoteCwd: runtimeCwd,
+        spec: expect.objectContaining({ atlas: expect.objectContaining({ probe: true }) }) }), "/worker/opencode",
+      ["run", "--standalone", "--format", "json", "--model", "openai/gpt-4.1", "--variant", "high"],
+      expect.objectContaining({ cwd: runtimeCwd, env: {} }),
+    );
+    expect(discoverOpenCodeModels).not.toHaveBeenCalled();
+    vi.clearAllMocks();
+    expect(await testEnvironment({ ...ctx, config: { ...ctx.config, managedService: true } })).toMatchObject({ status: "fail" });
+    expect(ensureAdapterExecutionTargetDirectory).not.toHaveBeenCalled();
+    expect(prepareAdapterExecutionTargetRuntime).not.toHaveBeenCalled();
+    expect(runAdapterExecutionTargetProcess).not.toHaveBeenCalled();
   });
 
   it.each(["passed", "auth_required", "model_unavailable", "timed_out"])(

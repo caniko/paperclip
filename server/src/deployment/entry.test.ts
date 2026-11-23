@@ -474,6 +474,32 @@ it("refuses missing Atlas policy, but serves the Board with empty admissions", a
   }
 }, 240000);
 
+it("requires pinned standalone OpenCode settings before Atlas startup can proceed", async () => {
+  const original = readFileSync(descriptorFile, "utf8");
+  const binding = {
+    companyId: adoptedCompanyId, agentId: randomUUID(), environmentId: randomUUID(), adapterType: "opencode_local",
+    standalone: true, model: "openai/gpt-4.1", variant: "high",
+    workspaceClass: "copy-scratch", command: "/worker/opencode", sshExecutable: "/bin/ssh",
+    host: "127.0.0.1", port: 2222, username: "worker",
+    hostKey: `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI${"A".repeat(43)}`,
+    privateKeyCredential: "gateway", remoteWorkspacePath: "/worker/scratch",
+  };
+  const writeBinding = (admission: Record<string, unknown>) => writeFileSync(descriptorFile, JSON.stringify({
+    ...JSON.parse(original), executionProfile: "atlas-ssh", atlasExecutionPolicy: { admissions: [admission] },
+  }));
+  try {
+    writeBinding({ ...binding, variant: undefined });
+    const refused = await command("check");
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain("phase=configuration");
+    expect(refused.stdout).toBe("");
+    writeBinding(binding);
+    expect((await command("check")).code).toBe(0);
+  } finally {
+    writeFileSync(descriptorFile, original);
+  }
+}, 240000);
+
 it("refuses missing credentials and failed binding publication without readiness", async () => {
   await stop();
   for (const name of ["auth", "gateway"]) {

@@ -649,8 +649,8 @@ export function agentEnvironmentTestService(db: Db, pluginWorkerManager?: Plugin
     try {
       const target = await prepareAtlasScratch(binding);
       const executionTarget = { ...target, leaseId: lease.id, spec: { ...target.spec, atlas: { ...target.spec.atlas, probe: true as const } } };
-      return await requireServerAdapter("claude_local").testEnvironment({
-        companyId: agent.companyId, adapterType: "claude_local", config: { ...agent.adapterConfig },
+      return await requireServerAdapter(binding.adapterType).testEnvironment({
+        companyId: agent.companyId, adapterType: binding.adapterType, config: { ...agent.adapterConfig },
         executionTarget, environmentName: environment.name,
       });
     } finally {

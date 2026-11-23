@@ -53,7 +53,9 @@ const {
     exitCode: 0,
   })),
   syncDirectoryToSsh: vi.fn(async (_input: { localDir: string; remoteDir: string }) => {}),
-  startAdapterExecutionTargetPaperclipBridge: vi.fn(async () => ({
+  startAdapterExecutionTargetPaperclipBridge: vi.fn(async (): Promise<{
+    env: Record<string, string>; stop: () => Promise<void>;
+  } | null> => ({
     env: {
       PAPERCLIP_API_URL: "http://127.0.0.1:4310",
       PAPERCLIP_API_KEY: "bridge-token",
@@ -125,6 +127,96 @@ describe("opencode remote execution", () => {
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
   });
+
+  it.each(["protected", "missing", "unprotected", "setup-failure", "staging-failure", "managed"])(
+    "fences Atlas execution and its unauthenticated model probe (%s)", async (outcome) => {
+      const workspace = await mkdtemp(path.join(os.tmpdir(), "opencode-atlas-scratch-"));
+      cleanupDirs.push(workspace);
+      const configDir = path.join(process.env.XDG_CONFIG_HOME!, "opencode");
+      const dataDir = path.join(process.env.XDG_CONFIG_HOME!, "data", "opencode");
+      await mkdir(configDir);
+      await mkdir(dataDir, { recursive: true });
+      await writeFile(path.join(configDir, "opencode.json"), '{"marker":"{env:OPENAI_API_KEY}"}');
+      await writeFile(path.join(dataDir, "auth.json"), '{"marker":"controller-auth"}');
+      vi.stubEnv("XDG_DATA_HOME", path.dirname(dataDir));
+      vi.stubEnv("OPENAI_API_KEY", "controller-provider-key");
+      vi.stubEnv("PAPERCLIP_API_URL", "http://controller.invalid");
+      vi.stubEnv("OPENCODE_ALLOW_ALL_MODELS", "true");
+      vi.stubEnv("PAPERCLIP_OPENCODE_PRINT_LOGS", "true");
+      const hostToken = "fake-controller-jwt";
+      const tokenFile = `/tmp/paperclip-atlas-${"a".repeat(32)}/bearer`;
+      const stop = vi.fn(async () => {});
+      if (outcome === "protected") startAdapterExecutionTargetPaperclipBridge.mockResolvedValueOnce({
+        env: { PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: tokenFile, PAPERCLIP_API_URL: "http://127.0.0.1:4310" }, stop,
+      });
+      if (outcome === "missing") startAdapterExecutionTargetPaperclipBridge.mockResolvedValueOnce(null);
+      if (outcome === "unprotected") startAdapterExecutionTargetPaperclipBridge.mockResolvedValueOnce({
+        env: { PAPERCLIP_API_KEY: "plaintext-bridge-token" }, stop,
+      });
+      if (outcome === "setup-failure") startAdapterExecutionTargetPaperclipBridge.mockRejectedValueOnce(new Error("bridge setup failed"));
+      if (outcome === "staging-failure") {
+        syncDirectoryToSsh.mockImplementationOnce(async () => {}).mockRejectedValueOnce(new Error("asset staging failed"));
+      }
+      const remoteCwd = "/remote/atlas";
+      const result = execute({
+        runId: "atlas-run", agent: { id: "agent-1", companyId: "company-1", name: "Fixture", adapterType: "opencode_local", adapterConfig: {} },
+        runtime: { sessionId: "untrusted-prior-session", sessionParams: null, sessionDisplayId: null, taskKey: null },
+        context: { paperclipWorkspace: { cwd: workspace } },
+        config: { command: "/worker/opencode", standalone: true, model: "openai/gpt-4.1", variant: "high",
+          managedService: outcome === "managed", extraArgs: ["--attach", "http://caller.invalid"], managedAiConnection: true,
+          env: { PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: "/untrusted-file", OPENAI_API_KEY: "caller-provider-key" } },
+        executionTarget: { kind: "remote", transport: "ssh", environmentId: "atlas", leaseId: "lease-1", remoteCwd,
+          spec: { host: "127.0.0.1", port: 2222, username: "worker", remoteCwd,
+            remoteWorkspacePath: remoteCwd, privateKey: "fixture-key", knownHosts: "fixture-host", strictHostKeyChecking: true,
+            atlas: { sshExecutable: "/bin/ssh", scratchDir: workspace } } },
+        authToken: hostToken, onLog: async () => {},
+      });
+      if (outcome === "protected") {
+        expect(await result).toMatchObject({ exitCode: 0 });
+      } else {
+        await expect(result).rejects.toThrow(outcome === "managed" ? /standalone/i
+          : outcome === "staging-failure" ? "asset staging failed"
+          : outcome === "setup-failure" ? "bridge setup failed" : "protected callback bridge");
+      }
+      expect(prepareWorkspaceForSshExecution).not.toHaveBeenCalled();
+      expect(restoreWorkspaceFromSshExecution).not.toHaveBeenCalled();
+      expect(await readdir(workspace)).toEqual([]);
+      if (outcome === "managed") expect(syncDirectoryToSsh).not.toHaveBeenCalled();
+      if (outcome === "managed" || outcome === "staging-failure") {
+        expect(runChildProcess).not.toHaveBeenCalled();
+        expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
+        return;
+      }
+      const attemptDir = syncDirectoryToSsh.mock.calls[0]![0].remoteDir;
+      expect(attemptDir).toMatch(/^\/remote\/atlas\/attempt-/);
+      expect(syncDirectoryToSsh.mock.calls.map(([input]) => input.remoteDir)).toEqual([
+        attemptDir, `${attemptDir}/.paperclip-runtime/opencode/skills`,
+      ]);
+      expect(runChildProcess).toHaveBeenNthCalledWith(1, "atlas-run", "/worker/opencode", ["models"],
+        expect.objectContaining({ cwd: attemptDir, env: {}, remoteExecution: expect.objectContaining({
+          remoteCwd: attemptDir, atlas: expect.objectContaining({ probe: true }),
+        }) }));
+      expect(startAdapterExecutionTargetPaperclipBridge).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        hostApiToken: hostToken, target: expect.objectContaining({ remoteCwd: attemptDir }),
+      }));
+      if (outcome === "protected") {
+        const runCall = runChildProcess.mock.calls[1]!;
+        expect(runCall[2].slice(0, 8)).toEqual(["run", "--standalone", "--format", "json", "--model", "openai/gpt-4.1", "--variant", "high"]);
+        expect(runCall[2]).not.toEqual(expect.arrayContaining(["--attach"]));
+        expect(runCall[2]).not.toEqual(expect.arrayContaining(["--print-logs"]));
+        expect(runCall[2]).not.toEqual(expect.arrayContaining(["--session"]));
+        expect(runCall[3]).toMatchObject({ cwd: attemptDir, env: { PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: tokenFile },
+          remoteExecution: { remoteCwd: attemptDir } });
+      } else {
+        expect(runChildProcess).toHaveBeenCalledTimes(1);
+      }
+      const processCalls = JSON.stringify(runChildProcess.mock.calls);
+      for (const secret of [hostToken, "controller-provider-key", "caller-provider-key", "controller.invalid", configDir, dataDir, "/untrusted-file"]) {
+        expect(processCalls).not.toContain(secret);
+      }
+      expect(stop).toHaveBeenCalledTimes(["protected", "unprotected"].includes(outcome) ? 1 : 0);
+    },
+  );
 
   it.each([[false, false], [false, true], [true, false], [true, true]])(
     "uses only forwarded credentials for remote billing (forwarded=%s, timeout=%s)", async (forwarded, timedOut) => {

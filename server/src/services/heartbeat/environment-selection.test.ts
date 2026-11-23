@@ -13,7 +13,8 @@ import { instanceSettingsService } from "../instance-settings.js";
 import { buildNativeExecutionInput } from "../native-runtime/native-execution-input.js";
 import { nativeRuntimeContextFixture } from "../native-runtime/runtime-context.test-fixture.js";
 import { selectHeartbeatEnvironment, type HeartbeatEnvironmentSelectionInput } from "./environment-selection.js";
-import { acquireAtlasExecution } from "./atlas-execution.js";
+import { acquireAtlasExecution, assertAtlasDispatch, atlasAdmissionForAgent } from "./atlas-execution.js";
+import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
 import { atlasExecutionPolicy, type AtlasAdmission } from "../../deployment/runtime.js";
 import type { Environment, EnvironmentLease } from "@paperclipai/shared";
 
@@ -21,6 +22,50 @@ vi.mock("../../deployment/runtime.js", async (original) => ({
   ...await original<typeof import("../../deployment/runtime.js")>(),
   atlasExecutionPolicy: vi.fn(() => null),
 }));
+
+it("checks the same Atlas OpenCode pins at declaration and final dispatch", () => {
+  const binding: AtlasAdmission = {
+    companyId: randomUUID(), agentId: randomUUID(), environmentId: randomUUID(), adapterType: "opencode_local",
+    host: "127.0.0.1", port: 2222, username: "worker", hostKey: "ssh-ed25519 fixture", privateKeyCredential: "worker-key",
+    workspaceClass: "copy-scratch", remoteWorkspacePath: "/worker/work", command: "/worker/opencode", sshExecutable: "/bin/ssh",
+    standalone: true, model: "provider/model", variant: "high",
+  };
+  const config = { engine: "cli", command: binding.command, standalone: true, model: binding.model, variant: binding.variant };
+  const agent = { id: binding.agentId, companyId: binding.companyId, adapterType: binding.adapterType,
+    defaultEnvironmentId: binding.environmentId, adapterConfig: config, runtimeConfig: {} };
+  const cwd = "/controller/scratch";
+  const { host, port, username, remoteWorkspacePath: remoteCwd } = binding;
+  const target = { kind: "remote", transport: "ssh", environmentId: binding.environmentId, leaseId: randomUUID(), remoteCwd,
+    spec: { host, port, username, remoteCwd, remoteWorkspacePath: remoteCwd, workspaceRealizationMode: "copy",
+      knownHosts: `[${host}]:${port} ${binding.hostKey}`, strictHostKeyChecking: true, privateKey: "fixture",
+      atlas: { sshExecutable: binding.sshExecutable, scratchDir: cwd } },
+  } as const satisfies AdapterExecutionTarget;
+  vi.mocked(atlasExecutionPolicy).mockReturnValue({ admissions: [binding], home: "/controller", credentialFiles: {} });
+  try {
+    expect(atlasAdmissionForAgent(agent, agent.companyId)).toBe(binding);
+    expect(() => assertAtlasDispatch(binding, target, { ...config, env: {} }, cwd)).not.toThrow();
+    for (const change of [
+      { command: undefined }, { command: "/other/opencode" }, { standalone: undefined }, { standalone: false },
+      { model: undefined }, { model: "provider/other" }, { variant: undefined }, { variant: "low" },
+      { managedService: true }, { managedAiConnection: true }, { extraArgs: [] }, { args: [] },
+      { provider: "elsewhere" }, { config: {} }, { baseUrl: "http://example.invalid" }, { xdgConfigHome: "/elsewhere" },
+      { env: { OPENAI_API_KEY: "fixture" } },
+    ]) {
+      const drifted = { ...config, ...change };
+      expect(() => atlasAdmissionForAgent({ ...agent, adapterConfig: drifted }, agent.companyId)).toThrow("No qualified Atlas");
+      expect(() => assertAtlasDispatch(binding, target, drifted, cwd)).toThrow("Final Atlas dispatch");
+    }
+    expect(() => atlasAdmissionForAgent({ ...agent, adapterConfig: { ...config, env: {} } }, agent.companyId)).toThrow();
+    expect(() => assertAtlasDispatch(binding, target, { ...config, env: [] }, cwd)).toThrow();
+    for (const drifted of [
+      { ...target, leaseId: null }, { ...target, environmentId: randomUUID() }, { ...target, remoteCwd: "/other" },
+      { ...target, spec: { ...target.spec, knownHosts: "different" } },
+      { ...target, spec: { ...target.spec, atlas: { ...target.spec.atlas, probe: true as const } } },
+    ]) expect(() => assertAtlasDispatch(binding, drifted, config, cwd)).toThrow("Final Atlas dispatch");
+  } finally {
+    vi.mocked(atlasExecutionPolicy).mockReturnValue(null);
+  }
+});
 
 it("releases an Atlas slot if the actual acquired target differs before preparation", async () => {
   const binding: AtlasAdmission = {
