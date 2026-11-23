@@ -1,5 +1,5 @@
 import { isOpenRouterUrl, openRouterAttributionHeaders } from "@paperclipai/adapter-utils/openrouter-attribution";
-import { atlasSshEnv } from "@paperclipai/adapter-utils/remote-execution-env";
+import { ATLAS_OPENCODE_ENV, atlasSshEnv } from "@paperclipai/adapter-utils/remote-execution-env";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -118,7 +118,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     const env = Object.fromEntries(Object.entries(atlasSshEnv(input.env)).filter(
       ([key]) => !key.startsWith("PAPERCLIP_API_") && !key.startsWith("PAPERCLIP_BRIDGE_"),
     ));
-    return { env, notes: [], cleanup: async () => {} };
+    return { env: { ...env, ...ATLAS_OPENCODE_ENV }, notes: [], cleanup: async () => {} };
   }
 
   const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);

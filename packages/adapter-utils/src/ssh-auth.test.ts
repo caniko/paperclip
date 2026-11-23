@@ -53,6 +53,48 @@ describe("SSH authentication selection", () => {
     expect(authorizeSandboxCallbackBridgeRequestWithRoutes({ method: "GET", path: "/api/execution-workspaces/x" }, ATLAS_CALLBACK_BRIDGE_ROUTES)).toBeNull();
   });
 
+  it.each(["models", "hello", "run"] as const)("sets only the fixed OpenCode launch flag for Atlas %s", async (invocation) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pc-atlas-opencode-"));
+    try {
+      const spec = await atlasFixtureSpec(root);
+      const probe = invocation !== "run";
+      const worker = path.join(root, "opencode");
+      await writeFile(worker, "#!/bin/sh\nexec env\n", { mode: 0o700 });
+      const bridge = atlasBridgeTokenDelivery(spec, "fixture-bridge-bearer");
+      if (!probe) await bridge.deliver();
+      try {
+        const launch = await buildSshSpawnTarget({
+          spec: { ...spec, atlas: { ...spec.atlas, adapterType: "opencode_local", ...(probe ? { probe: true } : {}) } },
+          command: worker,
+          args: invocation === "models" ? ["models"] : ["run", "--standalone", "--format", "json", "--model", "openai/gpt-4.1", "--variant", "high"],
+          env: {
+            OPENCODE_DISABLE_PROJECT_CONFIG: "0", CALLER_ONLY: "arbitrary", OPENAI_API_KEY: "fixture-host-provider",
+            PAPERCLIP_API_KEY: "fixture-jwt", PAPERCLIP_BRIDGE_TOKEN: "fixture-bridge-bearer",
+            PAPERCLIP_API_URL: "http://callback.invalid", PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: bridge.file,
+          },
+        });
+        try {
+          const { stdout } = await execFileAsync(launch.command, launch.args, { env: {} });
+          expect(stdout.split("\n").filter((line) => /^(OPENCODE_|PAPERCLIP_|OPENAI_|CALLER_ONLY=)/.test(line)).sort()).toEqual(
+            probe ? ["OPENCODE_DISABLE_PROJECT_CONFIG=1"] : [
+              "OPENCODE_DISABLE_PROJECT_CONFIG=1", "PAPERCLIP_API_KEY=fixture-bridge-bearer", "PAPERCLIP_API_URL=http://callback.invalid",
+            ],
+          );
+          const remoteCommand = launch.args.at(-1)!;
+          for (const forbidden of ["fixture-jwt", "fixture-bridge-bearer", "fixture-host-provider", "CALLER_ONLY", ...(probe ? [bridge.file, "callback.invalid"] : [])]) {
+            expect(remoteCommand).not.toContain(forbidden);
+          }
+        } finally {
+          await launch.cleanup();
+        }
+      } finally {
+        if (!probe) await bridge.cleanup();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("delivers the Atlas bearer out of band for bridge and adapter launches and cleans it up", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "pc-atlas-auth-"));
     const argvLog = path.join(root, "argv");

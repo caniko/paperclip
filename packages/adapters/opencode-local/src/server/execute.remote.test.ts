@@ -164,7 +164,8 @@ describe("opencode remote execution", () => {
         context: { paperclipWorkspace: { cwd: workspace } },
         config: { command: "/worker/opencode", standalone: true, model: "openai/gpt-4.1", variant: "high",
           managedService: outcome === "managed", extraArgs: ["--attach", "http://caller.invalid"], managedAiConnection: true,
-          env: { PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: "/untrusted-file", OPENAI_API_KEY: "caller-provider-key" } },
+          env: { PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: "/untrusted-file", OPENAI_API_KEY: "caller-provider-key",
+            OPENCODE_DISABLE_PROJECT_CONFIG: "0", CALLER_ONLY: "caller-env-marker" } },
         executionTarget: { kind: "remote", transport: "ssh", environmentId: "atlas", leaseId: "lease-1", remoteCwd,
           spec: { host: "127.0.0.1", port: 2222, username: "worker", remoteCwd,
             remoteWorkspacePath: remoteCwd, privateKey: "fixture-key", knownHosts: "fixture-host", strictHostKeyChecking: true,
@@ -193,25 +194,22 @@ describe("opencode remote execution", () => {
         attemptDir, `${attemptDir}/.paperclip-runtime/opencode/skills`,
       ]);
       expect(runChildProcess).toHaveBeenNthCalledWith(1, "atlas-run", "/worker/opencode", ["models"],
-        expect.objectContaining({ cwd: attemptDir, env: {}, remoteExecution: expect.objectContaining({
-          remoteCwd: attemptDir, atlas: expect.objectContaining({ probe: true }),
+        expect.objectContaining({ cwd: attemptDir, env: { OPENCODE_DISABLE_PROJECT_CONFIG: "1" }, remoteExecution: expect.objectContaining({
+          remoteCwd: attemptDir, atlas: expect.objectContaining({ adapterType: "opencode_local", probe: true }),
         }) }));
       expect(startAdapterExecutionTargetPaperclipBridge).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
         hostApiToken: hostToken, target: expect.objectContaining({ remoteCwd: attemptDir }),
       }));
       if (outcome === "protected") {
         const runCall = runChildProcess.mock.calls[1]!;
-        expect(runCall[2].slice(0, 8)).toEqual(["run", "--standalone", "--format", "json", "--model", "openai/gpt-4.1", "--variant", "high"]);
-        expect(runCall[2]).not.toEqual(expect.arrayContaining(["--attach"]));
-        expect(runCall[2]).not.toEqual(expect.arrayContaining(["--print-logs"]));
-        expect(runCall[2]).not.toEqual(expect.arrayContaining(["--session"]));
-        expect(runCall[3]).toMatchObject({ cwd: attemptDir, env: { PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: tokenFile },
-          remoteExecution: { remoteCwd: attemptDir } });
+        expect(runCall[2]).toEqual(["run", "--standalone", "--format", "json", "--model", "openai/gpt-4.1", "--variant", "high"]);
+        expect(runCall[3]).toMatchObject({ cwd: attemptDir, env: { PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: tokenFile, OPENCODE_DISABLE_PROJECT_CONFIG: "1" },
+          remoteExecution: { remoteCwd: attemptDir, atlas: { adapterType: "opencode_local" } } });
       } else {
         expect(runChildProcess).toHaveBeenCalledTimes(1);
       }
       const processCalls = JSON.stringify(runChildProcess.mock.calls);
-      for (const secret of [hostToken, "controller-provider-key", "caller-provider-key", "controller.invalid", configDir, dataDir, "/untrusted-file"]) {
+      for (const secret of [hostToken, "controller-provider-key", "caller-provider-key", "caller-env-marker", "controller.invalid", configDir, dataDir, "/untrusted-file"]) {
         expect(processCalls).not.toContain(secret);
       }
       expect(stop).toHaveBeenCalledTimes(["protected", "unprotected"].includes(outcome) ? 1 : 0);

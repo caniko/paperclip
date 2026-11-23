@@ -129,11 +129,15 @@ must use `engine: "cli"` and match the pinned command, model, variant and
 standalone setting. Caller arguments, environment variables and provider
 overrides are not accepted.
 
-The worker supplies OpenCode configuration, provider credentials and project
-config policy. Model and saved-agent hello probes receive no Paperclip API
-credentials. An actual run requires the protected callback bridge before
-launch; the controller's Paperclip JWT stays on the controller. Scratch data
-is not copied back, and there is no managed or local fallback.
+The worker supplies OpenCode user configuration and provider credentials.
+Every Atlas OpenCode launch sets `OPENCODE_DISABLE_PROJECT_CONFIG=1` to disable
+project configuration discovery. Model and saved-agent hello probes receive no
+controller provider credentials or Paperclip callback settings. The saved-agent
+test rechecks the binding after acquiring its lease and before reading the SSH
+credential. A real run requires the protected callback bridge and uses only
+`run --standalone --format json --model <model> --variant <variant>`, with no
+extra arguments. The controller's Paperclip JWT stays on the controller. Scratch
+data is not copied back, and there is no managed or local fallback.
 
 ### User-managed controller
 

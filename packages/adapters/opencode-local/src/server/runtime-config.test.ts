@@ -45,9 +45,10 @@ describe("prepareOpenCodeRuntimeConfig", () => {
         env: { PAPERCLIP_RUN_ID: "atlas-run", XDG_CONFIG_HOME: configHome, XDG_DATA_HOME: configHome,
           PAPERCLIP_API_KEY: "fake-controller-jwt", PAPERCLIP_API_URL: "http://controller.invalid",
           PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: "/untrusted-file", PAPERCLIP_BRIDGE_QUEUE_DIR: "/untrusted-queue",
-          OPENAI_API_KEY: "caller-provider-key", OPENCODE_CONFIG_CONTENT: '{"marker":"caller-config"}' },
+          OPENAI_API_KEY: "caller-provider-key", OPENCODE_CONFIG_CONTENT: '{"marker":"caller-config"}',
+          OPENCODE_DISABLE_PROJECT_CONFIG: "0" },
       });
-      expect(prepared.env).toEqual({ PAPERCLIP_RUN_ID: "atlas-run" });
+      expect(prepared.env).toEqual({ PAPERCLIP_RUN_ID: "atlas-run", OPENCODE_DISABLE_PROJECT_CONFIG: "1" });
       expect(prepared.notes).toEqual([]);
       expect(copy).not.toHaveBeenCalled();
       await prepared.cleanup();

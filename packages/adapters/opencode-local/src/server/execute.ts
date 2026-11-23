@@ -1,4 +1,5 @@
 import { createProviderStoppedBoundary } from "@paperclipai/adapter-utils/provider-stopped-boundary";
+import { ATLAS_OPENCODE_ENV } from "@paperclipai/adapter-utils/remote-execution-env";
 import { createUsageCheckpointLog } from "@paperclipai/adapter-utils/usage-checkpoint";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -24,6 +25,7 @@ import {
   resolveAdapterExecutionTargetCommandForLogs,
   runAdapterExecutionTargetProcess,
   startAdapterExecutionTargetPaperclipBridge,
+  type AdapterExecutionTarget,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
   asString,
@@ -127,7 +129,7 @@ export async function ensureRemoteOpenCodeModelConfiguredAndAvailable(input: {
     ["models"],
     {
       cwd: input.cwd,
-      env: atlas ? {} : input.env,
+      env: atlas ? ATLAS_OPENCODE_ENV : input.env,
       timeoutSec: probeTimeoutSec,
       graceSec: input.graceSec,
       onLog: async () => {},
@@ -188,15 +190,18 @@ async function buildOpenCodeSkillsDir(entries: Array<{ runtimeName: string; sour
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const providerStop = createProviderStoppedBoundary(ctx.onProviderStopped);
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
-  const executionTarget = readAdapterExecutionTarget({
+  const declaredTarget = readAdapterExecutionTarget({
     executionTarget: ctx.executionTarget,
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
   });
-  const atlas = executionTarget?.kind === "remote" && executionTarget.transport === "ssh" && executionTarget.spec.atlas;
+  const atlas = declaredTarget?.kind === "remote" && declaredTarget.transport === "ssh" && declaredTarget.spec.atlas;
   const atlasArgs = atlas ? atlasOpenCodeRunArgs(config) : null;
   if (atlas && (config.managedService === true || !atlasArgs || atlas.probe)) {
     throw new Error("Atlas OpenCode requires a standalone run with a pinned model and variant");
   }
+  const executionTarget: AdapterExecutionTarget | null = atlas
+    ? { ...declaredTarget, spec: { ...declaredTarget.spec, atlas: { ...atlas, adapterType: "opencode_local" } } }
+    : declaredTarget;
   if (config.managedService === true) validateManagedConfig(ctx);
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
 
@@ -314,7 +319,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // project working directory (which would pollute the git repo).  Model
   // selection is already handled via the --model CLI flag.  Set after the
   // envConfig loop so user overrides cannot disable this guard.
-  env.OPENCODE_DISABLE_PROJECT_CONFIG = "true";
+  if (!atlas) env.OPENCODE_DISABLE_PROJECT_CONFIG = "true";
   if (authToken && !atlas) {
     env.PAPERCLIP_API_KEY = authToken;
   }
@@ -607,13 +612,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       env.PAPERCLIP_OPENCODE_PRINT_LOGS ?? process.env.PAPERCLIP_OPENCODE_PRINT_LOGS,
     );
     const buildArgs = (resumeSessionId: string | null) => {
-      const args = atlasArgs ? [...atlasArgs] : ["run", "--format", "json"];
-      if (!atlas) {
-        if (printLogs) args.push("--print-logs");
-        if (resumeSessionId) args.push("--session", resumeSessionId);
-        if (model) args.push("--model", model);
-        if (variant) args.push("--variant", variant);
-      }
+      if (atlasArgs) return atlasArgs;
+      const args = ["run", "--format", "json"];
+      if (printLogs) args.push("--print-logs");
+      if (resumeSessionId) args.push("--session", resumeSessionId);
+      if (model) args.push("--model", model);
+      if (variant) args.push("--variant", variant);
       // Attach only this run's assets. Never install into a shared personal home;
       // both V1 and V2 accept file context without replacing discovery or policy.
       for (const skill of selectedSkills) {

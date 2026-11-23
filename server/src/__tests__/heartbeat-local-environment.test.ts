@@ -182,7 +182,7 @@ describeEmbeddedPostgres("heartbeat local environment lifecycle", () => {
     }
   });
 
-  it("tests the saved Atlas OpenCode binding on a probe-only lease and releases it", async () => {
+  it.each([false, true])("releases the saved Atlas OpenCode probe lease (binding drift: %s)", async (bindingDrift) => {
     const companyId = randomUUID(), agentId = randomUUID(), environmentId = randomUUID();
     const binding: deployment.AtlasAdmission = {
       companyId, agentId, environmentId, adapterType: "opencode_local", workspaceClass: "copy-scratch",
@@ -191,7 +191,7 @@ describeEmbeddedPostgres("heartbeat local environment lifecycle", () => {
       username: "worker", remoteWorkspacePath: "/fixture/workspace", privateKeyCredential: "atlas-key",
       hostKey: `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI${"A".repeat(43)}`,
     };
-    await db.insert(companies).values({ id: companyId, name: "Atlas probe fixture", issuePrefix: "ATLP" });
+    await db.insert(companies).values({ id: companyId, name: "Atlas probe fixture", issuePrefix: bindingDrift ? "ATLD" : "ATLP" });
     const { host, port, username, remoteWorkspacePath, privateKeyCredential, hostKey, command, standalone, model, variant } = binding;
     await db.insert(environments).values({ id: environmentId, name: "Atlas worker", driver: "ssh", status: "active",
       config: { host, port, username, remoteWorkspacePath, privateKeyCredential,
@@ -208,10 +208,27 @@ describeEmbeddedPostgres("heartbeat local environment lifecycle", () => {
       const report = { adapterType: binding.adapterType, status: "pass" as const, checks: [], testedAt: new Date().toISOString() };
       const openCodeProbe = vi.spyOn(adapters.requireServerAdapter("opencode_local"), "testEnvironment").mockResolvedValue(report);
       const claudeProbe = vi.spyOn(adapters.requireServerAdapter("claude_local"), "testEnvironment");
-      expect(await agentEnvironmentTestService(db).testAtlasEnvironment(agent!)).toEqual(report);
+      const readCredential = vi.spyOn(deployment, "readCredential");
+      if (bindingDrift) {
+        const realFactory = environmentServices.environmentService;
+        const service = realFactory(db);
+        const realAcquire = service.acquireLease;
+        vi.spyOn(service, "acquireLease").mockImplementationOnce(async (input) => {
+          const lease = await realAcquire(input);
+          await db.update(agents).set({ adapterConfig: { ...adapterConfig, variant: "low" } }).where(eq(agents.id, agentId));
+          return lease;
+        });
+        vi.spyOn(environmentServices, "environmentService").mockImplementation((...args) => args[0] === db ? service : realFactory(...args));
+        await expect(agentEnvironmentTestService(db).testAtlasEnvironment(agent!)).rejects.toThrow("No qualified Atlas agent execution binding");
+        expect(readCredential).not.toHaveBeenCalled();
+        expect(openCodeProbe).not.toHaveBeenCalled();
+      } else {
+        expect(await agentEnvironmentTestService(db).testAtlasEnvironment(agent!)).toEqual(report);
+        expect(readCredential).toHaveBeenCalledExactlyOnceWith(credential);
+      }
       const [lease] = await db.select().from(environmentLeases).where(eq(environmentLeases.environmentId, environmentId));
       expect(lease).toMatchObject({ status: "released", provider: "ssh", heartbeatRunId: null });
-      expect(openCodeProbe).toHaveBeenCalledExactlyOnceWith({
+      if (!bindingDrift) expect(openCodeProbe).toHaveBeenCalledExactlyOnceWith({
         companyId, adapterType: binding.adapterType, config: adapterConfig, environmentName: "Atlas worker",
         executionTarget: expect.objectContaining({ environmentId, leaseId: lease!.id, transport: "ssh",
           spec: expect.objectContaining({ atlas: expect.objectContaining({ probe: true, sshExecutable: binding.sshExecutable }) }) }),

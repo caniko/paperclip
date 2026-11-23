@@ -109,7 +109,10 @@ describe("opencode remote environment diagnostics", () => {
     const ctx = { companyId: "company-1", adapterType: "opencode_local", executionTarget: target,
       config: { command: "/worker/opencode", standalone: true, model: "openai/gpt-4.1", variant: "high",
         extraArgs: ["--attach", "http://caller.invalid"], managedAiConnection: true,
-        env: { PAPERCLIP_API_KEY: "fake-jwt", XDG_CONFIG_HOME: configHome } } };
+        env: { PAPERCLIP_API_KEY: "fake-jwt", XDG_CONFIG_HOME: configHome,
+          OPENCODE_DISABLE_PROJECT_CONFIG: "0", CALLER_ONLY: "caller-env-marker",
+          PAPERCLIP_BRIDGE_TOKEN: "fake-bearer", PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: "/untrusted-file",
+          PAPERCLIP_API_URL: "http://controller.invalid", OPENAI_API_KEY: "caller-provider-key" } } };
     const result = await testEnvironment(ctx);
     expect(result.checks).toContainEqual(expect.objectContaining({ code: "opencode_hello_probe_passed" }));
     expect(prepareAdapterExecutionTargetRuntime).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
@@ -118,9 +121,9 @@ describe("opencode remote environment diagnostics", () => {
     const runtimeCwd = "/remote/workspace/.paperclip-runtime/runs/test/workspace";
     expect(runAdapterExecutionTargetProcess).toHaveBeenCalledExactlyOnceWith(
       expect.any(String), expect.objectContaining({ remoteCwd: runtimeCwd,
-        spec: expect.objectContaining({ atlas: expect.objectContaining({ probe: true }) }) }), "/worker/opencode",
+        spec: expect.objectContaining({ atlas: expect.objectContaining({ adapterType: "opencode_local", probe: true }) }) }), "/worker/opencode",
       ["run", "--standalone", "--format", "json", "--model", "openai/gpt-4.1", "--variant", "high"],
-      expect.objectContaining({ cwd: runtimeCwd, env: {} }),
+      expect.objectContaining({ cwd: runtimeCwd, env: { OPENCODE_DISABLE_PROJECT_CONFIG: "1" } }),
     );
     expect(discoverOpenCodeModels).not.toHaveBeenCalled();
     vi.clearAllMocks();

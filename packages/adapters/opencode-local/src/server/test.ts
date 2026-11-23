@@ -7,6 +7,7 @@ import type {
   AdapterEnvironmentTestResult,
 } from "@paperclipai/adapter-utils";
 import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
+import { ATLAS_OPENCODE_ENV } from "@paperclipai/adapter-utils/remote-execution-env";
 import {
   asBoolean,
   asNumber,
@@ -83,7 +84,7 @@ export async function testEnvironment(
     };
   }
   const target: AdapterExecutionTarget | null = atlas
-    ? { ...declaredTarget, spec: { ...declaredTarget.spec, atlas: { ...atlas, probe: true } } }
+    ? { ...declaredTarget, spec: { ...declaredTarget.spec, atlas: { ...atlas, adapterType: "opencode_local", probe: true } } }
     : declaredTarget;
   const targetIsRemote = target?.kind === "remote";
   const targetIsSandbox = target?.kind === "remote" && target.transport === "sandbox";
@@ -139,7 +140,7 @@ export async function testEnvironment(
   }
 
   // Prevent OpenCode from writing an opencode.json into the working directory.
-  env.OPENCODE_DISABLE_PROJECT_CONFIG = "true";
+  if (!atlas) env.OPENCODE_DISABLE_PROJECT_CONFIG = "true";
   const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({
     env, config, targetIsAtlas: Boolean(atlas), includeOperatorGitConfig: !targetIsRemote,
   });
@@ -212,7 +213,7 @@ export async function testEnvironment(
         });
       }
     }
-    const runtimeEnv = atlas ? preparedRuntimeConfig.env : normalizeEnv(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env }));
+    const runtimeEnv = atlas ? ATLAS_OPENCODE_ENV : normalizeEnv(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env }));
 
     const cwdInvalid = checks.some((check) => check.code === "opencode_cwd_invalid");
     if (cwdInvalid) {
