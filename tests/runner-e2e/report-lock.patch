@@ -1,8 +1,8 @@
 diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
-index b925688a..ad688a5c 100644
+index 9c05ab8e98..4a739a280b 100644
 --- a/pnpm-lock.yaml
 +++ b/pnpm-lock.yaml
-@@ -1121,6 +1121,9 @@ importers:
+@@ -1166,6 +1166,9 @@ importers:
        tar-stream:
          specifier: 3.2.0
          version: 3.2.0

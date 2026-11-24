@@ -1,4 +1,4 @@
-import { execFile, execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
@@ -672,6 +672,9 @@ describe("ssh env-lab fixture", () => {
         await writeFile(
           path.join(homeDir, ".bashrc"),
           [
+            'printf "profile banner\\n"',
+            'printf "profile diagnostic\\n" >&2',
+            "IFS= read -r profile_input || true",
             'export PATH="/opt/from-bashrc/bin:$PATH"',
             'if [[ -n "$PS1" ]]; then :; fi',
             "export -a",
@@ -691,19 +694,26 @@ describe("ssh env-lab fixture", () => {
             strictHostKeyChecking: true,
           },
           command: "sh",
-          args: ["-c", 'printf "%s" "$PATH"'],
+          args: ["-c", 'IFS= read -r line && printf "%s\\n%s\\n" "${PATH%%:*}" "$line"'],
           env: { FOO: "bar" },
         });
         await target.cleanup();
 
-        // The last ssh argument is the command line the remote login shell runs.
+        // Replay both SSH's remote command and its stdin prefix, followed by
+        // command input that the login profile must not consume.
         const remoteCommandLine = String(target.args.at(-1) ?? "");
-        const output = execFileSync(dashPath!, ["-c", remoteCommandLine], {
+        expect(target.stdinPrefix).toBeDefined();
+        const result = spawnSync(dashPath!, ["-c", remoteCommandLine], {
           encoding: "utf8",
-          env: { HOME: homeDir, PATH: `${binDir}:/usr/bin:/bin` },
+          env: { HOME: homeDir, PATH: `${binDir}:${process.env.PATH ?? "/usr/bin:/bin"}` },
+          input: `${target.stdinPrefix}command input\n`,
         });
 
-        expect(output.split(":")[0]).toBe("/opt/from-bashrc/bin");
+        expect(result).toMatchObject({
+          status: 0,
+          stdout: "/opt/from-bashrc/bin\ncommand input\n",
+          stderr: "",
+        });
       } finally {
         await rm(rootDir, { recursive: true, force: true });
       }

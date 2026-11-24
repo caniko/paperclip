@@ -8,6 +8,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { and, eq } from "drizzle-orm";
@@ -22,6 +23,7 @@ import {
 } from "@paperclipai/db";
 import type { NativeExecutionInputV1 } from "@paperclipai/paperclip-runner";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { registerLocalRuntimeApiServer } from "../../runtime-api.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -259,6 +261,7 @@ const cases = [
 generated(
   "generated warm transition → real restart classifier → guarded server admission",
   () => {
+    const runtimeApi = createServer();
     let temporary:
       | Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>
       | undefined;
@@ -269,8 +272,15 @@ generated(
         );
         databaseUrl = temporary.connectionString;
       }
+      registerLocalRuntimeApiServer(runtimeApi);
+      await new Promise<void>((resolve, reject) => {
+        runtimeApi.once("error", reject).listen(0, "127.0.0.1", resolve);
+      });
     });
     afterAll(async () => {
+      if (runtimeApi.listening) {
+        await new Promise<void>((resolve) => runtimeApi.close(() => resolve()));
+      }
       await temporary?.cleanup();
     });
     it.each(cases)("%s / %s", async (fixtureName, fault) => {

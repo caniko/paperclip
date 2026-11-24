@@ -1094,28 +1094,21 @@ const recoveryFakeCodex = resolve(
         ),
         previousDriverSessionId: checkpoint.sessionId,
       });
-      const [epoch] = await readdir(join(root, "authority-epochs"));
+      const [continuityArchive] = await readdir(join(root, "continuity-breaks"));
+      const archiveRoot = join(root, "continuity-breaks", continuityArchive!);
+      const [epoch] = await readdir(join(archiveRoot, "authority-epochs"));
       const digest = (value: Buffer) =>
         createHash("sha256").update(value).digest("hex");
       expect(
         digest(
           await readFile(
-            join(root, "authority-epochs", epoch!, "runner-state.json"),
+            join(archiveRoot, "authority-epochs", epoch!, "runner-state.json"),
           ),
         ),
       ).toBe(digest(damagedRunnerBytes));
-      const [continuityArchive] = await readdir(
-        join(root, "continuity-breaks"),
-      );
       const archivedProvider = JSON.parse(
         await readFile(
-          join(
-            root,
-            "continuity-breaks",
-            continuityArchive!,
-            "runner",
-            "codex-provider-state.json",
-          ),
+          join(archiveRoot, "runner", "codex-provider-state.json"),
           "utf8",
         ),
       );
@@ -1137,13 +1130,7 @@ const recoveryFakeCodex = resolve(
       });
       const priorProvider = JSON.parse(
         await readFile(
-          join(
-            root,
-            "continuity-breaks",
-            continuityArchive!,
-            "codex-home",
-            "fake-state.json",
-          ),
+          join(archiveRoot, "codex-home", "fake-state.json"),
           "utf8",
         ),
       );

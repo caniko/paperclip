@@ -101,7 +101,7 @@ export function TaskChatTurn({
               agentIcon={item.agentIcon} agent={item.agent}
             />
           ) : null}
-          {!item.historical ? <span className="min-w-0 truncate">
+          {!item.historical ? <span className="min-w-0 truncate text-muted-foreground" data-testid="task-chat-turn-status-header">
             {item.continuedAfterSteering ? "Continued after steering · " : ""}
             {item.summary.durationLabel
               ? `${item.summary.failed ? "Stopped" : "Worked"} for ${item.summary.durationLabel}`

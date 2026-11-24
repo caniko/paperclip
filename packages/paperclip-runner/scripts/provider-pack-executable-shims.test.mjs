@@ -35,7 +35,7 @@ for (const platform of ["darwin-arm64", "darwin-x64", "linux-x64"]) {
     renameSync(pack, relocated);
     const args = ["argument with spaces", "", "$(not-a-command)"];
     const result = spawnSync(join(relocated, "node_modules", ".bin", name), args, {
-      cwd: root, env: { PATH: "/usr/bin:/bin" }, encoding: "utf8", timeout: 5_000,
+      cwd: root, env: { PATH: process.env.PATH }, encoding: "utf8", timeout: 5_000,
     });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 17);
@@ -91,7 +91,7 @@ test("points the Copilot command at the identical provider asset and drops the n
   const relocated = join(root, "relocated pack");
   renameSync(pack, relocated);
   const result = spawnSync(join(relocated, "node_modules", ".bin", name), ["one argument"], {
-    cwd: root, env: { PATH: "/usr/bin:/bin" }, encoding: "utf8", timeout: 5_000,
+    cwd: root, env: { PATH: process.env.PATH }, encoding: "utf8", timeout: 5_000,
   });
   assert.equal(result.status, 17);
   assert.equal(result.stdout, "asset one argument\n");
@@ -104,6 +104,6 @@ test("keeps the npm Copilot copy when the provider asset differs", (t) => {
 
   writePortableCopilotShims(pack);
   assert.equal(existsSync(entry), true);
-  const result = spawnSync(join(pack, "node_modules", ".bin", name), [], { env: { PATH: "/usr/bin:/bin" }, encoding: "utf8", timeout: 5_000 });
+  const result = spawnSync(join(pack, "node_modules", ".bin", name), [], { env: { PATH: process.env.PATH }, encoding: "utf8", timeout: 5_000 });
   assert.equal(result.stdout, "npm\n");
 });

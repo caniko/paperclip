@@ -7,8 +7,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { contract, selectCases, inspectSelection, filterCatalog, projectResults, verifyPublication, standingPlanCases, protocolTestOpsFailure,
   captureManualJobRunContext, parseOfficialJobRunContext, payloadFromSanitizedRun } from "./runner-protocol-testops.mjs";
-import { testopsClient } from "../../../tests/runner-e2e/chat-feature-testops-api.mjs";
-import { sanitizeProtocolEvalRuns } from "./runner-protocol-eval-campaign.mjs";
+import { testopsClient } from "./chat-feature-testops-api.mjs";
+import { sanitizeProtocolEvalRuns } from "../../packages/paperclip-runner/scripts/runner-protocol-eval-campaign.mjs";
 
 const context = { runId: "123", workflowSha: "a".repeat(40), sourceSha: "a".repeat(40), evalsSha: "b".repeat(40),
   allureJobRunId: "7", jobId: 9, launchId: 11, accountingMode: "legacy" };

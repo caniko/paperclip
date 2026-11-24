@@ -2,10 +2,9 @@ import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, it } from "vitest";
-import { githubLauncherSource } from "../../../../adapter-utils/src/github-launcher.js";
 import { resolveQualifiedAcpxProfile } from "./qualified-profiles.js";
 import { createAcpxRecoveryBinding } from "./recovery-identity.js";
 import { prepareAcpxRuntimeSandbox } from "./runtime-sandbox.js";
@@ -23,9 +22,8 @@ it.skipIf(process.platform === "win32").each(["isolated", "prepared", "preconfig
   const workspace = join(root, "workspace");
   const runtimeDirectory = join(root, "runtime");
   const managed = join(root, "managed");
-  const real = join(root, "real");
   const home = join(root, "home");
-  await Promise.all([workspace, runtimeDirectory, managed, real, home].map(path => mkdir(path)));
+  await Promise.all([workspace, runtimeDirectory, managed, home].map(path => mkdir(path)));
   await mkdir(join(home, ".claude"));
   const binding = await createAcpxRecoveryBinding({
     runtimeDirectory,
@@ -54,19 +52,28 @@ it.skipIf(process.platform === "win32").each(["isolated", "prepared", "preconfig
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   cleanups.push(() => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  const path = [managed, real, dirname(process.execPath), "/usr/bin", "/bin"].join(":");
-  await writeFile(join(managed, ".bashrc"), `export PATH='${path}'\n`);
-  const executable = `#!/usr/bin/env node
-const token = process.env.GH_TOKEN;
-const identity = token === 'fixture-operation-first' ? 'first' : token === 'fixture-operation-second' ? 'second' : 'anonymous';
-console.log(identity);
+  await writeFile(join(managed, ".bashrc"), 'export PATH="$PAPERCLIP_GITHUB_LAUNCHER_DIR:$PATH"\n');
+  // Runner owns the launch environment, not the application's GitHub launcher.
+  const launcher = `#!${process.execPath}
+const env = process.env;
+fetch(env.PAPERCLIP_GITHUB_BROKER_URL + "/runtime-tools/github/credentials", {
+  method: "POST",
+  headers: {
+    authorization: "Bearer " + env.PAPERCLIP_GITHUB_BRIDGE_TOKEN,
+    "x-paperclip-github-capability": env.PAPERCLIP_GITHUB_BROKER_TOKEN,
+  },
+}).then(async response => {
+  if (!response.ok) throw new Error("Fixture broker rejected the credentials request");
+  const result = await response.json();
+  if (result.status === "unavailable") console.error(result.reason);
+  console.log(result.env?.GH_TOKEN?.replace("fixture-operation-", "") ?? "anonymous");
+});
 `;
   for (const program of ["git", "gh"]) {
-    await writeFile(join(managed, program), githubLauncherSource(), { mode: 0o700 });
-    await writeFile(join(real, program), executable, { mode: 0o700 });
+    await writeFile(join(managed, program), launcher, { mode: 0o700 });
   }
   const environment = {
-    PATH: path,
+    PATH: workspace,
     BASH_ENV: join(managed, ".bashrc"),
     ZDOTDIR: managed,
     GH_CONFIG_DIR: managed,
@@ -80,10 +87,12 @@ console.log(identity);
     ...(homeMode === "prepared" ? { PAPERCLIP_RUNNER_PREPARED_HARNESS_HOME: join(home, ".claude") } : {}),
   };
   const sandbox = await prepareAcpxRuntimeSandbox({ binding, agent: "claude", environment });
-  const commands = "git ls-remote https://github.com/example/fixture; gh api user";
+  // Only the fixture's BASH_ENV should add the launcher directory to PATH.
+  const bash = (await execute("bash", ["-c", "command -v bash"])).stdout.trim();
+  const shellArgs = ["--norc", "-c", "git ls-remote https://github.com/example/fixture && gh api user"];
   for (const currentIdentity of ["first", "second", null] as const) {
     identity = currentIdentity;
-    const result = await execute("/bin/bash", ["-c", commands], { cwd: workspace, env: sandbox.launchEnvironment, timeout: 10_000 });
+    const result = await execute(bash, shellArgs, { cwd: workspace, env: sandbox.launchEnvironment, timeout: 10_000 });
     expect(result.stdout.trim().split("\n")).toEqual([identity ?? "anonymous", identity ?? "anonymous"]);
     if (identity) expect(result.stderr).toBe("");
     else expect(result.stderr).toContain("Fixture connection revoked");
@@ -94,7 +103,7 @@ console.log(identity);
   expect(JSON.stringify(sandbox.persistedEnvironment)).not.toMatch(/fixture-(?:session|bridge|operation)|PAPERCLIP_GITHUB_BROKER|PAPERCLIP_GITHUB_BRIDGE/);
   const recovered = await prepareAcpxRuntimeSandbox({ binding, agent: "claude", environment });
   identity = "first";
-  expect((await execute("/bin/bash", ["-c", commands], { cwd: workspace, env: recovered.launchEnvironment, timeout: 10_000 })).stdout.trim().split("\n")).toEqual(["first", "first"]);
+  expect((await execute(bash, shellArgs, { cwd: workspace, env: recovered.launchEnvironment, timeout: 10_000 })).stdout.trim().split("\n")).toEqual(["first", "first"]);
   expect(requests).toBe(8);
   expect(await readFile(join(managed, "gh"), "utf8")).not.toContain("fixture-session");
 });

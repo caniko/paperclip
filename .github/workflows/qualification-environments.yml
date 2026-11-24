@@ -127,6 +127,8 @@ jobs:
           if [ "$PROFILE" = runner-package ]; then
             cargo build --manifest-path runner/Cargo.toml --locked --workspace --bins --jobs 2 2>&1 | tee "$EVIDENCE/runner-build.log"
             pnpm run ensure:eval-build-deps 2>&1 | tee "$EVIDENCE/eval-build-deps.log"
+          elif [ "$PROFILE" = runnerd ]; then
+            cargo build --manifest-path runner/Cargo.toml --locked --bin paperclip-runnerd --bin fake-codex-app-server --bin fake-acpx-sidecar --jobs 2 2>&1 | tee "$EVIDENCE/runner-build.log"
           else
             cargo build --manifest-path runner/Cargo.toml --locked --bin paperclip-runnerd --bin fake-codex-app-server --jobs 2 2>&1 | tee "$EVIDENCE/runner-build.log"
           fi
@@ -142,6 +144,12 @@ jobs:
           cp "$RUNNER_TEMP/profile-pi/pi-distribution.json" "$EVIDENCE/pi-distribution.json"
           cp "$RUNNER_TEMP/profile-pi/native-closure.json" "$EVIDENCE/pi-native-closure.json"
           printf '%s\n' "PAPERCLIP_TEST_PI_DISTRIBUTION_ROOT=$RUNNER_TEMP/profile-pi" >> "$GITHUB_ENV"
+      - name: Prepare the locked OpenCode executable for the complete Runner package
+        if: matrix.profile == 'runner-package'
+        run: |
+          set -euo pipefail
+          node packages/paperclip-runner/scripts/materialize-opencode-binary.mjs | tee "$EVIDENCE/opencode-preparation.json"
+          printf 'PAPERCLIP_TEST_OPENCODE_BINARY=%s\n' "$(jq -er .target "$EVIDENCE/opencode-preparation.json")" >> "$GITHUB_ENV"
       - name: Verify all four read-only Stop fixture combinations from source
         if: matrix.profile == 'runnerd'
         working-directory: packages/paperclip-runner
@@ -167,10 +175,14 @@ jobs:
           mkdir -p "$EVIDENCE/warm-fixtures/transient" "$EVIDENCE/warm-fixtures/managed"
           export PAPERCLIP_ATTACH_TRANSITION_FIXTURE_DIRECTORY="$EVIDENCE/warm-fixtures/transient"
           export PAPERCLIP_ATTACH_TRANSITION_FIXTURE_SCOPE=transient
-          pnpm --filter @paperclipai/paperclip-runner exec vitest run src/live/runnerd-codex-transport.test.ts -t '^recovers a warm attachment with a fresh controller and runner \((before-result|after-result|after-activation|before-confirmation|after-confirmation), routed=true, fault=none, followup=undefined, external=undefined, prepared=undefined\)$' --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter="$GITHUB_WORKSPACE/scripts/qualification-junit-reporter.mjs" --outputFile.junit="$EVIDENCE/transient-producer.junit" 2>&1 | tee "$EVIDENCE/transient-producer.log"
+          pnpm --filter @paperclipai/paperclip-runner exec vitest run src/live/runnerd-codex-transport-attachment-recovery.test.ts -t '^recovers a warm attachment with a fresh controller and runner \((before-result|after-result|after-activation|before-confirmation|after-confirmation), routed=true, fault=none, followup=undefined, external=undefined, prepared=undefined\)$' --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter="$GITHUB_WORKSPACE/scripts/qualification-junit-reporter.mjs" --outputFile.junit="$EVIDENCE/transient-producer.junit" 2>&1 | tee "$EVIDENCE/transient-producer.log"
           export PAPERCLIP_ATTACH_TRANSITION_FIXTURE_DIRECTORY="$EVIDENCE/warm-fixtures/managed"
           export PAPERCLIP_ATTACH_TRANSITION_FIXTURE_SCOPE=managed
-          pnpm --filter @paperclipai/paperclip-runner exec vitest run src/live/runnerd-codex-transport.test.ts -t '^recovers a warm attachment with a fresh controller and runner \(before-result, routed=true, fault=none, followup=undefined, external=undefined, prepared=undefined\)$' --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter="$GITHUB_WORKSPACE/scripts/qualification-junit-reporter.mjs" --outputFile.junit="$EVIDENCE/managed-producer.junit" 2>&1 | tee "$EVIDENCE/managed-producer.log"
+          pnpm --filter @paperclipai/paperclip-runner exec vitest run src/live/runnerd-codex-transport-attachment-recovery.test.ts -t '^recovers a warm attachment with a fresh controller and runner \(before-result, routed=true, fault=none, followup=undefined, external=undefined, prepared=undefined\)$' --no-file-parallelism --maxWorkers=1 --retry=0 --allowOnly=false --reporter=default --reporter="$GITHUB_WORKSPACE/scripts/qualification-junit-reporter.mjs" --outputFile.junit="$EVIDENCE/managed-producer.junit" 2>&1 | tee "$EVIDENCE/managed-producer.log"
+          for fixture in before-result after-result after-activation before-confirmation after-confirmation; do
+            test -s "$EVIDENCE/warm-fixtures/transient/$fixture-routed/transition-fixture-metadata.json"
+          done
+          test -s "$EVIDENCE/warm-fixtures/managed/before-result-routed/transition-fixture-metadata.json"
           printf '%s\n' "PAPERCLIP_WARM_TRANSITION_FIXTURE_DIRECTORY=$EVIDENCE/warm-fixtures/transient" "PAPERCLIP_WARM_TRANSITION_MANAGED_FIXTURE_DIRECTORY=$EVIDENCE/warm-fixtures/managed" >> "$GITHUB_ENV"
       - name: Execute every source-mapped profile case once
         # A hung runnerd scenario must end the step so the profile log and evidence still upload.
@@ -181,6 +193,9 @@ jobs:
           SEARCH_EVAL_SCALE: ${{ matrix.profile == 'search-benchmark' && '1' || '' }}
           PAPERCLIP_FINAL_BURST_BENCHMARK: ${{ matrix.profile == 'runner-package' && '1' || '' }}
           PAPERCLIP_FINAL_BURST_REPETITIONS: ${{ matrix.profile == 'runner-package' && '1' || '' }}
+          PAPERCLIP_CHECKPOINT_FLUSH_BENCHMARK: ${{ matrix.profile == 'runner-package' && '1' || '' }}
+          PAPERCLIP_TRANSPORT_PUMP_BENCHMARK: ${{ matrix.profile == 'runner-package' && '1' || '' }}
+          PAPERCLIP_OPENCODE_QUALIFY: ${{ matrix.profile == 'runner-package' && '1' || '' }}
           PAPERCLIP_REQUIRE_SENTRY_TEST_SDK: ${{ matrix.profile == 'sentry-sdk' && '1' || '' }}
           PAPERCLIP_TEST_BWRAP: ${{ matrix.profile == 'linux-containment' && '/usr/bin/bwrap' || '' }}
           PAPERCLIP_TEST_SANDBOX_BUILD: ${{ matrix.profile == 'linux-containment' && '1' || '' }}

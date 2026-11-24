@@ -316,7 +316,7 @@ jobs:
           if [ -z "$RUNNER_TESTOPS_REQUESTED_JOB_RUN_ID" ]; then
             selection_args+=("$RUNNER_TEMP/runner-protocol-testplan.json")
           fi
-          allurectl watch -- node packages/paperclip-runner/scripts/runner-protocol-testops.mjs "${selection_args[@]}"
+          allurectl watch -- node tests/runner-e2e/runner-protocol-testops.mjs "${selection_args[@]}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: runner-protocol-testops-selection-${{ github.run_id }}-${{ github.run_attempt }}
@@ -407,7 +407,7 @@ jobs:
       - name: Apply the exact selected protocol cases before fan-out
         id: filter
         if: needs.authorize.outputs.testops_enabled == 'true'
-        run: node packages/paperclip-runner/scripts/runner-protocol-testops.mjs filter-catalog runner-protocol-eval-catalog.json runner-protocol-testops-selection/runner-protocol-testops-selection.json
+        run: node tests/runner-e2e/runner-protocol-testops.mjs filter-catalog runner-protocol-eval-catalog.json runner-protocol-testops-selection/runner-protocol-testops-selection.json
 
       - name: Enforce controlled limits against the selected catalog
         if: needs.authorize.outputs.accounting_mode == 'controlled'
@@ -1313,13 +1313,13 @@ jobs:
           mkdir -m 700 runner-protocol-testops-projection
           case "$ACCOUNTING_MODE" in
             controlled)
-              node packages/paperclip-runner/scripts/runner-protocol-testops.mjs export-runs \
+              node tests/runner-e2e/runner-protocol-testops.mjs export-runs \
                 runner-protocol-testops-selection/runner-protocol-testops-selection.json \
                 runner-protocol-merged/campaign.json runner-protocol-merged/public-runs \
                 runner-protocol-testops-projection/results
               ;;
             legacy)
-              node packages/paperclip-runner/scripts/runner-protocol-testops.mjs export \
+              node tests/runner-e2e/runner-protocol-testops.mjs export \
                 runner-protocol-testops-selection/runner-protocol-testops-selection.json \
                 runner-protocol-merged/public-report runner-protocol-testops-projection/results
               ;;
@@ -1435,7 +1435,7 @@ jobs:
         if: steps.projection.outcome != 'success'
         run: |
           mkdir -m 700 runner-protocol-testops-fallback
-          node packages/paperclip-runner/scripts/runner-protocol-testops.mjs export \
+          node tests/runner-e2e/runner-protocol-testops.mjs export \
             runner-protocol-testops-selection/runner-protocol-testops-selection.json \
             runner-protocol-testops-unavailable runner-protocol-testops-fallback/results
           echo "RUNNER_PROTOCOL_TESTOPS_RESULTS=runner-protocol-testops-fallback/results" >> "$GITHUB_ENV"
@@ -1454,7 +1454,7 @@ jobs:
       - name: Verify the persisted status and same-run case bindings
         env:
           ALLURE_TOKEN: ${{ secrets.ALLURE_TOKEN }}
-        run: node packages/paperclip-runner/scripts/runner-protocol-testops.mjs verify "${RUNNER_PROTOCOL_TESTOPS_RESULTS}-receipt.json"
+        run: node tests/runner-e2e/runner-protocol-testops.mjs verify "${RUNNER_PROTOCOL_TESTOPS_RESULTS}-receipt.json"
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

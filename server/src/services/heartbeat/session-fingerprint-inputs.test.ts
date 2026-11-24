@@ -175,6 +175,7 @@ describe("session fingerprint keeps sessions across non-thread changes", () => {
     ["wake scheduling", { agentRuntimeConfig: { aiConnection: { mode: "shared", grantId: "grant-1" }, heartbeat: { enabled: true, intervalSec: 300 } } }],
     ["the environment row's update time", withSelectedEnvironment({ configRevisionAt: "2099-02-01T00:00:00.000Z" })],
     ["how the same environment was selected", { environment: { ...(baseInput.environment as object), selectionSource: "issue" } }],
+    ["the environment's run-slot cap", withSelectedEnvironment({}, { capacity: { maxConcurrentRuns: 2 } })],
     ["the environment's release, log streaming, and RPC timeout settings",
       withSelectedEnvironment({}, { archiveOnRelease: true, streamRunLogs: false, timeoutMs: 30_000 })],
   ])("does not reset for %s", async (_label, next) => {
@@ -205,6 +206,7 @@ describe("session fingerprint still resets for thread changes", () => {
     ["the environment", { environment: { ...(baseInput.environment as object), selectedEnvironmentId: "environment-2" } }],
     ["the plugin driver config", withSelectedEnvironment({}, { driverConfig: { image: "image-b" } })],
     ["the environment's lifecycle mode", withSelectedEnvironment({}, { runnerLifecycleMode: "per_turn" })],
+    ["the SSH workspace realization mode", withSelectedEnvironment({}, { workspaceRealizationMode: "in_place" })],
   ])("resets for %s", async (_label, next) => {
     expect((await freshness(next)).reset).toBe(true);
   });

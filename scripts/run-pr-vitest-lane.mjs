@@ -12,7 +12,7 @@ import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { invocationEnv } from "./ci-profile/record.mjs";
-import { filesMatchedByFilters, listPackageVitestFiles, planPackageLanes } from "../packages/paperclip-runner/scripts/vitest-package-lanes.mjs";
+import { filesMatchedByFilters, listPackageVitestFiles, planPackageLanes } from "./vitest-package-lanes.mjs";
 
 const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = resolve(workspaceRoot, "packages/paperclip-runner");

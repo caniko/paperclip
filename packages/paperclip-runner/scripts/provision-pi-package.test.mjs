@@ -28,9 +28,9 @@ test("public server tar layout carries a self-contained host provisioner and exa
   // Exercise npm's actual package/ prefix after archive extraction, without
   // pretending this small fixture is a complete published Paperclip release.
   const archive = join(root, "server.tgz");
-  execFileSync("tar", ["-czf", archive, "-C", root, "package"], { env: { PATH: "/usr/bin:/bin" }, timeout: 10_000 });
+  execFileSync("tar", ["-czf", archive, "-C", root, "package"], { env: { PATH: process.env.PATH }, timeout: 10_000 });
   const installed = join(root, "installed"); await mkdir(installed);
-  execFileSync("tar", ["-xzf", archive, "-C", installed], { env: { PATH: "/usr/bin:/bin" }, timeout: 10_000 });
+  execFileSync("tar", ["-xzf", archive, "-C", installed], { env: { PATH: process.env.PATH }, timeout: 10_000 });
   const installedPackage = join(installed, "package"); const entry = join(installedPackage, "dist/vendor/paperclip-runner/cli/provision-pi.cjs");
   const api = createRequire(import.meta.url)(entry);
   const layout = await api.provisionPackageRoot(entry);

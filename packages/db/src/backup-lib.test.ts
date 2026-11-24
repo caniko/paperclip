@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -31,12 +32,24 @@ async function createTempDatabase(): Promise<string> {
   return db.connectionString;
 }
 
-async function createSiblingDatabase(connectionString: string, databaseName: string): Promise<string> {
+async function createSiblingDatabase(connectionString: string, prefix: string): Promise<string> {
+  // CI shares a PostgreSQL cluster across cases. A previous restore must not
+  // turn this empty-target round trip into a drop-and-recreate of the full schema.
+  const databaseName = `${prefix}_${randomUUID().slice(0, 8)}`;
   const adminUrl = new URL(connectionString);
   adminUrl.pathname = "/postgres";
   await ensurePostgresDatabase(adminUrl.toString(), databaseName);
   const targetUrl = new URL(connectionString);
   targetUrl.pathname = `/${databaseName}`;
+  cleanups.push(async () => {
+    const admin = createDb(adminUrl.toString(), { maxConnections: 1 }).$client;
+    try {
+      await closeRegisteredClients(targetUrl.toString(), { scope: "database" });
+      await admin`DROP DATABASE IF EXISTS ${admin(databaseName)} WITH (FORCE)`;
+    } finally {
+      await admin.end({ timeout: 1 });
+    }
+  });
   return targetUrl.toString();
 }
 
@@ -724,6 +737,8 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
         }
         const [connection] = await source`SELECT inet_server_addr() AS address`;
         expect(connection.address).toBeNull();
+        const [targetProbe] = await target`SELECT to_regclass('public.socket_probe') AS table_name`;
+        expect(targetProbe.table_name).toBeNull();
         expect(await getPostgresDataDirectory(sourceUrl)).toBe(await getPostgresDataDirectory(tcpUrl));
         await source`CREATE TABLE socket_probe (value text NOT NULL)`;
         await source`INSERT INTO socket_probe VALUES ('socket-backup-fixture')`;

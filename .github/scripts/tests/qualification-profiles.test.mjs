@@ -103,7 +103,8 @@ test("default source scope requires every ordinary case and preserves source-map
   assert.equal(verifyProfileResults(selected, [passed, skipped], []).passed, 1);
   assert.throws(() => verifyProfileResults(selected, [skipped], []));
   assert.throws(() => verifyProfileResults(selected, [passed], []), /roster/);
-  assert.throws(() => selectDefault([ordinary, { ...deferred, name: "unmapped skipped case" }]), /mapping/);
+  assert.throws(() => selectDefault([ordinary, deferred, { ...deferred, id: "unmapped", name: "unmapped skipped case" }]),
+    new RegExp(`Skipped source case has no environment mapping: ${file}: unmapped skipped case`));
   assert.throws(() => selectDefault([ordinary, deferred], { ...p, rules: [{ ...p.rules[0], source_sha256: "stale" }] }), /drift/);
 });
 

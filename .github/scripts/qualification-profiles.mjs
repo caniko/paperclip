@@ -18,7 +18,10 @@ export function profileSelection(profile, platform, rows, sources, policy) {
     assert.ok(rows.some(row => row.file === rule.file && row.name.includes(rule.name_contains)), "Required mapping collected no cases");
   }
   const mapped = sourceScope ? mapEnvironments(rows, sources, { ...policy, rules, conditional_expansions: [] }).cases : undefined;
-  if (mapped) assert.ok(mapped.every(row => row.environments.length), "Skipped source case has no environment mapping");
+  if (mapped) {
+    const unmapped = mapped.filter(row => !row.environments.length);
+    assert.equal(unmapped.length, 0, `Skipped source case has no environment mapping: ${unmapped.map(row => `${row.file}: ${row.name}`).join("\n")}`);
+  }
   // A complete package roster excludes exactly the cases that a source-backed rule assigns to another
   // profile of the same package on a different platform. Each exclusion must be skipped here.
   const packageRoot = policy.environments[profile]?.package_root;

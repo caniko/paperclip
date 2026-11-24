@@ -1,6 +1,6 @@
 {
-  "inputSha256": "43742a66f2dd438c5913a34840c94188f8ec05fda7fc11c1c8889913cdcf433b",
-  "outputSha256": "d44e2238d0db22352b3fc884c409a47cd769b83ecec2ac5288ac1bc9ddea5eb3",
-  "patchSha256": "f6aab695df1f8d9819ae189386866efd3bd4dc839c7eb7540e25b9225aad5e28",
-  "basis": "Generated with the trusted master lockfile refresh. Review this offline correction and its hashes with the dependency changes."
+  "inputSha256": "bf5b463d543c9b78b9e677a8e093bcc2c1be5a025f0f2fdd0b32e35f40461c38",
+  "outputSha256": "12b7fdb2564257451efa9f08ce7231762c95b9142f05aaffb09626dd980c3bfa",
+  "patchSha256": "3094f43d8aa4a6647602d84f37dbfccbc220d4beecd05ef147fad4679c868f0d",
+  "basis": "Rebased the upstream reviewed server tldts@7.4.10 importer correction onto the 2026-11-24 sync lock. The correction does not change package snapshots or integrity entries."
 }

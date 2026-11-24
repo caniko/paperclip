@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { failureProjection, testopsClient } from "../../../tests/runner-e2e/chat-feature-testops-api.mjs";
+import { failureProjection, testopsClient } from "./chat-feature-testops-api.mjs";
 
 export const contract = JSON.parse(await readFile(new URL("./runner-protocol-testops-contract.json", import.meta.url), "utf8"));
 const fail = code => { throw new Error(`runner_testops_${code}`); };

@@ -35,7 +35,7 @@ if (fixture) {
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   fs.writeFileSync(
     path.join(fixtureDir, "codex"),
-    `#!/bin/sh\nexec ${quote(fixture)} --state-file ${quote(fixtureDir)}/state-$$.json --hold-turn --call-log ${quote(logPath)} "$@"\n`,
+    `#!/bin/sh\nexec ${quote(fixture)} --state-file ${quote(fixtureDir)}/state-$$.json --hold-turn --complete-read-only-probes --call-log ${quote(logPath)} "$@"\n`,
     { mode: 0o755 },
   );
 }

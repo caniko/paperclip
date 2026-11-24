@@ -252,7 +252,7 @@ describe.each(["legacy", "native"] as const)("historical %s system status", (run
     expect(props.onResumeAssignee).not.toHaveBeenCalled();
   });
 
-  it.runIf(runtimeMode === "native")("keeps a failed MCP start on a historical settled run while hiding other notices", () => {
+  if (runtimeMode === "native") it("keeps a failed MCP start on a historical settled run while hiding other notices", () => {
     const prp = (seq: number, eventType: string, payload: Record<string, unknown>) => ({
       id: seq, companyId: "company", runId: "mcp", agentId: "agent", seq, eventType, stream: "system", level: "info",
       color: null, message: null, createdAt: new Date(`2025-01-01T10:00:0${seq}Z`),
@@ -3185,7 +3185,7 @@ describe("TaskChatThread runtime transcript selection", () => {
         ?.textContent,
     ).not.toContain("Continued after steering");
     expect(
-      container.querySelector('[data-testid="task-chat-turn-status-header"]')
+      container.querySelector('[data-testid="task-chat-live-transcript"] [data-testid="task-chat-turn-status-header"]')
         ?.textContent,
     ).toContain("Continued after steering · Working for");
     expect(container.textContent).toContain(
@@ -6044,6 +6044,9 @@ describe("TaskChatThread live transcript", () => {
     expect(container.querySelector('[data-testid="task-chat-live-transcript"]')).toBeNull();
     expect(container.textContent?.split("INTERRUPTED-PROGRESS-LINE")).toHaveLength(2);
     expect(container.textContent?.match(/Stopped (for|after) /g)).toHaveLength(1);
+    const statusHeader = container.querySelector('[data-testid="task-chat-turn-status-header"]');
+    expect(statusHeader?.textContent).toMatch(/^Stopped/);
+    expect(statusHeader?.classList.contains("text-muted-foreground")).toBe(true);
   });
 
   it("keeps the transcript mounted through run settle until the settled turn renders (PAP-462 B4)", () => {

@@ -6,9 +6,9 @@ import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadShardDurations, partitionGeneralServerSuites } from "../../../scripts/general-server-shard.mjs";
+import { loadShardDurations, partitionGeneralServerSuites } from "./general-server-shard.mjs";
 
-export const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+export const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../packages/paperclip-runner");
 export const laneDurationsPath = resolve(packageRoot, "scripts/vitest-lane-durations.json");
 // Manifest keys are repository-relative, matching the server shard manifests.
 export const repoPrefix = "packages/paperclip-runner/";

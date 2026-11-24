@@ -45,6 +45,8 @@ function writtenRootEntries(): { names: Set<string>; unresolved: string[] } {
         continue;
       }
       const identifier = /^[A-Za-z_$][\w$.]*$/.exec(argument)?.[0];
+      // A known loop binding can shadow an unrelated same-name constant.
+      if (identifier && writer.dynamic?.includes(identifier.split(".")[0]!)) continue;
       const constant = identifier
         ? new RegExp(`const ${escape(identifier)} = ["'\`]([^"'\`/]+)["'\`]`).exec(text)
         : null;
@@ -52,7 +54,6 @@ function writtenRootEntries(): { names: Set<string>; unresolved: string[] } {
         names.add(constant[1]!);
         continue;
       }
-      if (identifier && writer.dynamic?.includes(identifier.split(".")[0]!)) continue;
       unresolved.push(`${writer.file}: ${argument}`);
     }
   }

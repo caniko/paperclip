@@ -1530,6 +1530,8 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     // A claim-time pause can win before any preparer starts; only a registered
     // executor can take responsibility for deferred cleanup and release.
     const preparerWillReleaseIssue = cancelledBeforeNativeSelection && activeRunExecutions.has(run.id);
+    // The startup fence proves dispatch was blocked, not that preparation
+    // unwound. Only settlement may record bootstrap recovery for ordinary Stop.
     const resultJson = { ...(agent
       ? {
           ...mergeRunStopMetadataForAgent(agent, "cancelled", {
@@ -1538,9 +1540,6 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
             errorMessage: reason,
           }),
           ...(options.resultJson ?? {}),
-          ...(cancelledBeforeNativeSelection ? {
-            executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
-          } : {}),
         }
       : options.resultJson), cancellation };
 

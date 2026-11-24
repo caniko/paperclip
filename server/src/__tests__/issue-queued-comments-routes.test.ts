@@ -978,7 +978,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       const [waiting] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
       expect(waiting.payload?.queuedCommentInterrupt).toMatchObject({ actorId: "queue-owner", targetRunId: seeded.runId });
       expect(await db.select().from(issueComments).where(eq(issueComments.issueId, seeded.issueId))).toHaveLength(2);
-      expect(waiting.status).toBe("deferred_issue_execution");
+      expect(waiting).toMatchObject({ status: "deferred_issue_execution", runId: null });
       // The synthetic preparation owner now confirms that its unwind finished.
       // No provider ran; until this receipt exists, cancellation must hold input.
       const [stopped] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));

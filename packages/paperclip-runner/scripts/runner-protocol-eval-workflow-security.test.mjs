@@ -481,7 +481,7 @@ test('Braintrust-controlled workers do not require an unused direct provider cre
   assert.ok(credentialCheck.includes('test -n "${!CREDENTIAL_NAME:-}"'));
   for (const [mode, credential, status] of [['controlled', '', 0], ['legacy', '', 1], ['legacy', 'synthetic-only', 0]]) {
     const result = spawnSync('bash', ['-euc', credentialCheck], { encoding: 'utf8', env: {
-      ACCOUNTING_MODE: mode, CREDENTIAL_NAME: 'OPENAI_API_KEY', OPENAI_API_KEY: credential,
+      PATH: process.env.PATH, ACCOUNTING_MODE: mode, CREDENTIAL_NAME: 'OPENAI_API_KEY', OPENAI_API_KEY: credential,
     } });
     assert.equal(result.status, status, result.stderr);
   }
