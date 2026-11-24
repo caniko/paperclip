@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { profileSelection, verifyProfileResults } from "../qualification-profiles.mjs";
+import { profileSelection, serializeProfileErrors, verifyProfileResults } from "../qualification-profiles.mjs";
 import { sha256 } from "../qualification-roster.mjs";
 
 const file = "server/profile.test.ts";
@@ -106,6 +106,18 @@ test("default source scope requires every ordinary case and preserves source-map
   assert.throws(() => selectDefault([ordinary, deferred, { ...deferred, id: "unmapped", name: "unmapped skipped case" }]),
     new RegExp(`Skipped source case has no environment mapping: ${file}: unmapped skipped case`));
   assert.throws(() => selectDefault([ordinary, deferred], { ...p, rules: [{ ...p.rules[0], source_sha256: "stale" }] }), /drift/);
+});
+
+test("profile evidence retains a subprocess timeout without its circular error property", () => {
+  assert.throws(() => execFileSync(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { timeout: 50 }), error => {
+    assert.equal(error.error, error);
+    const [record] = JSON.parse(JSON.stringify(serializeProfileErrors([error])));
+    assert.equal(record.code, "ETIMEDOUT");
+    assert.equal(record.message, error.message);
+    assert.equal(record.stack, error.stack);
+    assert.throws(() => verifyProfileResults(select(), [], [record]), /hook or unhandled errors/);
+    return true;
+  });
 });
 
 test("the source runner collects and executes the same native Vitest file shard", () => {

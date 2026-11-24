@@ -37,10 +37,16 @@ test("the exact-head matrix covers every server suite once, including chat and n
   assert.deepEqual(actualSerialized.sort(), expectedSerialized.selectedSerializedSuites.sort());
   assert.equal(new Set([...actualServer, ...actualSerialized]).size, actualServer.length + actualSerialized.length);
   for (const file of ["server/src/__tests__/chat-channels.integration.test.ts",
+    "server/src/__tests__/dot-runner.test.ts",
     "server/src/services/native-runtime/native-codex-runner.integration.test.ts",
     "server/src/services/native-runtime/native-runner-restart-recovery.integration.test.ts"]) {
     assert.ok(actualServer.includes(file), `missing real runtime suite: ${file}`);
   }
+});
+
+test("the shard that selects Dot Runner prepares the locked daemon before running Vitest", () => {
+  assert.match(application, /selectedGeneralServerSuites\.includes\("server\/src\/__tests__\/dot-runner\.test\.ts"\)/);
+  assert.match(application, /cargo build --release --locked [^\n]+--bin paperclip-runnerd [^\n]+\n\s+\)\n\s+export PAPERCLIP_DOT_RUNNER_TEST_BINARY=[^\n]+\n\s+fi\n\s+pnpm test:run/);
 });
 
 test("the exact-head matrix covers each configured workspace and each native file shard", () => {

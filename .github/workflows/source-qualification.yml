@@ -160,6 +160,14 @@ jobs:
               if [ -n "$TEST_GROUP" ]; then args+=(--group "$TEST_GROUP"); fi
               if [ -n "$SHARD_COUNT" ]; then args+=(--shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT"); fi
               node scripts/run-vitest-stable.mjs "${args[@]}" --dry-run > "$EVIDENCE/shard-plan.json"
+              if [ "$TEST_GROUP" = general-server ] && node -e 'process.exitCode = require(process.argv[1]).selectedGeneralServerSuites.includes("server/src/__tests__/dot-runner.test.ts") ? 0 : 1' "$EVIDENCE/shard-plan.json"; then
+                (
+                  cd packages/paperclip-runner
+                  export CARGO_TARGET_DIR="$RUNNER_TEMP/dot-runner-target"
+                  cargo build --release --locked --manifest-path runner/Cargo.toml -p paperclip-runner-core --bin paperclip-runnerd --jobs 2 2>&1 | tee "$EVIDENCE/dot-runner-build.log"
+                )
+                export PAPERCLIP_DOT_RUNNER_TEST_BINARY="$RUNNER_TEMP/dot-runner-target/release/paperclip-runnerd"
+              fi
               pnpm test:run -- "${args[@]}" 2>&1 | tee "$EVIDENCE/tests.log"
               ;;
             build) pnpm build 2>&1 | tee "$EVIDENCE/build.log" ;;

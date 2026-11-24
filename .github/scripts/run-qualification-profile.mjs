@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { createVitest, parseCLI } from "vitest/node";
 import QualificationJUnitReporter from "../../scripts/qualification-junit-reporter.mjs";
 import { collectRows, sha256, specificationRows } from "./qualification-roster.mjs";
-import { profileSelection, verifyProfileResults } from "./qualification-profiles.mjs";
+import { profileSelection, serializeProfileErrors, verifyProfileResults } from "./qualification-profiles.mjs";
 import { resolveCargoBinary, resolveCargoTargetDirectory } from "../../packages/paperclip-runner/scripts/cargo-artifacts.mjs";
 import { bindQualificationRunner, bindRemoteContinuity } from "./qualification-runner.mjs";
 import { bindMockTailscale, verifyMockTailscaleExercise } from "./qualification-tailscale-mock.mjs";
@@ -153,7 +153,7 @@ try {
   const moduleErrors = modules => modules.flatMap(module => [module, ...module.children.allSuites()].flatMap(suite => suite.errors()));
   const collectionErrors = [...collection.unhandledErrors, ...moduleErrors(collection.testModules)];
   const rows = collectRows(collection.testModules, testRoot);
-  write("profile-collection.json", { discovery, specifications, sourceArgs, cases: rows, errors: collectionErrors });
+  write("profile-collection.json", { discovery, specifications, sourceArgs, cases: rows, errors: serializeProfileErrors(collectionErrors) });
   assert.equal(collectionErrors.length, 0, "Profile collection contains errors");
   for (const spec of specifications) assert.ok(rows.some(row => row.file === spec.file && row.project === spec.project),
     `Configured specification collected no cases: ${spec.file}`);
@@ -182,7 +182,7 @@ try {
     retryCount: task.result?.retryCount ?? 0, repeatCount: task.result?.repeatCount ?? 0 };
   });
   const errors = [...executed.unhandledErrors, ...moduleErrors(executed.testModules)];
-  write("profile-raw-results.json", { cases: results, errors });
+  write("profile-raw-results.json", { cases: results, errors: serializeProfileErrors(errors) });
   for (const file of files) assert.equal(sha256(readFileSync(path.join(testRoot, file))), metadata.sourceFiles[file], "Fixture changed during execution");
   if (packageProfile) assert.equal(sha256(readFileSync(path.join(testRoot, "vitest.config.ts"))), metadata.scope.configSha256,
     "The package configuration changed during execution");
@@ -197,7 +197,7 @@ try {
   const result = verifyProfileResults(selection, results, errors);
   write("profile-result.json", { ...metadata, ...result });
 } catch (error) {
-  write("profile-failure.json", { ...metadata, message: error.message, stack: error.stack });
+  write("profile-failure.json", { ...metadata, ...serializeProfileErrors([error])[0] });
   throw error;
 } finally {
   await ctx?.close();

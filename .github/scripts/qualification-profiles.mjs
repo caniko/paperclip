@@ -66,6 +66,17 @@ export function profileSelection(profile, platform, rows, sources, policy) {
     testNamePattern: allCasesRequired || sourceScope ? undefined : rules.map(rule => escape(rule.name_contains)).join("|") };
 }
 
+export function serializeProfileErrors(errors) {
+  // Vitest preserves custom fields, including execFileSync's self-referencing
+  // `error`. Keep diagnostics without serializing arbitrary process state.
+  return errors.map(error => ({
+    name: typeof error?.name === "string" ? error.name : "Error",
+    message: typeof error?.message === "string" ? error.message : typeof error === "string" ? error : "Unknown error",
+    stack: typeof error?.stack === "string" ? error.stack : undefined,
+    code: typeof error?.code === "string" ? error.code : undefined,
+  }));
+}
+
 export function verifyProfileResults(selection, results, errors) {
   assert.equal(errors.length, 0, "Profile has collection, hook or unhandled errors");
   assert.equal(new Set(results.map(identity)).size, results.length, "Duplicate/replayed execution identity");

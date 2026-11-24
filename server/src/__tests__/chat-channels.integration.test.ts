@@ -127,6 +127,7 @@ import {
   asc,
   desc,
   eq,
+  exists,
   inArray,
   isNotNull,
   isNull,
@@ -1275,8 +1276,13 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     // The milestone scanner includes paused endpoints with active bindings.
     await db.update(chatConversations).set({ state: "completed" })
       .where(and(inArray(chatConversations.companyId, companyIds), inArray(chatConversations.state, ["active", "waiting"])));
-    // The generic reconciliation sweep spans companies. Retire owed
-    // continuations before another case drives that sweep.
+    // The held-execution sweep can turn earlier recovery holds into new
+    // continuations, even when the chat conversation is already closed.
+    await db.update(issues).set({ status: "cancelled" })
+      .where(and(inArray(issues.companyId, companyIds), notInArray(issues.status, ["done", "cancelled"]),
+        exists(db.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions)
+          .where(and(eq(issueRecoveryActions.companyId, issues.companyId), eq(issueRecoveryActions.sourceIssueId, issues.id))))));
+    // Also retire continuations that were already recorded.
     await db.update(issueRecoveryActions)
       .set({ evidence: sql`${issueRecoveryActions.evidence} || '{"continuationDelivery":"invalidated"}'::jsonb` })
       .where(and(inArray(issueRecoveryActions.companyId, companyIds),
@@ -2238,6 +2244,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       await retireFixtureState([fixture.companyId]);
       const [retired] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, continuation.id));
       expect(retired.evidence.continuationDelivery).toBe("invalidated");
+      expect((await readIssuesById(conversation.issueId!))[0]?.status).toBe("cancelled");
       recovery = next.service.processPendingDeliveries();
       await expect.poll(async () => db.select({ status: chatActions.status }).from(chatActions)
         .where(eq(chatActions.id, receipt!.id)), { timeout: 5_000 })
