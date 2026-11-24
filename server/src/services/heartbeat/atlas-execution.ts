@@ -9,14 +9,27 @@ import type { environmentService } from "../environments.js";
 
 type Agent = Pick<typeof agents.$inferSelect, "id" | "companyId" | "adapterType" | "adapterConfig" | "runtimeConfig" | "defaultEnvironmentId">;
 
+function matchesAtlasAdapterConfig(binding: AtlasAdmission, config: Record<string, unknown> | null | undefined, dispatch = false) {
+  if (config?.engine !== "cli" || config.command !== binding.command) return false;
+  const allowed = ["engine", "command", "model", "timeoutSec", "dangerouslySkipPermissions"];
+  if (dispatch) allowed.push("env");
+  if (binding.adapterType === "opencode_local") {
+    allowed.push("standalone", "variant");
+    if (config.standalone !== true || config.model !== binding.model || config.variant !== binding.variant) return false;
+    if (Object.hasOwn(config, "env") &&
+        (!config.env || Object.getPrototypeOf(config.env) !== Object.prototype)) return false;
+  }
+  return Object.keys(config).every((key) => allowed.includes(key)) &&
+    (!dispatch || Object.keys(config.env ?? {}).length === 0);
+}
+
 export function atlasAdmissionForAgent(agent: Agent, companyId: string): AtlasAdmission | null {
   const policy = atlasExecutionPolicy();
   if (!policy) return null;
   const admission = policy.admissions.find((row) => row.companyId === companyId && row.agentId === agent.id);
   if (!admission || agent.companyId !== companyId || agent.adapterType !== admission.adapterType ||
       agent.defaultEnvironmentId !== admission.environmentId || Object.keys(agent.runtimeConfig ?? {}).some((key) => key !== "heartbeat") ||
-      agent.adapterConfig?.engine !== "cli" || agent.adapterConfig.command !== admission.command ||
-      Object.keys(agent.adapterConfig).some((key) => !["engine", "command", "model", "timeoutSec", "dangerouslySkipPermissions"].includes(key))) {
+      !matchesAtlasAdapterConfig(admission, agent.adapterConfig)) {
     throw forbidden("No qualified Atlas agent execution binding");
   }
   return admission;
@@ -106,9 +119,7 @@ export function assertAtlasDispatch(binding: AtlasAdmission, target: AdapterExec
     target.spec.knownHosts !== atlasKnownHosts(binding) || !target.spec.strictHostKeyChecking || !target.spec.privateKey ||
     target.spec.workspaceRealizationMode !== "copy" || target.spec.remoteWorkspacePath !== binding.remoteWorkspacePath ||
     target.spec.atlas?.sshExecutable !== binding.sshExecutable || target.spec.atlas.scratchDir !== cwd || target.spec.atlas.probe ||
-    config.command !== binding.command || config.engine !== "cli" ||
-    Object.keys(config).some((key) => !["command", "engine", "model", "timeoutSec", "dangerouslySkipPermissions", "env"].includes(key)) ||
-    Object.keys((config.env as Record<string, unknown> | undefined) ?? {}).length > 0) {
+    !matchesAtlasAdapterConfig(binding, config, true)) {
     throw forbidden("Final Atlas dispatch differs from the qualified binding");
   }
 }

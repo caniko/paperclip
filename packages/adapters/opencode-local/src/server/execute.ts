@@ -1,4 +1,5 @@
 import { createProviderStoppedBoundary } from "@paperclipai/adapter-utils/provider-stopped-boundary";
+import { ATLAS_OPENCODE_ENV } from "@paperclipai/adapter-utils/remote-execution-env";
 import { createUsageCheckpointLog } from "@paperclipai/adapter-utils/usage-checkpoint";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -24,6 +25,7 @@ import {
   resolveAdapterExecutionTargetCommandForLogs,
   runAdapterExecutionTargetProcess,
   startAdapterExecutionTargetPaperclipBridge,
+  type AdapterExecutionTarget,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
   asString,
@@ -59,7 +61,7 @@ import {
   requireOpenCodeModelId,
 } from "./models.js";
 import { apiKeyBillingType } from "@paperclipai/adapter-utils/api-billing-type";
-import { prepareOpenCodeRuntimeConfig, prepareManagedOpenCodeRemoteHomes } from "./runtime-config.js";
+import { atlasOpenCodeRunArgs, prepareOpenCodeRuntimeConfig, prepareManagedOpenCodeRemoteHomes } from "./runtime-config.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { executeManaged, validateManagedConfig } from "./managed.js";
 
@@ -100,6 +102,8 @@ export async function ensureRemoteOpenCodeModelConfiguredAndAvailable(input: {
 }) {
   const model = requireOpenCodeModelId(input.model);
   const catalogId = openCodeCatalogModelId(model);
+  const target = input.executionTarget;
+  const atlas = target.kind === "remote" && target.transport === "ssh" && target.spec.atlas;
 
   // When the caller opts into OPENCODE_ALLOW_ALL_MODELS, OpenCode accepts any
   // provider/model at run time (e.g. gateway-routed models that never appear in
@@ -107,7 +111,7 @@ export async function ensureRemoteOpenCodeModelConfiguredAndAvailable(input: {
   // remote availability probe; we still enforce the provider/model format above.
   // Mirrors the local ensureOpenCodeModelConfiguredAndAvailable bypass. Prefer the
   // explicit run env, then the process env.
-  if (isTruthyEnvFlag(input.env.OPENCODE_ALLOW_ALL_MODELS ?? process.env.OPENCODE_ALLOW_ALL_MODELS)) {
+  if (!atlas && isTruthyEnvFlag(input.env.OPENCODE_ALLOW_ALL_MODELS ?? process.env.OPENCODE_ALLOW_ALL_MODELS)) {
     return;
   }
 
@@ -120,12 +124,12 @@ export async function ensureRemoteOpenCodeModelConfiguredAndAvailable(input: {
     : defaultProbeTimeoutSec;
   const probe = await runAdapterExecutionTargetProcess(
     input.runId,
-    input.executionTarget,
+    atlas ? { ...target, spec: { ...target.spec, atlas: { ...atlas, probe: true } } } : target,
     input.command,
     ["models"],
     {
       cwd: input.cwd,
-      env: input.env,
+      env: atlas ? ATLAS_OPENCODE_ENV : input.env,
       timeoutSec: probeTimeoutSec,
       graceSec: input.graceSec,
       onLog: async () => {},
@@ -184,13 +188,21 @@ async function buildOpenCodeSkillsDir(entries: Array<{ runtimeName: string; sour
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  if (ctx.config.managedService === true) validateManagedConfig(ctx);
   const providerStop = createProviderStoppedBoundary(ctx.onProviderStopped);
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
-  const executionTarget = readAdapterExecutionTarget({
+  const declaredTarget = readAdapterExecutionTarget({
     executionTarget: ctx.executionTarget,
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
   });
+  const atlas = declaredTarget?.kind === "remote" && declaredTarget.transport === "ssh" && declaredTarget.spec.atlas;
+  const atlasArgs = atlas ? atlasOpenCodeRunArgs(config) : null;
+  if (atlas && (config.managedService === true || !atlasArgs || atlas.probe)) {
+    throw new Error("Atlas OpenCode requires a standalone run with a pinned model and variant");
+  }
+  const executionTarget: AdapterExecutionTarget | null = atlas
+    ? { ...declaredTarget, spec: { ...declaredTarget.spec, atlas: { ...atlas, adapterType: "opencode_local" } } }
+    : declaredTarget;
+  if (config.managedService === true) validateManagedConfig(ctx);
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
 
   const promptTemplate = asString(
@@ -218,15 +230,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const configuredCwd = asString(config.cwd, "");
   const useConfiguredInsteadOfAgentHome = workspaceSource === "agent_home" && configuredCwd.length > 0;
   const effectiveWorkspaceCwd = useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
-  const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
+  const cwd = (atlas && atlas.scratchDir) || effectiveWorkspaceCwd || configuredCwd || process.cwd();
   let effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
-  await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
+  await ensureAbsoluteDirectory(cwd, { createIfMissing: !atlas });
   const openCodeSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredOpenCodeSkillNames = new Set(resolveLegacyPaperclipDesiredSkillNames(config, openCodeSkillEntries));
   const selectedSkills = openCodeSkillEntries.filter(entry =>
     desiredOpenCodeSkillNames.has(entry.key) && !isPaperclipSkillSourceMissing(entry));
 
-  const envConfig = parseObject(config.env);
+  const envConfig = atlas ? {} : parseObject(config.env);
   const env: Record<string, string> = {
     ...buildPaperclipEnv(agent, ctx.agentIdentity),
     ...buildRuntimeToolsEnv(ctx.runtimeTools),
@@ -307,20 +319,21 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // project working directory (which would pollute the git repo).  Model
   // selection is already handled via the --model CLI flag.  Set after the
   // envConfig loop so user overrides cannot disable this guard.
-  env.OPENCODE_DISABLE_PROJECT_CONFIG = "true";
-  if (authToken) {
+  if (!atlas) env.OPENCODE_DISABLE_PROJECT_CONFIG = "true";
+  if (authToken && !atlas) {
     env.PAPERCLIP_API_KEY = authToken;
   }
   const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({
     includeOperatorGitConfig: executionTarget?.kind !== "remote",
     env, config,
+    targetIsAtlas: Boolean(atlas),
     sandboxToolOomPreference: executionTarget?.kind === "remote" && executionTarget.transport === "sandbox",
   });
   const localRuntimeConfigHome =
     preparedRuntimeConfig.notes.length > 0 ? preparedRuntimeConfig.env.XDG_CONFIG_HOME : "";
   let localSkillsDir: string | null = null;
   try {
-    const runtimeEnv = Object.fromEntries(
+    const runtimeEnv = atlas ? {} : Object.fromEntries(
       Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
@@ -361,7 +374,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
     }
 
-    const extraArgs = (() => {
+    const extraArgs = atlas ? [] : (() => {
       const fromExtraArgs = asStringArray(config.extraArgs);
       if (fromExtraArgs.length > 0) return fromExtraArgs;
       return asStringArray(config.args);
@@ -371,6 +384,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     let effectiveSkillsDir = localSkillsDir;
     let remoteRuntimeRootDir: string | null = null;
     let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
+    let runtimeExecutionTarget = executionTarget;
 
     if (executionTarget?.kind === "remote") {
       await onLog(
@@ -403,50 +417,56 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
       restoreRemoteWorkspace = () =>
         preparedExecutionTargetRuntime.restoreWorkspace((line) => onLog("stdout", line));
+      if (atlas && !preparedExecutionTargetRuntime.workspaceRemoteDir) {
+        throw new Error("Atlas OpenCode requires a realized scratch directory");
+      }
       effectiveExecutionCwd = preparedExecutionTargetRuntime.workspaceRemoteDir ?? effectiveExecutionCwd;
-      refreshPaperclipWorkspaceEnvForExecution({
-        env: preparedRuntimeConfig.env,
-        envConfig,
-        workspaceCwd: effectiveWorkspaceCwd,
-        workspaceSource,
-        workspaceId,
-        workspaceRepoUrl,
-        workspaceRepoRef,
-        workspaceHints,
-        agentHome,
-        executionTargetIsRemote,
-        executionCwd: effectiveExecutionCwd,
-      });
-      preparedRuntimeConfig.env.PWD = effectiveExecutionCwd;
+      runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd) ?? null;
       remoteRuntimeRootDir = preparedExecutionTargetRuntime.runtimeRootDir;
-      const managedHome = adapterExecutionTargetUsesManagedHome(executionTarget);
-      if (managedHome && preparedExecutionTargetRuntime.runtimeRootDir) {
-        preparedRuntimeConfig.env.HOME = preparedExecutionTargetRuntime.runtimeRootDir;
+      if (atlas) {
+        preparedRuntimeConfig.env.PAPERCLIP_WORKSPACE_CWD = effectiveExecutionCwd;
+      } else {
+        refreshPaperclipWorkspaceEnvForExecution({
+          env: preparedRuntimeConfig.env,
+          envConfig,
+          workspaceCwd: effectiveWorkspaceCwd,
+          workspaceSource,
+          workspaceId,
+          workspaceRepoUrl,
+          workspaceRepoRef,
+          workspaceHints,
+          agentHome,
+          executionTargetIsRemote,
+          executionCwd: effectiveExecutionCwd,
+        });
+        preparedRuntimeConfig.env.PWD = effectiveExecutionCwd;
+        if (adapterExecutionTargetUsesManagedHome(executionTarget) && remoteRuntimeRootDir) {
+          preparedRuntimeConfig.env.HOME = remoteRuntimeRootDir;
+        }
+        if (localRuntimeConfigHome && preparedExecutionTargetRuntime.assetDirs.xdgConfig) {
+          preparedRuntimeConfig.env.XDG_CONFIG_HOME = preparedExecutionTargetRuntime.assetDirs.xdgConfig;
+        }
+        prepareManagedOpenCodeRemoteHomes({
+          env: preparedRuntimeConfig.env,
+          config,
+          runtimeRootDir: remoteRuntimeRootDir,
+          runId,
+          configDir: preparedExecutionTargetRuntime.assetDirs.xdgConfig,
+        });
       }
-      if (localRuntimeConfigHome && preparedExecutionTargetRuntime.assetDirs.xdgConfig) {
-        preparedRuntimeConfig.env.XDG_CONFIG_HOME = preparedExecutionTargetRuntime.assetDirs.xdgConfig;
-      }
-      prepareManagedOpenCodeRemoteHomes({
-        env: preparedRuntimeConfig.env,
-        config,
-        runtimeRootDir: preparedExecutionTargetRuntime.runtimeRootDir,
-        runId,
-        configDir: preparedExecutionTargetRuntime.assetDirs.xdgConfig,
-      });
       effectiveSkillsDir = preparedExecutionTargetRuntime.assetDirs.skills;
       if (!effectiveSkillsDir) throw new Error("OpenCode runtime skills were not staged on the execution target.");
       await ensureRemoteOpenCodeModelConfiguredAndAvailable({
         runId,
-        executionTarget,
+        executionTarget: atlas ? runtimeExecutionTarget! : executionTarget,
         command,
         model,
-        cwd,
+        cwd: atlas ? effectiveExecutionCwd : cwd,
         env: preparedRuntimeConfig.env,
         timeoutSec,
         graceSec,
       });
     }
-    const runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
     if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
       paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
         runId,
@@ -456,25 +476,29 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         runtimeRootDir: remoteRuntimeRootDir,
         adapterKey: "opencode",
         timeoutSec,
-        hostApiToken: preparedRuntimeConfig.env.PAPERCLIP_API_KEY,
+        hostApiToken: atlas ? authToken : preparedRuntimeConfig.env.PAPERCLIP_API_KEY,
         onLog,
       });
-      if (paperclipBridge) {
-        Object.assign(preparedRuntimeConfig.env, paperclipBridge.env);
-        loggedEnv = buildInvocationEnvForLogs(preparedRuntimeConfig.env, {
-          runtimeEnv: Object.fromEntries(
-            Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
-              (entry): entry is [string, string] => typeof entry[1] === "string",
-            ),
+    }
+    if (atlas && (!paperclipBridge?.env.PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE || "PAPERCLIP_API_KEY" in paperclipBridge.env)) {
+      await paperclipBridge?.stop();
+      throw new Error("Atlas requires a protected callback bridge");
+    }
+    if (paperclipBridge) {
+      Object.assign(preparedRuntimeConfig.env, paperclipBridge.env);
+      loggedEnv = buildInvocationEnvForLogs(preparedRuntimeConfig.env, {
+        runtimeEnv: atlas ? preparedRuntimeConfig.env : Object.fromEntries(
+          Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
+            (entry): entry is [string, string] => typeof entry[1] === "string",
           ),
-          includeRuntimeKeys: ["HOME"],
-          resolvedCommand,
-        });
-      }
+        ),
+        includeRuntimeKeys: ["HOME"],
+        resolvedCommand,
+      });
     }
 
     const runtimeSessionParams = parseObject(runtime.sessionParams);
-    const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
+    const runtimeSessionId = atlas ? "" : asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
     const runtimeSessionCwd = asString(runtimeSessionParams.cwd, "");
     const runtimeRemoteExecution = parseObject(runtimeSessionParams.remoteExecution);
     const canResumeSession =
@@ -584,10 +608,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // "Unexpected server error" can be diagnosed in remote/sandbox runs where the
     // log file is unreachable. Toggle via PAPERCLIP_OPENCODE_PRINT_LOGS (run env,
     // then process env).
-    const printLogs = isTruthyEnvFlag(
+    const printLogs = !atlas && isTruthyEnvFlag(
       env.PAPERCLIP_OPENCODE_PRINT_LOGS ?? process.env.PAPERCLIP_OPENCODE_PRINT_LOGS,
     );
     const buildArgs = (resumeSessionId: string | null) => {
+      if (atlasArgs) return atlasArgs;
       const args = ["run", "--format", "json"];
       if (printLogs) args.push("--print-logs");
       if (resumeSessionId) args.push("--session", resumeSessionId);
@@ -643,7 +668,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         // Probes and preparation keep their existing execution paths.
         ...(runtimeExecutionTarget?.kind === "remote" && runtimeExecutionTarget.transport === "sandbox"
           && runtimeExecutionTarget.providerKey === "daytona" ? { useSession: true } : {}),
-        cwd,
+        cwd: atlas ? effectiveExecutionCwd : cwd,
         env: preparedRuntimeConfig.env,
         stdin: prompt,
         timeoutSec,

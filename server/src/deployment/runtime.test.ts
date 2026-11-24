@@ -54,4 +54,28 @@ describe("declarative startup credentials", () => {
     expect(deploymentDescriptorSchema.safeParse({ ...descriptor, executionProfile: "trusted-local" }).success).toBe(true);
     expect(deploymentDescriptorSchema.safeParse({ ...descriptor, executionProfile: "remote-only" }).success).toBe(true);
   });
+
+  it("admits only explicit, strictly pinned Atlas OpenCode bindings", () => {
+    const descriptor = { version: 1, home: "/var/lib/paperclip", instance: "one", configFile: "/config.json",
+      executionProfile: "atlas-ssh", credentialFiles: { worker: "/run/paperclip/key" } };
+    const binding = {
+      companyId: "01c386b4-02a5-4071-9e07-bea5d4f2824d", agentId: "978d03ab-e5da-44f8-9b88-2f614bf5f047",
+      environmentId: "91b06dd5-36df-45f8-94aa-d63c03436aeb", workspaceClass: "copy-scratch",
+      command: "/worker/opencode", sshExecutable: "/bin/ssh", remoteWorkspacePath: "/worker/scratch",
+      host: "::1", port: 2222, username: "worker", privateKeyCredential: "worker",
+      hostKey: `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI${"A".repeat(43)}`,
+      adapterType: "opencode_local", standalone: true, model: "openrouter/provider/model:fast", variant: "high",
+    };
+    const accepts = (...admissions: unknown[]) =>
+      deploymentDescriptorSchema.safeParse({ ...descriptor, atlasExecutionPolicy: { admissions } }).success;
+    expect(accepts(binding)).toBe(true);
+    for (const change of [
+      { standalone: undefined }, { standalone: false }, { model: undefined }, { model: "bare" }, { model: "/model" },
+      { model: "provider/" }, { model: "provider/model\n" }, { model: "provider/model#low" }, { variant: undefined },
+      { variant: "" }, { variant: "high medium" }, { variant: "high\u007f" }, { managedService: true }, { extraArgs: [] },
+      { env: {} }, { adapterType: "claude_local" }, { privateKeyCredential: "unbound" }, { host: "192.0.2.1" },
+      { command: "/worker/../opencode" }, { username: "root" }, { hostKey: `${binding.hostKey} comment` },
+    ]) expect(accepts({ ...binding, ...change }), JSON.stringify(change)).toBe(false);
+    expect(accepts(binding, binding)).toBe(false);
+  });
 });

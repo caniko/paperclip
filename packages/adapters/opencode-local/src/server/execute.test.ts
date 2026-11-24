@@ -9,10 +9,15 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async (importOriginal) =>
 });
 
 import { ensureRemoteOpenCodeModelConfiguredAndAvailable, execute } from "./execute.js";
-import { runAdapterExecutionTargetProcess } from "@paperclipai/adapter-utils/execution-target";
+import { runAdapterExecutionTargetProcess, type AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
 import { createPromptContextFixture } from "@paperclipai/adapter-utils/test-fixtures/prompt-context";
 
 const runProcessMock = vi.mocked(runAdapterExecutionTargetProcess);
+const sshProbeTarget = {
+  kind: "remote", transport: "ssh", environmentId: "fixture", leaseId: null, remoteCwd: "/tmp",
+  spec: { host: "127.0.0.1", port: 22, username: "fixture", remoteCwd: "/tmp", remoteWorkspacePath: "/tmp",
+    privateKey: null, knownHosts: null, strictHostKeyChecking: true },
+} as const satisfies AdapterExecutionTarget;
 
 async function createSkillDir(root: string, name: string): Promise<string> {
   const skillDir = path.join(root, name);
@@ -308,6 +313,7 @@ describe("OpenCode local skill injection", () => {
 });
 
 describe("ensureRemoteOpenCodeModelConfiguredAndAvailable", () => {
+  beforeEach(() => runProcessMock.mockClear());
   afterEach(() => {
     delete process.env.OPENCODE_ALLOW_ALL_MODELS;
   });
@@ -315,15 +321,12 @@ describe("ensureRemoteOpenCodeModelConfiguredAndAvailable", () => {
   // The remote/sandbox execution path must honour OPENCODE_ALLOW_ALL_MODELS just
   // like the local path: gateway-routed models (e.g. anthropic/<gateway>/<model>
   // via Bifrost) never appear in `opencode models`, so the availability probe
-  // must be skipped. The early return happens before the executionTarget is ever
-  // touched, so a bogus target proves the probe was not run.
-  const bogusTarget = {} as never;
-
+  // must be skipped on ordinary SSH targets.
   it("skips the remote availability probe when OPENCODE_ALLOW_ALL_MODELS is set in the run env", async () => {
     await expect(
       ensureRemoteOpenCodeModelConfiguredAndAvailable({
         runId: "run-1",
-        executionTarget: bogusTarget,
+        executionTarget: sshProbeTarget,
         command: "opencode",
         model: "anthropic/tensorix/deepseek/deepseek-chat-v3.1",
         cwd: "/tmp",
@@ -332,6 +335,7 @@ describe("ensureRemoteOpenCodeModelConfiguredAndAvailable", () => {
         graceSec: 5,
       }),
     ).resolves.toBeUndefined();
+    expect(runProcessMock).not.toHaveBeenCalled();
   });
 
   it("honours OPENCODE_ALLOW_ALL_MODELS from the process env", async () => {
@@ -339,7 +343,7 @@ describe("ensureRemoteOpenCodeModelConfiguredAndAvailable", () => {
     await expect(
       ensureRemoteOpenCodeModelConfiguredAndAvailable({
         runId: "run-2",
-        executionTarget: bogusTarget,
+        executionTarget: sshProbeTarget,
         command: "opencode",
         model: "anthropic/tensorix/deepseek/deepseek-chat-v3.1",
         cwd: "/tmp",
@@ -348,13 +352,14 @@ describe("ensureRemoteOpenCodeModelConfiguredAndAvailable", () => {
         graceSec: 5,
       }),
     ).resolves.toBeUndefined();
+    expect(runProcessMock).not.toHaveBeenCalled();
   });
 
   it("still enforces provider/model format even when the bypass flag is set", async () => {
     await expect(
       ensureRemoteOpenCodeModelConfiguredAndAvailable({
         runId: "run-3",
-        executionTarget: bogusTarget,
+        executionTarget: sshProbeTarget,
         command: "opencode",
         model: "",
         cwd: "/tmp",
@@ -367,10 +372,9 @@ describe("ensureRemoteOpenCodeModelConfiguredAndAvailable", () => {
 });
 
 describe("ensureRemoteOpenCodeModelConfiguredAndAvailable — probe is non-fatal when it cannot run", () => {
-  const target = { kind: "remote", transport: "ssh" } as never;
   const base = {
     runId: "run-probe",
-    executionTarget: target,
+    executionTarget: sshProbeTarget,
     command: "opencode",
     cwd: "/tmp",
     env: {} as Record<string, string>,

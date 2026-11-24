@@ -10,10 +10,9 @@ export const runtimeFile = z.string().refine((p) => isAbsolute(p) && normalize(p
 const credentialName = z.string().regex(/^[a-z][a-z0-9_-]{0,62}$/);
 const executablePath = z.string().regex(/^\/(?:[a-zA-Z0-9_+.-]+\/)*[a-zA-Z0-9_+.-]+$/)
   .refine((p) => normalize(p) === p && !p.split("/").some((part) => part === "." || part === ".."));
-const atlasAdmissionSchema = z.object({
+const atlasAdmissionFields = {
   companyId: z.string().uuid(),
   agentId: z.string().uuid(),
-  adapterType: z.literal("claude_local"),
   environmentId: z.string().uuid(),
   workspaceClass: z.literal("copy-scratch"),
   command: executablePath,
@@ -24,7 +23,18 @@ const atlasAdmissionSchema = z.object({
   hostKey: z.string().regex(/^ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$/),
   privateKeyCredential: credentialName,
   remoteWorkspacePath: executablePath,
-}).strict();
+};
+const atlasAdmissionSchema = z.discriminatedUnion("adapterType", [
+  z.object({ ...atlasAdmissionFields, adapterType: z.literal("claude_local") }).strict(),
+  z.object({
+    ...atlasAdmissionFields,
+    adapterType: z.literal("opencode_local"),
+    standalone: z.literal(true),
+    // Slashes inside model IDs are valid; a #variant suffix would compete with --variant.
+    model: z.string().regex(/^(?!-)(?:[^/\s\p{C}#]+\/)+[^/\s\p{C}#]+$/u),
+    variant: z.string().regex(/^(?!-)[^\s\p{C}]+$/u),
+  }).strict(),
+]);
 export type AtlasAdmission = Readonly<z.infer<typeof atlasAdmissionSchema>>;
 const atlasExecutionPolicySchema = z.object({ admissions: z.array(atlasAdmissionSchema) }).strict()
   .refine(({ admissions }) => new Set(admissions.map(({ agentId }) => agentId)).size === admissions.length);

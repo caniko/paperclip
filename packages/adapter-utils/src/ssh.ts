@@ -23,11 +23,11 @@ import {
   type RuntimeProgressSink,
 } from "./runtime-progress.js";
 
-import { atlasSshEnv } from "./remote-execution-env.js";
+import { ATLAS_OPENCODE_ENV, atlasSshEnv } from "./remote-execution-env.js";
 
 export interface SshConnectionConfig {
-  /** Set only by the controller's qualified target resolver, never by adapter config. */
-  atlas?: Readonly<{ sshExecutable: string; scratchDir: string; probe?: true }>;
+  /** Set by trusted controller/adapter code, never by adapter config. */
+  atlas?: Readonly<{ sshExecutable: string; scratchDir: string; probe?: true; adapterType?: "opencode_local" }>;
   host: string;
   port: number;
   username: string;
@@ -1507,10 +1507,15 @@ export async function buildSshSpawnTarget(input: {
       throw new Error(`Invalid SSH environment variable key: ${key}`);
     }
   }
-  const loadToken = input.spec.atlas && !input.spec.atlas.probe ? loadAtlasBridgeToken(input.env.PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE, "PAPERCLIP_API_KEY") : null;
+  const atlas = input.spec.atlas;
+  const loadToken = atlas && !atlas.probe ? loadAtlasBridgeToken(input.env.PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE, "PAPERCLIP_API_KEY") : null;
   const auth = await createSshAuthArgs(input.spec);
   const sshArgs = [...auth.args];
-  const envArgs = Object.entries(input.spec.atlas?.probe ? {} : input.spec.atlas ? atlasSshEnv(input.env) : input.env)
+  const launchEnv = atlas ? {
+    ...atlasSshEnv(atlas.probe ? undefined : input.env),
+    ...(atlas.adapterType === "opencode_local" ? ATLAS_OPENCODE_ENV : {}),
+  } : input.env;
+  const envArgs = Object.entries(launchEnv)
     .filter((entry): entry is [string, string] => typeof entry[1] === "string")
     .map(([key, value]) => `${key}=${shellQuote(value)}`);
   const remoteCommandParts = [shellQuote(input.command), ...input.args.map((arg) => shellQuote(arg))].join(" ");

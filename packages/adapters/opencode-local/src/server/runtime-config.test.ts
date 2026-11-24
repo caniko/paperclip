@@ -34,6 +34,30 @@ async function makeConfigHome(initialConfig?: Record<string, unknown>) {
 }
 
 describe("prepareOpenCodeRuntimeConfig", () => {
+  it("keeps Atlas configuration worker-owned and strips controller credentials and paths", async () => {
+    const configHome = await makeConfigHome({ marker: "{env:OPENAI_API_KEY}" });
+    const copy = vi.spyOn(fs, "cp");
+    vi.stubEnv("OPENAI_API_KEY", "controller-provider-key");
+    try {
+      const prepared = await prepareOpenCodeRuntimeConfig({
+        targetIsAtlas: true,
+        config: {},
+        env: { PAPERCLIP_RUN_ID: "atlas-run", XDG_CONFIG_HOME: configHome, XDG_DATA_HOME: configHome,
+          PAPERCLIP_API_KEY: "fake-controller-jwt", PAPERCLIP_API_URL: "http://controller.invalid",
+          PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: "/untrusted-file", PAPERCLIP_BRIDGE_QUEUE_DIR: "/untrusted-queue",
+          OPENAI_API_KEY: "caller-provider-key", OPENCODE_CONFIG_CONTENT: '{"marker":"caller-config"}',
+          OPENCODE_DISABLE_PROJECT_CONFIG: "0" },
+      });
+      expect(prepared.env).toEqual({ PAPERCLIP_RUN_ID: "atlas-run", OPENCODE_DISABLE_PROJECT_CONFIG: "1" });
+      expect(prepared.notes).toEqual([]);
+      expect(copy).not.toHaveBeenCalled();
+      await prepared.cleanup();
+    } finally {
+      copy.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("replaces a read-only linked config without changing the operator configuration", async () => {
     const configHome = await makeConfigHome();
     const operatorRoot = await makeConfigHome({ theme: "system", permission: { bash: "ask" } });

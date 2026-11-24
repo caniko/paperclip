@@ -7,6 +7,7 @@ import type {
   AdapterEnvironmentTestResult,
 } from "@paperclipai/adapter-utils";
 import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
+import { ATLAS_OPENCODE_ENV } from "@paperclipai/adapter-utils/remote-execution-env";
 import {
   asBoolean,
   asNumber,
@@ -29,7 +30,7 @@ import {
 import { discoverOpenCodeModels, ensureOpenCodeModelConfiguredAndAvailable, requireOpenCodeModelId } from "./models.js";
 import { parseOpenCodeJsonl } from "./parse.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
-import { prepareOpenCodeRuntimeConfig, prepareManagedOpenCodeRemoteHomes } from "./runtime-config.js";
+import { atlasOpenCodeRunArgs, prepareOpenCodeRuntimeConfig, prepareManagedOpenCodeRemoteHomes } from "./runtime-config.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -72,10 +73,22 @@ export async function testEnvironment(
   const checks: AdapterEnvironmentCheck[] = [];
   const config = parseObject(ctx.config);
   const command = asString(config.command, "opencode");
-  const target = ctx.executionTarget ?? null;
+  const declaredTarget = ctx.executionTarget ?? null;
+  const atlas = declaredTarget?.kind === "remote" && declaredTarget.transport === "ssh" && declaredTarget.spec.atlas;
+  const atlasArgs = atlas ? atlasOpenCodeRunArgs(config) : null;
+  if (atlas && (config.managedService === true || !atlasArgs)) {
+    return {
+      adapterType: ctx.adapterType, status: "fail", testedAt: new Date().toISOString(),
+      checks: [{ code: "opencode_atlas_standalone_required", level: "error",
+        message: "Atlas OpenCode requires a standalone run with a pinned model and variant" }],
+    };
+  }
+  const target: AdapterExecutionTarget | null = atlas
+    ? { ...declaredTarget, spec: { ...declaredTarget.spec, atlas: { ...atlas, adapterType: "opencode_local", probe: true } } }
+    : declaredTarget;
   const targetIsRemote = target?.kind === "remote";
   const targetIsSandbox = target?.kind === "remote" && target.transport === "sandbox";
-  const cwd = resolveAdapterExecutionTargetCwd(target, asString(config.cwd, ""), process.cwd());
+  const cwd = resolveAdapterExecutionTargetCwd(target, atlas ? "" : asString(config.cwd, ""), process.cwd());
   const targetLabel = targetIsRemote
     ? ctx.environmentName ?? describeAdapterExecutionTarget(target)
     : null;
@@ -110,7 +123,7 @@ export async function testEnvironment(
     });
   }
 
-  const envConfig = parseObject(config.env);
+  const envConfig = atlas ? {} : parseObject(config.env);
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
@@ -127,11 +140,13 @@ export async function testEnvironment(
   }
 
   // Prevent OpenCode from writing an opencode.json into the working directory.
-  env.OPENCODE_DISABLE_PROJECT_CONFIG = "true";
-  const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({ env, config, includeOperatorGitConfig: !targetIsRemote });
+  if (!atlas) env.OPENCODE_DISABLE_PROJECT_CONFIG = "true";
+  const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({
+    env, config, targetIsAtlas: Boolean(atlas), includeOperatorGitConfig: !targetIsRemote,
+  });
   const localRuntimeConfigHome =
     preparedRuntimeConfig.notes.length > 0 ? preparedRuntimeConfig.env.XDG_CONFIG_HOME : "";
-  if (asBoolean(config.dangerouslySkipPermissions, true)) {
+  if (!atlas && asBoolean(config.dangerouslySkipPermissions, true)) {
     checks.push({
       code: "opencode_headless_permissions_enabled",
       level: "info",
@@ -154,13 +169,15 @@ export async function testEnvironment(
       runtimeCwd = nativeProbeWorkspaceLocalDir;
     }
     if (targetIsRemote) {
-      preparedRuntimeWorkspaceLocalDir = await fs.mkdtemp(path.join(os.tmpdir(), `paperclip-opencode-envtest-${runId}-`));
+      if (!atlas) {
+        preparedRuntimeWorkspaceLocalDir = await fs.mkdtemp(path.join(os.tmpdir(), `paperclip-opencode-envtest-${runId}-`));
+      }
       const preparedExecutionTargetRuntime = await prepareAdapterExecutionTargetRuntime({
         runId,
         target,
         adapterKey: "opencode",
-        workspaceLocalDir: preparedRuntimeWorkspaceLocalDir,
-        workspaceRemoteDir: cwd,
+        workspaceLocalDir: atlas ? atlas.scratchDir : preparedRuntimeWorkspaceLocalDir!,
+        workspaceRemoteDir: atlas ? undefined : cwd,
         installCommand: SANDBOX_INSTALL_COMMAND,
         detectCommand: command,
         // The probe workspace is a throwaway temp dir; never wait on copy-back retries.
@@ -178,20 +195,25 @@ export async function testEnvironment(
           await fs.rm(preparedRuntimeWorkspaceLocalDir, { recursive: true, force: true }).catch(() => {});
         }
       };
+      if (atlas && !preparedExecutionTargetRuntime.workspaceRemoteDir) {
+        throw new Error("Atlas OpenCode requires a realized scratch directory");
+      }
       runtimeCwd = preparedExecutionTargetRuntime.workspaceRemoteDir ?? runtimeCwd;
       runtimeTarget = overrideAdapterExecutionTargetRemoteCwd(target ?? null, runtimeCwd) ?? null;
-      if (localRuntimeConfigHome && preparedExecutionTargetRuntime.assetDirs.xdgConfig) {
-        preparedRuntimeConfig.env.XDG_CONFIG_HOME = preparedExecutionTargetRuntime.assetDirs.xdgConfig;
+      if (!atlas) {
+        if (localRuntimeConfigHome && preparedExecutionTargetRuntime.assetDirs.xdgConfig) {
+          preparedRuntimeConfig.env.XDG_CONFIG_HOME = preparedExecutionTargetRuntime.assetDirs.xdgConfig;
+        }
+        prepareManagedOpenCodeRemoteHomes({
+          env: preparedRuntimeConfig.env,
+          config,
+          runtimeRootDir: preparedExecutionTargetRuntime.runtimeRootDir,
+          runId,
+          configDir: preparedExecutionTargetRuntime.assetDirs.xdgConfig,
+        });
       }
-      prepareManagedOpenCodeRemoteHomes({
-        env: preparedRuntimeConfig.env,
-        config,
-        runtimeRootDir: preparedExecutionTargetRuntime.runtimeRootDir,
-        runId,
-        configDir: preparedExecutionTargetRuntime.assetDirs.xdgConfig,
-      });
     }
-    const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env }));
+    const runtimeEnv = atlas ? ATLAS_OPENCODE_ENV : normalizeEnv(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env }));
 
     const cwdInvalid = checks.some((check) => check.code === "opencode_cwd_invalid");
     if (cwdInvalid) {
@@ -202,7 +224,7 @@ export async function testEnvironment(
         detail: command,
       });
     } else {
-      const installCheck = await maybeRunSandboxInstallCommand({
+      const installCheck = atlas ? null : await maybeRunSandboxInstallCommand({
         runId,
         target,
         adapterKey: "opencode",
@@ -368,10 +390,11 @@ export async function testEnvironment(
       const variant = asString(config.variant, "").trim();
       const probeModel = configuredModel;
 
-      const args = ["run", "--format", "json"];
-      args.push("--model", probeModel);
-      if (variant) args.push("--variant", variant);
-      if (extraArgs.length > 0) args.push(...extraArgs);
+      const args = atlasArgs ?? ["run", "--format", "json", "--model", probeModel];
+      if (!atlas) {
+        if (variant) args.push("--variant", variant);
+        if (extraArgs.length > 0) args.push(...extraArgs);
+      }
 
       // Sandbox bridges still add cold-start and transport overhead, but the
       // standard-2 Cloudflare tier now probes quickly enough that 90s keeps

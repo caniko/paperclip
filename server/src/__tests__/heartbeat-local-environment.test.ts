@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { and, eq, sql } from "drizzle-orm";
@@ -17,6 +17,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { heartbeatService } from "../services/heartbeat.ts";
+import { agentEnvironmentTestService } from "../services/agent-environment-test.js";
 import * as deployment from "../deployment/runtime.js";
 import * as environmentServices from "../services/environments.js";
 import * as atlas from "../services/heartbeat/atlas-execution.js";
@@ -118,14 +119,18 @@ describeEmbeddedPostgres("heartbeat local environment lifecycle", () => {
     }
   });
 
-  it("denies Atlas queue resume if the saved binding changes during lease acquisition", async () => {
+  it.each(["claude_local", "opencode_local"] as const)(
+    "denies Atlas %s queue resume if the saved binding changes during lease acquisition", async (adapterType) => {
     const companyId = randomUUID(), agentId = randomUUID(), environmentId = randomUUID();
-    const binding: deployment.AtlasAdmission = {
-      companyId, agentId, environmentId, adapterType: "claude_local", workspaceClass: "copy-scratch",
-      command: "/fixture/claude", sshExecutable: "/fixture/ssh", host: "127.0.0.1", port: 2222,
+    const common = {
+      companyId, agentId, environmentId, workspaceClass: "copy-scratch",
+      command: `/fixture/${adapterType}`, sshExecutable: "/fixture/ssh", host: "127.0.0.1", port: 2222,
       username: "worker", remoteWorkspacePath: "/fixture/workspace", privateKeyCredential: "atlas-key",
       hostKey: `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI${"A".repeat(43)}`,
-    };
+    } as const;
+    const openCodePins = { standalone: true, model: "openai/gpt-4.1", variant: "high" } as const;
+    const binding: deployment.AtlasAdmission = adapterType === "opencode_local"
+      ? { ...common, adapterType, ...openCodePins } : { ...common, adapterType };
     await db.insert(companies).values({ id: companyId, name: "Atlas resume fixture", issuePrefix: "ATLR",
       defaultResponsibleUserId: "responsible-user" });
     const { host, port, username, remoteWorkspacePath, privateKeyCredential, hostKey, command } = binding;
@@ -133,7 +138,8 @@ describeEmbeddedPostgres("heartbeat local environment lifecycle", () => {
       config: { host, port, username, remoteWorkspacePath, privateKeyCredential,
         knownHosts: `[${host}]:${port} ${hostKey}`, strictHostKeyChecking: true } });
     await db.insert(agents).values({ id: agentId, companyId, name: "Resumed agent", status: "idle",
-      adapterType: "claude_local", adapterConfig: { engine: "cli", command }, defaultEnvironmentId: environmentId });
+      adapterType, adapterConfig: { engine: "cli", command, ...(adapterType === "opencode_local" ? openCodePins : {}) },
+      defaultEnvironmentId: environmentId });
     const [run] = await db.insert(heartbeatRuns).values({ companyId, agentId, status: "queued", runtimeMode: "legacy",
       invocationSource: "on_demand", runnerProfileJson: { nativeExecutionInput: { model: "historical" } },
       contextSnapshot: { aiRouterSelection: { poolId: randomUUID() } } }).returning();
@@ -143,14 +149,16 @@ describeEmbeddedPostgres("heartbeat local environment lifecycle", () => {
     const realAcquire = service.acquireLease;
     const acquire = vi.spyOn(service, "acquireLease").mockImplementation(async (input) => {
       const lease = await realAcquire(input);
-      await db.update(agents).set({ defaultEnvironmentId: null }).where(eq(agents.id, agentId));
+      await db.update(agents).set(adapterType === "opencode_local"
+        ? { adapterConfig: { engine: "cli", command, ...openCodePins, variant: "low" } }
+        : { defaultEnvironmentId: null }).where(eq(agents.id, agentId));
       return lease;
     });
     const route = vi.spyOn(router, "aiConnectionRouterService").mockImplementation(() => { throw new Error("Unexpected provider routing"); });
     const prepareWorkspace = vi.spyOn(workspaces, "prepareHeartbeatWorkspace").mockRejectedValue(new Error("Unexpected workspace preparation"));
     const prepareScratch = vi.spyOn(atlas, "prepareAtlasScratch");
     const credential = vi.spyOn(deployment, "readCredential").mockImplementation(() => { throw new Error("Unexpected credential read"); });
-    const probe = vi.spyOn(adapters.requireServerAdapter("claude_local"), "testEnvironment").mockRejectedValue(new Error("Unexpected adapter probe"));
+    const probe = vi.spyOn(adapters.requireServerAdapter(adapterType), "testEnvironment").mockRejectedValue(new Error("Unexpected adapter probe"));
     const realSecrets = secrets.secretService;
     const resolveAdapterConfigForRuntime = vi.fn().mockRejectedValue(new Error("Unexpected adapter secret resolution"));
     const resolveEnvBindings = vi.fn().mockRejectedValue(new Error("Unexpected environment secret resolution"));
@@ -171,6 +179,64 @@ describeEmbeddedPostgres("heartbeat local environment lifecycle", () => {
     } finally {
       await resumed.drainActiveRunExecutions();
       vi.restoreAllMocks();
+    }
+  });
+
+  it.each([false, true])("releases the saved Atlas OpenCode probe lease (binding drift: %s)", async (bindingDrift) => {
+    const companyId = randomUUID(), agentId = randomUUID(), environmentId = randomUUID();
+    const binding: deployment.AtlasAdmission = {
+      companyId, agentId, environmentId, adapterType: "opencode_local", workspaceClass: "copy-scratch",
+      command: "/fixture/opencode", standalone: true, model: "openai/gpt-4.1", variant: "high",
+      sshExecutable: "/fixture/ssh", host: "127.0.0.1", port: 2222,
+      username: "worker", remoteWorkspacePath: "/fixture/workspace", privateKeyCredential: "atlas-key",
+      hostKey: `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI${"A".repeat(43)}`,
+    };
+    await db.insert(companies).values({ id: companyId, name: "Atlas probe fixture", issuePrefix: bindingDrift ? "ATLD" : "ATLP" });
+    const { host, port, username, remoteWorkspacePath, privateKeyCredential, hostKey, command, standalone, model, variant } = binding;
+    await db.insert(environments).values({ id: environmentId, name: "Atlas worker", driver: "ssh", status: "active",
+      config: { host, port, username, remoteWorkspacePath, privateKeyCredential,
+        knownHosts: `[${host}]:${port} ${hostKey}`, strictHostKeyChecking: true } });
+    const adapterConfig = { engine: "cli", command, standalone, model, variant };
+    const [agent] = await db.insert(agents).values({ id: agentId, companyId, name: "Saved agent", status: "idle",
+      adapterType: binding.adapterType, adapterConfig, defaultEnvironmentId: environmentId }).returning();
+    const home = await mkdtemp(join(tmpdir(), "paperclip-atlas-probe-"));
+    const credential = join(home, "worker-key");
+    try {
+      await writeFile(credential, "fixture-key", { mode: 0o600 });
+      vi.spyOn(deployment, "atlasExecutionPolicy").mockReturnValue({ admissions: [binding], home,
+        credentialFiles: { [privateKeyCredential]: credential } });
+      const report = { adapterType: binding.adapterType, status: "pass" as const, checks: [], testedAt: new Date().toISOString() };
+      const openCodeProbe = vi.spyOn(adapters.requireServerAdapter("opencode_local"), "testEnvironment").mockResolvedValue(report);
+      const claudeProbe = vi.spyOn(adapters.requireServerAdapter("claude_local"), "testEnvironment");
+      const readCredential = vi.spyOn(deployment, "readCredential");
+      if (bindingDrift) {
+        const realFactory = environmentServices.environmentService;
+        const service = realFactory(db);
+        const realAcquire = service.acquireLease;
+        vi.spyOn(service, "acquireLease").mockImplementationOnce(async (input) => {
+          const lease = await realAcquire(input);
+          await db.update(agents).set({ adapterConfig: { ...adapterConfig, variant: "low" } }).where(eq(agents.id, agentId));
+          return lease;
+        });
+        vi.spyOn(environmentServices, "environmentService").mockImplementation((...args) => args[0] === db ? service : realFactory(...args));
+        await expect(agentEnvironmentTestService(db).testAtlasEnvironment(agent!)).rejects.toThrow("No qualified Atlas agent execution binding");
+        expect(readCredential).not.toHaveBeenCalled();
+        expect(openCodeProbe).not.toHaveBeenCalled();
+      } else {
+        expect(await agentEnvironmentTestService(db).testAtlasEnvironment(agent!)).toEqual(report);
+        expect(readCredential).toHaveBeenCalledExactlyOnceWith(credential);
+      }
+      const [lease] = await db.select().from(environmentLeases).where(eq(environmentLeases.environmentId, environmentId));
+      expect(lease).toMatchObject({ status: "released", provider: "ssh", heartbeatRunId: null });
+      if (!bindingDrift) expect(openCodeProbe).toHaveBeenCalledExactlyOnceWith({
+        companyId, adapterType: binding.adapterType, config: adapterConfig, environmentName: "Atlas worker",
+        executionTarget: expect.objectContaining({ environmentId, leaseId: lease!.id, transport: "ssh",
+          spec: expect.objectContaining({ atlas: expect.objectContaining({ probe: true, sshExecutable: binding.sshExecutable }) }) }),
+      });
+      expect(claudeProbe).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+      await rm(home, { recursive: true, force: true });
     }
   });
 

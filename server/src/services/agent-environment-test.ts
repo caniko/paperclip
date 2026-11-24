@@ -647,10 +647,15 @@ export function agentEnvironmentTestService(db: Db, pluginWorkerManager?: Plugin
     if (!binding) throw forbidden("No qualified Atlas test binding");
     const { environment, lease } = await acquireAtlasExecution({ environments: environmentsSvc, binding, runId: null, issueId: null });
     try {
+      const [currentAgent] = await db.select().from(agents)
+        .where(and(eq(agents.id, binding.agentId), eq(agents.companyId, binding.companyId)));
+      if (!currentAgent || atlasAdmissionForAgent(currentAgent, binding.companyId) !== binding) {
+        throw forbidden("No qualified Atlas agent execution binding");
+      }
       const target = await prepareAtlasScratch(binding);
       const executionTarget = { ...target, leaseId: lease.id, spec: { ...target.spec, atlas: { ...target.spec.atlas, probe: true as const } } };
-      return await requireServerAdapter("claude_local").testEnvironment({
-        companyId: agent.companyId, adapterType: "claude_local", config: { ...agent.adapterConfig },
+      return await requireServerAdapter(binding.adapterType).testEnvironment({
+        companyId: binding.companyId, adapterType: binding.adapterType, config: { ...currentAgent.adapterConfig },
         executionTarget, environmentName: environment.name,
       });
     } finally {
