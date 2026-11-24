@@ -54,7 +54,7 @@ describe.skipIf(!support.supported)("GitHub webhook ingress claim PostgreSQL beh
     { status: "failed", result: { retryable: true, retryAt: new Date(Date.now() + 60_000).toISOString() }, accepted: false },
     { status: "processing", result: { attempts: 1 }, accepted: false },
     { status: "delivery_unknown", result: null, accepted: false },
-  ])("does not fetch a body or mutate an ineligible $status row ($result)", async ({ status, result, accepted }) => {
+  ])("does not fetch a body or mutate an ineligible $status row (case %$)", async ({ status, result, accepted }) => {
     const f = await githubIngressFixture(db);
     // A corrupt body must not let a nonclaimant overwrite a live or delayed claim.
     const action = await f.insertAction({ status, result, payload: { ...f.payload, bodySha256: "0".repeat(64) } });

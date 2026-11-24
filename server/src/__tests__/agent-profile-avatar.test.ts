@@ -107,7 +107,7 @@ it("requires an agent configuration grant for board avatar changes", async () =>
 it.each([
   { kind: "task_bridge" as const, parentIssueId: randomUUID() },
   { kind: "skill_test" as const, issueId: randomUUID() },
-])("rejects profile changes by restricted %s credentials", async keyScope => {
+])("rejects profile changes by restricted $kind credentials", async keyScope => {
   const f = await fixture();
   const app = appFor({ type: "agent", agentId: f.agent.id, companyId: f.company.id, keyScope });
   const path = `/api/companies/${f.company.id}/agents/${f.agent.id}/avatar`;

@@ -219,7 +219,7 @@ describeEmbeddedPostgres("task chat bootstrap", () => {
     "", "?ids=", "?ids=,", "?ids=nope", "?ids=not-a-uuid-or-identifier!", "?ids[]=x", "?ids[x]=x",
     `?ids=${randomUUID()}&extra=1`, `?ids=${randomUUID()}&ids=${randomUUID()}`,
     `?ids=${Array.from({ length: 11 }, () => randomUUID()).join(",")}`,
-  ])("rejects invalid query %s", async (query) => {
+  ])("rejects invalid query (case %$)", async (query) => {
     const f = await seedCompanyWithBoardAccess(ctx.db, "Invalid");
     await request(app(f.actor)).get(url(f.companyId) + query).expect(400);
   });
