@@ -1,15 +1,17 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { completionContracts, environmentLeases, environments, heartbeatRunEvents, heartbeatRuns, issues, nativeRunFinalizations,
   nativeRunnerCheckpoints } from "@paperclipai/db";
 import type { NativeExecutionInputV1 } from "@paperclipai/paperclip-runner";
 import { createLocalDiskStorageProvider } from "../../storage/local-disk-provider.js";
 import { createStorageService } from "../../storage/service.js";
-import { describeEmbeddedPostgres, nativeRestartFixture } from "../../__tests__/helpers/native-restart.js";
+import { nativeRestartFixture } from "../../__tests__/helpers/native-restart.js";
+import { recoveryPostgresSupport } from "../../__tests__/helpers/recovery-postgres.js";
 import { CONTROL_PLANE_CONFORMANCE_RESULT, CONTROL_PLANE_CONFORMANCE_TERMINAL } from "../../vendor/paperclip-runner/testing.js";
 import { defaultCapabilityRunnerdBinary } from "../../vendor/paperclip-runner/index.js";
 import { PROCESS_IDENTITY_RECORDED, PROCESS_START_REQUESTED } from "../native-process-start-events.js";
@@ -47,7 +49,9 @@ import { assertNativeRunnerCheckpointOwner } from "./native-runner-checkpoint.js
 
 type Successor = "own_runner" | "owner_clock_ahead" | "own_runner_resumed" | "own_runner_reconciled" | "other_sandbox" | "start_requested_only" | "inherited_events" | "events_before_owner_finished";
 
-describeEmbeddedPostgres("idle warm owner superseded by a successor's Runner", () => {
+// The transport is mocked, but the remote bootstrap validates the real daemon header.
+const runnerBinary = defaultCapabilityRunnerdBinary();
+describe.skipIf(!recoveryPostgresSupport.supported || !existsSync(runnerBinary))("idle warm owner superseded by a successor's Runner", () => {
   const environment = nativeRestartFixture();
   let root: string;
   beforeAll(async () => { root = await mkdtemp(join(tmpdir(), "warm-successor-runner-")); });
@@ -105,7 +109,7 @@ describeEmbeddedPostgres("idle warm owner superseded by a successor's Runner", (
       .where(eq(heartbeatRuns.id, fixture.runId));
     const owner = await executePaperclipNativeSession({ db: fixture.db, execution, runnerInstanceId: fixture.native.runnerInstanceId,
       useRunnerd: true, runnerIngressAuthorized: true,
-      runnerRemoteBinaryPath: defaultCapabilityRunnerdBinary(), runnerRemoteCodexPath: defaultCapabilityRunnerdBinary(),
+      runnerRemoteBinaryPath: runnerBinary, runnerRemoteCodexPath: runnerBinary,
       runnerExecutionTarget: { kind: "remote", transport: "sandbox", remoteCwd: root, environmentId,
         leaseId: randomUUID(), providerKey: "fixture", effectiveCapabilities: { runnerWebSocketIngress: true },
         sandboxLeaseAcquisition: { outcome: "created", providerLeaseId },

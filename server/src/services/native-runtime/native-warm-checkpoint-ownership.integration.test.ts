@@ -1,14 +1,16 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { and, eq } from "drizzle-orm";
-import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { completionContracts, heartbeatRuns, issues, nativeRunFinalizations } from "@paperclipai/db";
 import type { NativeExecutionInputV1 } from "@paperclipai/paperclip-runner";
 import { createLocalDiskStorageProvider } from "../../storage/local-disk-provider.js";
 import { createStorageService } from "../../storage/service.js";
-import { describeEmbeddedPostgres, nativeRestartFixture } from "../../__tests__/helpers/native-restart.js";
+import { nativeRestartFixture } from "../../__tests__/helpers/native-restart.js";
+import { recoveryPostgresSupport } from "../../__tests__/helpers/recovery-postgres.js";
 import { CONTROL_PLANE_CONFORMANCE_RESULT } from "../../vendor/paperclip-runner/testing.js";
 import { defaultCapabilityRunnerdBinary } from "../../vendor/paperclip-runner/index.js";
 
@@ -46,7 +48,9 @@ import { prepareNativeHeartbeatRun } from "./prepare-native-run.js";
 import { createPostgresWakeQueueAdapter } from "../../modules/wake-queue/adapters/postgres.js";
 import { createReleaseIssueExecution } from "../../modules/wake-queue/application/use-cases.js";
 
-describeEmbeddedPostgres("managed warm checkpoint ownership", () => {
+// The transport is mocked, but the remote bootstrap validates the real daemon header.
+const runnerBinary = defaultCapabilityRunnerdBinary();
+describe.skipIf(!recoveryPostgresSupport.supported || !existsSync(runnerBinary))("managed warm checkpoint ownership", () => {
   const environment = nativeRestartFixture();
   let root: string;
   beforeAll(async () => { root = await mkdtemp(join(tmpdir(), "warm-checkpoint-owner-")); });
@@ -142,7 +146,7 @@ describeEmbeddedPostgres("managed warm checkpoint ownership", () => {
         .where(eq(heartbeatRuns.id, fixture.runId));
       return executePaperclipNativeSession({ db: fixture.db, execution, runnerInstanceId: fixture.native.runnerInstanceId,
         useRunnerd: true, runnerIngressAuthorized: true,
-        runnerRemoteBinaryPath: defaultCapabilityRunnerdBinary(), runnerRemoteCodexPath: defaultCapabilityRunnerdBinary(),
+        runnerRemoteBinaryPath: runnerBinary, runnerRemoteCodexPath: runnerBinary,
         runnerExecutionTarget: { kind: "remote", transport: "sandbox", remoteCwd: root, environmentId,
           leaseId: randomUUID(), providerKey: "fixture", effectiveCapabilities: { runnerWebSocketIngress: true },
           sandboxLeaseAcquisition: { outcome: acquisition, providerLeaseId },

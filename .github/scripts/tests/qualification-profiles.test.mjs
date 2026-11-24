@@ -238,3 +238,19 @@ test("checked-in package-profile rules bind current package sources and are exec
     else assert.match(workflow, new RegExp(`- profile: ${rule.environment}\\n\\s+runner: macos-15`));
   }
 });
+
+test("warm ownership suites defer to the runnerd profile that supplies their daemon", () => {
+  const checkedIn = JSON.parse(readFileSync(new URL("../../qualification/coverage-environments.json", import.meta.url), "utf8"));
+  for (const [suite, title] of [
+    ["checkpoint-ownership", "managed warm checkpoint ownership"],
+    ["successor-runner-release", "idle warm owner superseded by a successor's Runner"],
+  ]) {
+    const file = `server/src/services/native-runtime/native-warm-${suite}.integration.test.ts`;
+    const text = readFileSync(new URL(`../../../${file}`, import.meta.url), "utf8");
+    assert.deepEqual(checkedIn.rules.filter(rule => rule.file === file), [{
+      file, source_sha256: sha256(text), name_contains: title, environment: "runnerd",
+      anchor: "describe.skipIf(!recoveryPostgresSupport.supported || !existsSync(runnerBinary))",
+    }]);
+    assert.ok(text.includes(`describe.skipIf(!recoveryPostgresSupport.supported || !existsSync(runnerBinary))("${title}"`));
+  }
+});
