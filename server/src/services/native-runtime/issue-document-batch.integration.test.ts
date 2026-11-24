@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { agentApiKeys, assets, chatTaskHandoffs, documents, heartbeatRunEvents, issueDocuments, issues } from "@paperclipai/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -165,7 +165,8 @@ describe("bulk issue documents through native API tools", () => {
     const f = await server.fixture();
     const ids = Array.from({ length: 200 }, () => randomUUID());
     await server.db.insert(issues).values(ids.map(id => ({ id, companyId: f.companyId, title: "Large case", status: "todo" })));
-    const rows = await server.db.insert(documents).values(ids.map(() => ({ companyId: f.companyId, latestBody: sql<string>`repeat('x', 524288)` }))).returning({ id: documents.id });
+    // Keep all 200 documents, but cross the 8 MiB cap without seeding 100 MiB.
+    const rows = await server.db.insert(documents).values(ids.map(() => ({ companyId: f.companyId, latestBody: sql<string>`repeat('x', 49152)` }))).returning({ id: documents.id });
     await server.db.insert(issueDocuments).values(rows.map((row, index) => ({ companyId: f.companyId, issueId: ids[index], documentId: row.id, key: "sentry-case" })));
     const queries: string[] = [];
     const measured = drizzle(server.db.$client, { schema: server.db._.fullSchema, logger: { logQuery: query => queries.push(query) } }) as typeof server.db;
@@ -184,9 +185,11 @@ describe("bulk issue documents through native API tools", () => {
     expect(result).not.toHaveProperty("artifact");
     // Bodies alone fit, but their metadata pushes the response over budget.
     // The incremental JSON builder must refuse this before joining a response.
-    await server.db.update(documents).set({ latestBody: "x".repeat(524000) }).where(eq(documents.companyId, f.companyId));
+    const nearLimitCount = 16;
+    await server.db.update(documents).set({ latestBody: "x".repeat(524000) })
+      .where(inArray(documents.id, rows.slice(0, nearLimitCount).map(row => row.id)));
     const nearLimit = await f.authority.execute({ tool: "save_api_response", callId: randomUUID(), arguments: {
-      operationId, pathParams: { companyId: f.companyId }, query: { key: "sentry-case", issueIds: ids.slice(0, 16).join(",") },
+      operationId, pathParams: { companyId: f.companyId }, query: { key: "sentry-case", issueIds: ids.slice(0, nearLimitCount).join(",") },
     } }) as any;
     expect(nearLimit).toMatchObject({ ok: false, status: 413 });
     expect(nearLimit).not.toHaveProperty("artifact");
