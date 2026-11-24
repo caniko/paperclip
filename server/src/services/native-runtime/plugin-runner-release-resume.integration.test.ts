@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { and, eq } from "drizzle-orm";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
-import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { completionContracts, environmentLeases, environments, executionWorkspaces, heartbeatRunEvents, heartbeatRuns, issues, nativeRunFinalizations, nativeRunResults } from "@paperclipai/db";
 import { environmentTaskOperationSchema, type PluginEnvironmentTaskOperation } from "@paperclipai/plugin-sdk";
 import { readRunnerdArtifactBinding, defaultCapabilityRunnerdBinary,
@@ -16,7 +16,8 @@ import { readRunnerdArtifactBinding, defaultCapabilityRunnerdBinary,
 import { createRunnerProviderLaunch, runnerLaunchRequirementsDigest, canonicalNativeRuntimeContextDigest } from "@paperclipai/paperclip-runner";
 import { materializeAsset } from "./runtime-context.js";
 import { spawnRunner } from "../../vendor/paperclip-runner/testing.js";
-import { describeEmbeddedPostgres, nativeRestartFixture, realProcessIt, fakeCodexAppServer, waitForCondition } from "../../__tests__/helpers/native-restart.js";
+import { nativeRestartBinariesAvailable, nativeRestartFixture, fakeCodexAppServer, waitForCondition } from "../../__tests__/helpers/native-restart.js";
+import { recoveryPostgresSupport } from "../../__tests__/helpers/recovery-postgres.js";
 import { executePaperclipNativeSession, cancelNativeSession, closeIdleWarmNativeSessionsForRestart, readNativeSessionIdleWork } from "./native-session-executor.js";
 import { resolvePaperclipInstanceRoot } from "../../home-paths.js";
 import * as remoteWarmRecovery from "./remote-warm-session-recovery.js";
@@ -42,7 +43,7 @@ const parkId = (source: DurableRecoveryIdentity) => `park_${sha(JSON.stringify(O
 
 // The only replaced service is the external environment-task/Launcher edge.
 // Runtime, backend, owner, PRP ingress, checkpoint persistence and native Runner are real.
-describeEmbeddedPostgres("plugin Runner release/resume through the Core execution entry", () => {
+describe.skipIf(!recoveryPostgresSupport.supported)("plugin Runner release/resume through the Core execution entry", () => {
   let currentCase: { teardown?: () => Promise<void> } | undefined;
   afterEach(async () => {
     const finished = currentCase;
@@ -64,8 +65,7 @@ describeEmbeddedPostgres("plugin Runner release/resume through the Core executio
   afterAll(() => {
     https.globalAgent.destroy(); https.globalAgent = oldAgent; setDefaultCACertificates(oldCAs);
   });
-  const nativeIt = process.platform === "win32" ? it.skip : realProcessIt;
-  nativeIt.for([...(["codex", "claude"] as const).flatMap(harness => (["cached", "adopted", "adopted restart"] as const).map(mode => [harness, mode] as const)), ["codex", "adopted cancellation"] as const, ["codex", "adopted legacy cancellation"] as const,
+  it.skipIf(process.platform === "win32" || !nativeRestartBinariesAvailable).for([...(["codex", "claude"] as const).flatMap(harness => (["cached", "adopted", "adopted restart"] as const).map(mode => [harness, mode] as const)), ["codex", "adopted cancellation"] as const, ["codex", "adopted legacy cancellation"] as const,
     ["codex", "cached cancellation"] as const, ["codex", "cached held claim"] as const, ["claude", "cached held claim"] as const,
     ["codex", "cached relaunch"] as const, ["claude", "cached relaunch"] as const, ["codex", "adopted relaunch"] as const,
     ["codex", "adopted restart relaunch"] as const, ["claude", "adopted restart relaunch"] as const,

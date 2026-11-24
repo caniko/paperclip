@@ -6,7 +6,7 @@ import { mkdir, readFile, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { eq } from "drizzle-orm";
 import { environmentLeases, environments, heartbeatRuns, nativeRunFinalizations } from "@paperclipai/db";
-import { beforeAll, expect, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createRunnerdCodexTransport,
   defaultCapabilityRunnerdBinary,
@@ -22,15 +22,15 @@ import { REMOTE_RUNNER_RECONNECT_GRACE_MS } from "./native-runner-recovery-contr
 import { claimNativeRestartRecoveries } from "./native-restart-recovery.js";
 import {
   nativeRestartFixture,
-  describeEmbeddedPostgres,
-  realProcessIt,
+  nativeRestartBinariesAvailable,
   fakeCodexAppServer,
   processAlive,
   waitForCondition,
   stopOwnedProcessGroup,
 } from "../../__tests__/helpers/native-restart.js";
+import { recoveryPostgresSupport } from "../../__tests__/helpers/recovery-postgres.js";
 
-describeEmbeddedPostgres("native runner restart recovery: diskless", () => {
+describe.skipIf(!recoveryPostgresSupport.supported)("native runner restart recovery: diskless", () => {
   const environment = nativeRestartFixture();
   const { seedRun, transportOptions } = environment;
   let runtimeRoot: typeof environment.current.runtimeRoot;
@@ -39,7 +39,7 @@ describeEmbeddedPostgres("native runner restart recovery: diskless", () => {
   let successor: typeof environment.current.successor;
   beforeAll(() => { ({ runtimeRoot, companyId, agentId, successor } = environment.current); });
 
-  realProcessIt.each([false, true])("adopts the same runner from Postgres after losing the controller filesystem (prepared task: %s)", async preparedTask => {
+  it.skipIf(!nativeRestartBinariesAvailable).each([false, true])("adopts the same runner from Postgres after losing the controller filesystem (prepared task: %s)", async preparedTask => {
     const fixture = await seedRun(`EMPTY-CONTROLLER-DISK-${preparedTask}`);
     const controllerRoot = resolve(runtimeRoot, `${fixture.runId}-controller`);
     const sandboxRoot = resolve(runtimeRoot, `${fixture.runId}-sandbox`);

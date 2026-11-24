@@ -4,7 +4,7 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, expect, vi } from "vitest";
 import { agents, authUsers, companyMemberships, closeRegisteredClients, companies, createDb, environments,
   executionWorkspaces, issues } from "@paperclipai/db";
 import { buildSshEnvLabFixtureConfig, getSshEnvLabSupport, shellQuote, startSshEnvLabFixture,
@@ -73,14 +73,15 @@ export const sshHeartbeatRuns = sshHeartbeatHarnesses.flatMap(harness =>
 
 type SshHeartbeatAdapterType = (typeof sshHeartbeatHarnesses)[number]["adapterType"];
 
-export function describeSshHeartbeatRuns(title: string,
+export function selectSshHeartbeatRuns(
   selection: { include: readonly SshHeartbeatAdapterType[] } | { exclude: readonly SshHeartbeatAdapterType[] }) {
-  const runs = sshHeartbeatRuns.filter(run => "include" in selection
+  return sshHeartbeatRuns.filter(run => "include" in selection
     ? selection.include.includes(run.adapterType) : !selection.exclude.includes(run.adapterType));
-  describe.skipIf(!sshWorkspaceTestsSupported)(title, () => {
-    const fixture = useSshWorkspaceFixture("cloud-ssh-heartbeat-");
+}
 
-    it.each(runs)("runs an assigned $key task through heartbeat over SSH", async ({ adapterType, provider, authEnv, model, engine, key }) => {
+export function sshHeartbeatCase(fixture: SshWorkspaceFixture) {
+  return (
+    async ({ adapterType, provider, authEnv, model, engine, key }: (typeof sshHeartbeatRuns)[number]) => {
       const { root, db, sshd } = fixture;
       vi.stubEnv("PAPERCLIP_EPHEMERAL_SERVER", "true");
       vi.stubEnv("PAPERCLIP_STORAGE_PROVIDER", "s3");
@@ -248,6 +249,6 @@ if (process.argv.includes('--acp-fixture')) {
         await heartbeat.drainActiveRunExecutions();
         executing.mockRestore();
       }
-    }, 60_000);
-  });
+    }
+  );
 }

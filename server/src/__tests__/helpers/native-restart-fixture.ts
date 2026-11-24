@@ -22,9 +22,9 @@ export const fakeCodexAppServer = resolve(
   import.meta.dirname,
   "../../../../packages/paperclip-runner/runner/target/debug/fake-codex-app-server",
 );
-const binariesAvailable =
+export const nativeRestartBinariesAvailable =
   existsSync(defaultCapabilityRunnerdBinary()) && existsSync(fakeCodexAppServer);
-export const realProcessIt: typeof it.skip = binariesAvailable ? it : it.skip;
+export const realProcessIt: typeof it.skip = nativeRestartBinariesAvailable ? it : it.skip;
 
 async function closeServer(server: Server | null): Promise<void> {
   if (!server) return;

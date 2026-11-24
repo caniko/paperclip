@@ -16,10 +16,10 @@ describePostgres("skill version cache lock during slow preparation", () => {
 
   beforeAll(async () => {
     database = await startEmbeddedPostgresTestDatabase("skill-version-cache-lock-");
-    db = createDb(database.connectionString, { maxConnections: 1 });
-    const rows = await db.execute(sql`select current_user as name`);
-    const role = String(rows[0].name);
-    await db.execute(sql`alter role ${sql.identifier(role)} set idle_in_transaction_session_timeout = '1s'`);
+    // Test databases cloned from one ephemeral cluster share the same role.
+    const url = new URL(database.connectionString);
+    url.searchParams.set("idle_in_transaction_session_timeout", "1000");
+    db = createDb(url.href, { maxConnections: 1 });
   });
 
   afterAll(async () => {
@@ -27,6 +27,18 @@ describePostgres("skill version cache lock during slow preparation", () => {
       await db?.$client.end({ timeout: 1 });
     } finally {
       await database?.cleanup();
+    }
+  });
+
+  it("limits the idle transaction timeout to the lock fixture's connections", async () => {
+    const unconfigured = createDb(database.connectionString);
+    try {
+      const setting = sql`select current_setting('idle_in_transaction_session_timeout') as timeout`;
+      const [row] = await unconfigured.execute(setting);
+      expect(row.timeout).not.toBe("1s");
+      await expect(db.execute(setting)).resolves.toMatchObject([{ timeout: "1s" }]);
+    } finally {
+      await unconfigured.$client.end({ timeout: 1 });
     }
   });
 

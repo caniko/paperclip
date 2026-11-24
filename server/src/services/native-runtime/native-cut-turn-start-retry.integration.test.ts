@@ -4,9 +4,10 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { and, eq } from "drizzle-orm";
 import { completionContracts, heartbeatRunEvents, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations } from "@paperclipai/db";
-import { expect, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { NativeSessionCloseUnrecoverableError, executeNativeSession, parseNativeExecutionInput, nativeSessionCleanupBlock, createNativeSessionBackend, createRunnerdCodexTransport, canonicalNativeRuntimeContextDigest } from "../../vendor/paperclip-runner/index.js";
-import { describeEmbeddedPostgres, nativeRestartFixture, processAlive, realProcessIt, waitForCondition } from "../../__tests__/helpers/native-restart.js";
+import { nativeRestartBinariesAvailable, nativeRestartFixture, processAlive, waitForCondition } from "../../__tests__/helpers/native-restart.js";
+import { recoveryPostgresSupport } from "../../__tests__/helpers/recovery-postgres.js";
 import { buildNativeExecutionInput } from "./native-execution-input.js";
 import { buildNativeCompletionContract } from "./completion-contracts.js";
 import { executePaperclipNativeSession, scopedRunnerdStateRoot } from "./native-session-executor.js";
@@ -30,10 +31,10 @@ import { admitExplicitNativeContinuation } from "../explicit-native-continuation
  *   forceFreshSession) and completes with the real runner, without touching or
  *   tripping over the stuck conversation's saved or quarantined state.
  */
-describeEmbeddedPostgres("Retry after a turn start cut off once Codex recorded the turn", () => {
+describe.skipIf(!recoveryPostgresSupport.supported)("Retry after a turn start cut off once Codex recorded the turn", () => {
   const environment = nativeRestartFixture();
 
-  realProcessIt("keeps the cut-off turn closed and completes a fresh Retry run", async () => {
+  it.skipIf(!nativeRestartBinariesAvailable)("keeps the cut-off turn closed and completes a fresh Retry run", async () => {
     const fixture = await environment.seedRun("CUT-TURN-START");
     const { db, issueId } = fixture;
     const { companyId, agentId, runtimeRoot } = environment.current;

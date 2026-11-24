@@ -11,12 +11,14 @@ import { resolveCodexCommand } from "./codex-command.js";
 
 const execFileAsync = promisify(execFile);
 const gitBinary = existsSync("/usr/bin/git") ? "/usr/bin/git" : "git";
+const required = process.env.PAPERCLIP_REQUIRE_CODEX_CERTIFICATE_TEST === "1";
 const toolsAvailable = (() => {
   try {
     execFileSync("openssl", ["version"], { stdio: "ignore", timeout: 10_000 });
     execFileSync(gitBinary, ["--version"], { stdio: "ignore", timeout: 10_000 });
     return true;
-  } catch {
+  } catch (error) {
+    if (required) throw error;
     return false;
   }
 })();
@@ -112,7 +114,7 @@ describe.skipIf(!toolsAvailable)("Codex shell certificate trust (synthetic priva
   }, 120_000);
 
   afterAll(async () => {
-    await new Promise<void>((resolveClose) => server?.close(() => resolveClose()));
+    if (server) await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -153,8 +155,9 @@ describe.skipIf(!toolsAvailable)("Codex shell certificate trust (synthetic priva
     let codexBinary: string;
     try {
       codexBinary = resolveCodexCommand();
-    } catch {
-      return context.skip();
+    } catch (error) {
+      if (required) throw error;
+      return context.skip(String(error));
     }
     const codexHome = join(root, "codex-home");
     mkdirSync(join(codexHome, ".codex"), { recursive: true });
@@ -178,15 +181,16 @@ describe.skipIf(!toolsAvailable)("Codex shell certificate trust (synthetic priva
     try {
       // Codex sandboxes commands with host kernel facilities; hosts without
       // them keep coverage through the policy-replay cases above.
-      await execFileAsync(codexBinary, ["sandbox", "--", "/usr/bin/true"], {
+      await execFileAsync(codexBinary, ["sandbox", "--", process.execPath, "-e", ""], {
         env: injectedEnvironment, cwd: root, timeout: 60_000,
       });
-    } catch {
-      return context.skip();
+    } catch (error) {
+      if (required) throw error;
+      return context.skip(String(error));
     }
     const { stdout } = await execFileAsync(
       codexBinary,
-      ["sandbox", ...policyOverrides, "--", "/usr/bin/env"],
+      ["sandbox", ...policyOverrides, "--", "env"],
       { env: injectedEnvironment, cwd: root, timeout: 60_000 },
     );
     const lines = stdout.split("\n");

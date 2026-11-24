@@ -26,6 +26,30 @@ test("checked-in coverage bindings match the current source before expensive col
   }
 });
 
+test("Vitest statically collects the split SSH and native Runner integration suites", async () => {
+  const root = fileURLToPath(new URL("../../", import.meta.url));
+  const ctx = await createVitest({ root, watch: false, reporters: [], maxWorkers: 1 });
+  try {
+    const specs = await ctx.globTestSpecifications([
+      "ssh-remote-workspace-heartbeat-",
+      "native-cut-turn-start-retry.integration",
+      "native-runner-restart-checkpoint-cost.integration",
+      "native-runner-restart-diskless.integration",
+      "plugin-runner-eviction.integration",
+      "plugin-runner-release-resume.integration",
+    ]);
+    assert.equal(specs.length, 9);
+    const modules = await ctx.parseSpecifications(specs, { concurrency: 2 });
+    assert.equal(modules.length, specs.length);
+    for (const module of modules) {
+      assert.deepEqual(module.errors(), []);
+      assert.ok(collectRows([module], root).length, module.task.filepath);
+    }
+  } finally {
+    await ctx.close();
+  }
+});
+
 test("concurrent discovery order cannot hide a missing, changed or duplicate file/project/pool identity", () => {
   const spec = (file, project, pool = "forks") => ({ moduleId: `/checkout/${file}`, project: { name: project }, pool });
   const first = spec("a.test.ts", "first");

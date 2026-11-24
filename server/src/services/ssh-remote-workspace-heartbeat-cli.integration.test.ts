@@ -1,4 +1,7 @@
-import { describeSshHeartbeatRuns } from "./__tests__/ssh-remote-workspace-fixture.js";
+import { describe, it } from "vitest";
+import { selectSshHeartbeatRuns, sshHeartbeatCase, sshWorkspaceTestsSupported, useSshWorkspaceFixture } from "./__tests__/ssh-remote-workspace-fixture.js";
 
-describeSshHeartbeatRuns("Cloud SSH heartbeat runs for the remaining harnesses with a real SSH server",
-  { exclude: ["claude_local", "codex_local", "gemini_local"] });
+describe.skipIf(!sshWorkspaceTestsSupported)("Cloud SSH heartbeat runs for the remaining harnesses with a real SSH server", () => {
+  const fixture = useSshWorkspaceFixture("cloud-ssh-heartbeat-");
+  it.each(selectSshHeartbeatRuns({ exclude: ["claude_local", "codex_local", "gemini_local"] }))("runs an assigned $key task through heartbeat over SSH", sshHeartbeatCase(fixture), 60_000);
+});

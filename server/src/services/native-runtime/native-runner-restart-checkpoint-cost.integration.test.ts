@@ -3,13 +3,14 @@ import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { eq, sql } from "drizzle-orm";
 import { checkpointDb, livenessDb, nativeRunFinalizations } from "@paperclipai/db";
-import { beforeAll, expect } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { createRunnerdCodexTransport, DurablePrpControlPlane } from "../../vendor/paperclip-runner/index.js";
 import { registerRunnerPrpAuthority } from "../../realtime/runner-prp-ws.js";
 import { nativeRunnerCheckpointWriter } from "./native-runner-checkpoint.js";
-import { nativeRestartFixture, describeEmbeddedPostgres, realProcessIt, waitForCondition } from "../../__tests__/helpers/native-restart.js";
+import { nativeRestartBinariesAvailable, nativeRestartFixture, waitForCondition } from "../../__tests__/helpers/native-restart.js";
+import { recoveryPostgresSupport } from "../../__tests__/helpers/recovery-postgres.js";
 
-describeEmbeddedPostgres("native runner restart recovery: checkpoint-cost", () => {
+describe.skipIf(!recoveryPostgresSupport.supported)("native runner restart recovery: checkpoint-cost", () => {
   const environment = nativeRestartFixture();
   const { seedRun, transportOptions } = environment;
   let runtimeRoot: typeof environment.current.runtimeRoot;
@@ -17,7 +18,7 @@ describeEmbeddedPostgres("native runner restart recovery: checkpoint-cost", () =
   let successor: typeof environment.current.successor;
   beforeAll(() => { ({ runtimeRoot, companyId, successor } = environment.current); });
 
-  realProcessIt("keeps checkpoint SQL independent of streamed output volume with a real Postgres writer", async () => {
+  it.skipIf(!nativeRestartBinariesAvailable)("keeps checkpoint SQL independent of streamed output volume with a real Postgres writer", async () => {
     const samples: Array<{ chunks: number; checkpointWrites: number; transactions: number;
       changedRows: number; checkpointBytes: number; walBytes: number; elapsedMs: number; idleSql: number;
       streamSql: number; streamTransactions: number; streamChangedRows: number; renewalSql: number }> = [];

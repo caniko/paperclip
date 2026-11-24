@@ -17,10 +17,9 @@ describePostgres("workspace source ownership during preparation", () => {
 
   beforeAll(async () => {
     database = await startEmbeddedPostgresTestDatabase("workspace-source-lock-");
-    db = createDb(database.connectionString, { maxConnections: 1 });
-    const rows = await db.execute(sql`select current_user as name`);
-    const role = String(rows[0].name);
-    await db.execute(sql`alter role ${sql.identifier(role)} set idle_in_transaction_session_timeout = '1s'`);
+    const url = new URL(database.connectionString);
+    url.searchParams.set("idle_in_transaction_session_timeout", "1000");
+    db = createDb(url.href, { maxConnections: 1 });
   });
 
   afterAll(async () => {
