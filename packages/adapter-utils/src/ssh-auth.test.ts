@@ -11,6 +11,7 @@ import {
   buildSshSpawnTarget,
   createSshCommandManagedRuntimeRunner,
   getSshEnvLabSupport,
+  parseSshRemoteExecutionSpec,
   startSshEnvLabFixture,
   stopSshEnvLabFixture,
   syncDirectoryToSsh,
@@ -18,7 +19,7 @@ import {
 } from "./ssh.js";
 import { ATLAS_CALLBACK_BRIDGE_ROUTES, authorizeSandboxCallbackBridgeRequestWithRoutes, createSandboxCallbackBridgeAsset, sandboxCallbackBridgeDirectories, startSandboxCallbackBridgeServer } from "./sandbox-callback-bridge.js";
 import { startAdapterExecutionTargetPaperclipBridge } from "./execution-target.js";
-import { prepareRemoteManagedRuntime } from "./remote-managed-runtime.js";
+import { buildRemoteExecutionSessionIdentity, prepareRemoteManagedRuntime, remoteExecutionSessionMatches } from "./remote-managed-runtime.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -230,7 +231,10 @@ describe("SSH authentication selection", () => {
           env: {},
         });
         try {
-          return await execFileAsync(target.command, ["-F", "/dev/null", ...target.args], { env, timeout: 5_000 });
+          const result = execFileAsync(target.command, ["-F", "/dev/null", ...target.args], { env, timeout: 5_000 });
+          result.child.stdin?.on("error", () => {});
+          result.child.stdin?.end(target.stdinPrefix);
+          return await result;
         } finally {
           await target.cleanup();
         }
@@ -293,5 +297,23 @@ describe("SSH authentication selection", () => {
       if (root) await rm(root, { recursive: true, force: true });
     }
     if (keyPath) await expect(stat(keyPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+const spec = { host: "ssh.example.test", port: 22, username: "fixture", remoteCwd: "/workspace", remoteWorkspacePath: "/workspace", privateKey: null, knownHosts: null, strictHostKeyChecking: true };
+
+describe("SSH authentication source", () => {
+  it.each([undefined, true, false])("preserves the SSH authentication option through target parsing (%s)", useHostAuth => {
+    const target = { ...spec, ...(useHostAuth !== undefined ? { useHostAuth } : {}) };
+    expect(parseSshRemoteExecutionSpec(target)).toEqual(target);
+    expect(parseSshRemoteExecutionSpec({ ...spec, useHostAuth: "false" })).toBeNull();
+  });
+  it("starts a fresh SSH session when its authentication source changes", () => {
+    const saved = buildRemoteExecutionSessionIdentity(spec);
+    expect(remoteExecutionSessionMatches(saved, { ...spec })).toBe(true);
+    expect(remoteExecutionSessionMatches(saved, { ...spec, useHostAuth: false })).toBe(false);
+    const configured = buildRemoteExecutionSessionIdentity({ ...spec, useHostAuth: false });
+    expect(remoteExecutionSessionMatches(configured, { ...spec, useHostAuth: false })).toBe(true);
+    expect(remoteExecutionSessionMatches(configured, { ...spec, useHostAuth: true })).toBe(false);
   });
 });

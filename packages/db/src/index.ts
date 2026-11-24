@@ -3,8 +3,25 @@ export {
   acquireDeploymentLease,
   assertSameDeploymentDatabase,
   assertDeploymentSchemaCompatible,
+  databaseClientOptionsFromEnv,
+  type DatabaseClientOptions,
   withDedicatedDbConnection,
+  closeDedicatedDbConnections,
+  DEDICATED_CONNECTION_IDLE_MAX,
+  DEFAULT_DEDICATED_CONNECTION_MAX,
+  DEFAULT_DEDICATED_CONNECTION_WAIT_MS,
+  dedicatedDbConnectionStats,
+  type DedicatedDbConnectionStats,
+  type DedicatedDbConnectionOptions,
+  preparedStatementStats,
+  databaseConnectionBudget,
+  PRIVATE_POOL_MAX_CONNECTIONS,
+  createOwnedDatabaseListener,
+  type OwnedDatabaseListener,
   livenessDb,
+  controllerLeaseDb,
+  controllerInstanceLeaseDb,
+  controllerInstanceLeaseDbWithoutStatementTimeout,
   closeLivenessDb,
   checkpointDb,
   closeCheckpointDb,
@@ -22,6 +39,7 @@ export {
   migratePostgresIfEmpty,
   type MigrationBootstrapResult,
   type Db,
+  afterTransactionCommit,
 } from "./client.js";
 export {
   getEmbeddedPostgresTestSupport,
@@ -53,4 +71,6 @@ export { issueReferenceMentions } from "./schema/issue_reference_mentions.js";
 export * from "./schema/index.js";
 export { resolveMigrationConnection } from "./migration-runtime.js";
 
-export { databaseWorkScopeKey, signalDatabaseWork, subscribeDatabaseWork, databaseWorkPending, reconcileDatabaseWork } from "./work-signals.js";
+export { databaseWorkScopeKey, primeDatabaseWorkTransactionId, signalDatabaseWork, subscribeDatabaseWork, databaseWorkPending, reconcileDatabaseWork } from "./work-signals.js";
+export { withDatabaseOperation } from "./response-capture.js";
+export { databaseStatementCount } from "./statement-count.js";

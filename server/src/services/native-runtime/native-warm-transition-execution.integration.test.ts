@@ -124,7 +124,7 @@ generated("warm transition → restarted native execution", () => {
       await new Promise<void>(done => server.listen(0, "127.0.0.1", done));
       const address = server.address();
       if (!address || typeof address === "string") throw new Error("Missing PRP listener");
-      setupRunnerPrpWebSocketServer(server, { apiUrl: `http://127.0.0.1:${address.port}` });
+      setupRunnerPrpWebSocketServer(server);
       const execution = (runId: string): NativeExecutionInput => {
         const { runtimeContext: _context, ...input } = buildNativeExecutionInput({
           companyId, agentId, runId, normalizedSessionId: sessionId,
@@ -222,7 +222,7 @@ generated("warm transition → restarted native execution", () => {
       // A fresh core/transport uses the same endpoint, configuration and paths.
       // No copied journal is rewritten, and the original Rust provider state stays in place.
       transportSpy.mockRestore();
-      setupRunnerPrpWebSocketServer(server, { apiUrl: `http://127.0.0.1:${address.port}` });
+      setupRunnerPrpWebSocketServer(server);
       const [claim] = await claimNativeRestartRecoveries({ db, runIds: [newRunId], restartKind: "hard" });
       expect(claim?.kind).toBe("resume_dead_runner");
       if (claim?.kind !== "resume_dead_runner") throw new Error("Missing exact dead-runner recovery claim");

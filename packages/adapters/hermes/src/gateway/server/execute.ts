@@ -597,26 +597,28 @@ async function handleEvent(
     throw protocolError("Noncontiguous Hermes event sequence");
   }
   state.lastEventName = eventName;
+  const delta = asString(record?.delta, "") || asString(record?.text_delta, "");
+  const sanitizedDelta = eventName === "message.delta" && delta ? redactText(delta) : null;
   const sanitized = asRecord(redactForLog(parsed, [], 0, redactText)) ?? {};
   if (sequenced && ctx.onEvent) {
     try {
       await ctx.onEvent({ eventType: `hermes.${eventName ?? "message"}`, stream: "stdout", payload: sanitized,
-        message: eventName === "message.delta" ? redactText(nonEmpty(record?.delta) ?? nonEmpty(record?.text_delta) ?? "") : undefined,
+        message: sanitizedDelta ?? undefined,
         providerSource: { runId, sequence, canonicalPayload: { version: 1, sha256: digest } } });
     } catch {
       throw protocolError("Host refused the Hermes event receipt");
     }
   } else {
-    await ctx.onLog("stdout", `[hermes-gateway:event] run=${runId} event=${eventName ?? "message"} data=${stringifyForLog(sanitized, 8_000)}\n`);
+    const eventData = sanitizedDelta !== null
+      ? JSON.stringify({ delta: sanitizedDelta })
+      : stringifyForLog(sanitized, 8_000);
+    await ctx.onLog("stdout", `[hermes-gateway:event] run=${runId} event=${eventName ?? "message"} data=${eventData}\n`);
   }
 
   if (state.runId !== runId || state.protocolError) return;
 
-  const delta = nonEmpty(record?.delta) ?? nonEmpty(record?.text_delta);
-  if (eventName === "message.delta" && delta) {
-    const sanitizedDelta = redactText(delta);
+  if (sanitizedDelta !== null) {
     state.outputChunks.push(sanitizedDelta);
-    if (!sequenced || !ctx.onEvent) await ctx.onLog("stdout", sanitizedDelta);
   }
 
   if (state.runId !== runId || state.protocolError) return;

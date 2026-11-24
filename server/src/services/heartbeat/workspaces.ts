@@ -1,3 +1,6 @@
+import { retainCurrentWorkspaceSource } from "../workspace-source-lock.js";
+import { isGitMountBoundaryMessage } from "../git-mount-boundary-message.js";
+import { localWorkspaceSourcePaths } from "../execution-workspace-source-roots.js";
 import { effectiveProjectWorkspacePolicy } from "../project-workspace-provider.js";
 import { canonicalRepositoryRoot } from "../execution-workspace-source-roots.js";
 import { assertTaskWorkspaceExecutionAccess } from "../task-workspace-access.js";
@@ -13,6 +16,7 @@ import { sql } from "drizzle-orm";
 import { materializeIsolatedTaskDirectory } from "../isolated-task-directory.js";
 import { readConnectionFailure, type GitConnectionFailure } from "@paperclipai/adapter-utils/connection-failure";
 import { managedAiSessionFingerprintConfig } from "../ai-connection-runtime.js";
+import { paperclipRunnerSessionAdapterConfig, sessionAgentRuntimeConfig, sessionEnvironment } from "./session-fingerprint-inputs.js";
 import {
   PROJECT_REPOSITORIES_DIR,
   readGitWorkspaceSnapshot,
@@ -590,6 +594,7 @@ async function resolveConfiguredOrManagedProjectCwd(input: {
 }): Promise<{ cwd: string; warning: string | null }> {
   const configuredCwd = readNonEmptyString(input.cwd);
   if (configuredCwd && configuredCwd !== REPO_ONLY_CWD_SENTINEL) {
+    await retainCurrentWorkspaceSource(configuredCwd);
     return { cwd: configuredCwd, warning: null };
   }
   return ensureManagedProjectWorkspace({
@@ -855,7 +860,7 @@ async function probeGitWorktreeBase(cwd: string) {
     const notRepository = failure.code === 128 && failure.signal == null &&
       typeof failure.stderr === "string" &&
       (/^fatal: not a git repository \(or any of the parent directories\): \.git\r?\n?$/.test(failure.stderr) ||
-        /^fatal: not a git repository \(or any parent up to mount point [^\r\n]+\)\r?\nStopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.\r?\n?$/.test(failure.stderr)) &&
+        isGitMountBoundaryMessage(failure.stderr)) &&
       !process.env.GIT_DIR && !process.env.GIT_WORK_TREE && !process.env.GIT_COMMON_DIR &&
       await hasNoGitMetadataInWorkspaceAncestors(cwd);
     return { isCheckout: false, notRepository };
@@ -1619,7 +1624,7 @@ export interface ReferencedProjectFailure {
 export interface ResolvedRunReferencedProjects {
   /** The anchor (primary) project — retains the existing git-worktree run path; never re-authorized here. */
   anchor: RunReferencedProject | null;
-  /** Additional read-only referenced projects that each passed per-project `project:read` authorization. */
+  /** Additional referenced projects that each passed per-project `project:read` authorization. */
   additional: RunReferencedProject[];
   /** Human-readable warnings for every referenced project that was dropped (unavailable, unauthorized, or capped). */
   warnings: string[];
@@ -2124,7 +2129,7 @@ const PAPERCLIP_SESSION_METADATA_KEYS = new Set([
   SESSION_CONFIG_CATEGORY_FINGERPRINTS_KEY,
 ]);
 
-const WORKSPACE_CONFIG_FINGERPRINT_METADATA_KEY = "configFingerprint";
+export const WORKSPACE_CONFIG_FINGERPRINT_METADATA_KEY = "configFingerprint";
 
 const EFFECTIVE_RUN_SESSION_CONFIG_CATEGORIES = [
   "adapter",
@@ -2618,7 +2623,8 @@ export function buildWorkspaceConfigFreshnessOperation(
       previousWorkspaceId: input.previousWorkspaceId,
       activeWorkspaceId: input.activeWorkspaceId,
     },
-    system: `[paperclip] ${workspaceConfigFreshnessActionLabel(input.decision.action)} after config freshness check${categorySummary}: ${reasonSummary}\n`,
+    system: `[paperclip] ${(input.workspaceReused && input.decision.action === "replace"
+      ? "reused execution workspace" : workspaceConfigFreshnessActionLabel(input.decision.action))} after config freshness check${categorySummary}: ${reasonSummary}\n`,
   };
 }
 
@@ -2777,7 +2783,7 @@ async function resolveInstructionsConfigFingerprintMetadata(
   return metadata;
 }
 
-function buildSessionConfigCategoryValues(input: {
+export function buildSessionConfigCategoryValues(input: {
   adapterType: string;
   effectiveAdapterConfig: Record<string, unknown>;
   agentRuntimeConfig: unknown;
@@ -2792,6 +2798,7 @@ function buildSessionConfigCategoryValues(input: {
   runtimeSkills: unknown;
   agentConfigRevision: unknown;
   agentIdentityKeyId?: string;
+  legacyComposition?: boolean;
 }) {
   const sanitizedSecretManifest = sanitizeSecretManifestForConfigFingerprint(
     input.secretManifest,
@@ -2814,18 +2821,21 @@ function buildSessionConfigCategoryValues(input: {
   const issueSettings = { ...parseObject(workspaceConfig.issueSettings) };
   if (issueSettings.mode === workspaceConfig.requestedMode) delete issueSettings.mode;
   workspaceConfig.issueSettings = Object.keys(issueSettings).length ? issueSettings : null;
+  const legacy = input.legacyComposition === true;
   return {
     adapter: {
       adapterType: input.adapterType,
       ...(input.agentIdentityKeyId ? { agentIdentityKeyId: input.agentIdentityKeyId } : {}),
-      agentConfigRevision: input.agentConfigRevision,
+      ...(legacy ? { agentConfigRevision: input.agentConfigRevision } : {}),
     },
-    adapterConfig: input.effectiveAdapterConfig,
-    agentRuntimeConfig: input.agentRuntimeConfig,
+    adapterConfig: legacy || input.adapterType !== "paperclip_runner"
+      ? input.effectiveAdapterConfig
+      : paperclipRunnerSessionAdapterConfig(input.effectiveAdapterConfig),
+    agentRuntimeConfig: legacy ? input.agentRuntimeConfig : sessionAgentRuntimeConfig(input.agentRuntimeConfig),
     instructions: input.instructions,
     issueOverrides: input.issueOverrides,
     workspaceConfig,
-    environment: input.environment,
+    environment: legacy ? input.environment : sessionEnvironment(input.environment),
     envBindings: {
       environment: { env: input.environmentEnv },
       project: { env: input.projectEnv },
@@ -2841,6 +2851,7 @@ export async function buildEffectiveRunSessionConfigMetadata(input: {
   effectiveAdapterConfig: Record<string, unknown>;
   managedAiHome?: string;
   managedInstructions?: { entryFile: string; contentHash: string | null } | null;
+  retainManagedInstructionPaths?: boolean;
   agentRuntimeConfig: unknown;
   issueOverrides: unknown;
   workspaceConfig: unknown;
@@ -2852,6 +2863,7 @@ export async function buildEffectiveRunSessionConfigMetadata(input: {
   runtimeSkills: unknown;
   agentConfigRevision?: unknown;
   agentIdentityKeyId?: string;
+  legacyComposition?: boolean;
 }): Promise<EffectiveRunSessionConfigMetadata> {
   const secretManifest = input.secretManifest ?? [];
   const instructions = input.managedInstructions ? {
@@ -2860,7 +2872,14 @@ export async function buildEffectiveRunSessionConfigMetadata(input: {
     ...(input.managedInstructions.contentHash !== null ? { contentHash: input.managedInstructions.contentHash } : {}),
   } : await resolveInstructionsConfigFingerprintMetadata(input.effectiveAdapterConfig);
   const effectiveAdapterConfig = { ...managedAiSessionFingerprintConfig(input.effectiveAdapterConfig, input.managedAiHome) };
-  if (input.managedInstructions) {
+  // Migration 0443 cleared the stored per_turn creation default from native
+  // agents. Fingerprint an unset lifecycle as that stored value so clearing it
+  // keeps saved task sessions and their provider history. An explicit change
+  // to warm still starts a new session.
+  if (input.adapterType === "paperclip_runner" && effectiveAdapterConfig.lifecycleMode === undefined) {
+    effectiveAdapterConfig.lifecycleMode = "per_turn";
+  }
+  if (input.managedInstructions && !input.retainManagedInstructionPaths) {
     delete effectiveAdapterConfig.instructionsRootPath;
     delete effectiveAdapterConfig.instructionsFilePath;
   }
@@ -2890,6 +2909,7 @@ export async function buildEffectiveRunSessionConfigMetadata(input: {
     runtimeSkills: versionedSkills(input.runtimeSkills),
     agentConfigRevision: input.agentConfigRevision ?? null,
     agentIdentityKeyId: input.agentIdentityKeyId,
+    legacyComposition: input.legacyComposition,
   });
   const fingerprints = createEffectiveRunConfigFingerprints({
     session: categoryValues,
@@ -3015,6 +3035,7 @@ export function resolveExecutionWorkspaceConfigFreshness(input: {
   existingWorkspaceMetadata: Record<string, unknown> | null | undefined;
   inferredMetadata?: EffectiveRunWorkspaceConfigMetadata | null;
   nextMetadata: EffectiveRunWorkspaceConfigMetadata | null;
+  providerOwnedStorage?: boolean;
 }): ExecutionWorkspaceConfigFreshnessDecision {
   if (!input.hasExistingWorkspace) {
     return {
@@ -3119,8 +3140,10 @@ export function resolveExecutionWorkspaceConfigFreshness(input: {
     previous: previous.categoryFingerprints,
     next: input.nextMetadata.categoryFingerprints,
   });
-  const replacementRequired = changedCategories.some((category) =>
-    WORKSPACE_REPLACEMENT_CONFIG_CATEGORIES.has(category),
+  const replacementRequired = changedCategories.some(
+    (category) =>
+      WORKSPACE_REPLACEMENT_CONFIG_CATEGORIES.has(category) &&
+      !(input.providerOwnedStorage && category === "environment"),
   );
   const action: WorkspaceConfigFreshnessDecisionAction = replacementRequired
     ? "replace"
@@ -3399,6 +3422,7 @@ export function createHeartbeatWorkspaceResolver(db: Db) {
       managedBase && workspace.repoUrl
         ? `${managedBase}-${createHash("sha256").update(workspace.repoUrl).digest("hex").slice(0, 12)}` : null,
     ].filter((value): value is string => Boolean(value));
+    for (const sourceCwd of localWorkspaceSourcePaths(workspace)) await retainCurrentWorkspaceSource(sourceCwd);
     const cwd = await resolvePersistedGitWorkspaceSource({
       companyId: agent.companyId,
       projectId: sourceProjectId,
@@ -3686,6 +3710,7 @@ export function createHeartbeatWorkspaceResolver(db: Db) {
         .then((stats) => stats.isDirectory())
         .catch(() => false);
       if (sessionCwdExists) {
+        await retainCurrentWorkspaceSource(sessionCwd!);
         return {
           cwd: sessionCwd,
           source: "task_session" as const,
@@ -3707,6 +3732,7 @@ export function createHeartbeatWorkspaceResolver(db: Db) {
     const cwd = configuredCwd ? path.resolve(configuredCwd)
       : issueId ? await materializeIsolatedTaskDirectory({ companyId: agent.companyId, issueId })
       : resolveDefaultAgentWorkspaceDir(agent.id);
+    await retainCurrentWorkspaceSource(cwd);
     await fs.mkdir(cwd, { recursive: true });
     const warnings: string[] = [];
     if (sessionCwd && sessionCwdLooksUnsafe) {
@@ -3764,6 +3790,7 @@ export function createHeartbeatWorkspaceResolver(db: Db) {
       previousSessionParams,
       opts,
     );
+    await retainCurrentWorkspaceSource(anchor.cwd);
     if (!isMultiProjectWorkspaceSyncEnabled()) {
       return {
         ...anchor,

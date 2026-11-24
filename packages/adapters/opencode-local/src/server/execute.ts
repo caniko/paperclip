@@ -16,6 +16,7 @@ import {
   adapterExecutionTargetUsesPaperclipBridge,
   describeAdapterExecutionTarget,
   ensureAdapterExecutionTargetCommandResolvable,
+  ensureAdapterExecutionTargetLocalWorkspace,
   ensureAdapterExecutionTargetRuntimeCommandInstalled,
   prepareAdapterExecutionTargetRuntime,
   adapterExecutionTargetDuplexObservabilityRecorder,
@@ -136,12 +137,12 @@ export async function ensureRemoteOpenCodeModelConfiguredAndAvailable(input: {
     },
   );
 
-  // The remote availability probe is a best-effort pre-flight guard, not a gate.
+  // The non-Atlas remote availability probe is a best-effort pre-flight guard.
   // If `opencode models` itself cannot run on the target — timeout, transient CLI
   // error, provider hiccup — do NOT abort the run. The real invocation is
-  // authoritative, so a probe that can't execute must never be fatal. (Previously
-  // these threw and crashed runs mid-flight, losing the agent's work + disposition.)
+  // authoritative there. Atlas must prove that the worker recognizes the pin.
   if (probe.timedOut) {
+    if (atlas) throw new Error("Atlas OpenCode model probe timed out");
     console.warn(
       `[opencode-local] Remote model availability probe for "${model}" timed out after ${probeTimeoutSec}s; proceeding with the configured model.`,
     );
@@ -149,6 +150,7 @@ export async function ensureRemoteOpenCodeModelConfiguredAndAvailable(input: {
   }
 
   if ((probe.exitCode ?? 1) !== 0) {
+    if (atlas) throw new Error("Atlas OpenCode model probe failed");
     const detail = firstNonEmptyLine(probe.stderr) || firstNonEmptyLine(probe.stdout);
     console.warn(
       `[opencode-local] Remote \`opencode models\` could not run for "${model}"${
@@ -160,6 +162,7 @@ export async function ensureRemoteOpenCodeModelConfiguredAndAvailable(input: {
 
   const models = parseOpenCodeModelsOutput(probe.stdout);
   if (models.length === 0) {
+    if (atlas) throw new Error("Atlas OpenCode model probe returned no models");
     console.warn(
       `[opencode-local] Remote \`opencode models\` returned no models; proceeding with the configured model "${model}".`,
     );
@@ -232,7 +235,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const effectiveWorkspaceCwd = useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
   const cwd = (atlas && atlas.scratchDir) || effectiveWorkspaceCwd || configuredCwd || process.cwd();
   let effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
-  await ensureAbsoluteDirectory(cwd, { createIfMissing: !atlas });
+  if (atlas) await ensureAbsoluteDirectory(cwd, { createIfMissing: false });
+  else await ensureAdapterExecutionTargetLocalWorkspace(executionTarget, cwd);
   const openCodeSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredOpenCodeSkillNames = new Set(resolveLegacyPaperclipDesiredSkillNames(config, openCodeSkillEntries));
   const selectedSkills = openCodeSkillEntries.filter(entry =>
@@ -326,6 +330,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({
     includeOperatorGitConfig: executionTarget?.kind !== "remote",
     env, config,
+    targetIsRemote: executionTargetIsRemote,
     targetIsAtlas: Boolean(atlas),
     sandboxToolOomPreference: executionTarget?.kind === "remote" && executionTarget.transport === "sandbox",
   });
@@ -386,410 +391,418 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
     let runtimeExecutionTarget = executionTarget;
 
-    if (executionTarget?.kind === "remote") {
-      await onLog(
-        "stdout",
-        `[paperclip] Syncing workspace and OpenCode runtime assets to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
-      );
-      const preparedExecutionTargetRuntime = await prepareAdapterExecutionTargetRuntime({
-        runId,
-        target: executionTarget,
-        adapterKey: "opencode",
-        timeoutSec,
-        workspaceLocalDir: cwd,
-        installCommand: SANDBOX_INSTALL_COMMAND,
-        detectCommand: command,
-        onProgress: (line) => onLog("stdout", line),
-        onRuntimeProgress: ctx.onRuntimeProgress,
-        assets: [
-          {
-            key: "skills",
-            localDir: localSkillsDir,
-            followSymlinks: true,
-          },
-          ...(localRuntimeConfigHome
-            ? [{
-              key: "xdgConfig",
-              localDir: localRuntimeConfigHome,
-            }]
-            : []),
-        ],
-      });
-      restoreRemoteWorkspace = () =>
-        preparedExecutionTargetRuntime.restoreWorkspace((line) => onLog("stdout", line));
-      if (atlas && !preparedExecutionTargetRuntime.workspaceRemoteDir) {
-        throw new Error("Atlas OpenCode requires a realized scratch directory");
-      }
-      effectiveExecutionCwd = preparedExecutionTargetRuntime.workspaceRemoteDir ?? effectiveExecutionCwd;
-      runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd) ?? null;
-      remoteRuntimeRootDir = preparedExecutionTargetRuntime.runtimeRootDir;
-      if (atlas) {
-        preparedRuntimeConfig.env.PAPERCLIP_WORKSPACE_CWD = effectiveExecutionCwd;
-      } else {
-        refreshPaperclipWorkspaceEnvForExecution({
-          env: preparedRuntimeConfig.env,
-          envConfig,
-          workspaceCwd: effectiveWorkspaceCwd,
-          workspaceSource,
-          workspaceId,
-          workspaceRepoUrl,
-          workspaceRepoRef,
-          workspaceHints,
-          agentHome,
-          executionTargetIsRemote,
-          executionCwd: effectiveExecutionCwd,
-        });
-        preparedRuntimeConfig.env.PWD = effectiveExecutionCwd;
-        if (adapterExecutionTargetUsesManagedHome(executionTarget) && remoteRuntimeRootDir) {
-          preparedRuntimeConfig.env.HOME = remoteRuntimeRootDir;
-        }
-        if (localRuntimeConfigHome && preparedExecutionTargetRuntime.assetDirs.xdgConfig) {
-          preparedRuntimeConfig.env.XDG_CONFIG_HOME = preparedExecutionTargetRuntime.assetDirs.xdgConfig;
-        }
-        prepareManagedOpenCodeRemoteHomes({
-          env: preparedRuntimeConfig.env,
-          config,
-          runtimeRootDir: remoteRuntimeRootDir,
-          runId,
-          configDir: preparedExecutionTargetRuntime.assetDirs.xdgConfig,
-        });
-      }
-      effectiveSkillsDir = preparedExecutionTargetRuntime.assetDirs.skills;
-      if (!effectiveSkillsDir) throw new Error("OpenCode runtime skills were not staged on the execution target.");
-      await ensureRemoteOpenCodeModelConfiguredAndAvailable({
-        runId,
-        executionTarget: atlas ? runtimeExecutionTarget! : executionTarget,
-        command,
-        model,
-        cwd: atlas ? effectiveExecutionCwd : cwd,
-        env: preparedRuntimeConfig.env,
-        timeoutSec,
-        graceSec,
-      });
-    }
-    if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
-      paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
-        runId,
-        target: runtimeExecutionTarget,
-        enableSandboxDuplexBridge: adapterExecutionTargetEnablesSandboxDuplexBridge(runtimeExecutionTarget),
-        duplexObservabilityRecorder: adapterExecutionTargetDuplexObservabilityRecorder(runtimeExecutionTarget),
-        runtimeRootDir: remoteRuntimeRootDir,
-        adapterKey: "opencode",
-        timeoutSec,
-        hostApiToken: atlas ? authToken : preparedRuntimeConfig.env.PAPERCLIP_API_KEY,
-        onLog,
-      });
-    }
-    if (atlas && (!paperclipBridge?.env.PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE || "PAPERCLIP_API_KEY" in paperclipBridge.env)) {
-      await paperclipBridge?.stop();
-      throw new Error("Atlas requires a protected callback bridge");
-    }
-    if (paperclipBridge) {
-      Object.assign(preparedRuntimeConfig.env, paperclipBridge.env);
-      loggedEnv = buildInvocationEnvForLogs(preparedRuntimeConfig.env, {
-        runtimeEnv: atlas ? preparedRuntimeConfig.env : Object.fromEntries(
-          Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
-            (entry): entry is [string, string] => typeof entry[1] === "string",
-          ),
-        ),
-        includeRuntimeKeys: ["HOME"],
-        resolvedCommand,
-      });
-    }
-
-    const runtimeSessionParams = parseObject(runtime.sessionParams);
-    const runtimeSessionId = atlas ? "" : asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
-    const runtimeSessionCwd = asString(runtimeSessionParams.cwd, "");
-    const runtimeRemoteExecution = parseObject(runtimeSessionParams.remoteExecution);
-    const canResumeSession =
-      runtimeSessionId.length > 0 &&
-      !runtimeSessionId.startsWith("ses_external_") &&
-      !runtimeSessionParams.managedBackendID &&
-      (runtimeSessionCwd.length === 0 || path.resolve(runtimeSessionCwd) === path.resolve(effectiveExecutionCwd)) &&
-      adapterExecutionTargetSessionMatches(runtimeRemoteExecution, runtimeExecutionTarget);
-    const sessionId = canResumeSession ? runtimeSessionId : null;
-    if (executionTargetIsRemote && runtimeSessionId && !canResumeSession) {
-      await onLog(
-        "stdout",
-        `[paperclip] OpenCode session "${runtimeSessionId}" does not match the current remote execution identity and will not be resumed in "${effectiveExecutionCwd}". Starting a fresh remote session.\n`,
-      );
-    } else if (runtimeSessionId && !canResumeSession) {
-      await onLog(
-        "stdout",
-        `[paperclip] OpenCode session "${runtimeSessionId}" was saved for cwd "${runtimeSessionCwd}" and will not be resumed in "${effectiveExecutionCwd}".\n`,
-      );
-    }
-    const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
-    const resolvedInstructionsFilePath = instructionsFilePath
-      ? path.resolve(cwd, instructionsFilePath)
-      : "";
-    const instructionsDir = resolvedInstructionsFilePath ? `${path.dirname(resolvedInstructionsFilePath)}/` : "";
-    let instructionsPrefix = "";
-    if (resolvedInstructionsFilePath) {
-      try {
-        const instructionsContents = await fs.readFile(resolvedInstructionsFilePath, "utf8");
-        instructionsPrefix =
-          `${instructionsContents}\n\n` +
-          `The above agent instructions were loaded from ${resolvedInstructionsFilePath}. ` +
-          `Resolve any relative file references from ${instructionsDir}.\n\n`;
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
+    try {
+      if (executionTarget?.kind === "remote") {
         await onLog(
           "stdout",
-          `[paperclip] Warning: could not read agent instructions file "${resolvedInstructionsFilePath}": ${reason}\n`,
+          `[paperclip] Syncing workspace and OpenCode runtime assets to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
         );
+        const preparedExecutionTargetRuntime = await prepareAdapterExecutionTargetRuntime({
+          privateRuntime: !atlas && Boolean(config.managedAiConnection),
+          runId,
+          target: executionTarget,
+          adapterKey: "opencode",
+          timeoutSec,
+          workspaceLocalDir: cwd,
+          syncWorkspace: executionTarget.workspaceRealization?.mode !== "in_place",
+          installCommand: SANDBOX_INSTALL_COMMAND,
+          detectCommand: command,
+          onProgress: (line) => onLog("stdout", line),
+          onRuntimeProgress: ctx.onRuntimeProgress,
+          assets: [
+            {
+              key: "skills",
+              localDir: localSkillsDir,
+              followSymlinks: true,
+            },
+            ...(localRuntimeConfigHome
+              ? [{
+                key: "xdgConfig",
+                localDir: localRuntimeConfigHome,
+              }]
+              : []),
+          ],
+        });
+        restoreRemoteWorkspace = () =>
+          preparedExecutionTargetRuntime.restoreWorkspace((line) => onLog("stdout", line));
+        if (atlas && !preparedExecutionTargetRuntime.workspaceRemoteDir) {
+          throw new Error("Atlas OpenCode requires a realized scratch directory");
+        }
+        effectiveExecutionCwd = preparedExecutionTargetRuntime.workspaceRemoteDir ?? effectiveExecutionCwd;
+        runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd) ?? null;
+        remoteRuntimeRootDir = preparedExecutionTargetRuntime.runtimeRootDir;
+        if (atlas) {
+          preparedRuntimeConfig.env.PAPERCLIP_WORKSPACE_CWD = effectiveExecutionCwd;
+        } else {
+          refreshPaperclipWorkspaceEnvForExecution({
+            env: preparedRuntimeConfig.env,
+            envConfig,
+            workspaceCwd: effectiveWorkspaceCwd,
+            workspaceSource,
+            workspaceId,
+            workspaceRepoUrl,
+            workspaceRepoRef,
+            workspaceHints,
+            agentHome,
+            executionTargetIsRemote,
+            executionCwd: effectiveExecutionCwd,
+          });
+          preparedRuntimeConfig.env.PWD = effectiveExecutionCwd;
+          if (adapterExecutionTargetUsesManagedHome(executionTarget, Boolean(config.managedAiConnection)) && remoteRuntimeRootDir) {
+            preparedRuntimeConfig.env.HOME = remoteRuntimeRootDir;
+          }
+          if (localRuntimeConfigHome && preparedExecutionTargetRuntime.assetDirs.xdgConfig) {
+            preparedRuntimeConfig.env.XDG_CONFIG_HOME = preparedExecutionTargetRuntime.assetDirs.xdgConfig;
+          }
+          prepareManagedOpenCodeRemoteHomes({
+            env: preparedRuntimeConfig.env,
+            config,
+            runtimeRootDir: remoteRuntimeRootDir,
+            runId,
+            configDir: preparedExecutionTargetRuntime.assetDirs.xdgConfig,
+          });
+        }
+        effectiveSkillsDir = preparedExecutionTargetRuntime.assetDirs.skills;
+        if (!effectiveSkillsDir) throw new Error("OpenCode runtime skills were not staged on the execution target.");
+        await ensureRemoteOpenCodeModelConfiguredAndAvailable({
+          runId,
+          executionTarget: atlas ? runtimeExecutionTarget! : executionTarget,
+          command,
+          model,
+          cwd: atlas ? effectiveExecutionCwd : cwd,
+          env: preparedRuntimeConfig.env,
+          timeoutSec,
+          graceSec,
+        });
       }
-    }
-
-    const commandNotes = (() => {
-      const notes = [...preparedRuntimeConfig.notes];
-      if (!resolvedInstructionsFilePath) return notes;
-      if (instructionsPrefix.length > 0) {
-        notes.push(`Loaded agent instructions from ${resolvedInstructionsFilePath}`);
-        notes.push(
-          `Prepended instructions + path directive to stdin prompt (relative references from ${instructionsDir}).`,
-        );
-        return notes;
+      if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
+        paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+          runId,
+          target: runtimeExecutionTarget,
+          enableSandboxDuplexBridge: adapterExecutionTargetEnablesSandboxDuplexBridge(runtimeExecutionTarget),
+          duplexObservabilityRecorder: adapterExecutionTargetDuplexObservabilityRecorder(runtimeExecutionTarget),
+          runtimeRootDir: remoteRuntimeRootDir,
+          adapterKey: "opencode",
+          timeoutSec,
+          hostApiToken: atlas ? authToken : preparedRuntimeConfig.env.PAPERCLIP_API_KEY,
+          onLog,
+        });
       }
-      notes.push(
-        `Configured instructionsFilePath ${resolvedInstructionsFilePath}, but file could not be read; continuing without injected instructions.`,
-      );
-      return notes;
-    })();
-
-    const bootstrapPromptTemplate = asString(config.bootstrapPromptTemplate, "");
-    const templateData = {
-      agentId: agent.id,
-      companyId: agent.companyId,
-      runId,
-      company: { id: agent.companyId },
-      agent,
-      run: { id: runId, source: "on_demand" },
-      context,
-    };
-    const buildPrompt = (resumedSession: boolean) => {
-      const renderedBootstrapPrompt =
-        !resumedSession && bootstrapPromptTemplate.trim().length > 0
-          ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
-          : "";
-      const { taskContextNote, wakePrompt } = selectPaperclipPromptSections(context, {
-        resumedSession,
-        includeCommunicationGuidance: false,
-      });
-      const shouldUseResumeDeltaPrompt = resumedSession && wakePrompt.length > 0;
-      const renderedPrompt = shouldUseResumeDeltaPrompt || isPaperclipRecoveryWakePayload(context.paperclipWake)
-        ? ""
-        : renderTemplate(promptTemplate, templateData);
-      const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
-      const basePrompt = joinPromptSections([
-        instructionsPrefix,
-        renderedBootstrapPrompt,
-        wakePrompt,
-        taskContextNote,
-        sessionHandoffNote,
-        renderedPrompt,
-      ]);
-      return {
-        basePrompt,
-        promptMetrics: {
-          promptChars: basePrompt.length,
-          instructionsChars: instructionsPrefix.length,
-          bootstrapPromptChars: renderedBootstrapPrompt.length,
-          wakePromptChars: wakePrompt.length,
-          taskContextChars: taskContextNote.length,
-          sessionHandoffChars: sessionHandoffNote.length,
-          heartbeatPromptChars: renderedPrompt.length,
-        },
-      };
-    };
-
-    // Optional diagnostic: surface OpenCode's own logs on stderr (captured into the
-    // run result) so failures that OpenCode otherwise wraps as an opaque
-    // "Unexpected server error" can be diagnosed in remote/sandbox runs where the
-    // log file is unreachable. Toggle via PAPERCLIP_OPENCODE_PRINT_LOGS (run env,
-    // then process env).
-    const printLogs = !atlas && isTruthyEnvFlag(
-      env.PAPERCLIP_OPENCODE_PRINT_LOGS ?? process.env.PAPERCLIP_OPENCODE_PRINT_LOGS,
-    );
-    const buildArgs = (resumeSessionId: string | null) => {
-      if (atlasArgs) return atlasArgs;
-      const args = ["run", "--format", "json"];
-      if (printLogs) args.push("--print-logs");
-      if (resumeSessionId) args.push("--session", resumeSessionId);
-      if (model) args.push("--model", model);
-      if (variant) args.push("--variant", variant);
-      // Attach only this run's assets. Never install into a shared personal home;
-      // both V1 and V2 accept file context without replacing discovery or policy.
-      for (const skill of selectedSkills) {
-        const paths = executionTargetIsRemote ? path.posix : path;
-        args.push("--file", paths.join(effectiveSkillsDir, skill.runtimeName, "SKILL.md"));
+      if (atlas && (!paperclipBridge?.env.PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE || "PAPERCLIP_API_KEY" in paperclipBridge.env)) {
+        throw new Error("Atlas requires a protected callback bridge");
       }
-      if (extraArgs.length > 0) args.push(...extraArgs);
-      return args;
-    };
-
-    // Remote targets receive only the prepared environment, never host keys.
-    const accountingEnv = executionTargetIsRemote ? preparedRuntimeConfig.env : runtimeEnv;
-    const runAttempt = async (resumeSessionId: string | null) => {
-      await hydrateFreshSessionHandoff(ctx, { resumedSession: Boolean(resumeSessionId) });
-      const { basePrompt, promptMetrics } = buildPrompt(Boolean(resumeSessionId));
-      const prompt = joinPromptSections([
-        selectInitialCommunicationGuidance(context, { resumedSession: Boolean(resumeSessionId) }),
-        basePrompt,
-      ]);
-      const args = buildArgs(resumeSessionId);
-      if (onMeta) {
-        await onMeta({
-          adapterType: "opencode_local",
-          command: resolvedCommand,
-          cwd: effectiveExecutionCwd,
-          commandNotes,
-          commandArgs: [...args, `<stdin prompt ${prompt.length} chars>`],
-          env: loggedEnv,
-          prompt,
-          promptMetrics: { ...promptMetrics, promptChars: prompt.length },
-          context,
+      if (paperclipBridge) {
+        Object.assign(preparedRuntimeConfig.env, paperclipBridge.env);
+        loggedEnv = buildInvocationEnvForLogs(preparedRuntimeConfig.env, {
+          runtimeEnv: atlas ? preparedRuntimeConfig.env : Object.fromEntries(
+            Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
+              (entry): entry is [string, string] => typeof entry[1] === "string",
+            ),
+          ),
+          includeRuntimeKeys: ["HOME"],
+          resolvedCommand,
         });
       }
 
-      const consumeAccounting = createOpenCodeJsonlParser();
-      let hasAccounting = false;
-      const accountingLog = createUsageCheckpointLog(onLog, ctx.onUsage ?? (async () => {}), stdout => {
-        hasAccounting = true;
-        const parsed = consumeAccounting(stdout);
-        const provider = parseModelProvider(model || null);
-        return { usage: parsed.usageReported ? parsed.usage : undefined, costUsd: parsed.costUsd,
-          costStatus: parsed.usageComplete || parsed.costUsd != null ? undefined : "unpriced",
-          usageBasis: "per_run", provider, biller: resolveOpenCodeBiller(accountingEnv, provider), billingType: apiKeyBillingType(provider, accountingEnv), model, complete: false };
-      });
-      const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
-        onProcessStopped: providerStop.beginInvocation(),
-        // Keep a long sandbox run off the synchronous command HTTP request.
-        // Probes and preparation keep their existing execution paths.
-        ...(runtimeExecutionTarget?.kind === "remote" && runtimeExecutionTarget.transport === "sandbox"
-          && runtimeExecutionTarget.providerKey === "daytona" ? { useSession: true } : {}),
-        cwd: atlas ? effectiveExecutionCwd : cwd,
-        env: preparedRuntimeConfig.env,
-        stdin: prompt,
-        timeoutSec,
-        graceSec,
-        onSpawn,
-        onRuntimeProgress: ctx.onRuntimeProgress,
-        onLog: accountingLog,
-        runLogTail: paperclipBridge?.runLogTail,
-        settleRunDisposition: paperclipBridge?.settleRunDisposition,
-      });
-      // Parse any unterminated final record before deciding whether its usage
-      // is complete. A clean exit alone cannot turn absent counters into zero.
-      await accountingLog.flush();
-      const retainedAccounting = consumeAccounting("");
-      await accountingLog.flush({ complete: proc.exitCode === 0 && !proc.timedOut && !proc.signal
-        && (retainedAccounting.usageComplete || retainedAccounting.costUsd != null) });
-      // Display output is capped by the process transport. Keep accounting
-      // from the full stream, including when no checkpoint callback is installed.
-      const parsed = parseOpenCodeJsonl(proc.stdout);
-      if (hasAccounting) {
-        const retained = consumeAccounting("");
-        parsed.usage = retained.usage;
-        parsed.usageReported = retained.usageReported;
-        parsed.usageComplete = retained.usageComplete;
-        parsed.costUsd = retained.costUsd;
+      const runtimeSessionParams = parseObject(runtime.sessionParams);
+      const runtimeSessionId = atlas ? "" : asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
+      const runtimeSessionCwd = asString(runtimeSessionParams.cwd, "");
+      const runtimeRemoteExecution = parseObject(runtimeSessionParams.remoteExecution);
+      const canResumeSession =
+        runtimeSessionId.length > 0 &&
+        !runtimeSessionId.startsWith("ses_external_") &&
+        !runtimeSessionParams.managedBackendID &&
+        (runtimeSessionCwd.length === 0 || path.resolve(runtimeSessionCwd) === path.resolve(effectiveExecutionCwd)) &&
+        adapterExecutionTargetSessionMatches(runtimeRemoteExecution, runtimeExecutionTarget);
+      const sessionId = canResumeSession ? runtimeSessionId : null;
+      if (executionTargetIsRemote && runtimeSessionId && !canResumeSession) {
+        await onLog(
+          "stdout",
+          `[paperclip] OpenCode session "${runtimeSessionId}" does not match the current remote execution identity and will not be resumed in "${effectiveExecutionCwd}". Starting a fresh remote session.\n`,
+        );
+      } else if (runtimeSessionId && !canResumeSession) {
+        await onLog(
+          "stdout",
+          `[paperclip] OpenCode session "${runtimeSessionId}" was saved for cwd "${runtimeSessionCwd}" and will not be resumed in "${effectiveExecutionCwd}".\n`,
+        );
       }
-      return { proc, rawStderr: proc.stderr, parsed };
-    };
+      const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
+      const resolvedInstructionsFilePath = instructionsFilePath
+        ? path.resolve(cwd, instructionsFilePath)
+        : "";
+      const instructionsDir = resolvedInstructionsFilePath ? `${path.dirname(resolvedInstructionsFilePath)}/` : "";
+      let instructionsPrefix = "";
+      if (resolvedInstructionsFilePath) {
+        try {
+          const instructionsContents = await fs.readFile(resolvedInstructionsFilePath, "utf8");
+          instructionsPrefix =
+            `${instructionsContents}\n\n` +
+            `The above agent instructions were loaded from ${resolvedInstructionsFilePath}. ` +
+            `Resolve any relative file references from ${instructionsDir}.\n\n`;
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          await onLog(
+            "stdout",
+            `[paperclip] Warning: could not read agent instructions file "${resolvedInstructionsFilePath}": ${reason}\n`,
+          );
+        }
+      }
 
-    const toResult = (
-      attempt: {
-        proc: { exitCode: number | null; signal: string | null; timedOut: boolean; stdout: string; stderr: string; errorCode?: string | null };
-        rawStderr: string;
-        parsed: ReturnType<typeof parseOpenCodeJsonl>;
-      },
-      clearSessionOnMissingSession = false,
-    ): AdapterExecutionResult => {
-      if (attempt.proc.timedOut) {
+      const commandNotes = (() => {
+        const notes = [...preparedRuntimeConfig.notes];
+        if (!resolvedInstructionsFilePath) return notes;
+        if (instructionsPrefix.length > 0) {
+          notes.push(`Loaded agent instructions from ${resolvedInstructionsFilePath}`);
+          notes.push(
+            `Prepended instructions + path directive to stdin prompt (relative references from ${instructionsDir}).`,
+          );
+          return notes;
+        }
+        notes.push(
+          `Configured instructionsFilePath ${resolvedInstructionsFilePath}, but file could not be read; continuing without injected instructions.`,
+        );
+        return notes;
+      })();
+
+      const bootstrapPromptTemplate = asString(config.bootstrapPromptTemplate, "");
+      const templateData = {
+        agentId: agent.id,
+        companyId: agent.companyId,
+        runId,
+        company: { id: agent.companyId },
+        agent,
+        run: { id: runId, source: "on_demand" },
+        context,
+      };
+      const buildPrompt = (resumedSession: boolean) => {
+        const renderedBootstrapPrompt =
+          !resumedSession && bootstrapPromptTemplate.trim().length > 0
+            ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
+            : "";
+        const { taskContextNote, wakePrompt } = selectPaperclipPromptSections(context, {
+          resumedSession,
+          includeCommunicationGuidance: false,
+        });
+        const shouldUseResumeDeltaPrompt = resumedSession && wakePrompt.length > 0;
+        const renderedPrompt = shouldUseResumeDeltaPrompt || isPaperclipRecoveryWakePayload(context.paperclipWake)
+          ? ""
+          : renderTemplate(promptTemplate, templateData);
+        const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
+        const basePrompt = joinPromptSections([
+          instructionsPrefix,
+          renderedBootstrapPrompt,
+          wakePrompt,
+          taskContextNote,
+          sessionHandoffNote,
+          renderedPrompt,
+        ]);
         return {
-          exitCode: attempt.proc.exitCode,
+          basePrompt,
+          promptMetrics: {
+            promptChars: basePrompt.length,
+            instructionsChars: instructionsPrefix.length,
+            bootstrapPromptChars: renderedBootstrapPrompt.length,
+            wakePromptChars: wakePrompt.length,
+            taskContextChars: taskContextNote.length,
+            sessionHandoffChars: sessionHandoffNote.length,
+            heartbeatPromptChars: renderedPrompt.length,
+          },
+        };
+      };
+
+      // Optional diagnostic: surface OpenCode's own logs on stderr (captured into the
+      // run result) so failures that OpenCode otherwise wraps as an opaque
+      // "Unexpected server error" can be diagnosed in remote/sandbox runs where the
+      // log file is unreachable. Toggle via PAPERCLIP_OPENCODE_PRINT_LOGS (run env,
+      // then process env).
+      const printLogs = !atlas && isTruthyEnvFlag(
+        env.PAPERCLIP_OPENCODE_PRINT_LOGS ?? process.env.PAPERCLIP_OPENCODE_PRINT_LOGS,
+      );
+      const buildArgs = (resumeSessionId: string | null) => {
+        if (atlasArgs) return atlasArgs;
+        const args = ["run", "--format", "json"];
+        if (printLogs) args.push("--print-logs");
+        if (resumeSessionId) args.push("--session", resumeSessionId);
+        if (model) args.push("--model", model);
+        const modelHasVariant = model !== openCodeCatalogModelId(model);
+        if (variant && !modelHasVariant) args.push("--variant", variant);
+        // OpenCode prefers the inherited PWD over process.cwd(). Use the realized
+        // workspace unless the operator already selected a directory explicitly.
+        const optionTerminator = extraArgs.indexOf("--");
+        const extraOptionArgs = optionTerminator === -1 ? extraArgs : extraArgs.slice(0, optionTerminator);
+        if (executionTargetIsRemote && !modelHasVariant && !extraOptionArgs.some((arg) => arg === "--dir" || arg.startsWith("--dir="))) {
+          args.push("--dir", effectiveExecutionCwd);
+        }
+        // Attach only this run's assets; never install into a shared personal home.
+        for (const skill of selectedSkills) {
+          const paths = executionTargetIsRemote ? path.posix : path;
+          args.push("--file", paths.join(effectiveSkillsDir, skill.runtimeName, "SKILL.md"));
+        }
+        if (extraArgs.length > 0) args.push(...extraArgs);
+        return args;
+      };
+
+      // Remote targets receive only the prepared environment, never host keys.
+      const accountingEnv = executionTargetIsRemote ? preparedRuntimeConfig.env : runtimeEnv;
+      const runAttempt = async (resumeSessionId: string | null) => {
+        await hydrateFreshSessionHandoff(ctx, { resumedSession: Boolean(resumeSessionId) });
+        const { basePrompt, promptMetrics } = buildPrompt(Boolean(resumeSessionId));
+        const prompt = joinPromptSections([
+          selectInitialCommunicationGuidance(context, { resumedSession: Boolean(resumeSessionId) }),
+          basePrompt,
+        ]);
+        const args = buildArgs(resumeSessionId);
+        if (onMeta) {
+          await onMeta({
+            adapterType: "opencode_local",
+            command: resolvedCommand,
+            cwd: effectiveExecutionCwd,
+            commandNotes,
+            commandArgs: [...args, `<stdin prompt ${prompt.length} chars>`],
+            env: loggedEnv,
+            prompt,
+            promptMetrics: { ...promptMetrics, promptChars: prompt.length },
+            context,
+          });
+        }
+
+        const consumeAccounting = createOpenCodeJsonlParser();
+        let hasAccounting = false;
+        const accountingLog = createUsageCheckpointLog(onLog, ctx.onUsage ?? (async () => {}), stdout => {
+          hasAccounting = true;
+          const parsed = consumeAccounting(stdout);
+          const provider = parseModelProvider(model || null);
+          return { usage: parsed.usageReported ? parsed.usage : undefined, costUsd: parsed.costUsd,
+            costStatus: parsed.usageComplete || parsed.costUsd != null ? undefined : "unpriced",
+            usageBasis: "per_run", provider, biller: resolveOpenCodeBiller(accountingEnv, provider), billingType: apiKeyBillingType(provider, accountingEnv), model, complete: false };
+        });
+        const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
+          onProcessStopped: providerStop.beginInvocation(),
+          // Keep a long sandbox run off the synchronous command HTTP request.
+          // Probes and preparation keep their existing execution paths.
+          ...(runtimeExecutionTarget?.kind === "remote" && runtimeExecutionTarget.transport === "sandbox"
+            && runtimeExecutionTarget.providerKey === "daytona" ? { useSession: true } : {}),
+          cwd: atlas ? effectiveExecutionCwd : cwd,
+          env: preparedRuntimeConfig.env,
+          stdin: prompt,
+          timeoutSec,
+          graceSec,
+          onSpawn,
+          onRuntimeProgress: ctx.onRuntimeProgress,
+          onLog: accountingLog,
+          runLogTail: paperclipBridge?.runLogTail,
+          settleRunDisposition: paperclipBridge?.settleRunDisposition,
+        });
+        // Parse any unterminated final record before deciding whether its usage
+        // is complete. A clean exit alone cannot turn absent counters into zero.
+        await accountingLog.flush();
+        const retainedAccounting = consumeAccounting("");
+        await accountingLog.flush({ complete: proc.exitCode === 0 && !proc.timedOut && !proc.signal
+          && (retainedAccounting.usageComplete || retainedAccounting.costUsd != null) });
+        // Display output is capped by the process transport. Keep accounting
+        // from the full stream, including when no checkpoint callback is installed.
+        const parsed = parseOpenCodeJsonl(proc.stdout);
+        if (hasAccounting) {
+          const retained = consumeAccounting("");
+          parsed.usage = retained.usage;
+          parsed.usageReported = retained.usageReported;
+          parsed.usageComplete = retained.usageComplete;
+          parsed.costUsd = retained.costUsd;
+        }
+        return { proc, rawStderr: proc.stderr, parsed };
+      };
+
+      const toResult = (
+        attempt: {
+          proc: { exitCode: number | null; signal: string | null; timedOut: boolean; stdout: string; stderr: string; errorCode?: string | null };
+          rawStderr: string;
+          parsed: ReturnType<typeof parseOpenCodeJsonl>;
+        },
+        clearSessionOnMissingSession = false,
+      ): AdapterExecutionResult => {
+        if (attempt.proc.timedOut) {
+          return {
+            exitCode: attempt.proc.exitCode,
+            signal: attempt.proc.signal,
+            timedOut: true,
+            usageComplete: false,
+            usage: attempt.parsed.usageReported ? attempt.parsed.usage : undefined,
+            usageBasis: "per_run",
+            provider: parseModelProvider(model || null),
+            biller: resolveOpenCodeBiller(accountingEnv, parseModelProvider(model || null)),
+            model,
+            billingType: apiKeyBillingType(parseModelProvider(model || null), accountingEnv),
+            costUsd: attempt.parsed.costUsd,
+            costStatus: attempt.parsed.usageComplete || attempt.parsed.costUsd != null ? undefined : "unpriced",
+            // A provider or output-observation timeout can arrive before the
+            // configured execution deadline. The boolean does not prove which
+            // timer fired, and provider stderr is not safe exception text.
+            errorMessage: "OpenCode execution timed out",
+            resultJson: { adapterExecutionTimeout },
+            clearSession: clearSessionOnMissingSession,
+          };
+        }
+
+        const resolvedSessionId =
+          attempt.parsed.sessionId ??
+          (clearSessionOnMissingSession ? null : sessionId);
+        const resolvedSessionParams = resolvedSessionId
+          ? ({
+              sessionId: resolvedSessionId,
+              cwd: effectiveExecutionCwd,
+              ...(workspaceId ? { workspaceId } : {}),
+              ...(workspaceRepoUrl ? { repoUrl: workspaceRepoUrl } : {}),
+              ...(workspaceRepoRef ? { repoRef: workspaceRepoRef } : {}),
+              ...(executionTargetIsRemote
+                ? {
+                    remoteExecution: adapterExecutionTargetSessionIdentity(runtimeExecutionTarget),
+                  }
+                : {}),
+            } as Record<string, unknown>)
+          : null;
+
+        const parsedError = typeof attempt.parsed.errorMessage === "string" ? attempt.parsed.errorMessage.trim() : "";
+        const stderrLine = firstNonEmptyLine(attempt.proc.stderr);
+        const rawExitCode = attempt.proc.exitCode;
+        const synthesizedExitCode = parsedError && (rawExitCode ?? 0) === 0 ? 1 : rawExitCode;
+        const fallbackErrorMessage =
+          parsedError ||
+          stderrLine ||
+          `OpenCode exited with code ${synthesizedExitCode ?? -1}`;
+        const modelId = model || null;
+
+        return {
+          exitCode: synthesizedExitCode,
           signal: attempt.proc.signal,
-          timedOut: true,
-          usageComplete: false,
-          usage: attempt.parsed.usageReported ? attempt.parsed.usage : undefined,
+          timedOut: false,
+          usageComplete: attempt.proc.exitCode === 0 && !attempt.proc.signal
+            && (attempt.parsed.usageComplete || attempt.parsed.costUsd != null),
           usageBasis: "per_run",
-          provider: parseModelProvider(model || null),
-          biller: resolveOpenCodeBiller(accountingEnv, parseModelProvider(model || null)),
-          model,
-          billingType: apiKeyBillingType(parseModelProvider(model || null), accountingEnv),
+          errorMessage: (synthesizedExitCode ?? 0) === 0 ? null : fallbackErrorMessage,
+          // Forward the transport-level error code from the run-disposition seam.
+          // A lost duplex control channel surfaces the typed `duplex_channel_lost`
+          // code; every other result carries no code here.
+          errorCode: attempt.proc.errorCode ?? null,
+          usage: attempt.parsed.usageReported ? attempt.parsed.usage : undefined,
+          sessionId: resolvedSessionId,
+          sessionParams: resolvedSessionParams,
+          sessionDisplayId: resolvedSessionId,
+          provider: parseModelProvider(modelId),
+          biller: resolveOpenCodeBiller(accountingEnv, parseModelProvider(modelId)),
+          model: modelId,
+          billingType: apiKeyBillingType(parseModelProvider(modelId), accountingEnv),
           costUsd: attempt.parsed.costUsd,
           costStatus: attempt.parsed.usageComplete || attempt.parsed.costUsd != null ? undefined : "unpriced",
-          // A provider or output-observation timeout can arrive before the
-          // configured execution deadline. The boolean does not prove which
-          // timer fired, and provider stderr is not safe exception text.
-          errorMessage: "OpenCode execution timed out",
-          resultJson: { adapterExecutionTimeout },
-          clearSession: clearSessionOnMissingSession,
+          resultJson: {
+            adapterExecutionTimeout,
+            stdout: attempt.proc.stdout,
+            stderr: attempt.proc.stderr,
+          },
+          summary: attempt.parsed.summary,
+          clearSession: Boolean((clearSessionOnMissingSession || (runtimeSessionId && !canResumeSession)) && !attempt.parsed.sessionId),
         };
-      }
-
-      const resolvedSessionId =
-        attempt.parsed.sessionId ??
-        (clearSessionOnMissingSession ? null : sessionId);
-      const resolvedSessionParams = resolvedSessionId
-        ? ({
-            sessionId: resolvedSessionId,
-            cwd: effectiveExecutionCwd,
-            ...(workspaceId ? { workspaceId } : {}),
-            ...(workspaceRepoUrl ? { repoUrl: workspaceRepoUrl } : {}),
-            ...(workspaceRepoRef ? { repoRef: workspaceRepoRef } : {}),
-            ...(executionTargetIsRemote
-              ? {
-                  remoteExecution: adapterExecutionTargetSessionIdentity(runtimeExecutionTarget),
-                }
-              : {}),
-          } as Record<string, unknown>)
-        : null;
-
-      const parsedError = typeof attempt.parsed.errorMessage === "string" ? attempt.parsed.errorMessage.trim() : "";
-      const stderrLine = firstNonEmptyLine(attempt.proc.stderr);
-      const rawExitCode = attempt.proc.exitCode;
-      const synthesizedExitCode = parsedError && (rawExitCode ?? 0) === 0 ? 1 : rawExitCode;
-      const fallbackErrorMessage =
-        parsedError ||
-        stderrLine ||
-        `OpenCode exited with code ${synthesizedExitCode ?? -1}`;
-      const modelId = model || null;
-
-      return {
-        exitCode: synthesizedExitCode,
-        signal: attempt.proc.signal,
-        timedOut: false,
-        usageComplete: attempt.proc.exitCode === 0 && !attempt.proc.signal
-          && (attempt.parsed.usageComplete || attempt.parsed.costUsd != null),
-        usageBasis: "per_run",
-        errorMessage: (synthesizedExitCode ?? 0) === 0 ? null : fallbackErrorMessage,
-        // Forward the transport-level error code from the run-disposition seam.
-        // A lost duplex control channel surfaces the typed `duplex_channel_lost`
-        // code; every other result carries no code here.
-        errorCode: attempt.proc.errorCode ?? null,
-        usage: attempt.parsed.usageReported ? attempt.parsed.usage : undefined,
-        sessionId: resolvedSessionId,
-        sessionParams: resolvedSessionParams,
-        sessionDisplayId: resolvedSessionId,
-        provider: parseModelProvider(modelId),
-        biller: resolveOpenCodeBiller(accountingEnv, parseModelProvider(modelId)),
-        model: modelId,
-        billingType: apiKeyBillingType(parseModelProvider(modelId), accountingEnv),
-        costUsd: attempt.parsed.costUsd,
-        costStatus: attempt.parsed.usageComplete || attempt.parsed.costUsd != null ? undefined : "unpriced",
-        resultJson: {
-          adapterExecutionTimeout,
-          stdout: attempt.proc.stdout,
-          stderr: attempt.proc.stderr,
-        },
-        summary: attempt.parsed.summary,
-        clearSession: Boolean((clearSessionOnMissingSession || (runtimeSessionId && !canResumeSession)) && !attempt.parsed.sessionId),
       };
-    };
 
-    try {
       const initial = await runAttempt(sessionId);
       const initialFailed =
         !initial.proc.timedOut && ((initial.proc.exitCode ?? 0) !== 0 || Boolean(initial.parsed.errorMessage));
@@ -811,10 +824,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       try {
         await providerStop.collectBeforeRestore();
       } finally {
-        await Promise.all([
-          paperclipBridge?.stop(),
-          restoreRemoteWorkspace?.(),
-        ]);
+        try {
+          await paperclipBridge?.stop();
+        } finally {
+          await restoreRemoteWorkspace?.();
+        }
       }
     }
   } finally {

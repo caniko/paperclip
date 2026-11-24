@@ -63,3 +63,18 @@ Focused hosted checks cover executor selection, the session codec, cross-issue
 controller continuity, reset fencing and uncertain admission/recovery.
 Full application qualification remains required before
 using a successor source in deployment.
+
+## Run-log replay and Stop
+
+Sequenced Hermes SSE frames deduplicate on provider-run identity and sequence.
+The versioned `providerSource.canonicalPayload` digest covers the complete
+canonical wire payload, not its redacted display text. A changed replay is
+rejected and the adapter requests Stop before releasing execution ownership.
+The receipts stay in the instance database.
+
+Cancellable runs require durable admission checkpoints, including ordinary
+runs without workspace bindings. Stop cancels a stalled acknowledgement, then
+fences uncertain admission using the original idempotency key and request body
+with a separate bounded signal. Graceful shutdown joins the live Stop control:
+ownership remains until the target confirms settlement, and shutdown does not
+launch a successor.

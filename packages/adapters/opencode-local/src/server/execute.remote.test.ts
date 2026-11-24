@@ -47,8 +47,8 @@ const {
   resolveCommandForLogs: vi.fn(async () => "ssh://fixture@127.0.0.1:2222/remote/workspace :: opencode"),
   prepareWorkspaceForSshExecution: vi.fn(async () => ({ gitBacked: false })),
   restoreWorkspaceFromSshExecution: vi.fn(async () => undefined),
-  runSshCommand: vi.fn(async () => ({
-    stdout: "/home/agent",
+  runSshCommand: vi.fn(async (_spec?: unknown, command?: string) => ({
+    stdout: command?.includes("mktemp -d") ? "/tmp/paperclip-ssh-runtime.opencode" : "/home/agent",
     stderr: "",
     exitCode: 0,
   })),
@@ -128,7 +128,7 @@ describe("opencode remote execution", () => {
     }
   });
 
-  it.each(["protected", "missing", "unprotected", "setup-failure", "staging-failure", "managed"])(
+  it.each(["protected", "missing", "unprotected", "setup-failure", "staging-failure", "probe-failure", "managed"])(
     "fences Atlas execution and its unauthenticated model probe (%s)", async (outcome) => {
       const workspace = await mkdtemp(path.join(os.tmpdir(), "opencode-atlas-scratch-"));
       cleanupDirs.push(workspace);
@@ -157,6 +157,12 @@ describe("opencode remote execution", () => {
       if (outcome === "staging-failure") {
         syncDirectoryToSsh.mockImplementationOnce(async () => {}).mockRejectedValueOnce(new Error("asset staging failed"));
       }
+      if (outcome === "probe-failure") {
+        runChildProcess.mockResolvedValueOnce({
+          exitCode: 1, signal: null, timedOut: false, stdout: "", stderr: "fixture probe failure",
+          pid: 122, startedAt: new Date().toISOString(),
+        });
+      }
       const remoteCwd = "/remote/atlas";
       const result = execute({
         runId: "atlas-run", agent: { id: "agent-1", companyId: "company-1", name: "Fixture", adapterType: "opencode_local", adapterConfig: {} },
@@ -177,7 +183,8 @@ describe("opencode remote execution", () => {
       } else {
         await expect(result).rejects.toThrow(outcome === "managed" ? /standalone/i
           : outcome === "staging-failure" ? "asset staging failed"
-          : outcome === "setup-failure" ? "bridge setup failed" : "protected callback bridge");
+          : outcome === "setup-failure" ? "bridge setup failed"
+          : outcome === "probe-failure" ? "Atlas OpenCode model probe failed" : "protected callback bridge");
       }
       expect(prepareWorkspaceForSshExecution).not.toHaveBeenCalled();
       expect(restoreWorkspaceFromSshExecution).not.toHaveBeenCalled();
@@ -197,6 +204,11 @@ describe("opencode remote execution", () => {
         expect.objectContaining({ cwd: attemptDir, env: { OPENCODE_DISABLE_PROJECT_CONFIG: "1" }, remoteExecution: expect.objectContaining({
           remoteCwd: attemptDir, atlas: expect.objectContaining({ adapterType: "opencode_local", probe: true }),
         }) }));
+      if (outcome === "probe-failure") {
+        expect(runChildProcess).toHaveBeenCalledTimes(1);
+        expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
+        return;
+      }
       expect(startAdapterExecutionTargetPaperclipBridge).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
         hostApiToken: hostToken, target: expect.objectContaining({ remoteCwd: attemptDir }),
       }));
@@ -253,6 +265,7 @@ describe("opencode remote execution", () => {
     const workspaceDir = path.join(rootDir, "workspace");
     const alternateWorkspaceDir = path.join(rootDir, "workspace-other");
     const managedRemoteWorkspace = "/remote/workspace/.paperclip-runtime/runs/run-1/workspace";
+    const runtimeRoot = managed ? "/tmp/paperclip-ssh-runtime.opencode" : `${managedRemoteWorkspace}/.paperclip-runtime/opencode`;
     await mkdir(workspaceDir, { recursive: true });
     await mkdir(alternateWorkspaceDir, { recursive: true });
     await mkdir(path.join(rootDir, "config", "git"), { recursive: true });
@@ -312,6 +325,7 @@ describe("opencode remote execution", () => {
       },
       executionTransport: {
         remoteExecution: {
+          useHostAuth: !managed,
           host: "127.0.0.1",
           port: 2222,
           username: "fixture",
@@ -341,13 +355,19 @@ describe("opencode remote execution", () => {
     expect(stagedConfigEntries).toContain("opencode");
     expect(stagedConfigEntries).not.toContain("git");
     expect(syncDirectoryToSsh).toHaveBeenCalledWith(expect.objectContaining({
-      remoteDir: `${managedRemoteWorkspace}/.paperclip-runtime/opencode/xdgConfig`,
+      remoteDir: `${runtimeRoot}/xdgConfig`,
     }));
     expect(syncDirectoryToSsh).toHaveBeenCalledWith(expect.objectContaining({
-      remoteDir: `${managedRemoteWorkspace}/.paperclip-runtime/opencode/skills`,
+      remoteDir: `${runtimeRoot}/skills`,
       followSymlinks: true,
     }));
-    expect(runSshCommand).not.toHaveBeenCalled();
+    if (managed) {
+      expect(runSshCommand).toHaveBeenCalledTimes(2);
+      expect(runSshCommand).toHaveBeenNthCalledWith(1, expect.anything(), expect.stringContaining("mktemp -d"), expect.anything());
+      expect(runSshCommand).toHaveBeenNthCalledWith(2, expect.anything(), `rm -rf -- '${runtimeRoot}'`, expect.anything());
+    } else {
+      expect(runSshCommand).not.toHaveBeenCalled();
+    }
     const runCall = runChildProcess.mock.calls.find((entry) => Array.isArray(entry[2]) && entry[2].includes("run")) as
       | [string, string, string[], { env: Record<string, string>; remoteExecution?: { remoteCwd: string } | null }]
       | undefined;
@@ -360,12 +380,14 @@ describe("opencode remote execution", () => {
     // original target remoteCwd — the per-run subdirectory is layered
     // underneath via XDG/runtime config rather than by switching the cwd.
     expect(modelProbeCall?.[3].env.XDG_CONFIG_HOME).toBe(
-      `${managedRemoteWorkspace}/.paperclip-runtime/opencode/xdgConfig`,
+      `${runtimeRoot}/xdgConfig`,
     );
     expect(modelProbeCall?.[3].remoteExecution?.remoteCwd).toBe("/remote/workspace");
     expect(runCall).toBeDefined();
     expect(runCall![2].slice(-2)).toEqual(["--", "--dir"]);
-    expect(runCall![2].filter((arg) => arg === "--dir")).toHaveLength(1);
+    const options = runCall![2].slice(0, -2);
+    expect(options.filter((arg) => arg === "--dir")).toHaveLength(1);
+    expect(options[options.indexOf("--dir") + 1]).toBe(managedRemoteWorkspace);
     expect(runCall![3].env.PWD).toBe(managedRemoteWorkspace);
     expect(modelProbeCall).toBeDefined();
     expect(modelProbeCall![3].env.PWD).toBe(managedRemoteWorkspace);
@@ -374,10 +396,10 @@ describe("opencode remote execution", () => {
       | undefined;
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_CWD).toBe(managedRemoteWorkspace);
     const skillFiles = call?.[2].flatMap((arg, index, args) => arg === "--file" ? [args[index + 1]] : []);
-    expect(skillFiles).toContain(`${managedRemoteWorkspace}/.paperclip-runtime/opencode/skills/paperclip/SKILL.md`);
-    expect(skillFiles?.every(file => file?.startsWith(`${managedRemoteWorkspace}/.paperclip-runtime/opencode/skills/`))).toBe(true);
+    expect(skillFiles).toContain(`${runtimeRoot}/skills/paperclip/SKILL.md`);
+    expect(skillFiles?.every(file => file?.startsWith(`${runtimeRoot}/skills/`))).toBe(true);
     if (managed) {
-      const home = `${managedRemoteWorkspace}/.paperclip-runtime/opencode/managed-auth/run-1`;
+      const home = `${runtimeRoot}/managed-auth/run-1`;
       expect(call?.[3].env.HOME).toBe(home);
       expect(call?.[3].env.XDG_DATA_HOME).toBe(`${home}/data`);
       expect(modelProbeCall?.[3].env.XDG_DATA_HOME).toBe(`${home}/data`);
@@ -398,7 +420,7 @@ describe("opencode remote execution", () => {
     ]);
     expect(call?.[3].env.PAPERCLIP_API_URL).toBe("http://127.0.0.1:4310");
     expect(call?.[3].env.PAPERCLIP_API_BRIDGE_MODE).toBe("queue_v1");
-    expect(call?.[3].env.XDG_CONFIG_HOME).toBe(`${managedRemoteWorkspace}/.paperclip-runtime/opencode/xdgConfig`);
+    expect(call?.[3].env.XDG_CONFIG_HOME).toBe(`${runtimeRoot}/xdgConfig`);
     expect(call?.[3].remoteExecution?.remoteCwd).toBe(managedRemoteWorkspace);
     expect(startAdapterExecutionTargetPaperclipBridge).toHaveBeenCalledTimes(1);
     expect(restoreWorkspaceFromSshExecution).toHaveBeenCalledTimes(1);

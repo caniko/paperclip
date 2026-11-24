@@ -15,8 +15,9 @@
 
 import express from "express";
 import request from "supertest";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { authAccounts, createDb } from "@paperclipai/db";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
+import { authAccounts, authUsers, createDb } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -27,11 +28,6 @@ import type { Config } from "../config.js";
 const ORIGIN = "http://127.0.0.1:41999";
 const EMAIL = "founder@example.com";
 const PASSWORD = "correct-horse-battery-staple";
-
-// The issuer Better Auth stamps on an email/password account:
-// `createLocalAccountIssuer("credential")`. Sign-in matches on it, so a row
-// written with anything else is a row nobody can sign in as.
-const CREDENTIAL_ISSUER = "local:credential";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -94,7 +90,7 @@ describeEmbeddedPostgres("Better Auth credential sign-up against the real schema
     const signUp = await request(app)
       .post("/api/auth/sign-up/email")
       .set("origin", ORIGIN)
-      .send({ email: EMAIL, password: PASSWORD, name: "Founder" });
+      .send({ email: EMAIL, password: PASSWORD, name: "Founder", issuer: "client-forged-issuer" });
 
     // A missing `account` column fails here with a 500 and an empty body.
     expect(signUp.status).toBe(200);
@@ -107,9 +103,14 @@ describeEmbeddedPostgres("Better Auth credential sign-up against the real schema
     expect(accounts).toHaveLength(1);
     expect(accounts[0]).toMatchObject({
       providerId: "credential",
-      issuer: CREDENTIAL_ISSUER,
+      issuer: "local:credential",
     });
     expect(accounts[0]?.password).toBeTruthy();
+    // Frozen Better Auth 1.7.2 dist/api/routes/sign-in.mjs:320, SHA256
+    // 04b21b699fd3f63a6c437eaa8514bd22284a49117d428a037c84f9ab89764916.
+    const oldReaderAccount = accounts.find(account => account.providerId === "credential"
+      && account.issuer === "local:credential" && account.accountId === signUp.body.user.id);
+    expect(oldReaderAccount?.id).toBe(accounts[0]?.id);
 
     const signIn = await request(app)
       .post("/api/auth/sign-in/email")
@@ -119,5 +120,71 @@ describeEmbeddedPostgres("Better Auth credential sign-up against the real schema
     expect(signIn.status).toBe(200);
     expect(signIn.body?.user?.email).toBe(EMAIL);
     expect(sessionCookies(signIn).length).toBeGreaterThan(0);
+
+    await db.update(authAccounts).set({ issuer: null });
+    const nullableIssuerSignIn = await request(app)
+      .post("/api/auth/sign-in/email")
+      .set("origin", ORIGIN)
+      .send({ email: EMAIL, password: PASSWORD });
+    expect(nullableIssuerSignIn.status).toBe(200);
+    expect(nullableIssuerSignIn.body?.user?.email).toBe(EMAIL);
+
+    await expect(db.insert(authAccounts).values({ ...accounts[0]!, id: "duplicate-credential" }))
+      .rejects.toMatchObject({ cause: { code: "23505", constraint_name: "account_provider_account_id_uq" } });
+    await db.insert(authAccounts).values({ ...accounts[0]!, id: "other-provider", providerId: "other" });
+  });
+
+  it.each([
+    { localVerified: true, providerVerified: true, linked: true },
+    { localVerified: false, providerVerified: true, linked: false },
+    { localVerified: true, providerVerified: false, linked: false },
+  ])("links an OIDC board account only when both emails are verified ($localVerified/$providerVerified)", async ({
+    localVerified, providerVerified, linked,
+  }) => {
+    const id = `oidc-user-${localVerified}-${providerVerified}`;
+    const email = `${id}@example.com`;
+    const now = new Date();
+    await db.insert(authUsers).values({
+      id, email, name: "Board member", emailVerified: localVerified, createdAt: now, updatedAt: now,
+    });
+    const provider = "https://oidc.example.test";
+    vi.stubEnv("PAPERCLIP_AUTH_OIDC_CLIENT_SECRET", "test-client-secret");
+    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === `${provider}/token`) return Response.json({ access_token: "test-access-token", token_type: "Bearer" });
+      if (url === `${provider}/userinfo`) return Response.json({ sub: id, email, email_verified: providerVerified });
+      throw new Error("Discovery offline");
+    });
+    try {
+      const auth = createBetterAuthInstance(db, {
+        ...testConfig(),
+        authOidc: {
+          providerId: "board-oidc",
+          displayName: "Board OIDC",
+          clientId: "paperclip",
+          discoveryUrl: `${provider}/.well-known/openid-configuration`,
+          authorizationUrl: `${provider}/authorize`,
+          tokenUrl: `${provider}/token`,
+          userInfoUrl: `${provider}/userinfo`,
+        },
+      }, [ORIGIN]);
+      const oidcApp = express();
+      oidcApp.all("/api/auth/{*authPath}", createBetterAuthHandler(auth));
+      const browser = request.agent(oidcApp);
+      const start = await browser.post("/api/auth/sign-in/social").set("origin", ORIGIN)
+        .send({ provider: "board-oidc", callbackURL: ORIGIN });
+      expect(start.status).toBe(200);
+      const state = new URL(start.body.url).searchParams.get("state");
+      expect(state).toBeTruthy();
+      const callback = await browser.get("/api/auth/callback/board-oidc").query({ code: "test-code", state });
+      expect(callback.status).toBe(302);
+      expect(sessionCookies(callback).length > 0).toBe(linked);
+      const accounts = await db.select().from(authAccounts).where(eq(authAccounts.userId, id));
+      expect(accounts.map(({ providerId, accountId }) => ({ providerId, accountId })))
+        .toEqual(linked ? [{ providerId: "board-oidc", accountId: id }] : []);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    }
   });
 });

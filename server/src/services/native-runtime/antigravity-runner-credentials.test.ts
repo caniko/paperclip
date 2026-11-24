@@ -7,6 +7,8 @@ import { antigravityCredentialTurn, bindAntigravityCredentialTurn, bindAntigravi
 import { completeManagedNativeCredentialTurn } from "./managed-native-credentials.js";
 import type { NativeSession, createRunnerdCodexTransport } from "../../vendor/paperclip-runner/index.js";
 import { bindRetainedGoogleCredentialHome } from "../retained-google-credential-cleanup.js";
+import { AntigravityConnectionConfigurationError, antigravityConnectionRefusal } from "./antigravity-connection-policy.js";
+import { NATIVE_PROVIDER_STARTUP_REJECTED, nativeSessionFailureDisposition, nativeSessionFailureSourceCode } from "./native-session-executor.js";
 
 const copyFault = vi.hoisted(() => ({ phase: "", destination: "", source: "", collisionPath: "", failedRemoval: "", removals: [] as string[], hits: 0 }));
 vi.mock("./runner-api-files.js", async importOriginal => {
@@ -103,8 +105,40 @@ describe("Antigravity managed Runner credentials", () => {
     expect(await prepareAntigravityRunnerCredentials({ remote: false, managedHome, environment: { GEMINI_HOME: "/untrusted" } })).toEqual({
       home: managedHome, credential: credential("fixture-selected"), environment: { PAPERCLIP_ACPX_ANTIGRAVITY_AUTH_JSON_SECRET: credential("fixture-selected") },
     });
-    await expect(prepareAntigravityRunnerCredentials({ remote: true, managedHome, environment: {} })).rejects.toThrow("not qualified for remote");
-    await expect(prepareAntigravityRunnerCredentials({ remote: false, managedHome, environment: {}, lifecycleMode: "warm" })).rejects.toThrow("warm sessions are not qualified");
+    for (const [input, code] of [[{ remote: true, environment: {} }, "antigravity_remote_sign_in_unsupported"],
+      [{ remote: false, lifecycleMode: "warm" as const, environment: {} }, "antigravity_warm_unsupported"],
+      [{ remote: false, lifecycleMode: "warm" as const, environment: { GEMINI_API_KEY: "fixture-selected" } }, "antigravity_warm_unsupported"]] as const) {
+      const refusal = await prepareAntigravityRunnerCredentials({ managedHome, ...input }).catch(error => error);
+      // Configuration save and Test refuse this first; a run that still
+      // reaches it stops permanently by name instead of offering a Retry.
+      expect(refusal).toBeInstanceOf(AntigravityConnectionConfigurationError);
+      expect(refusal).toMatchObject({ code });
+      expect(refusal.message).toMatch(code === "antigravity_warm_unsupported" ? /^Google Antigravity runs one turn at a time\. Turn off warm sessions for this agent\.$/ : /Google API key/);
+      const failure = nativeSessionFailureSourceCode(refusal);
+      expect(failure).toBe(NATIVE_PROVIDER_STARTUP_REJECTED);
+      expect(nativeSessionFailureDisposition(1, new Date(), failure)).toMatchObject({ phase: "terminal_failure", failureCode: NATIVE_PROVIDER_STARTUP_REJECTED });
+    }
+  });
+  it("names the connection choices each target supports in both release states", () => {
+    expect(antigravityConnectionRefusal({ apiKey: true, remote: true, releasePending: false })).toBeNull();
+    // Per-turn is one contract for both routes: an API key does not enable warm.
+    for (const apiKey of [true, false]) {
+      expect(antigravityConnectionRefusal({ apiKey, remote: false, lifecycleMode: "warm", releasePending: false })?.code).toBe("antigravity_warm_unsupported");
+      expect(antigravityConnectionRefusal({ apiKey, remote: false, lifecycleMode: "per_turn", releasePending: false })).toBeNull();
+    }
+    expect(antigravityConnectionRefusal({ apiKey: false, remote: false, releasePending: false })).toBeNull();
+    expect(antigravityConnectionRefusal({ apiKey: false, remote: true, releasePending: false })?.message)
+      .toBe("Google sign-in for Google Antigravity works only on the Paperclip host. To run this agent in a cloud environment, connect a Google API key instead.");
+    expect(antigravityConnectionRefusal({ apiKey: true, remote: true, releasePending: true })?.code).toBe("antigravity_remote_unavailable");
+    expect(antigravityConnectionRefusal({ apiKey: false, remote: false, releasePending: true })).toBeNull();
+    // While pending, an operator's cloud grant admits an API key in a cloud environment, never Google sign-in.
+    expect(antigravityConnectionRefusal({ apiKey: true, remote: true, releasePending: true, remoteCandidateAdmitted: true })).toBeNull();
+    expect(antigravityConnectionRefusal({ apiKey: false, remote: true, releasePending: true, remoteCandidateAdmitted: true })?.code)
+      .toBe("antigravity_remote_sign_in_unsupported");
+    expect(antigravityConnectionRefusal({ apiKey: true, remote: true, releasePending: true, remoteCandidateAdmitted: false })?.code)
+      .toBe("antigravity_remote_unavailable");
+    expect(antigravityConnectionRefusal({ apiKey: true, remote: true, lifecycleMode: "warm", releasePending: true, remoteCandidateAdmitted: true })?.code)
+      .toBe("antigravity_warm_unsupported");
   });
   it.each(["symlink", "public", "invalid"])("rejects a %s selected token without using a fallback", async kind => {
     const managedHome = await home(), token = join(managedHome, "antigravity-acp", "acp_token.json");
@@ -169,7 +203,7 @@ describe("Antigravity managed Runner credentials", () => {
     expect(await readFile(destination, "utf8")).toBe(credential("fixture-refreshed"));
     await expect(access(source)).rejects.toMatchObject({ code: "ENOENT" });
   });
-  it("settles the retained runtime refresh before preparing another launch for the same account", async () => {
+  it("settles the retained runtime refresh before reusing its original home", async () => {
     const managedHome = await home(), runtimeHome = await home();
     const release = bindRetainedGoogleCredentialHome(managedHome, { companyId: "company", accountKey: managedHome });
     const destination = join(managedHome, "antigravity-acp", "acp_token.json");
@@ -182,7 +216,7 @@ describe("Antigravity managed Runner credentials", () => {
     try {
       await expect(completeManagedNativeCredentialTurn(session)).rejects.toThrow("destination is invalid");
       await expect(prepareAntigravityRunnerCredentials({ managedHome, remote: false, environment: {} }))
-        .rejects.toThrow("still completing credential cleanup");
+        .rejects.toMatchObject({ details: { code: "ai_credential_cleanup_pending" } });
       expect(await readFile(source, "utf8")).toBe(credential("fixture-refreshed"));
       await chmod(destination, 0o600);
       expect((await prepareAntigravityRunnerCredentials({ managedHome, remote: false, environment: {} })).credential)
@@ -191,7 +225,7 @@ describe("Antigravity managed Runner credentials", () => {
       await expect(access(source)).rejects.toMatchObject({ code: "ENOENT" });
     } finally { release(); }
   });
-  it.each(["turn completion", "direct close"])("retries original process proof after rejected %s before account reuse, without clearing session failure", async origin => {
+  it.each(["turn completion", "direct close"])("retries original process proof after rejected %s before reusing the original home, without clearing session failure", async origin => {
     const managedHome = await home(), runtimeHome = await home();
     const release = bindRetainedGoogleCredentialHome(managedHome, { companyId: "company-retirement", accountKey: managedHome });
     const destination = join(managedHome, "antigravity-acp", "acp_token.json"), source = join(runtimeHome, "antigravity-acp", "auth-refresh.json");
@@ -212,7 +246,7 @@ describe("Antigravity managed Runner credentials", () => {
     try {
       await expect(origin === "turn completion" ? completeManagedNativeCredentialTurn(session) : session.close({ reason: "direct close" })).rejects.toBe(terminal);
       await expect(prepareAntigravityRunnerCredentials({ managedHome, remote: false, environment: {} }))
-        .rejects.toThrow("still completing credential cleanup");
+        .rejects.toMatchObject({ details: { code: "ai_credential_cleanup_pending" } });
       expect(proof).toHaveBeenCalledOnce();
       expect(await readFile(source, "utf8")).toBe(credential("fixture-refreshed"));
       expect(await readFile(destination, "utf8")).toBe(credential("fixture-original"));

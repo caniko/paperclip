@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const spawn = vi.hoisted(() => vi.fn());
-vi.mock("node:child_process", () => ({ spawn }));
+vi.mock(import("node:child_process"), async (importOriginal) => ({ ...await importOriginal(), spawn }));
 
 import { runAdmissionCommand } from "./environment-overflow.js";
 

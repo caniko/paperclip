@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { resolveCargoBinary, resolveCargoTargetDirectory } from "../../scripts/cargo-artifacts.mjs";
 
+import type { LocalRunnerRunMetadata, LocalRunnerRunTrace } from "../contracts/local-runner.js";
 import {
   applyLocalRunnerLiveEvent,
   createLocalRunnerLiveSnapshot,
@@ -26,6 +27,16 @@ const binaries = {
   runnerBinaryPath: resolveCargoBinary({ binary: "paperclip-runnerd", targetDirectory }),
   fakeHarnessBinaryPath: resolveCargoBinary({ binary: "fake-harness", targetDirectory }),
 };
+
+function traceMetadata(trace: LocalRunnerRunTrace): LocalRunnerRunMetadata {
+  return {
+    schema: "paperclip.runner.local-runner.metadata.v1",
+    scenario: trace.scenario,
+    fixtureName: trace.fixtureName,
+    identity: trace.identity,
+    capabilities: trace.capabilities,
+  };
+}
 
 describe("Local runner and fake harness", { concurrent: false }, () => {
   it("runs the CLI with relative binary overrides from another cwd without Cargo", async () => {
@@ -148,7 +159,7 @@ describe("Local runner and fake harness", { concurrent: false }, () => {
       ),
     ).toBe(true);
     expect(
-      replayLocalRunnerEvents(trace, trace.events).timeline.find(
+      replayLocalRunnerEvents(traceMetadata(trace), trace.events).timeline.find(
         (event) => event.eventType === "harness.diagnostic",
       )?.summary,
     ).toBe(
@@ -202,7 +213,7 @@ describe("Local runner and fake harness", { concurrent: false }, () => {
 
   it("produces the same snapshot for validated live events and replay", async () => {
     const trace = await runLocalRunnerScenario({ ...binaries, scenario: "happy-path", delayMs: 1 });
-    let live = createLocalRunnerLiveSnapshot(trace);
+    let live = createLocalRunnerLiveSnapshot(traceMetadata(trace));
     for (const event of trace.events) {
       const next = applyLocalRunnerLiveEvent(live, event);
       expect(next.ok).toBe(true);
@@ -210,7 +221,7 @@ describe("Local runner and fake harness", { concurrent: false }, () => {
         live = next.snapshot;
       }
     }
-    const replay = replayLocalRunnerEvents(trace, trace.events);
+    const replay = replayLocalRunnerEvents(traceMetadata(trace), trace.events);
 
     expect(localRunnerSnapshotsMatch(live, replay)).toBe(true);
   });

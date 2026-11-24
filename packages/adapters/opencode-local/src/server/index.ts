@@ -1,3 +1,4 @@
+import { normalizeAdapterExecutionTargetSessionIdentity } from "@paperclipai/adapter-utils/execution-target";
 import type { AdapterSessionCodec } from "@paperclipai/adapter-utils";
 
 function readNonEmptyString(value: unknown): string | null {
@@ -38,11 +39,8 @@ function readRemoteIdentity(value: unknown): Record<string, unknown> | null | un
   const remoteCwd = readNonEmptyString(saved.remoteCwd);
   if (!remoteCwd?.startsWith("/")) return null;
   if (saved.transport === "ssh") {
-    const host = readNonEmptyString(saved.host),
-      username = readNonEmptyString(saved.username);
-    if (!host || !username || !Number.isInteger(saved.port) || Number(saved.port) < 1 || Number(saved.port) > 65535)
-      return null;
-    return { transport: "ssh", host, port: saved.port, username, remoteCwd };
+    if (saved.tailscaleIdentity !== undefined && !readNonEmptyString(saved.tailscaleIdentity)) return null;
+    return normalizeAdapterExecutionTargetSessionIdentity({ ...saved, remoteCwd });
   }
   if (saved.transport !== "sandbox") return null;
   if (![saved.providerKey, saved.environmentId, saved.leaseId].every((v) => v == null || typeof v === "string"))

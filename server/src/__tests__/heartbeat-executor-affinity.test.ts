@@ -152,8 +152,8 @@ describe("controller conversation executor affinity", () => {
     await db.insert(heartbeatRuns).values({ id: runId, companyId: fixture.companyId, agentId: fixture.agentId, issueId: fixture.first,
       status: "running", invocationSource: "manual", controllerBootId: legacyControllerBootId,
       controllerLeaseExpiresAt: sql`clock_timestamp() + interval '1 minute'`, contextSnapshot: { issueId: fixture.first } });
-    await db.insert(environmentLeases).values({ id: leaseId, companyId: fixture.companyId, agentId: fixture.agentId,
-      heartbeatRunId: runId, status: "active", provider: "local", scope: "run", metadata: {} });
+    await db.insert(environmentLeases).values({ id: leaseId, companyId: fixture.companyId,
+      heartbeatRunId: runId, status: "active", provider: "local", metadata: {} });
     const input = { companyId: fixture.companyId, agentId: fixture.agentId, adapterType: "hermes_gateway", scope: "agent" as const,
       taskKey: fixture.first, primaryEndpoint: `${origin}/atlas` };
     const affinity = await loadExecutionAffinity(db, input);
@@ -211,8 +211,8 @@ describe("controller conversation executor affinity", () => {
       await db.insert(heartbeatRuns).values({ id: runId, companyId: fixture.companyId, agentId: fixture.agentId,
         status: "running", invocationSource: "manual", controllerBootId: legacyControllerBootId,
         controllerLeaseExpiresAt: sql`clock_timestamp() + interval '1 minute'` });
-      await db.insert(environmentLeases).values({ id: leaseId, companyId: fixture.companyId, agentId: fixture.agentId,
-        heartbeatRunId: runId, status: "active", provider: "local", scope: "run", metadata: {} });
+      await db.insert(environmentLeases).values({ id: leaseId, companyId: fixture.companyId,
+        heartbeatRunId: runId, status: "active", provider: "local", metadata: {} });
       return { companyId: fixture.companyId, runId, leaseId, adapterType: "hermes_gateway", checkpoint: { body: "immutable" } };
     }
     const first = await preparing(), second = await preparing();

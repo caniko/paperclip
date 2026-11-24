@@ -1150,6 +1150,12 @@ describe("sandbox adapter execution targets", () => {
       expect(terminal).toEqual([
         `[paperclip] ACP process session terminal: source=remote_event outcome=${exitCode === null ? "error" : "exit"} exitCode=${exitCode ?? "unknown"} signal=unknown.\n`,
       ]);
+      expect(bridge!.readTerminalEvidence?.()).toEqual({
+        source: "remote_event",
+        outcome: exitCode === null ? "error" : "exit",
+        exitCode: exitCode ?? "unknown",
+        signal: "unknown",
+      });
       if (exitCode === null) {
         expect(result.stdout).toBe("");
         expect(result.stderr).toContain("ENOENT");
@@ -1337,6 +1343,9 @@ describe("sandbox adapter execution targets", () => {
         if (!authenticated) expect(logs).toEqual([]);
       }
       await waitForCondition(() => logs.length === 1, "Missing proxy-close diagnostic.");
+      expect(bridge!.readTerminalEvidence?.()).toEqual({
+        source: "proxy_close", outcome: "error", exitCode: "unknown", signal: "unknown",
+      });
       await bridge!.stop();
       expect(logs.filter((line) => line.includes("ACP process session terminal:"))).toEqual([
         "[paperclip] ACP process session terminal: source=proxy_close outcome=error exitCode=unknown signal=unknown.\n",

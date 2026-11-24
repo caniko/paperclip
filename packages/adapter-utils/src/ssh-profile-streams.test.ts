@@ -22,7 +22,7 @@ let spec: SshRemoteExecutionSpec;
 beforeEach(async (context) => {
   if (process.platform === "win32") context.skip("Requires a POSIX shell");
   const tools = new Map<string, string>();
-  for (const command of ["sh", "git", "tar", "mkdir", "mktemp", "cat", "rm", "env"]) {
+  for (const command of ["sh", "base64", "git", "tar", "mkdir", "mktemp", "cat", "rm", "env"]) {
     const resolved = await execFileAsync("sh", ["-c", 'command -v "$1"', "ssh-profile-test", command])
       .then(({ stdout }) => stdout.trim(), () => "");
     if (!resolved) context.skip(`Missing required command: ${command}`);
@@ -37,6 +37,7 @@ beforeEach(async (context) => {
     await mkdir(directory);
   }
   await symlink(tools.get("sh")!, path.join(bootstrapBin, "sh"));
+  await symlink(tools.get("base64")!, path.join(bootstrapBin, "base64"));
   for (const [name, executable] of tools) {
     await symlink(executable, path.join(profileBin, name));
   }
@@ -53,8 +54,8 @@ beforeEach(async (context) => {
     `if IFS= read -r line; then printf consumed > ${quote(path.join(root, "consumed"))}; fi`,
     "",
   ].join("\n"));
-  // Replace only the transport. Real sh, tar and git execute the exact last
-  // SSH argument with tools unavailable until the remote profile runs.
+  // Replace only the transport. sh and the stdin decoder bootstrap the command;
+  // tar and git are unavailable until the remote profile runs.
   const nodePath = path.join(root, "node 'with spaces'");
   await symlink(process.execPath, nodePath);
   const launcher = path.join(localBin, "ssh.cjs");
@@ -164,7 +165,9 @@ describe("SSH login profiles and transfer streams", () => {
       env: { PROFILE_VALUE: "explicit" },
     });
     try {
-      const output = await execFileAsync(target.command, target.args);
+      const execution = execFileAsync(target.command, target.args, { timeout: 5_000 });
+      execution.child.stdin?.end(target.stdinPrefix);
+      const output = await execution;
       expect(output.stdout).toBe("explicit");
       expect(output.stderr).toBe("");
     } finally {
