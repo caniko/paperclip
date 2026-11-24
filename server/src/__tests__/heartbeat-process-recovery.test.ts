@@ -4887,36 +4887,79 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
   });
 
-  it("fences native selection when cancellation wins during preparation", async () => {
+  it.each([false, true])("fences native selection when cancellation wins during preparation (unverified cleanup: %s)", async unverifiedCleanup => {
     await withTempPaperclipHome(async () => {
       const { companyId, agentId, issueId, runId } = await seedQueuedIssueRunFixture();
       await db.update(agents).set({ adapterType: "paperclip_runner",
         adapterConfig: { provider: "codex", model: "gpt-5.6-luna" },
       }).where(eq(agents.id, agentId));
       const factory = vi.fn(() => { throw new Error("provider must not start"); });
-      let reachedSelection = false;
+      const reachedSelection = Promise.withResolvers<void>();
+      const resumeSelection = Promise.withResolvers<void>();
+      const originalOrchestrator = environmentOrchestrator.environmentRunOrchestrator;
+      const releaseOverride = unverifiedCleanup
+        ? vi.spyOn(environmentOrchestrator, "environmentRunOrchestrator").mockImplementation((...args) => ({
+          ...originalOrchestrator(...args), releaseForRun: async () => ({ released: [], errors: [] }),
+        }))
+        : undefined;
       const heartbeat = heartbeatService(db, {
         nativeSessionBackendFactory: factory,
-        beforeNativeRuntimeSelection: async id => {
-          reachedSelection = true;
-          await heartbeat.cancelRun(id);
-          const [preparingTask] = await db.select().from(issues).where(eq(issues.id, issueId));
-          expect(preparingTask.executionRunId).toBe(id);
-          expect((await heartbeat.getRun(id))?.resultJson?.startupPreparationSettledAt).toBeUndefined();
-          expect(await getExecutionBlocker(db, companyId, issueId)).toBeNull();
+        beforeNativeRuntimeSelection: async () => {
+          reachedSelection.resolve();
+          await resumeSelection.promise;
         },
       });
-      await heartbeat.resumeQueuedRuns();
-      await heartbeat.drainActiveRunExecutions();
-      expect(reachedSelection).toBe(true);
-      expect(await heartbeat.getRun(runId)).toMatchObject({ status: "cancelled", runtimeMode: "legacy",
-        runtimeModeResolvedAt: null, nativeSessionId: null,
-        resultJson: { startupCancellation: { beforeNativeSelection: true },
-          startupPreparationSettledAt: expect.any(String) },
-      });
+      try {
+        await heartbeat.resumeQueuedRuns();
+        await Promise.race([reachedSelection.promise, heartbeat.drainActiveRunExecutions().then(() => {
+          throw new Error("run finished before reaching native selection");
+        })]);
+        await heartbeat.cancelRun(runId, "Stopped by the operator", {
+          resultJson: { cancelledByActorType: "user", cancelledByUserId: "responsible-user" },
+        });
+        const [preparingTask] = await db.select().from(issues).where(eq(issues.id, issueId));
+        expect(preparingTask.executionRunId).toBe(runId);
+        const pending = (await heartbeat.getRun(runId))?.resultJson;
+        expect(pending?.startupPreparationSettledAt).toBeUndefined();
+        expect(pending?.executionRecovery).toBeUndefined();
+        expect(pending?.executionCancellation).toMatchObject({ state: "requested" });
+        expect(await getExecutionBlocker(db, companyId, issueId)).toBeNull();
+        if (unverifiedCleanup) {
+          // Preparation left a remote lease behind; a startup fence is not
+          // proof that the executor cleaned it up.
+          await db.insert(environmentLeases).values({ companyId, issueId, heartbeatRunId: runId,
+            provider: "daytona", providerLeaseId: randomUUID(), status: "active", leasePolicy: "ephemeral",
+          });
+        }
+      } finally {
+        resumeSelection.resolve();
+        try {
+          await heartbeat.drainActiveRunExecutions();
+        } finally {
+          releaseOverride?.mockRestore();
+        }
+      }
       expect(await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, runId))).toHaveLength(0);
       expect(factory).not.toHaveBeenCalled();
       expect(mockAdapterExecute).not.toHaveBeenCalled();
+      if (unverifiedCleanup) {
+        expect(await heartbeat.getRun(runId)).toMatchObject({ status: "cancelled", runtimeMode: "legacy",
+          resultJson: { executionCancellation: { state: "requested" } } });
+        expect(await db.select().from(issueRecoveryActions).where(and(
+          eq(issueRecoveryActions.companyId, companyId), eq(issueRecoveryActions.sourceIssueId, issueId),
+        ))).toEqual([expect.objectContaining({
+          kind: "active_run_watchdog", cause: "legacy_execution_requires_reconciliation",
+          status: "active", evidence: expect.objectContaining({ runId }),
+        })]);
+        return;
+      }
+      expect(await heartbeat.getRun(runId)).toMatchObject({ status: "cancelled", runtimeMode: "legacy",
+        runtimeModeResolvedAt: null, nativeSessionId: null,
+        resultJson: { startupCancellation: { beforeNativeSelection: true },
+          executionCancellation: { state: "acknowledged", proof: "preparation_settled" },
+          executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+          startupPreparationSettledAt: expect.any(String) },
+      });
       const [task] = await db.select().from(issues).where(eq(issues.id, issueId));
       expect(task.executionRunId).toBeNull();
       expect(task.status).not.toBe("blocked");

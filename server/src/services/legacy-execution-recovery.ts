@@ -172,6 +172,7 @@ export async function terminalizeLegacyExecution(input: {
   patch?: Partial<typeof heartbeatRuns.$inferInsert>;
   fromStatuses?: string[];
   reconcileIfNeeded?: boolean;
+  hasActivePreparer?: () => boolean;
   writeConditions?: SQL[];
   /** Adapter settlement records a copy-back failure before host finalization. */
   recordRestoreFailureOnly?: boolean;
@@ -266,6 +267,14 @@ export async function terminalizeLegacyExecution(input: {
       ? retainedLeaseIds.length > 0 || hasRequiredWorkspaceRecovery(updated.resultJson)
       : !input.reconcileIfNeeded || await legacyExecutionNeedsReconciliationWithEvidence(tx as unknown as Db, updated);
     if (!needsRecovery) return updated;
+    // A Stop that fenced native selection still owns the task while its
+    // preparer unwinds. Defer the watchdog verdict, not any saved-file hold.
+    const startupCancellation = updated.resultJson?.startupCancellation as Record<string, unknown> | undefined;
+    if (current.status === "running" && updated.status === "cancelled" && updated.runtimeMode === "legacy"
+        && !updated.runtimeModeResolvedAt && updated.executionStage === "preparing"
+        && startupCancellation?.beforeNativeSelection === true && readRunCancellation(updated.resultJson)?.expected === true
+        && !hasWorkspaceRestoreFailure(updated.resultJson) && !hasRequiredWorkspaceRecovery(updated.resultJson)
+        && input.hasActivePreparer?.()) return updated;
     if (!input.recordRestoreFailureOnly && task && (task.executionRunId === run.id || task.checkoutRunId === run.id)) {
       await notifyNativeStatusReassessment(tx, { companyId: task.companyId, issueId: task.id });
     }

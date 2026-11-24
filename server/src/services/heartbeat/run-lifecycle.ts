@@ -235,6 +235,7 @@ export interface HeartbeatLifecycleDependencies extends Pick<ReturnType<typeof c
   enqueueWakeup: ReturnType<typeof createHeartbeatQueue>["enqueueWakeup"];
   getCurrentUserRedactionOptions: () => Promise<CurrentUserRedactionOptions>;
   budgetHooks: BudgetServiceHooks;
+  activeRunExecutions?: ReadonlySet<string>;
   emitTerminalAgentTaskRun: (run: HeartbeatRun, previousStatus: string | null, failureReport?: RunFailureReportOptions) => void;
 }
 
@@ -1197,6 +1198,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
             status,
             patch,
             reconcileIfNeeded: true,
+            hasActivePreparer: () => dependencies.activeRunExecutions?.has(runId) ?? false,
           })
         : (async () => {
             // Terminal writes serialize with protected adapter settlement.
@@ -1326,6 +1328,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
             patch,
             fromStatuses,
             reconcileIfNeeded: true,
+            hasActivePreparer: () => dependencies.activeRunExecutions?.has(runId) ?? false,
             writeConditions: [nativeRunnerOwnershipNotHeldCondition(), ...(cancellationCondition ? [cancellationCondition] : [])],
           })
         : (async () => {

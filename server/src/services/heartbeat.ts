@@ -335,6 +335,7 @@ import {
 import {
   settleInterruptedNativeBootstrap,
   settleCancelledLegacyPreparation,
+  terminalizeLegacyExecution,
 } from "./legacy-execution-recovery.js";
 import { resumePauseInterruptedWork } from "./issue-tree-resume.js";
 import {
@@ -1456,6 +1457,7 @@ export function heartbeatService(
     issuesSvc,
     recovery,
     companySkills,
+    activeRunExecutions,
     getRunStatus,
     emitTerminalAgentTaskRun,
     getIssueExecutionContext,
@@ -4421,6 +4423,12 @@ export function heartbeatService(
             providerDispatchStarted: legacyAdapterEntered || nativeDispatchStarted || nativeOwnershipHeld,
           });
           latestRun = settled ?? latestRun;
+          if (!settled && parseObject(latestRun.resultJson?.startupCancellation).beforeNativeSelection === true) {
+            // The startup fence alone did not certify cleanup. Keep normal
+            // recovery in force before releasing the task to its queue.
+            latestRun = await terminalizeLegacyExecution({ db, run: latestRun, status: "cancelled",
+              fromStatuses: ["cancelled"], reconcileIfNeeded: true }) ?? latestRun;
+          }
           // A pause may already have been released while this Stop unwound.
           const settledIssueId = settled?.issueId ?? settled?.contextSnapshot?.issueId;
           if (typeof settledIssueId === "string") {
