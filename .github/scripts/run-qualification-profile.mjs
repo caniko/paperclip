@@ -21,6 +21,7 @@ assert.ok(sourceScope || sourceArgs.length === 0, "Only source lanes accept the 
 const cli = sourceScope ? parseCLI(["vitest", ...sourceArgs]) : { filter: [], options: {} };
 assert.ok(!cli.options.testNamePattern && !cli.options.config && !cli.options.root,
   "Source qualification preserves the configured roster without name or configuration overrides");
+const { exclude = [], ...runnerOptions } = cli.options;
 const root = process.cwd();
 const completePackage = profile === "runner-package";
 // Package profiles run the separately configured packages/paperclip-runner roster (the macOS one only its mapped cases).
@@ -71,7 +72,7 @@ if (completePackage) {
     config: "packages/paperclip-runner/vitest.config.ts", configSha256: sha256(readFileSync(path.join(testRoot, "vitest.config.ts"))),
     benchmarkEnabled: true, benchmarkRepetitions: 1 };
 }
-if (["otel-sdk", "sentry-sdk"].includes(profile)) {
+if (profile === "sentry-sdk") {
   const sdkRaw = readFileSync(path.join(evidence, "sdk.json"));
   const sdk = JSON.parse(sdkRaw);
   assert.equal(sdk.profile, profile);
@@ -117,9 +118,13 @@ function runnerBinding() {
 if (["runnerd", "warm-transition", "runner-package"].includes(profile)) metadata.runnerd = runnerBinding();
 if (profile === "runnerd") metadata.remoteContinuity = bindRemoteContinuity(root, evidence);
 if (profile === "tailscale-mock") metadata.tailscaleMock = bindMockTailscale(root);
-const options = { ...cli.options, root: testRoot, ...(packageProfile ? { config: path.join(testRoot, "vitest.config.ts") } : {}),
+// Keep dedicated profiles serial, but honor the stable source runner's explicit
+// isolated-file workers (and its serial settings for shared databases).
+const options = { maxWorkers: 1, fileParallelism: false, ...runnerOptions,
+  root: testRoot, ...(packageProfile ? { config: path.join(testRoot, "vitest.config.ts") } : {}),
   watch: false, includeTaskLocation: true, allowOnly: false, retry: 0,
-  maxWorkers: 1, fileParallelism: false, exclude: [...(cli.options.exclude ?? []), "**/dist/**"] };
+  // Vitest's CLI uses cliExclude to append patterns in every configured project.
+  cliExclude: [...exclude, "**/dist/**"] };
 // Unbuffered start/finish lines: a hung case is named by the last "START" line.
 const progressReporter = { onTestCaseReady: test => writeSync(2, `START ${test.fullName}\n`),
   onTestCaseResult: test => writeSync(2, `${test.result().state.toUpperCase()} ${test.fullName}\n`) };

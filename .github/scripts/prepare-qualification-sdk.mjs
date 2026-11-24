@@ -2,17 +2,17 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { sha256 } from "./qualification-roster.mjs";
-import { inventory, packageInventory } from "./qualification-sdk-inventory.mjs";
+import { inventory } from "./qualification-sdk-inventory.mjs";
 
 const args = process.argv.slice(2);
 const diagnostic = args[0] === "--diagnostic";
 assert.equal(args.length, diagnostic ? 4 : 3, "Pass profile, fresh external SDK directory and evidence directory");
 const [profile, destination, output] = args.slice(diagnostic ? 1 : 0);
-assert.ok(["otel-sdk", "sentry-sdk"].includes(profile));
+assert.equal(profile, "sentry-sdk");
 assert.equal(process.platform, "linux");
 if (!diagnostic) {
   assert.equal(process.env.RUNNER_ENVIRONMENT, "github-hosted");
@@ -27,8 +27,8 @@ const declared = path.join(root, ".github/qualification/sdks", profile);
 const manifest = JSON.parse(readFileSync(path.join(declared, "package.json")));
 const lock = JSON.parse(readFileSync(path.join(declared, "package-lock.json")));
 const serverPeers = JSON.parse(readFileSync(path.join(root, "server/package.json"))).peerDependencies;
-const expected = Object.fromEntries(Object.entries(serverPeers).filter(([name]) => profile === "sentry-sdk"
-  ? name === "@sentry/node" : name.startsWith("@opentelemetry/")));
+assert.ok(serverPeers["@sentry/node"]);
+const expected = { "@sentry/node": serverPeers["@sentry/node"] };
 assert.deepEqual(manifest.dependencies, expected, "SDK versions must exactly match the declared server peers");
 assert.equal(lock.lockfileVersion, 3);
 assert.deepEqual(lock.packages[""].dependencies, expected);
@@ -45,43 +45,19 @@ const installArgs = ["ci", "--prefix", sdk, "--ignore-scripts", "--no-audit", "-
 // https://docs.npmjs.com/cli/v11/commands/npm-ci
 execFileSync("npm", installArgs, { stdio: "inherit", timeout: 120_000 });
 assert.equal(sha256(readFileSync(path.join(sdk, "package-lock.json"))), sha256(readFileSync(path.join(declared, "package-lock.json"))));
-const names = [...Object.keys(expected), ...(profile === "otel-sdk" ? ["@opentelemetry/api", "@opentelemetry/sdk-trace-base"] : [])];
+const names = Object.keys(expected);
 const links = [];
-const borrowedPackages = [];
-const serverRequire = createRequire(path.join(root, "server/package.json"));
 // Validate all destinations before linking any package into the disposable checkout.
 for (const name of names) {
   const link = path.join(root, "server/node_modules", name);
-  if (["@opentelemetry/api", "@opentelemetry/resources"].includes(name) && existsSync(link)) {
-    // API and resource utilities are workspace dependencies. Borrow only byte-identical
-    // files from the separately locked SDK version.
-    const actual = realpathSync(link);
-    const target = path.join(sdk, "node_modules", name);
-    assert.equal(sha256(readFileSync(path.join(actual, "package.json"))), sha256(readFileSync(path.join(target, "package.json"))));
-    const sdkRequire = createRequire(path.join(sdk, "package.json"));
-    assert.equal(sha256(readFileSync(serverRequire.resolve(name))), sha256(readFileSync(sdkRequire.resolve(name))));
-    const resolvedInventory = packageInventory(actual);
-    assert.deepEqual(resolvedInventory, packageInventory(target), `Existing ${name} files differ from the locked SDK`);
-    borrowedPackages.push({
-      name,
-      link,
-      target: readlinkSync(link),
-      resolvedPackage: actual,
-      packageSha256: sha256(readFileSync(path.join(actual, "package.json"))),
-      fileSha256: resolvedInventory.packages[resolvedInventory.root].fileSha256,
-      resolvedInventory,
-    });
-    continue;
-  }
   assert.ok(!existsSync(link), `Preserve an existing SDK entry: ${name}`);
   assert.throws(() => lstatSync(link), { code: "ENOENT" });
 }
 for (const name of names) {
-  if (borrowedPackages.some(row => row.name === name)) continue;
   const target = path.join(sdk, "node_modules", name);
   const installed = JSON.parse(readFileSync(path.join(target, "package.json")));
   assert.equal(installed.name, name);
-  assert.equal(installed.version, expected[name] ?? lock.packages[`node_modules/${name}`].version);
+  assert.equal(installed.version, expected[name]);
   const link = path.join(root, "server/node_modules", name);
   mkdirSync(path.dirname(link), { recursive: true });
   symlinkSync(target, link, "dir");
@@ -96,7 +72,7 @@ const receipt = { schema: "paperclip.qualification-sdk.v1", profile, diagnostic,
   manifestSha256: sha256(readFileSync(path.join(declared, "package.json"))),
   sdkLockSha256: sha256(readFileSync(path.join(declared, "package-lock.json"))),
   workspaceLockSha256: sha256(readFileSync(path.join(root, "pnpm-lock.yaml"))),
-  installArgs, lifecycleScriptsExecuted: false, links, borrowedPackages, installedFileSha256: files };
+  installArgs, lifecycleScriptsExecuted: false, links, borrowedPackages: [], installedFileSha256: files };
 mkdirSync(evidence, { recursive: true });
 writeFileSync(path.join(evidence, "sdk.json"), JSON.stringify(receipt, null, 2) + "\n", { flag: "wx" });
 for (const name of ["package.json", "package-lock.json"]) cpSync(path.join(declared, name), path.join(evidence, `sdk-${name}`), { errorOnExist: true, force: false });

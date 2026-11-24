@@ -1275,6 +1275,13 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     // The milestone scanner includes paused endpoints with active bindings.
     await db.update(chatConversations).set({ state: "completed" })
       .where(and(inArray(chatConversations.companyId, companyIds), inArray(chatConversations.state, ["active", "waiting"])));
+    // The generic reconciliation sweep spans companies. Retire owed
+    // continuations before another case drives that sweep.
+    await db.update(issueRecoveryActions)
+      .set({ evidence: sql`${issueRecoveryActions.evidence} || '{"continuationDelivery":"invalidated"}'::jsonb` })
+      .where(and(inArray(issueRecoveryActions.companyId, companyIds),
+        eq(issueRecoveryActions.status, "resolved"),
+        sql`${issueRecoveryActions.evidence}->>'continuationDelivery' = 'pending'`));
   }
 
   const companyPrefixAttempts = 8;
@@ -2215,9 +2222,22 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       token: "other-fixture-owner",
       expiresAt: new Date(Date.now() + 90_000),
     }).returning();
+    const [conversation] = await readChatConversationsByEndpointId(context.endpoint.id);
+    const [continuation] = await db.insert(issueRecoveryActions).values({
+      companyId: fixture.companyId,
+      sourceIssueId: conversation.issueId!,
+      kind: "active_run_watchdog",
+      status: "resolved",
+      cause: "execution_finalization_deadline_exceeded",
+      fingerprint: randomUUID(),
+      nextAction: "Start the saved continuation.",
+      evidence: { continuationDelivery: "pending" },
+    }).returning();
     let recovery: Promise<number> | undefined;
     try {
       await retireFixtureState([fixture.companyId]);
+      const [retired] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, continuation.id));
+      expect(retired.evidence.continuationDelivery).toBe("invalidated");
       recovery = next.service.processPendingDeliveries();
       await expect.poll(async () => db.select({ status: chatActions.status }).from(chatActions)
         .where(eq(chatActions.id, receipt!.id)), { timeout: 5_000 })

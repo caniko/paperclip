@@ -40,8 +40,6 @@ jobs:
             runner: ubuntu-24.04
           - profile: otel-absent
             runner: ubuntu-24.04
-          - profile: otel-sdk
-            runner: ubuntu-24.04
           - profile: sentry-sdk
             runner: ubuntu-24.04
           - profile: linux-containment
@@ -91,7 +89,7 @@ jobs:
           set -euo pipefail
           node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/qualification-node-junit-reporter.mjs --test-reporter-destination="$EVIDENCE/tailscale-policy.xml" .github/scripts/tests/qualification-profiles.test.mjs .github/scripts/tests/qualification-tailscale-mock.test.mjs 2>&1 | tee "$EVIDENCE/tailscale-policy.log"
       - name: Prepare the separately locked optional SDK
-        if: matrix.profile == 'otel-sdk' || matrix.profile == 'sentry-sdk'
+        if: matrix.profile == 'sentry-sdk'
         env:
           PROFILE: ${{ matrix.profile }}
         run: |
@@ -213,7 +211,7 @@ jobs:
           node .github/scripts/run-qualification-profile.mjs "$PROFILE" "$EVIDENCE" 2>&1 | tee "$EVIDENCE/profile.log"
           python .github/scripts/verify_profile_evidence.py "$EVIDENCE"
       - name: Release only preparation-owned SDK links
-        if: always() && (matrix.profile == 'otel-sdk' || matrix.profile == 'sentry-sdk')
+        if: always() && matrix.profile == 'sentry-sdk'
         run: |
           if [ -f "$EVIDENCE/sdk.json" ]; then node .github/scripts/cleanup-qualification-sdk.mjs "$EVIDENCE"; fi
       - name: Retain and release the disposable remote continuity container
@@ -258,7 +256,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - name: Verify actual provider expiry and SHA-256
-        run: python .github/scripts/qualification-evidence.py artifacts required-profile- 14 profile-retention.json
+        run: python .github/scripts/qualification-evidence.py artifacts required-profile- 13 profile-retention.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

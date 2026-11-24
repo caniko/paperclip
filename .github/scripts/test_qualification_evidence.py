@@ -157,10 +157,10 @@ class ReceiptTests(unittest.TestCase):
         source.parent.mkdir()
         source.write_text('describe.skipIf(!sdk)("real SDK", () => {});')
         policy = {"all_declared_cases_required": True,
-                  "environments": {"otel-sdk": {"platform": "linux"}},
+                  "environments": {"sentry-sdk": {"platform": "linux"}},
                   "rules": [{"file": file, "source_sha256": evidence.sha256(source),
                              "anchor": "describe.skipIf(!sdk)", "name_contains": "real SDK",
-                             "environment": "otel-sdk"}]}
+                              "environment": "sentry-sdk"}]}
         raw = '<testsuite><testcase classname="server/sdk.test.ts" name="real SDK &gt; renders [vitest:case-1]"><skipped/></testcase></testsuite>'
         (directory / "cases.xml").write_text(raw)
         with patch.object(evidence, "REPOSITORY_ROOT", self.root), \
@@ -171,7 +171,7 @@ class ReceiptTests(unittest.TestCase):
             self.assertEqual(receipt["reports"][0]["skipped"], 1)
             self.assertEqual(receipt["environment_deferrals"][0], {
                 "file": file, "name": "real SDK > renders", "id": "case-1",
-                "source_sha256": evidence.sha256(source), "environments": ["otel-sdk"],
+                 "source_sha256": evidence.sha256(source), "environments": ["sentry-sdk"],
                 "required": True, "execution_evidence": False})
             self.assertEqual((directory / "cases.xml").read_text(), raw)
             source.write_text(source.read_text() + "// drift")

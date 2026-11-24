@@ -114,7 +114,8 @@ test("the source runner collects and executes the same native Vitest file shard"
   const directory = path.join(temporary, "evidence");
   try {
     execFileSync(process.execPath, [".github/scripts/run-qualification-profile.mjs", "--diagnostic", "default-hosted", directory,
-      "--project", "@paperclipai/server", "--shard=1/2", "server/src/deployment/runtime.test.ts", "server/src/deployment/adapter-config.test.ts"], {
+      "--project", "@paperclipai/server", "--fileParallelism", "--maxWorkers=2", "--shard=1/2", "--exclude", "**/deployment/entry.test.ts",
+      "server/src/deployment/runtime.test.ts", "server/src/deployment/adapter-config.test.ts", "server/src/deployment/entry.test.ts"], {
       cwd: root, timeout: 30_000,
       env: { ...process.env, NODE_ENV: "test", PAPERCLIP_HOME: path.join(temporary, "home"), PAPERCLIP_CONFIG: path.join(temporary, "home/config.json") },
     });
@@ -122,6 +123,7 @@ test("the source runner collects and executes the same native Vitest file shard"
     const selection = JSON.parse(readFileSync(path.join(directory, "profile-selection.json"), "utf8"));
     const result = JSON.parse(readFileSync(path.join(directory, "profile-result.json"), "utf8"));
     assert.equal(collection.discovery.length, 2);
+    assert.ok(collection.discovery.every(spec => !spec.file.endsWith("/entry.test.ts")));
     assert.equal(collection.specifications.length, 1);
     assert.ok(selection.requiredCases.length > 0);
     assert.ok(selection.collectedCases.every(row => row.file === collection.specifications[0].file));

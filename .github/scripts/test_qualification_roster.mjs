@@ -6,7 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createVitest } from "vitest/node";
 import { collectRows, declarationSites, mapEnvironments, sha256, specificationRows } from "./qualification-roster.mjs";
-import { importEntries, reconcileImportEntry, supplementalSpecifications } from "./qualification-import-provenance.mjs";
+import { importEntries, reconcileImportEntry, resolveStaticParserGaps, supplementalSpecifications } from "./qualification-import-provenance.mjs";
 
 const module = tasks => ({ task: { filepath: "/checkout/fixture.test.ts", projectName: "fixture", mode: "run", tasks } });
 const task = (id, mode = "run") => ({ id, type: "test", name: "same display title", mode, location: { line: 10, column: 3 } });
@@ -24,6 +24,27 @@ test("checked-in coverage bindings match the current source before expensive col
       assert.ok(source.includes(rule.anchor), `${group}: ${rule.file}: missing anchor`);
     }
   }
+});
+
+test("ordinary Linux cases stay required while specialized obligations are preserved", () => {
+  const configured = JSON.parse(readFileSync(new URL("../qualification/coverage-environments.json", import.meta.url), "utf8"));
+  const files = {
+    instrumentation: "server/src/__tests__/instrumentation.test.ts",
+    restart: "server/src/services/native-runtime/native-runner-restart-recovery.integration.test.ts",
+    workspaces: "server/src/services/remote-workspaces.integration.test.ts",
+    candidate: "server/src/services/native-runtime/antigravity-candidate-admission.test.ts",
+  };
+  const cases = [
+    [files.instrumentation, "recordProviderPluginSpan native duration > opens and ends the span now when the timestamp pair is absent", "default-hosted"],
+    [files.restart, "native runner restart recovery with real processes > bounds a crash loop that never starts the provider", "default-hosted"],
+    [files.restart, "native runner restart recovery with real processes > hot-restarts a dead runner with a historical prompt on the same run and provider session", "runnerd"],
+    [files.restart, "native runner restart recovery with real processes > preserves remote warm continuity across completed turns: warm", "runnerd"],
+    [files.workspaces, "remote workspace lifecycle with real Postgres and independent filesystem execution", "default-hosted"],
+    [files.candidate, "rejects expired, changed or broad operator authorization", "macos", "default-hosted"],
+  ];
+  const sources = Object.fromEntries(Object.values(files).map(file => [file, readFileSync(new URL(`../../${file}`, import.meta.url))]));
+  const mapped = mapEnvironments(cases.map(([file, name]) => ({ file, name })), sources, configured);
+  assert.deepEqual(mapped.cases.map(row => row.environments), cases.map(([, , ...environments]) => environments));
 });
 
 test("Vitest statically collects the split SSH and native Runner integration suites", async () => {
@@ -239,6 +260,12 @@ test("real Vitest reconciles an import-only entry to independently collected sou
     const modules = [...primaryModules, ...supplemental.testModules];
     const result = reconcileImportEntry(entries[0], modules, declarations, root);
     assert.equal(result.complete, true);
+    assert.deepEqual(resolveStaticParserGaps(parsed, [{ ...result, complete: false }], root).unresolved, originalErrors);
+    assert.deepEqual(resolveStaticParserGaps(parsed, [{ ...result, project: "another-project" }], root).unresolved, originalErrors);
+    const parser = resolveStaticParserGaps(parsed, [result], root);
+    assert.deepEqual(parser.unresolved, []);
+    assert.deepEqual(parser.resolved.map(gap => [gap.file, gap.project, gap.required_cases, gap.execution_credit]),
+      [["entry.test.ts", "import-contract", 3, false]]);
     assert.equal(result.bindings.length, 3);
     assert.equal(new Set(result.bindings.map(binding => binding.wrapper_id)).size, 3);
     assert.ok(result.bindings.every(binding => binding.source_file === "source.test.ts" && binding.source_location.line > 0));

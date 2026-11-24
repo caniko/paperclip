@@ -71,6 +71,7 @@ export function declarationSites(declarations, rows, sources, policy = {}, prove
   });
   rows = [...rows, ...imported];
   const byPosition = new Map(), sourceLines = new Map(), importedByPosition = new Map();
+  const rowsByFile = Map.groupBy(rows, row => row.file);
   const key = row => {
     const source = sources[row.file];
     if (!row.location || typeof source !== "string") return null;
@@ -107,12 +108,15 @@ export function declarationSites(declarations, rows, sources, policy = {}, prove
   // Vitest 5's static parser also calls testEnvironment, testApp.use, etc.
   // "tests". Helpers inside test bodies/hooks cannot register during collection.
   // Retain every raw row and bind its disposition to the actual callback range.
-  for (const file of new Set(sites.filter(site => !site.runtime_case_ids_at_site.length).map(site => site.file))) {
+  const unmatchedByFile = Map.groupBy(sites.filter(site => !site.runtime_case_ids_at_site.length), site => site.file);
+  for (const [file, unmatched] of unmatchedByFile) {
     const text = sources[file];
     if (!text) continue;
+    const fileRows = (rowsByFile.get(file) ?? []).filter(row => row.location);
+    const sourceHash = sha256(text);
     const helpers = (policy.static_helper_calls ?? []).filter(rule => rule.file === file);
     for (const helper of helpers) {
-      assert.equal(sha256(text), helper.source_sha256, `Static helper source drift: ${file}`);
+      assert.equal(sourceHash, helper.source_sha256, `Static helper source drift: ${file}`);
       assert.ok(text.includes(helper.anchor) && helper.reason?.trim(), "Static helper provenance is incomplete");
     }
     const { code, map } = transformSync(text, { loader: /\.[jt]sx$/.test(file) ? "tsx" : "ts",
@@ -143,7 +147,7 @@ export function declarationSites(declarations, rows, sources, policy = {}, prove
     // ponytail: scan only files with unmatched sites; index callback intervals
     // if this per-file calls × collected-cases scan becomes a collection cost.
     const callbacks = calls.flatMap(call => {
-      const enclosing = rows.filter(row => row.file === file && call.start <= offset(row)
+      const enclosing = fileRows.filter(row => call.start <= offset(row)
         && offset(row) <= call.argumentsStart);
       const hook = call.node.callee.type === "Identifier"
         && /^(?:before|after)(?:All|Each)$/.test(call.node.callee.name) ? call.node.callee.name : null;
@@ -152,7 +156,7 @@ export function declarationSites(declarations, rows, sources, policy = {}, prove
         .map(callback => ({ start: originalOffset(callback.body.start), end: originalOffset(callback.body.end - 1),
           enclosing, hook }));
     });
-    for (const site of sites.filter(site => site.file === file && !site.runtime_case_ids_at_site.length)) {
+    for (const site of unmatched) {
       const position = offset(site);
       const call = calls.filter(call => call.start <= position && position <= call.argumentsStart).at(-1);
       // Genuine nested Vitest declarations stay unresolved, even though
@@ -172,7 +176,7 @@ export function declarationSites(declarations, rows, sources, policy = {}, prove
       if (body) site.non_declaration = { kind: body.hook ? "runtime-hook-body-call" : "runtime-test-body-call",
         callback_source_range: [body.start, body.end], hook: body.hook,
         enclosing_case_ids: body.enclosing.filter(row => row.project === site.project).map(row => row.id),
-        source_sha256: sha256(text), execution_credit: false };
+        source_sha256: sourceHash, execution_credit: false };
       else if (call) {
         const callee = code.slice(call.node.callee.start, call.node.callee.end);
         const helper = helpers.find(rule => rule.callees.includes(callee));
@@ -212,10 +216,16 @@ export function mapEnvironments(rows, sources, policy) {
   // (and the complete-package profile that defers to it) verifies them against the package sources.
   const rootRule = rule => !policy.environments[rule.environment]?.package_root;
   const policyRules = policy.rules.filter(rootRule);
+  const rulesByFile = Map.groupBy(policyRules, rule => rule.file);
+  const sourceHashes = new Map();
+  const sourceHash = file => {
+    if (!sourceHashes.has(file)) sourceHashes.set(file, sha256(sources[file]));
+    return sourceHashes.get(file);
+  };
   for (const rule of [...policyRules, ...(policy.conditional_expansions ?? [])]) {
     assert.ok(policy.environments[rule.environment], "Unknown environment");
     const source = sources[rule.file];
-    if (!source || sha256(source) !== rule.source_sha256 || !source.includes(rule.anchor)) stale.push(rule);
+    if (!source || sourceHash(rule.file) !== rule.source_sha256 || !source.includes(rule.anchor)) stale.push(rule);
   }
   return {
     stale_rules: stale,
@@ -223,11 +233,11 @@ export function mapEnvironments(rows, sources, policy) {
       required: true, evidence: [], status: "unexecuted", source_valid: !stale.includes(rule),
       observed_case_ids: rows.filter(row => row.file === rule.file && row.name.includes(rule.name_contains)).map(row => row.id) })),
     cases: rows.map(row => {
-      const rules = policyRules.filter(rule => rule.file === row.file && row.name.includes(rule.name_contains));
+      const rules = (rulesByFile.get(row.file) ?? []).filter(rule => row.name.includes(rule.name_contains));
       const valid = rules.filter(rule => !stale.includes(rule));
       const environments = [...new Set(valid.map(rule => rule.environment))];
       if (!environments.length && !row.skipped_in_environment && !rules.length) environments.push("default-hosted");
-      return { ...row, source_sha256: sha256(sources[row.file]), environments,
+      return { ...row, source_sha256: sourceHash(row.file), environments,
         environment_mapping: rules.some(rule => stale.includes(rule)) ? "source-drift"
           : !environments.length ? "unresolved" : rules.length ? "source-backed" : "observed-default-candidate" };
     }),
