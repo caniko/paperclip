@@ -11351,6 +11351,7 @@ describe("remote Runner retention after a failed run", () => {
     const executionInput = { ...input, workspace: { ...input.workspace, cwd: WORKSPACE } };
     const backend = createCodexNativeSessionBackend(executionInput, {
       runnerInstanceId: "runner-recovery", transportFactory: () => transport,
+      environment: { ...process.env, PAPERCLIP_WORKSPACE_CWD: WORKSPACE },
     });
     const execution = executeNativeSession({ input: executionInput, backend, controlPlane: port(),
       runnerInstanceId: "runner-recovery", controlPlaneInstanceId: "control-recovery",

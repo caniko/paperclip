@@ -23,6 +23,7 @@ import { createRunnerdCodexTransport, defaultCapabilityRunnerdBinary } from "./r
  */
 it.each(["before", "after"] as const)("resumes a run whose turn.start a restart cut off (provider stopped %s creating the turn)", async (stage) => {
   const root = await mkdtemp(join(tmpdir(), `runnerd-cut-turn-start-${stage}-`));
+  const environment = { ...process.env, PAPERCLIP_WORKSPACE_CWD: root };
   const callsPath = join(root, "calls.log");
   const hangPath = join(root, "hang-turn-start");
   const identity = { runId: "run-cut-start", sessionId: "session-cut-start", companyId: "company-cut-start", issueId: "issue-cut-start", agentId: "agent-cut-start" };
@@ -58,7 +59,7 @@ it.each(["before", "after"] as const)("resumes a run whose turn.start a restart 
   };
   const turnStarts = async () => ((await readFile(callsPath, "utf8")).match(/^turn\/start$/gm) ?? []).length;
   try {
-    const backend = createRunnerdNativeSessionBackend(execution, { runnerInstanceId: "runner-cut-start", transportFactory: () => first.transport });
+    const backend = createRunnerdNativeSessionBackend(execution, { runnerInstanceId: "runner-cut-start", environment, transportFactory: () => first.transport });
     const session = await backend.openSession({ identity, workingDirectory: root });
     // The last checkpoint the controller persisted: no active turn.
     const checkpoint = await session.snapshot();
@@ -85,7 +86,7 @@ it.each(["before", "after"] as const)("resumes a run whose turn.start a restart 
     await writeFile(join(root, "fake-state.json"), JSON.stringify(providerState));
 
     restored = createRunnerdCodexTransport({ ...options, resumeDynamicTools: [], resumeActiveTurnId: null });
-    const recovering = createRunnerdNativeSessionBackend(execution, { runnerInstanceId: "runner-cut-start", transportFactory: () => restored!.transport });
+    const recovering = createRunnerdNativeSessionBackend(execution, { runnerInstanceId: "runner-cut-start", environment, transportFactory: () => restored!.transport });
     const events: PrpEvent[] = [];
     const executing = executeNativeSession({
       input: execution, backend: recovering, persistedSession: checkpoint, resumeInterruptedTurn: true,

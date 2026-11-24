@@ -97,6 +97,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         },
       },
     });
+  } else if (method === "thread/goal/get") {
+    send({ id, result: { goal: null } });
   } else if (method === "thread/turns/list") {
     const turns = Object.entries(state.turns).map(([turnId, turn]) => ({
       id: turnId, status: turn.status, items: [], itemsView: "notLoaded",

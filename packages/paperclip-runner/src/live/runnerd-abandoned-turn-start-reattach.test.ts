@@ -63,6 +63,7 @@ function withUnreachableRemoteRunner(control: ControlPlaneModule) {
 
 async function abandonTurnStart(label: string, providerArgs: string[]) {
   const root = await mkdtemp(join(tmpdir(), `runnerd-abandoned-${label}-`));
+  const environment = { ...process.env, PAPERCLIP_WORKSPACE_CWD: root };
   const gate = join(root, "turn-started-gate");
   const callLog = join(root, "calls.log");
   const identity = { runId: `run-${label}`, sessionId: `session-${label}`, companyId: `company-${label}`,
@@ -148,7 +149,7 @@ async function abandonTurnStart(label: string, providerArgs: string[]) {
       transports.push(first);
       await expect(firstProcess.execute({
         input: execution, runnerInstanceId: options.prpIdentity.runnerInstanceId, controlPlaneInstanceId: `controller-${label}`,
-        backend: firstProcess.createBackend(execution, { runnerInstanceId: options.prpIdentity.runnerInstanceId, transportFactory: () => first.transport }),
+        backend: firstProcess.createBackend(execution, { runnerInstanceId: options.prpIdentity.runnerInstanceId, environment, transportFactory: () => first.transport }),
         timeoutMs: 30_000, requireSessionCloseBeforeReturn: true, controlPlane,
       })).rejects.toThrow("runnerd did not report the provider turn identity");
     } finally {
@@ -176,7 +177,7 @@ async function abandonTurnStart(label: string, providerArgs: string[]) {
       });
       transports.push(adopted);
       const backend = secondProcess.createBackend(execution, {
-        runnerInstanceId: options.prpIdentity.runnerInstanceId, transportFactory: () => adopted.transport,
+        runnerInstanceId: options.prpIdentity.runnerInstanceId, environment, transportFactory: () => adopted.transport,
       });
       return {
         adopted, duplicateLauncher, backend,

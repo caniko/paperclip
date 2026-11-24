@@ -66,6 +66,7 @@ it("keeps the remote Runner alive for the same-run reattachment when the turn.st
   try {
     await writeFile(hangPath, "before");
     const backend = createRunnerdNativeSessionBackend(execution, { runnerInstanceId: "runner-start-timeout",
+      environment: { ...process.env, PAPERCLIP_WORKSPACE_CWD: root },
       transportFactory: () => bundle.transport });
     const executing = executeNativeSession({
       input: execution, backend, runnerInstanceId: "runner-start-timeout", controlPlaneInstanceId: "controller-start-timeout",

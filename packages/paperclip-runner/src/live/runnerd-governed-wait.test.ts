@@ -54,6 +54,7 @@ it.each([0, 18_000, null])("requires a Codex terminal or verified shutdown when 
   const tool = vi.fn(async () => ({ ok: true, task: { id: "task-1" } }));
   const backend = createRunnerdNativeSessionBackend(input, {
     runnerInstanceId: "runner-wait", transportFactory: () => bundle.transport,
+    environment: { ...process.env, PAPERCLIP_WORKSPACE_CWD: root },
     dynamicTools: [{
       name: "get_task_context", description: "Read the task.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
