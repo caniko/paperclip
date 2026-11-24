@@ -1270,7 +1270,7 @@ describe("live remote runner lease reattachment", () => {
     [{ releasedAt: new Date() }, "lease_status"], [{ cleanupStatus: "pending" }, "lease_status"],
     [{ metadata: { agentId: "another-agent", remoteCwd: "/remote/workspace" } }, "lease_scope"],
     [{ metadata: { agentId: "agent-1", remoteCwd: "/other/workspace" } }, "remote_cwd"],
-  ] as [Partial<EnvironmentLease>, string][])("fails closed before provider acquisition for a mismatched lease %j", async (override, field) => {
+  ] as [Partial<EnvironmentLease>, string][])("fails closed before provider acquisition for a mismatched lease (case %$)", async (override, field) => {
     mockGetLease.mockResolvedValue({ ...originalLease(), ...override });
     const runtime = makeMockRuntime();
     await expect(environmentRunOrchestrator({} as never, { environmentRuntime: runtime }).acquireForRun(input))

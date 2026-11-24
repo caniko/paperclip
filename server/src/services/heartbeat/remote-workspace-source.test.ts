@@ -108,7 +108,7 @@ describe.skipIf(!support.supported)("remote referenced project sources", () => {
   it.each([
     { enabled: true, storageProviderPluginId: randomUUID() },
     { enabled: false, storageProviderPluginId: null },
-  ])("keeps the private empty source for a project with no repository and saved storage %j", async (policy) => {
+  ])("keeps the private empty source for a project with no repository and saved storage (case %$)", async (policy) => {
     const f = await assignedTask();
     await db.update(projects).set({ executionWorkspacePolicy: policy }).where(eq(projects.id, f.projectId));
     const result = await resolveRemoteWorkspaceSource(db, { ...f, responsibleUserId: null,

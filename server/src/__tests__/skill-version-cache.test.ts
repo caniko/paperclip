@@ -210,7 +210,7 @@ describePostgres("immutable skill version cache", () => {
     { runnerProfileJson: { nativeExecutionInput: {} } },
     { contextSnapshot: { skillVersions: null } },
     { contextSnapshot: { skillSelectionSnapshot: true } },
-  ])("preserves unknown skill selections for queued execution evidence %j", async evidence => {
+  ])("preserves unknown skill selections for queued execution evidence (case %$)", async evidence => {
     const f = await fixture();
     const run = await activeRun(f.companyId, null);
     await db.update(heartbeatRuns).set({ status: "queued", ...evidence }).where(eq(heartbeatRuns.id, run.id));

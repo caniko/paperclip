@@ -73,7 +73,7 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
     { controllerLeaseExpiresAt: new Date("2099-01-01T00:00:00Z") },
     { runnerProfileJson: { nativeExecutionInput: {} } }, { runnerProfileJson: { remoteWorkspace: {} } },
     { runnerProfileJson: { nativeWorkspaceSync: {} } },
-  ])("rejects contradictory run evidence: %j", async patch => {
+  ])("rejects contradictory run evidence (case %$)", async patch => {
     const { agent, run } = await fixture();
     await db.update(heartbeatRuns).set(patch).where(eq(heartbeatRuns.id, run.id));
     const [changed] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));

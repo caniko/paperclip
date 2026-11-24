@@ -110,7 +110,7 @@ describeEmbeddedPostgres("reportRunFailure low-trust project denials", () => {
     { resultJson: { projectAccessDenied: { projectId: randomUUID() } } },
     { resultJson: { projectAccessDenied: { projectId: randomUUID() }, executionRecovery: { kind: "bootstrap", providerWorkStarted: true } } },
     { resultJson: { projectAccessDenied: {}, executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } },
-  ])("reports project denial markers without an exact pre-dispatch outcome: %j", async (overrides) => {
+  ])("reports project denial markers without an exact pre-dispatch outcome (case %$)", async (overrides) => {
     await reportRunFailure(db, projectAccessDeniedRun(overrides), { phase: "setup" });
     expect(mockCaptureRunFailure).toHaveBeenCalledTimes(1);
   });
