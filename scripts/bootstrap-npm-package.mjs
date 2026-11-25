@@ -31,7 +31,7 @@ import { createInterface } from "node:readline/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-import { PENDING_BOOTSTRAP_PACKAGES } from "./check-release-package-bootstrap.mjs";
+import { packOnlyPackageNames } from "./release-package-map.mjs";
 
 export const PLACEHOLDER_VERSION = "0.0.0";
 
@@ -113,14 +113,10 @@ export function validatePackageName(packageName) {
   }
 }
 
-// A fork-only package has no upstream counterpart and this fork has no npm credentials
-// for the @paperclipai scope, so a real bootstrap publish must never be attempted.
-// Dry runs still stage the placeholder locally.
-export function assertBootstrapAllowed(packageName, publish) {
-  if (publish && PENDING_BOOTSTRAP_PACKAGES.has(packageName)) {
+export function assertBootstrapAllowed(packageName, publish, packOnlyNames = packOnlyPackageNames) {
+  if (publish && packOnlyNames().includes(packageName)) {
     throw new Error(
-      `refusing to bootstrap ${packageName}: it is a fork-only package pending bootstrap, ` +
-        "and this fork never publishes the @paperclipai scope",
+      `refusing to bootstrap ${packageName}: scripts/release-package-manifest.json marks it packOnly`,
     );
   }
 }

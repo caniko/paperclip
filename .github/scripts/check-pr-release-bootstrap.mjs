@@ -116,6 +116,7 @@ export async function checkReleaseBootstrap(files, token, repo, prNumber, baseRe
     if (!entry || typeof entry.name !== 'string') continue;
     const name = entry.name;
     if (!SCOPE_RE.test(name)) continue;
+    if (entry.packOnly === true) continue;
 
     const enabled = entry.publishFromCi === true;
     const baseEnabled = basePublishFromCiByName.get(name);

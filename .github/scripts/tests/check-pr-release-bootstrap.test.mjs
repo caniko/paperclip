@@ -159,6 +159,32 @@ test('notices a newly added dependency on an existing unpublished package even w
   assert.match(result.informational[0], /depend on it/);
 });
 
+test('stays quiet and skips registry lookup when a PR adds a dependency on a pack-only package', async () => {
+  const name = '@paperclipai/adapter-t3code-local';
+  const resultFiles = [
+    manifestChangedFile,
+    {
+      filename: 'server/package.json',
+      status: 'modified',
+      patch: `@@ -1 +1 @@\n+    "${name}": "workspace:*",`,
+    },
+  ];
+  let lookups = 0;
+  const result = await checkReleaseBootstrap(resultFiles, 'token', 'paperclipai/paperclip', 9967, 'master', {
+    fetchFromGitHub: stubGitHub({
+      base: [],
+      head: [{ dir: 'packages/adapters/t3code-local', name, publishFromCi: false, packOnly: true }],
+    }),
+    registryPackageExists: async () => {
+      lookups += 1;
+      return false;
+    },
+  });
+
+  assert.deepEqual(result.informational, []);
+  assert.equal(lookups, 0);
+});
+
 test('stays quiet for a publishFromCi:false package nothing depends on', async () => {
   const result = await checkReleaseBootstrap(
     [manifestChangedFile],
