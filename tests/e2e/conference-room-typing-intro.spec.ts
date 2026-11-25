@@ -119,7 +119,8 @@ async function assertOnlyChatExists(page: Page, companyName: string) {
   const chats = await chatsRes.json();
   expect(chats).toHaveLength(1);
   expect(chats[0]).toMatchObject({ originKind: "onboarding_chat", projectId: null });
-  await expect(page.getByTestId("task-chat-composer-add")).toBeVisible();
+  // The API can see the chat before the newly navigated conversation has rendered.
+  await expect(page.getByTestId("task-chat-composer-add")).toBeVisible({ timeout: 30_000 });
 }
 
 test.describe("Chat launch after onboarding wizard", () => {

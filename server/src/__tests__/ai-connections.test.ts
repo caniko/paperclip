@@ -888,19 +888,16 @@ describe("managed AI connections", () => {
   });
 
   it("requires sign-in after the receiver process dies with an exchanged but unsaved token", async () => {
+    // Vitest retries share the suite database. Isolate both the account and its company lock.
+    const companyId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Quota receiver process loss", issuePrefix: `Q${companyId.slice(0, 8).toUpperCase()}` });
     const owner = "quota-receiver-process-loss";
     await db.insert(companyMemberships).values({ companyId, principalId: owner, principalType: "user", status: "active", membershipRole: "member" });
     const original = JSON.stringify({ tokens: { access_token: "expired-process", refresh_token: "single-use-process" } });
     await service.save(companyId, owner, { provider: "openai", method: "subscription", ownership: "personal", name: owner, loginSessionId: "fixture", agentIds: [], allAgents: true }, original);
     const [row] = await service.quotaAccounts(companyId, owner);
     const ref = row.grant.credentialSecretRefs.find(ref => ref.configPath === "ai.credential")!;
-    const held = deferredSignal(), release = deferredSignal();
     const lockKey = 7192031;
-    const holder = db.transaction(async tx => {
-      await tx.execute(sql`select pg_advisory_xact_lock(${lockKey})`);
-      held.resolve(); await release.promise;
-    });
-    await held.promise;
     await db.execute(sql.raw(`create function hold_receiver_save() returns trigger language plpgsql as $$ begin
       if new.secret_id = '${ref.secretId}'::uuid then perform pg_advisory_xact_lock(${lockKey}); end if; return new; end $$;
       create trigger hold_receiver_save before insert on company_secret_versions for each row execute function hold_receiver_save();`));
@@ -910,30 +907,42 @@ describe("managed AI connections", () => {
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ access_token: "unsaved-process", refresh_token: "replacement-process" }));
     });
-    provider.listen(0, "127.0.0.1"); await once(provider, "listening");
-    const address = provider.address() as { port: number };
-    const child = spawn(process.execPath, ["--import", createRequire(import.meta.url).resolve("tsx"), new URL("./helpers/quota-credential-process.ts", import.meta.url).pathname], {
-      env: { ...process.env, CREDENTIAL_TEST_DATABASE_URL: database.connectionString,
-        CREDENTIAL_TEST_PROVIDER_URL: `http://127.0.0.1:${address.port}`, CREDENTIAL_TEST_COMPANY_ID: companyId, CREDENTIAL_TEST_OWNER: owner },
-      stdio: "ignore",
-    });
-    const exited = once(child, "exit");
     try {
-      let blocked = false;
-      const deadline = Date.now() + 25_000;
-      while (!blocked && Date.now() < deadline && child.exitCode === null) {
-        const rows = await db.execute(sql`select pid from pg_stat_activity where datname = current_database()
-          and wait_event_type = 'Lock' and wait_event = 'advisory'`);
-        blocked = exchanges === 1 && rows.length > 0;
-        if (!blocked) await new Promise(resolve => setTimeout(resolve, 25));
-      }
-      expect(blocked).toBe(true);
-      child.kill("SIGKILL"); await exited;
+      provider.listen(0, "127.0.0.1"); await once(provider, "listening");
+      const address = provider.address() as { port: number };
+      await db.transaction(async tx => {
+        const [{ pid }] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid, pg_advisory_xact_lock(${lockKey})`);
+        const exchange = once(provider, "request", { signal: AbortSignal.timeout(60_000) });
+        const child = spawn(process.execPath, ["--import", createRequire(import.meta.url).resolve("tsx"), new URL("./helpers/quota-credential-process.ts", import.meta.url).pathname], {
+          env: { ...process.env, CREDENTIAL_TEST_DATABASE_URL: database.connectionString,
+            CREDENTIAL_TEST_PROVIDER_URL: `http://127.0.0.1:${address.port}`, CREDENTIAL_TEST_COMPANY_ID: companyId, CREDENTIAL_TEST_OWNER: owner },
+          stdio: "ignore",
+        });
+        const exited = once(child, "exit");
+        try {
+          // A cold tsx startup must not spend the window for observing the database save.
+          await Promise.race([exchange, exited.then(([code, signal]) => {
+            throw new Error(`Receiver exited before the OAuth exchange (code: ${code}, signal: ${signal})`);
+          })]);
+          await expect.poll(async () => {
+            const [lock] = await db.execute<{ blocked: boolean }>(sql`select exists(
+              select 1 from pg_locks where locktype = 'advisory' and not granted
+                and ${pid} = any(pg_blocking_pids(pid))
+            ) as blocked`);
+            return lock.blocked;
+          }, { timeout: 15_000, interval: 25, message: "Receiver did not reach the blocked credential save" }).toBe(true);
+        } finally {
+          // Keep the save blocked until the receiver has died, even if an assertion fails.
+          if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+            child.kill("SIGKILL");
+            await exited;
+          }
+        }
+        expect(await exited).toEqual([null, "SIGKILL"]);
+      });
     } finally {
-      if (child.exitCode === null && child.signalCode === null) { child.kill("SIGKILL"); await exited; }
-      release.resolve(); await holder;
-      await db.execute(sql`drop trigger hold_receiver_save on company_secret_versions; drop function hold_receiver_save()`);
       await new Promise<void>(resolve => provider.close(() => resolve()));
+      await db.execute(sql`drop trigger hold_receiver_save on company_secret_versions; drop function hold_receiver_save()`);
     }
     expect(exchanges).toBe(1);
     expect(await service.credential(row)).toBe(original);
@@ -949,7 +958,7 @@ describe("managed AI connections", () => {
     await receiver.save(companyId, owner, { connectionId: row.connection.id, provider: "openai", method: "subscription", ownership: "personal", name: owner, loginSessionId: "fixture", agentIds: [], allAgents: true }, signedIn);
     const [current] = await receiver.quotaAccounts(companyId, owner);
     expect(await receiver.runtimeCredential(current)).toBe(signedIn);
-  }, 40_000);
+  }, 90_000);
 
   it("does not exchange a token when a required database transaction fails", async () => {
     const owner = "quota-db-prerequisite";
