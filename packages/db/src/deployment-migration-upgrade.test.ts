@@ -21,7 +21,7 @@ import {
 type TestSql = ReturnType<typeof connectPostgres>;
 type JournalEntry = { idx: number; version: string; when: number; tag: string; breakpoints: boolean };
 type Journal = { version: string; dialect: string; entries: JournalEntry[] };
-const nativeFile = "0423_sweet_titanium_man.sql";
+const nativeFile = "0505_sweet_titanium_man.sql";
 const nativeHash = "ac20d3f6626b23aaf07e7bc7f6502bbcd728a2808d4b4adb56b2116bb30e6412";
 // Authentic entry and SQL from 843bb5b, whose upstream prefix through 0288 is unchanged.
 const oldEntry: JournalEntry = {
@@ -211,9 +211,8 @@ async function preservedRows(sql: TestSql, row: Awaited<ReturnType<typeof seed>>
 }
 
 function upgradedRows(before: Awaited<ReturnType<typeof preservedRows>>) {
-  // Preserve every historical column, while asserting the exact defaults and
-  // decimal representation introduced by 0312 and 0299, lifecycle state from
-  // 0320, instance-secret ownership from 0339 and creator provenance from 0343.
+  // Preserve every historical column while asserting the exact defaults and
+  // representation changes introduced by later migrations.
   return before.map((rows, index) =>
     rows.map((row) =>
       index === 3 || index === 4
@@ -230,11 +229,13 @@ function upgradedRows(before: Awaited<ReturnType<typeof preservedRows>>) {
                   lifecycle_error: null,
                   lifecycle_operation: null,
                   created_by_user_id: null,
+                  harness_verified_at: null,
+                  harness_verified_digest: null,
                 }
-              : {}),
+              : { budget_owner_user_id: null, default_decision_owner_user_id: null }),
           }
         : index === 5
-          ? { ...row, ai_session_epoch: 0, owner_agent_id: null, owner_plugin_id: null, owner_project_id: null }
+          ? { ...row, ai_session_epoch: 0, owner_agent_id: null, owner_plugin_id: null, owner_project_id: null, system_purpose: null }
           : row,
     ),
   );

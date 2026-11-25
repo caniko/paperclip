@@ -59,6 +59,7 @@ vi.mock("@/hooks/useIssuePlanDocument", () => ({
 }));
 
 vi.mock("@/lib/router", () => ({
+  Link: ({ to, children }: { to: string; children: ReactNode }) => <a href={to}>{children}</a>,
   useLocation: () => routeFixture.location,
   useNavigate: () => routeFixture.navigate,
 }));
@@ -112,7 +113,8 @@ vi.mock("@/components/WorkspaceFileBrowser", () => ({
 
 vi.mock("./TaskAttachmentPanel", () => ({ TaskAttachmentPanel: ({ attachmentId }: { attachmentId: string }) => <div>Text file {attachmentId}</div> }));
 
-vi.mock("./TaskDocumentPanel", () => ({
+vi.mock("./TaskDocumentPanel", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./TaskDocumentPanel")>()),
   TaskDocumentPanel: ({ documentKey, issueId, revisionId, documentIssueId, currentIssueId, initialDocument }: { documentKey: string; issueId: string; revisionId?: string; documentIssueId?: string; currentIssueId?: string; initialDocument?: IssueDocument }) => <div data-document-owner={issueId} data-gallery-owner={documentIssueId} data-current-task={currentIssueId} data-revision-id={revisionId} data-initial-document={initialDocument?.id}>{`Document ${documentKey}`}</div>,
 }));
 

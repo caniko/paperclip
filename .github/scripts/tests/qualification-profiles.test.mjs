@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { profileSelection, verifyProfileResults } from "../qualification-profiles.mjs";
+import { profileSelection, serializeProfileErrors, verifyProfileResults } from "../qualification-profiles.mjs";
 import { sha256 } from "../qualification-roster.mjs";
 
 const file = "server/profile.test.ts";
@@ -103,8 +103,21 @@ test("default source scope requires every ordinary case and preserves source-map
   assert.equal(verifyProfileResults(selected, [passed, skipped], []).passed, 1);
   assert.throws(() => verifyProfileResults(selected, [skipped], []));
   assert.throws(() => verifyProfileResults(selected, [passed], []), /roster/);
-  assert.throws(() => selectDefault([ordinary, { ...deferred, name: "unmapped skipped case" }]), /mapping/);
+  assert.throws(() => selectDefault([ordinary, deferred, { ...deferred, id: "unmapped", name: "unmapped skipped case" }]),
+    new RegExp(`Skipped source case has no environment mapping: ${file}: unmapped skipped case`));
   assert.throws(() => selectDefault([ordinary, deferred], { ...p, rules: [{ ...p.rules[0], source_sha256: "stale" }] }), /drift/);
+});
+
+test("profile evidence retains a subprocess timeout without its circular error property", () => {
+  assert.throws(() => execFileSync(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { timeout: 50 }), error => {
+    assert.equal(error.error, error);
+    const [record] = JSON.parse(JSON.stringify(serializeProfileErrors([error])));
+    assert.equal(record.code, "ETIMEDOUT");
+    assert.equal(record.message, error.message);
+    assert.equal(record.stack, error.stack);
+    assert.throws(() => verifyProfileResults(select(), [], [record]), /hook or unhandled errors/);
+    return true;
+  });
 });
 
 test("the source runner collects and executes the same native Vitest file shard", () => {
@@ -113,7 +126,8 @@ test("the source runner collects and executes the same native Vitest file shard"
   const directory = path.join(temporary, "evidence");
   try {
     execFileSync(process.execPath, [".github/scripts/run-qualification-profile.mjs", "--diagnostic", "default-hosted", directory,
-      "--project", "@paperclipai/server", "--shard=1/2", "server/src/deployment/runtime.test.ts", "server/src/deployment/adapter-config.test.ts"], {
+      "--project", "@paperclipai/server", "--fileParallelism", "--maxWorkers=2", "--shard=1/2", "--exclude", "**/deployment/entry.test.ts",
+      "server/src/deployment/runtime.test.ts", "server/src/deployment/adapter-config.test.ts", "server/src/deployment/entry.test.ts"], {
       cwd: root, timeout: 30_000,
       env: { ...process.env, NODE_ENV: "test", PAPERCLIP_HOME: path.join(temporary, "home"), PAPERCLIP_CONFIG: path.join(temporary, "home/config.json") },
     });
@@ -121,6 +135,7 @@ test("the source runner collects and executes the same native Vitest file shard"
     const selection = JSON.parse(readFileSync(path.join(directory, "profile-selection.json"), "utf8"));
     const result = JSON.parse(readFileSync(path.join(directory, "profile-result.json"), "utf8"));
     assert.equal(collection.discovery.length, 2);
+    assert.ok(collection.discovery.every(spec => !spec.file.endsWith("/entry.test.ts")));
     assert.equal(collection.specifications.length, 1);
     assert.ok(selection.requiredCases.length > 0);
     assert.ok(selection.collectedCases.every(row => row.file === collection.specifications[0].file));
@@ -221,5 +236,21 @@ test("checked-in package-profile rules bind current package sources and are exec
     // A maintainer-host owner is deliberately not a hosted matrix lane.
     if (environment.maintainer_host) assert.doesNotMatch(workflow, new RegExp(`- profile: ${rule.environment}\\n`));
     else assert.match(workflow, new RegExp(`- profile: ${rule.environment}\\n\\s+runner: macos-15`));
+  }
+});
+
+test("warm ownership suites defer to the runnerd profile that supplies their daemon", () => {
+  const checkedIn = JSON.parse(readFileSync(new URL("../../qualification/coverage-environments.json", import.meta.url), "utf8"));
+  for (const [suite, title] of [
+    ["checkpoint-ownership", "managed warm checkpoint ownership"],
+    ["successor-runner-release", "idle warm owner superseded by a successor's Runner"],
+  ]) {
+    const file = `server/src/services/native-runtime/native-warm-${suite}.integration.test.ts`;
+    const text = readFileSync(new URL(`../../../${file}`, import.meta.url), "utf8");
+    assert.deepEqual(checkedIn.rules.filter(rule => rule.file === file), [{
+      file, source_sha256: sha256(text), name_contains: title, environment: "runnerd",
+      anchor: "describe.skipIf(!recoveryPostgresSupport.supported || !existsSync(runnerBinary))",
+    }]);
+    assert.ok(text.includes(`describe.skipIf(!recoveryPostgresSupport.supported || !existsSync(runnerBinary))("${title}"`));
   }
 });

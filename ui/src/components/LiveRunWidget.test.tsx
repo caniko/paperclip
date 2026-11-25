@@ -73,7 +73,7 @@ describe("LiveRunWidget ownership waiting", () => {
     await renderWidget();
     let finish!: () => void;
     const cancel = vi.spyOn(heartbeatsApi, "cancel").mockImplementation(() => new Promise((resolve) => {
-      finish = () => resolve();
+      finish = () => resolve(null);
     }));
     const stop = container.querySelector("button")!;
     await act(async () => stop.click());

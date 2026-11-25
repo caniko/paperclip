@@ -2,10 +2,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import path from "node:path";
 import { createVitest } from "vitest/node";
 import { collectRows, declarationSites, mapEnvironments, sha256, specificationRows } from "./qualification-roster.mjs";
-import { importEntries, reconcileImportEntry, supplementalSpecifications } from "./qualification-import-provenance.mjs";
+import { importEntries, reconcileImportEntry, resolveStaticParserGaps, supplementalSpecifications } from "./qualification-import-provenance.mjs";
 
 const root = process.cwd();
 const destination = path.resolve(process.argv[2]);
@@ -15,25 +16,30 @@ const source = JSON.parse(readFileSync(path.join(destination, "source.json"), "u
 assert.equal(source.initialized, true);
 assert.equal(source.tested_source, execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim());
 const policy = JSON.parse(readFileSync(".github/qualification/coverage-environments.json", "utf8"));
+// Collection evaluates declarations, not tests or hooks. Keep each file isolated
+// and bound the number of concurrent module graphs on the hosted runner.
+const maxWorkers = Math.min(4, availableParallelism());
 const options = { root, watch: false, reporters: [], includeTaskLocation: true,
-  allowOnly: false, retry: 0, maxWorkers: 1, fileParallelism: false, exclude: ["**/dist/**"] };
+  allowOnly: false, retry: 0, isolate: true, maxWorkers, fileParallelism: maxWorkers > 1,
+  cliExclude: ["**/dist/**"] };
 // Keep AST and runtime state separate: static placeholder tasks must never
 // stand in for a module that failed to collect in the real environment.
 // Source: https://github.com/vitest-dev/vitest/blob/v5.0.3/packages/vitest/src/node/core.ts
 let ctx = await createVitest(options);
 try {
   const specs = await ctx.globTestSpecifications();
-  const discoveryRows = specifications => specifications.map(spec => ({ file: path.relative(root, spec.moduleId).split(path.sep).join("/"), project: spec.project.name, pool: spec.pool }));
-  write("static-discovery.json", discoveryRows(specs));
   const specifications = specificationRows(specs, root);
+  write("static-discovery.json", specifications);
   write("specifications.json", specifications);
   assert.ok(specs.length, "No configured test specifications");
+  console.log(`[qualification] Parsing ${specs.length} configured specifications`);
   const sources = Object.fromEntries([...new Set(specifications.map(spec => spec.file))]
     .map(file => [file, readFileSync(file, "utf8")]));
   const entries = importEntries(specs, root);
   write("import-entry-sources.json", entries);
   const supplementalStatic = supplementalSpecifications(specs, entries, root);
-  write("supplemental-static-specifications.json", specificationRows(supplementalStatic, root));
+  const supplementalSpecificationsRows = specificationRows(supplementalStatic, root);
+  write("supplemental-static-specifications.json", supplementalSpecificationsRows);
   for (const entry of entries) for (const source of entry.sources) {
     sources[source.file] = readFileSync(source.file, "utf8");
   }
@@ -52,14 +58,15 @@ try {
   await ctx.close();
   ctx = await createVitest(options);
   const runtimeSpecs = await ctx.globTestSpecifications();
-  write("runtime-discovery.json", discoveryRows(runtimeSpecs));
-  assert.deepEqual(specificationRows(runtimeSpecs, root),
+  const runtimeSpecifications = specificationRows(runtimeSpecs, root);
+  write("runtime-discovery.json", runtimeSpecifications);
+  assert.deepEqual(runtimeSpecifications,
     specifications, "Configured specifications changed between static and runtime collection");
+  console.log(`[qualification] Collecting ${runtimeSpecs.length} configured specifications with ${maxWorkers} isolated file workers`);
   const { testModules, unhandledErrors } = await ctx.collectTests(runtimeSpecs);
   const rows = collectRows(testModules, root);
   write("runtime-roster.json", rows);
-  const supplementalRuntime = supplementalSpecifications(runtimeSpecs, entries, root);
-  write("supplemental-runtime-specifications.json", specificationRows(supplementalRuntime, root));
+  console.log(`[qualification] Collected ${rows.length} runtime cases; reconciling source declarations`);
   // A third context keeps supplemental collection from reusing static tasks or
   // changing the configured runtime roster's state and identities.
   await ctx.close();
@@ -67,28 +74,24 @@ try {
   const sourceSpecs = await ctx.globTestSpecifications();
   assert.deepEqual(specificationRows(sourceSpecs, root), specifications);
   const extraSpecs = supplementalSpecifications(sourceSpecs, entries, root);
+  const supplementalRuntimeSpecifications = specificationRows(extraSpecs, root);
+  assert.deepEqual(supplementalRuntimeSpecifications, supplementalSpecificationsRows);
+  write("supplemental-runtime-specifications.json", supplementalRuntimeSpecifications);
   const supplemental = extraSpecs.length ? await ctx.collectTests(extraSpecs)
     : { testModules: [], unhandledErrors: [] };
   write("supplemental-runtime-roster.json", collectRows(supplemental.testModules, root));
   const provenance = entries.map(entry => reconcileImportEntry(entry,
     [...testModules, ...supplemental.testModules], declarations, root));
   write("import-entry-provenance.json", provenance);
-  const unresolvedStaticErrors = [...staticErrors];
-  const resolvedParserGaps = [];
-  for (const entry of provenance.filter(entry => entry.complete)) {
-    const index = unresolvedStaticErrors.findIndex(error =>
-      error.message === `No test suite found in file ${path.resolve(root, entry.file)}`);
-    if (index >= 0) resolvedParserGaps.push({ original_error: unresolvedStaticErrors.splice(index, 1)[0],
-      resolution: "source-bound import-only entry point", file: entry.file,
-      source_sha256: entry.sha256, required_cases: entry.bindings.length, execution_credit: false });
-  }
+  const { unresolved: unresolvedStaticErrors, resolved: resolvedParserGaps } = resolveStaticParserGaps(parsed, provenance, root);
   write("resolved-parser-gaps.json", resolvedParserGaps);
   const mapped = mapEnvironments(rows, sources, policy);
   const errors = [...unresolvedStaticErrors, ...supplementalStaticErrors, ...unhandledErrors,
     ...supplemental.unhandledErrors, ...moduleErrors(testModules), ...moduleErrors(supplemental.testModules)]
     .map(error => ({ name: error.name, message: error.message, stack: error.stack }));
-  const sites = declarationSites(declarations, rows, sources, policy, provenance);
-  const missing = specifications.filter(spec => !rows.some(row => row.file === spec.file && row.project === spec.project));
+  const sites = declarationSites(declarations, rows, sources, policy, provenance.filter(entry => entry.complete));
+  const collectedSpecs = new Set(rows.map(row => JSON.stringify([row.file, row.project])));
+  const missing = specifications.filter(spec => !collectedSpecs.has(JSON.stringify([spec.file, spec.project])));
   const roster = { schema: "paperclip.complete-coverage-map.v1", repository: source.repository, pull_request: source.pr,
     head: source.head, base: source.base, harness_sha256: source.harness_sha256,
     exception_policy_sha256: source.exception_policy_sha256,

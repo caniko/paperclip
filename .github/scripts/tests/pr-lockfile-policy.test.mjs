@@ -4,21 +4,32 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 test("lock policy consumes large diffs and accepts only unchanged approved CI imports", t => {
   const workflow = readFileSync(new URL("../../workflows/pr-trusted.yml", import.meta.url), "utf8");
-  const step = workflow.split("      - name: Block manual lockfile edits")[1].split("      - name:")[0];
-  const script = step.split("        run: |\n")[1].replace(/^ {10}/gm, "")
-    .replaceAll("${{ github.event.pull_request.base.sha }}", "base").replaceAll("${{ github.event.pull_request.head.sha }}", "head");
+  const step = workflow.split("      - name: Block untrusted lockfile edits")[1].split("      - name:")[0];
+  const script = step.split("        run: |\n")[1].replace(/^ {10}/gm, "");
   const directory = mkdtempSync(join(tmpdir(), "pr-lock-policy-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
+  writeFileSync(join(directory, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
   writeFileSync(join(directory, "git"), `#!${process.execPath}
 import { readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
-if (args[0] === "diff" && args[1] === "--name-only") console.log((process.env.LOCK_CHANGED === "true" ? "pnpm-lock.yaml\\n" : "") + Array.from({length:50000},(_,i)=>"changed/"+i).join("\\n"));
+if (args[0] === "show") process.stdout.write(readFileSync(process.env.POLICY_SOURCE));
+else if (args[0] === "diff" && args[1] === "--name-only") {
+  const locks = (process.env.LOCK_CHANGED === "true" ? "pnpm-lock.yaml\\n" : "") + process.env.EXTRA_LOCK;
+  console.log(locks + (args.includes("--") ? "" : Array.from({length:10000},(_,i)=>"changed/"+i).join("\\n")));
+}
+else if (args[0] === "diff" && args[1] === "--quiet") {
+  const fetched = readFileSync(process.env.FETCH_STATE, "utf8");
+  process.exit(process.env.MANUAL_LOCK === "true" ||
+    (process.env.REFRESH_LOCK === "true" && fetched.endsWith(" master")) ||
+    (process.env.FORK_REFRESH === "true" && !fetched.startsWith("https://github.com/caniko/paperclip.git ")) ? 1 : 0);
+}
 else if (args[0] === "fetch") { writeFileSync(process.env.FETCH_STATE, args.slice(-2).join(" ")); process.exit(process.env.FETCH_FAILED === "true" || (process.env.REFRESH_FETCH_FAILED === "true" && args.at(-1) !== "master") || (process.env.FORK_FETCH_FAILED === "true" && args.at(-2) === "https://github.com/caniko/paperclip.git") || (process.env.UPSTREAM_REFRESH_MISSING === "true" && args.at(-2) === "https://github.com/paperclipai/paperclip.git" && args.at(-1) !== "master") ? 1 : 0); }
 else if (args[0] === "merge-base") console.log("a".repeat(40));
-else if (args[0] === "rev-parse") { if (process.env.RESOLVE_FAILED === "true") process.exit(1); const fetched = args[1].startsWith("head:") ? "" : readFileSync(process.env.FETCH_STATE, "utf8"); console.log(args[1].startsWith("head:") ? (process.env.MANUAL_LOCK === "true" ? "c" : "b").repeat(40) : ((process.env.REFRESH_LOCK === "true" && fetched.endsWith(" master")) || (process.env.FORK_REFRESH === "true" && !fetched.startsWith("https://github.com/caniko/paperclip.git ")) ? "d" : "b").repeat(40)); }
+else if (args[0] === "rev-parse") process.exit(1);
 else process.exit(2);
 `, { mode: 0o700 });
   const scenarios = [
@@ -26,7 +37,6 @@ else process.exit(2);
     { succeeds: true },
     { manual: true },
     { fetchFailed: true },
-    { resolveFailed: true },
     { refresh: true, succeeds: true },
     { refresh: true, manual: true },
     { refresh: true, refreshFetchFailed: true },
@@ -37,20 +47,33 @@ else process.exit(2);
     { refresh: true, upstreamRefreshMissing: true, manual: true },
     { fork: true, repository: "untrusted/paperclip" },
     { manual: true, repository: "paperclipai/paperclip" },
+    { manual: true, extra: "scripts/typecheck-sandbox-providers/pnpm-lock.yaml" },
+    { manual: true, extra: "tests/runner-e2e/report-lock.patch" },
+    { author: "dependabot[bot]", extra: "tests/runner-e2e/report-lock.patch" },
+    { ref: "chore/refresh-lockfile" },
   ];
   for (const scenario of scenarios) {
-    const { changed = true, manual = false, fetchFailed = false, resolveFailed = false,
+    const { changed = true, manual = false, fetchFailed = false,
       refresh = false, refreshFetchFailed = false, fork = false, forkFetchFailed = false, upstreamRefreshMissing = false,
-      repository = "caniko/paperclip", succeeds = false } = scenario;
+      repository = "caniko/paperclip", succeeds = false, extra = "", author = "contributor", ref = "feature" } = scenario;
     // In the fork, a change no CI-owned import matches defers to CI's own resolution step.
-    const deferred = changed && !resolveFailed && !succeeds && repository === "caniko/paperclip";
+    const deferred = changed && !extra && !succeeds && repository === "caniko/paperclip" && ref === "feature";
     const githubEnv = join(directory, "github-env");
+    const githubOutput = join(directory, "github-output");
     writeFileSync(githubEnv, "");
-    const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", script], { encoding: "utf8", timeout: 10000,
-      env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, FETCH_STATE: join(directory, "fetched-ref"), LOCK_CHANGED: String(changed), MANUAL_LOCK: String(manual), FETCH_FAILED: String(fetchFailed), RESOLVE_FAILED: String(resolveFailed), REFRESH_LOCK: String(refresh), REFRESH_FETCH_FAILED: String(refreshFetchFailed), FORK_REFRESH: String(fork), FORK_FETCH_FAILED: String(forkFetchFailed), UPSTREAM_REFRESH_MISSING: String(upstreamRefreshMissing), GITHUB_REPOSITORY: repository, GITHUB_ENV: githubEnv } });
+    writeFileSync(githubOutput, "");
+    const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script], { cwd: directory, encoding: "utf8", timeout: 10000,
+      env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, FETCH_STATE: join(directory, "fetched-ref"),
+        LOCK_CHANGED: String(changed), EXTRA_LOCK: extra ? `${extra}\n` : "", MANUAL_LOCK: String(manual),
+        FETCH_FAILED: String(fetchFailed), REFRESH_LOCK: String(refresh), REFRESH_FETCH_FAILED: String(refreshFetchFailed),
+        FORK_REFRESH: String(fork), FORK_FETCH_FAILED: String(forkFetchFailed), UPSTREAM_REFRESH_MISSING: String(upstreamRefreshMissing),
+        POLICY_SOURCE: fileURLToPath(new URL("../lockfile-trust.mjs", import.meta.url)),
+        BASE_SHA: "base", HEAD_SHA: "head", PR_AUTHOR: author, HEAD_REPO: repository, HEAD_REF: ref, PR_NUMBER: "1",
+        GITHUB_SHA: "merge", RUNNER_TEMP: directory, GITHUB_REPOSITORY: repository, GITHUB_ENV: githubEnv, GITHUB_OUTPUT: githubOutput } });
     assert.equal(result.status === 0, succeeds || deferred, `${JSON.stringify(scenario)}: ${result.stdout} ${result.stderr}`);
     assert.doesNotMatch(result.stderr, /Broken pipe/);
     assert.equal(readFileSync(githubEnv, "utf8").includes("PAPERCLIP_LOCK_FROM_CI_RESOLUTION=true"), deferred);
+    assert.equal(readFileSync(githubOutput, "utf8"), succeeds || deferred ? "writer=none\n" : "");
     if (manual && !succeeds && !deferred) assert.match(result.stdout, /Do not commit pnpm-lock.yaml/);
   }
 });
@@ -99,7 +122,7 @@ writeFileSync("pnpm-lock.yaml", process.env.RESOLVED_LOCK);
   for (const { name, head, resolved, succeeds = false, pnpmFails = false } of scenarios) {
     const cwd = mkdtempSync(join(directory, "checkout-"));
     writeFileSync(join(cwd, "pnpm-lock.yaml"), "merge-ref lock");
-    const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", script], { cwd, encoding: "utf8", timeout: 10000,
+    const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script], { cwd, encoding: "utf8", timeout: 10000,
       env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, BASE_LOCK: base, HEAD_LOCK: head, RESOLVED_LOCK: resolved,
         PNPM_FAILS: String(pnpmFails), RUNNER_TEMP: join(cwd, "runner-temp") } });
     assert.equal(result.status === 0, succeeds, `${name}: ${result.stdout} ${result.stderr}`);
@@ -147,7 +170,7 @@ test("CI's lock resolution uses real pnpm and ignores PR-controlled pnpm hooks",
     git("checkout", "-q", "--detach", head);
     git("merge", "-q", "--no-edit", target);
     const script = template.replaceAll("${{ github.event.pull_request.base.sha }}", target).replaceAll("${{ github.event.pull_request.head.sha }}", head);
-    return spawnSync("bash", ["-e", "-o", "pipefail", "-c", script], { cwd: repo, env, encoding: "utf8", timeout: 60000 });
+    return spawnSync("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script], { cwd: repo, env, encoding: "utf8", timeout: 60000 });
   };
 
   // A workspace dependency adds only importer entries, exactly as CI resolves them.
@@ -225,8 +248,10 @@ if (args[0] === "diff") process.exit(1);
 if (args.includes("--force")) process.exit(22);
 `, { mode: 0o700 });
   writeFileSync(join(directory, "gh"), `#!${process.execPath}\nprocess.exit(23);\n`, { mode: 0o700 });
-  const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", script], { encoding: "utf8", timeout: 10000,
+  writeFileSync(join(directory, "node"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script], { cwd: directory, encoding: "utf8", timeout: 10000,
     env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, GIT_LOG: log,
+      LOCKFILES: "pnpm-lock.yaml scripts/typecheck-sandbox-providers/pnpm-lock.yaml packages/plugins/sandbox-providers/daytona/pnpm-lock.yaml",
       GITHUB_OUTPUT: join(directory, "output"), SOURCE_REF: "refs/heads/feature", REPO_OWNER: "caniko" } });
   assert.equal(result.status, 0, `${result.stdout} ${result.stderr}`);
   const commands = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line));

@@ -6,7 +6,6 @@ import { spawn } from "node:child_process";
 import { open as openFile } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
-import { connectPostgres as postgres } from "./postgres-connection.js";
 import { randomUUID } from "node:crypto";
 
 export type BackupRetentionPolicy = {
@@ -289,6 +288,9 @@ function formatSqlValue(
   if (dataType === "json" || dataType === "jsonb") {
     return formatSqlLiteral(JSON.stringify(val));
   }
+  if (dataType === "bytea" && val instanceof Uint8Array) {
+    return `decode('${Buffer.from(val).toString("hex")}', 'hex')`;
+  }
   if (typeof val === "boolean") return val ? "true" : "false";
   if (typeof val === "number") return String(val);
   if (val instanceof Date) return formatSqlLiteral(val.toISOString());
@@ -554,7 +556,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
   const canUsePgDump = !hasBackupTransforms(opts);
   const excludedTableNames = normalizeTableNameSet(opts.excludeTables);
   const nullifiedColumnsByTable = normalizeNullifyColumnMap(opts.nullifyColumns);
-  let sql: ReturnType<typeof postgres> = connectPostgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
+  let sql = connectPostgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
   let sqlClosed = false;
   const closeSql = async () => {
     if (sqlClosed) return;
@@ -979,8 +981,8 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       if (excludedTableNames.has(currentTableKey) || (count[0]?.n ?? 0) === 0) continue;
 
       // Get column info for this table
-      const cols = await sql<{ column_name: string; data_type: string }[]>`
-        SELECT column_name, data_type
+      const cols = await sql<{ column_name: string; data_type: string; udt_schema: string; udt_name: string }[]>`
+        SELECT column_name, data_type, udt_schema, udt_name
         FROM information_schema.columns
         WHERE table_schema = ${schema_name} AND table_name = ${tablename}
         ORDER BY ordinal_position
@@ -1010,8 +1012,13 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         continue;
       }
 
+      const binaryArray = (column: (typeof cols)[number]) => column.data_type === "ARRAY"
+        && column.udt_schema === "pg_catalog" && column.udt_name === "_bytea";
+      const projection = cols.some(binaryArray) ? cols.map(column => binaryArray(column)
+        ? `${quoteIdentifier(column.column_name)}::text AS ${quoteIdentifier(column.column_name)}`
+        : quoteIdentifier(column.column_name)).join(", ") : "*";
       const rowCursor = sql
-        .unsafe(`SELECT * FROM ${qualifiedTableName}`)
+        .unsafe(`SELECT ${projection} FROM ${qualifiedTableName}`)
         .values()
         .cursor(BACKUP_DATA_CURSOR_ROWS) as AsyncIterable<unknown[][]>;
       for await (const rows of rowCursor) {

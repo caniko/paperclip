@@ -11,6 +11,7 @@ import {
   buildSshSpawnTarget,
   createSshCommandManagedRuntimeRunner,
   getSshEnvLabSupport,
+  parseSshRemoteExecutionSpec,
   startSshEnvLabFixture,
   stopSshEnvLabFixture,
   syncDirectoryToSsh,
@@ -18,7 +19,7 @@ import {
 } from "./ssh.js";
 import { ATLAS_CALLBACK_BRIDGE_ROUTES, authorizeSandboxCallbackBridgeRequestWithRoutes, createSandboxCallbackBridgeAsset, sandboxCallbackBridgeDirectories, startSandboxCallbackBridgeServer } from "./sandbox-callback-bridge.js";
 import { startAdapterExecutionTargetPaperclipBridge } from "./execution-target.js";
-import { prepareRemoteManagedRuntime } from "./remote-managed-runtime.js";
+import { buildRemoteExecutionSessionIdentity, prepareRemoteManagedRuntime, remoteExecutionSessionMatches } from "./remote-managed-runtime.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -59,14 +60,17 @@ describe("SSH authentication selection", () => {
       const spec = await atlasFixtureSpec(root);
       const probe = invocation !== "run";
       const worker = path.join(root, "opencode");
-      await writeFile(worker, "#!/bin/sh\nexec env\n", { mode: 0o700 });
+      await writeFile(worker, '#!/bin/sh\nprintf "argv:%s\\n" "$@"\nexec env\n', { mode: 0o700 });
+      const args = invocation === "models"
+        ? ["models", "--standalone"]
+        : ["run", "--standalone", "--format", "json", "--model", "openai/gpt-4.1#high"];
       const bridge = atlasBridgeTokenDelivery(spec, "fixture-bridge-bearer");
       if (!probe) await bridge.deliver();
       try {
         const launch = await buildSshSpawnTarget({
           spec: { ...spec, atlas: { ...spec.atlas, adapterType: "opencode_local", ...(probe ? { probe: true } : {}) } },
           command: worker,
-          args: invocation === "models" ? ["models"] : ["run", "--standalone", "--format", "json", "--model", "openai/gpt-4.1", "--variant", "high"],
+          args,
           env: {
             OPENCODE_DISABLE_PROJECT_CONFIG: "0", CALLER_ONLY: "arbitrary", OPENAI_API_KEY: "fixture-host-provider",
             PAPERCLIP_API_KEY: "fixture-jwt", PAPERCLIP_BRIDGE_TOKEN: "fixture-bridge-bearer",
@@ -75,6 +79,7 @@ describe("SSH authentication selection", () => {
         });
         try {
           const { stdout } = await execFileAsync(launch.command, launch.args, { env: {} });
+          expect(stdout.split("\n").filter((line) => line.startsWith("argv:"))).toEqual(args.map((arg) => `argv:${arg}`));
           expect(stdout.split("\n").filter((line) => /^(OPENCODE_|PAPERCLIP_|OPENAI_|CALLER_ONLY=)/.test(line)).sort()).toEqual(
             probe ? ["OPENCODE_DISABLE_PROJECT_CONFIG=1"] : [
               "OPENCODE_DISABLE_PROJECT_CONFIG=1", "PAPERCLIP_API_KEY=fixture-bridge-bearer", "PAPERCLIP_API_URL=http://callback.invalid",
@@ -230,7 +235,10 @@ describe("SSH authentication selection", () => {
           env: {},
         });
         try {
-          return await execFileAsync(target.command, ["-F", "/dev/null", ...target.args], { env, timeout: 5_000 });
+          const result = execFileAsync(target.command, ["-F", "/dev/null", ...target.args], { env, timeout: 5_000 });
+          result.child.stdin?.on("error", () => {});
+          result.child.stdin?.end(target.stdinPrefix);
+          return await result;
         } finally {
           await target.cleanup();
         }
@@ -293,5 +301,23 @@ describe("SSH authentication selection", () => {
       if (root) await rm(root, { recursive: true, force: true });
     }
     if (keyPath) await expect(stat(keyPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+const spec = { host: "ssh.example.test", port: 22, username: "fixture", remoteCwd: "/workspace", remoteWorkspacePath: "/workspace", privateKey: null, knownHosts: null, strictHostKeyChecking: true };
+
+describe("SSH authentication source", () => {
+  it.each([undefined, true, false])("preserves the SSH authentication option through target parsing (%s)", useHostAuth => {
+    const target = { ...spec, ...(useHostAuth !== undefined ? { useHostAuth } : {}) };
+    expect(parseSshRemoteExecutionSpec(target)).toEqual(target);
+    expect(parseSshRemoteExecutionSpec({ ...spec, useHostAuth: "false" })).toBeNull();
+  });
+  it("starts a fresh SSH session when its authentication source changes", () => {
+    const saved = buildRemoteExecutionSessionIdentity(spec);
+    expect(remoteExecutionSessionMatches(saved, { ...spec })).toBe(true);
+    expect(remoteExecutionSessionMatches(saved, { ...spec, useHostAuth: false })).toBe(false);
+    const configured = buildRemoteExecutionSessionIdentity({ ...spec, useHostAuth: false });
+    expect(remoteExecutionSessionMatches(configured, { ...spec, useHostAuth: false })).toBe(true);
+    expect(remoteExecutionSessionMatches(configured, { ...spec, useHostAuth: true })).toBe(false);
   });
 });

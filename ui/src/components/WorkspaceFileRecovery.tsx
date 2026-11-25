@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import type { ExecutionBlocker, Issue } from "@paperclipai/shared";
+import { describeError } from "../api/errors";
 import { issuesApi } from "../api/issues";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
@@ -67,7 +68,7 @@ function WorkspaceFileRecoveryForm({ issueId, issueStatus, blocker, canManage, o
             {record.isPending ? "Recording…" : "Record file recovery"}
           </Button>
         </div>
-        {record.isError && <p role="alert" className="text-destructive">{record.error.message}</p>}
+        {record.error && <p role="alert" className="text-destructive">{describeError(record.error).body}</p>}
       </> : <p className="text-muted-foreground">A board member with runtime access can record verified file recovery here.</p>}
   </section>;
 }

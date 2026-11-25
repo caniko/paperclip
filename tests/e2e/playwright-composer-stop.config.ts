@@ -35,11 +35,11 @@ if (fixture) {
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   fs.writeFileSync(
     path.join(fixtureDir, "codex"),
-    `#!/bin/sh\nexec ${quote(fixture)} --state-file ${quote(fixtureDir)}/state-$$.json --hold-turn --call-log ${quote(logPath)} "$@"\n`,
+    `#!/bin/sh\nexec ${quote(fixture)} --state-file ${quote(fixtureDir)}/state-$$.json --hold-turn --complete-read-only-probes --call-log ${quote(logPath)} "$@"\n`,
     { mode: 0o755 },
   );
 }
-const server = base.webServer as Exclude<typeof base.webServer, unknown[]>;
+const server = base.webServer as Exclude<typeof base.webServer, unknown[] | undefined>;
 const browserExecutable = process.env.PAPERCLIP_PLAYWRIGHT_EXECUTABLE_PATH;
 export default defineConfig({
   ...base,
@@ -52,6 +52,9 @@ export default defineConfig({
     })),
   } : {}),
   testMatch: "composer-stop.spec.ts",
+  // Both adapter cases share instance-level settings on one server.
+  workers: 1,
+  fullyParallel: false,
   timeout: 90_000,
   webServer: {
     ...server,

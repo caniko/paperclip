@@ -5,7 +5,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OPENROUTER_ATTRIBUTION_HEADERS } from "@paperclipai/adapter-utils/openrouter-attribution";
-import { prepareOpenCodeRuntimeConfig } from "./runtime-config.js";
+import { atlasOpenCodeRunArgs, prepareOpenCodeRuntimeConfig } from "./runtime-config.js";
 
 const cleanupPaths = new Set<string>();
 
@@ -32,6 +32,33 @@ async function makeConfigHome(initialConfig?: Record<string, unknown>) {
   }
   return root;
 }
+
+describe("atlasOpenCodeRunArgs", () => {
+  const config = { standalone: true, model: "provider/model", variant: "high" };
+
+  it("passes the variant as part of the OpenCode V2 model reference", () => {
+    expect(atlasOpenCodeRunArgs(config)).toEqual([
+      "run", "--standalone", "--format", "json", "--model", "provider/model#high",
+    ]);
+  });
+
+  it.each([
+    { standalone: false },
+    { model: "" },
+    { variant: "" },
+    { model: "gpt-4.1" },
+    { model: "-provider/model" },
+    { model: "provider/model\u007f" },
+    { model: "provider/model#low" },
+    { model: "provider/model name" },
+    { variant: "-high" },
+    { variant: "high\u007f" },
+    { variant: "hi#gh" },
+    { variant: "high\t" },
+  ])("rejects invalid standalone pins: %j", (override) => {
+    expect(atlasOpenCodeRunArgs({ ...config, ...override })).toBeNull();
+  });
+});
 
 describe("prepareOpenCodeRuntimeConfig", () => {
   it("keeps Atlas configuration worker-owned and strips controller credentials and paths", async () => {
@@ -142,6 +169,33 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     }
   });
 
+  it("stages isolated configuration for remote asset transfer even with remote target metadata", async () => {
+    const configHome = await makeConfigHome({ theme: "system" });
+    const input = {
+      env: { XDG_CONFIG_HOME: configHome },
+       config: { model: "gateway/test-model#high" },
+       targetIsRemote: true,
+       includeOperatorGitConfig: true,
+     };
+     await fs.mkdir(path.join(configHome, "git"));
+     await fs.writeFile(path.join(configHome, "git", "config"), "[user]\n\tname = Operator\n");
+    const prepared = await prepareOpenCodeRuntimeConfig(input);
+    expect(prepared.env.XDG_CONFIG_HOME).not.toBe(configHome);
+     cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+     await expect(fs.stat(path.join(prepared.env.XDG_CONFIG_HOME, "git"))).rejects.toMatchObject({ code: "ENOENT" });
+     expect(JSON.parse(await fs.readFile(
+       path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8",
+     ))).toMatchObject({
+      theme: "system",
+      permission: "allow",
+       provider: { gateway: { models: { "test-model": {} } } },
+     });
+    await prepared.cleanup();
+    await expect(fs.stat(prepared.env.XDG_CONFIG_HOME)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(JSON.parse(await fs.readFile(path.join(configHome, "opencode", "opencode.json"), "utf8")))
+      .toEqual({ theme: "system" });
+  });
+
   it("stages a relocatable sandbox shell hook without changing the parent environment", async () => {
     const configHome = await makeConfigHome({ plugin: ["operator-plugin"], permission: { bash: "ask" } });
     const input = { env: { XDG_CONFIG_HOME: configHome }, config: { dangerouslySkipPermissions: false }, sandboxToolOomPreference: true };
@@ -172,10 +226,13 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     expect(command.status).toBe(7);
     if (process.platform === "linux") {
       const parentScore = await fs.readFile("/proc/self/oom_score_adj", "utf8");
-      expect(execFileSync("bash", ["-c", "cat /proc/self/oom_score_adj"], {
-        env: { ...process.env, ...hookEnv.child }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
-      }).trim()).toBe("1000");
-      expect(await fs.readFile("/proc/self/oom_score_adj", "utf8")).toBe(parentScore);
+      for (const shellLevel of ["0", "1"]) {
+        expect(execFileSync("bash", ["-c", "cat /proc/self/oom_score_adj"], {
+          env: { ...process.env, ...hookEnv.child, SHLVL: shellLevel }, encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        }).trim()).toBe("1000");
+        expect(await fs.readFile("/proc/self/oom_score_adj", "utf8")).toBe(parentScore);
+      }
     }
     const config = JSON.parse(await fs.readFile(path.join(relocated, "opencode", "opencode.json"), "utf8"));
     expect(config).toMatchObject({ plugin: ["operator-plugin"], permission: { bash: "ask" } });

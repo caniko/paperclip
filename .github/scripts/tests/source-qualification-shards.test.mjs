@@ -28,7 +28,9 @@ function args(lane) {
 test("the exact-head matrix covers every server suite once, including chat and native execution", () => {
   const server = lanes.filter(lane => lane.group === "general-server");
   const serialized = lanes.filter(lane => lane.mode === "serialized");
-  assert.ok(server.length > 1 && serialized.length > 1, "both long-running groups need shards");
+  assert.deepEqual(server.map(lane => [lane.lane, lane.shard_index, lane.shard_count]),
+    Array.from({ length: 6 }, (_, index) => [`tests-server-${index + 1}`, String(index), "6"]));
+  assert.ok(serialized.length > 1, "the long-running serialized group needs shards");
   const expectedServer = plan(["--mode", "general", "--group", "general-server", "--shard-index", "0", "--shard-count", "1"]);
   const expectedSerialized = plan(["--mode", "serialized"]);
   const actualServer = server.flatMap(lane => plan(args(lane)).selectedGeneralServerSuites);
@@ -37,10 +39,16 @@ test("the exact-head matrix covers every server suite once, including chat and n
   assert.deepEqual(actualSerialized.sort(), expectedSerialized.selectedSerializedSuites.sort());
   assert.equal(new Set([...actualServer, ...actualSerialized]).size, actualServer.length + actualSerialized.length);
   for (const file of ["server/src/__tests__/chat-channels.integration.test.ts",
+    "server/src/__tests__/dot-runner.test.ts",
     "server/src/services/native-runtime/native-codex-runner.integration.test.ts",
     "server/src/services/native-runtime/native-runner-restart-recovery.integration.test.ts"]) {
     assert.ok(actualServer.includes(file), `missing real runtime suite: ${file}`);
   }
+});
+
+test("the shard that selects Dot Runner prepares the locked daemon before running Vitest", () => {
+  assert.match(application, /selectedGeneralServerSuites\.includes\("server\/src\/__tests__\/dot-runner\.test\.ts"\)/);
+  assert.match(application, /cargo build --release --locked [^\n]+--bin paperclip-runnerd [^\n]+\n\s+\)\n\s+export PAPERCLIP_DOT_RUNNER_TEST_BINARY=[^\n]+\n\s+fi\n\s+pnpm test:run/);
 });
 
 test("the exact-head matrix covers each configured workspace and each native file shard", () => {
@@ -68,6 +76,7 @@ test("all source shards retain strict reports, the two-hour deadline and their o
   assert.match(application, /timeout-minutes: 120\n/);
   assert.match(application, /fail-fast: false\n/);
   assert.match(application, /max-parallel: 2\n/);
+  assert.match(application, /if \[ "\$TEST_GROUP" = general-server \]; then export PAPERCLIP_VITEST_MAX_WORKERS="2"; fi\n/);
   assert.match(application, /tests-\*\|regression\|managed-opencode\) strict\+=\(--strict-reports\)/);
   assert.match(application, /if: matrix\.lane == 'tests-workspaces-b' \|\| matrix\.lane == 'tests-workspaces-c' \|\| matrix\.lane == 'managed-opencode'/);
   assert.match(application, /pnpm test:run -- "\$\{args\[@\]\}"/);

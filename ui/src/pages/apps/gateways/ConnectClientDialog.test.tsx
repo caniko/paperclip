@@ -70,20 +70,6 @@ async function flushReact(): Promise<void> {
   await new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
-async function waitForAssertion(assertion: () => void): Promise<void> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    await flushReact();
-    try {
-      assertion();
-      return;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError;
-}
-
 function storedToken(): ToolMcpGatewayToken {
   return {
     id: "token-1",
@@ -199,7 +185,7 @@ describe("ConnectClientDialog", () => {
       .find((button) => button.textContent?.trim() === "Copy");
     // The snippet copy button stays disabled until the token-selection effect commits, so wait
     // for it instead of assuming one macrotask is enough on a loaded worker.
-    await waitForAssertion(() => {
+    await vi.waitFor(() => {
       const button = copyButton();
       if (!button) throw new Error("snippet copy button missing");
       expect(button.disabled).toBe(false);

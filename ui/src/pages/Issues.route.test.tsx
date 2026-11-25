@@ -22,7 +22,10 @@ vi.mock("@/context/CompanyContext", () => ({
     selectedCompany: { id: "company-1", name: "Paperclip", issuePrefix: "PAP" },
   }),
 }));
-vi.mock("@/context/ToastContext", () => ({ useToastActions: () => ({ pushToast: vi.fn(), dismissToast: vi.fn(), clearToasts: vi.fn() }) }));
+vi.mock("@/context/ToastContext", () => ({
+  useToastActions: () => ({ pushToast: vi.fn(), dismissToast: vi.fn(), clearToasts: vi.fn() }),
+  useOptionalToastActions: () => undefined,
+}));
 vi.mock("@/context/BreadcrumbContext", () => ({
   useBreadcrumbs: () => ({ setBreadcrumbs: fixture.setBreadcrumbs }),
 }));
@@ -34,6 +37,9 @@ vi.mock("@/hooks/useStreamlinedUiEnabled", () => ({
 }));
 vi.mock("@/hooks/useCombinedInboxTasksEnabled", () => ({
   useCombinedInboxTasksEnabled: () => ({ enabled: true, loaded: true }),
+}));
+vi.mock("@/hooks/useCoordinatorWorkspaceEnabled", () => ({
+  useCoordinatorWorkspaceEnabled: () => ({ enabled: false, loaded: true, userId: null }),
 }));
 vi.mock("@/hooks/useInboxBadge", () => ({ useInboxBadge: () => ({ inbox: 0 }) }));
 vi.mock("@/hooks/useSharedPolling", () => ({
@@ -109,6 +115,7 @@ afterEach(async () => {
 });
 
 it("remembers Done when a bare Tasks link is followed in the same mounted route", async () => {
+  window.localStorage.setItem(TASK_LAST_VIEW_KEY, "mine");
   await act(async () => {
     root.render(
       <QueryClientProvider client={queryClient}>

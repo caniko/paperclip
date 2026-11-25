@@ -489,7 +489,9 @@ describeEmbeddedPostgres("nested repository clone migration", () => {
     expect(await second.migrate()).toMatchObject({ outcome: "migrated" });
     expect(await second.expire()).toMatchObject({ expired: false, skipReason: "unpushed_managed_checkout_branches" });
     expect(await exists(second.checkout)).toBe(true);
-  });
+    // Two actual migrations plus bundle creation and restore can exceed the
+    // default 15 seconds when Git and PostgreSQL share a loaded CI runner.
+  }, 45_000);
 
   it("is disabled by default, changes nothing in dry run, and runs from the reaper when enabled", async () => {
     const f = await fixture();

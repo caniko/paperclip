@@ -14,6 +14,9 @@ remains rejected when platform-specific or deliberately disabled cases are
 skipped; their coverage still needs an independent disposition. The real nested
 chat-shard fixture keeps its reports in its own temporary directory so its
 expected assertion failure cannot overwrite mandatory outer-suite evidence.
+The server shard that selects Dot Runner builds its locked release daemon before
+starting Vitest and retains the build log. The suite then exercises that binary
+without spending its test setup timeout compiling Rust.
 
 The separately configured `runner-package` environment runs the complete Runner
 Vitest roster without a name filter, including all three final-output benchmarks

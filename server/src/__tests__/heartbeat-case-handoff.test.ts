@@ -192,10 +192,10 @@ describe("durable case handoff queue admission", () => {
       await db.update(issues).set({ executionRunId: sourceRunId }).where(eq(issues.id, f.issueId));
       await db.update(caseHandoffs).set({ state: "awaiting_release", sourceRunId, fromAgentId: f.agentId }).where(eq(caseHandoffs.id, f.handoffId));
       const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, sourceRunId));
-      const output = createHeartbeatRunOutput(db, { run: source, runId: sourceRunId, issueId: f.issueId,
+      const output = createHeartbeatRunOutput(db, { run: source, runId: sourceRunId, issueId: f.issueId, adapterType: "process",
         runLogStore: { begin: async () => ({ store: "local_file", logRef: "synthetic-legacy-log" }), append: async () => 0 },
         identityRedactor: createAgentIdentityRedactor(), secretKeys: new Set(), getCurrentUserRedactionOptions: async () => ({ enabled: false }),
-        appendRunEvent: (run, event) => appendHeartbeatRunEvent(db, { companyId: run.companyId, agentId: run.agentId, runId: run.id, ...event }),
+        appendRunEvent: async (run, event) => { await appendHeartbeatRunEvent(db, { companyId: run.companyId, agentId: run.agentId, runId: run.id, ...event }); },
       });
       const handlers = await output.begin(source);
       await handlers.onAdapterEvent({ eventType: "legacy.case_handoff_cleanup_verified", stream: "system", payload: {

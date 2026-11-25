@@ -8,6 +8,13 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { CompanyEnvironments } from "./CompanyEnvironments";
 import { ApiError } from "@/api/client";
 
+vi.mock("@/api/access", () => ({
+  accessApi: { getCurrentBoardAccess: async () => ({ source: "local_implicit", isInstanceAdmin: false }) },
+}));
+vi.mock("@/api/tailscale", () => ({
+  tailscaleApi: { list: async () => [] },
+}));
+
 const xtermMocks = vi.hoisted(() => {
   class MockTerminal {
     readonly options: Record<string, unknown>;
@@ -807,6 +814,7 @@ describe("CompanyEnvironments — test provider button", () => {
   ] as const)("persists disabling %s %s policy after saving and reloading", async (driver, disabledPolicy) => {
     const policy = { authority: "host-authority", principal: "controller-a", roots: ["/srv/link/../data ", "/srv/other"] };
     const unrelatedConfig = driver === "ssh" ? {
+      useHostAuth: true, network: "direct",
       host: "worker.example", port: 2222, username: "alice", remoteWorkspacePath: policy.roots[0],
       knownHosts: "worker.example ssh-ed25519 known-key", strictHostKeyChecking: true,
       privateKey: null, privateKeySecretRef: null,

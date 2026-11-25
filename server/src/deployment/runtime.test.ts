@@ -72,7 +72,8 @@ describe("declarative startup credentials", () => {
     for (const change of [
       { standalone: undefined }, { standalone: false }, { model: undefined }, { model: "bare" }, { model: "/model" },
       { model: "provider/" }, { model: "provider/model\n" }, { model: "provider/model#low" }, { variant: undefined },
-      { variant: "" }, { variant: "high medium" }, { variant: "high\u007f" }, { managedService: true }, { extraArgs: [] },
+      { variant: "" }, { variant: "high medium" }, { variant: "high#low" }, { variant: "high\u007f" },
+      { managedService: true }, { extraArgs: [] },
       { env: {} }, { adapterType: "claude_local" }, { privateKeyCredential: "unbound" }, { host: "192.0.2.1" },
       { command: "/worker/../opencode" }, { username: "root" }, { hostKey: `${binding.hostKey} comment` },
     ]) expect(accepts({ ...binding, ...change }), JSON.stringify(change)).toBe(false);

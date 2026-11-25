@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { asBoolean } from "@paperclipai/adapter-utils/server-utils";
+import { openCodeCatalogModelId } from "./models.js";
 import { installSandboxToolMemoryPreference } from "./sandbox-tool-memory.js";
 
 type PreparedOpenCodeRuntimeConfig = {
@@ -89,7 +90,7 @@ function parseProviderConfig(
 
 function parseConfiguredModelRef(raw: unknown): { provider: string; model: string } | null {
   if (typeof raw !== "string") return null;
-  const trimmed = raw.trim();
+  const trimmed = openCodeCatalogModelId(raw.trim());
   const slash = trimmed.indexOf("/");
   if (slash <= 0 || slash === trimmed.length - 1) return null;
   return { provider: trimmed.slice(0, slash), model: trimmed.slice(slash + 1) };
@@ -123,19 +124,6 @@ export async function prepareOpenCodeRuntimeConfig(input: {
 
   const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
 
-  // For remote execution targets the host XDG_CONFIG_HOME path is meaningless
-  // (and actively harmful — it leaks a macOS-only path into the remote Linux
-  // env). Callers that need to ship a runtime opencode config to the remote
-  // box do that via prepareAdapterExecutionTargetRuntime in execute.ts; this
-  // host-fs helper is local-only.
-  if (input.targetIsRemote) {
-    return {
-      env: input.env,
-      notes: [],
-      cleanup: async () => {},
-    };
-  }
-
   const sourceConfigHome = resolveXdgConfigHome(input.env);
   const sourceConfigDir = path.join(sourceConfigHome, "opencode");
   const runtimeConfigHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-config-"));
@@ -147,7 +135,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     // Include operator Git settings locally while keeping global writes run-owned.
     // The operator config is optional: skip it unless it is a readable regular file.
     const sourceGitConfig = path.resolve(sourceConfigHome, "git", "config");
-    if (input.includeOperatorGitConfig && await fs.stat(sourceGitConfig)
+    if (!input.targetIsRemote && input.includeOperatorGitConfig && await fs.stat(sourceGitConfig)
       .then(async (stat) => stat.isFile() && await fs.access(sourceGitConfig, fs.constants.R_OK).then(() => true))
       .catch(() => false)) {
       const runtimeGitDir = path.join(runtimeConfigHome, "git");
@@ -283,11 +271,15 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   }
 }
 
+const ATLAS_MODEL_PATTERN = /^(?!-)(?:[^/\s\p{C}#]+\/)+[^/\s\p{C}#]+$/u;
+const ATLAS_VARIANT_PATTERN = /^(?!-)[^\s\p{C}#]+$/u;
+
 /** Only server-admitted pins are used by the Atlas run and hello probe. */
 export function atlasOpenCodeRunArgs(config: Record<string, unknown>): string[] | null {
   const { model, variant, standalone } = config;
-  if (standalone !== true || typeof model !== "string" || !model || typeof variant !== "string" || !variant) return null;
-  return ["run", "--standalone", "--format", "json", "--model", model, "--variant", variant];
+  if (standalone !== true || typeof model !== "string" || typeof variant !== "string") return null;
+  if (!ATLAS_MODEL_PATTERN.test(model) || !ATLAS_VARIANT_PATTERN.test(variant)) return null;
+  return ["run", "--standalone", "--format", "json", "--model", `${model}#${variant}`];
 }
 
 /** Managed credentials must never leave host-only homes in a remote process. */

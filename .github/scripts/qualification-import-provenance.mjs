@@ -121,3 +121,21 @@ export function reconcileImportEntry(entry, modules, declarations, root) {
   }
   return { ...result, complete: true };
 }
+
+export function resolveStaticParserGaps(modules, provenance, root) {
+  const unresolved = [], resolved = [];
+  for (const module of modules) {
+    const entry = provenance.find(entry => entry.complete
+      && module.task.filepath === path.resolve(root, entry.file)
+      && (module.task.projectName ?? "") === entry.project);
+    for (const error of module.errors()) {
+      if (entry && error.message === `No test suite found in file ${module.task.filepath}`) {
+        resolved.push({ original_error: error, resolution: "source-bound import-only entry point",
+          file: entry.file, project: entry.project, source_sha256: entry.sha256,
+          required_cases: entry.bindings.length, execution_credit: false });
+      } else unresolved.push(error);
+    }
+    for (const suite of module.children.allSuites()) unresolved.push(...suite.errors());
+  }
+  return { unresolved, resolved };
+}

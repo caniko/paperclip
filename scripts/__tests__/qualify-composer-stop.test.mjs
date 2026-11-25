@@ -256,7 +256,8 @@ test("the mandatory lane executes an immutable harness and verifier outside the 
   }
   assert.equal((lane.match(/sha256sum --check/g) ?? []).length, 2);
   const base = readFileSync(new URL("../../tests/e2e/playwright.config.ts", import.meta.url), "utf8");
-  assert.match(base, /cwd: process\.env\.PAPERCLIP_E2E_SOURCE_ROOT \?\?/);
+  assert.match(base, /const REPO_ROOT = process\.env\.PAPERCLIP_E2E_SOURCE_ROOT \?\?/);
+  assert.match(base, /cwd: REPO_ROOT\b/);
   const config = readFileSync(new URL("../../tests/e2e/playwright-composer-stop.config.ts", import.meta.url), "utf8");
   assert.match(config, /Mandatory native composer Stop requires an absolute candidate source root/);
 });

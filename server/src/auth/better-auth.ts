@@ -1,9 +1,10 @@
 import type { Request, RequestHandler } from "express";
 import type { IncomingHttpHeaders } from "node:http";
-import { betterAuth, type Auth } from "better-auth";
+import { betterAuth, type Auth, type BetterAuthOptions } from "better-auth";
 import { genericOAuth } from "better-auth/plugins";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { toNodeHandler } from "better-auth/node";
+import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import {
   authAccounts,
@@ -46,10 +47,23 @@ type BetterAuthSessionResolver = {
   api?: BetterAuthGetSessionApi;
 };
 
-type BetterAuthInstance = BetterAuthHandlerTarget & BetterAuthSessionResolver;
+type BetterAuthInstance = BetterAuthHandlerTarget & BetterAuthSessionResolver & Pick<Auth, "options" | "$context">;
+
+const oidcUserInfoSchema = z.object({
+  sub: z.string().min(1),
+  email: z.email(),
+  email_verified: z.boolean().optional(),
+  name: z.string().optional(),
+  picture: z.string().optional(),
+});
 
 const AUTH_COOKIE_PREFIX_FALLBACK = "default";
 const AUTH_COOKIE_PREFIX_INVALID_SEGMENTS_RE = /[^a-zA-Z0-9_-]+/g;
+
+export function legacyAccountIssuerForCreate(account: { providerId: string; issuer?: unknown }): string | null {
+  if (typeof account.issuer === "string" && account.issuer.trim()) return account.issuer;
+  return account.providerId === "credential" ? "local:credential" : null;
+}
 
 export function deriveAuthCookiePrefix(instanceId = resolvePaperclipInstanceId()): string {
   const scopedInstanceId = instanceId
@@ -269,7 +283,7 @@ export function createBetterAuthInstance(
     publicUrl,
   });
 
-  const authConfig = {
+  const authConfig: BetterAuthOptions = {
     baseURL: baseUrl,
     secret,
     trustedOrigins,
@@ -282,13 +296,32 @@ export function createBetterAuthInstance(
         verification: authVerifications,
       },
     }),
+    account: {
+      additionalFields: {
+        issuer: { type: "string", required: false, input: false, returned: false },
+      },
+      ...(oidc ? { accountLinking: { enabled: true, requireLocalEmailVerified: true } } : {}),
+    },
+    databaseHooks: {
+      account: {
+        create: {
+          before: async (account, context) => {
+            // The explicit OAuth callback does not enforce requireLocalEmailVerified.
+            if (oidc && account.providerId === oidc.providerId) {
+              const user = await context?.context.internalAdapter.findUserById(account.userId);
+              if (user?.emailVerified !== true) return false;
+            }
+            return { data: { ...account, issuer: legacyAccountIssuerForCreate(account) } };
+          },
+        },
+      },
+    },
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: false,
       disableSignUp: config.authDisableSignUp,
       autoSignIn: options.autoSignIn ?? true,
     },
-    ...(oidc ? { account: { accountLinking: { enabled: true } } } : {}),
     rateLimit: buildBetterAuthRateLimitOptions({
       deploymentMode: config.deploymentMode,
       deploymentExposure: config.deploymentExposure,
@@ -320,15 +353,38 @@ export function createBetterAuthInstance(
   };
 
   if (oidc) {
+    const userInfoUrl = oidc.userInfoUrl;
     const oidcPlugin = genericOAuth({
       config: [
         {
           providerId: oidc.providerId,
           discoveryUrl: oidc.discoveryUrl,
-          accountIssuer: oidc.discoveryUrl.replace(/\/\.well-known\/openid-configuration$/, ""),
+          accountSubject: ({ profile }) => typeof profile.sub === "string" ? profile.sub : "",
           ...(oidc.authorizationUrl ? { authorizationUrl: oidc.authorizationUrl } : {}),
           ...(oidc.tokenUrl ? { tokenUrl: oidc.tokenUrl } : {}),
-          ...(oidc.userInfoUrl ? { userInfoUrl: oidc.userInfoUrl } : {}),
+          ...(userInfoUrl
+            ? {
+                // Discovery can be unavailable at startup. In that case
+                // genericOAuth decodes ID tokens without JWKS verification.
+                // Use the configured UserInfo endpoint, not those claims.
+                getUserInfo: async ({ accessToken }) => {
+                  if (!accessToken) return null;
+                  try {
+                    const response = await fetch(userInfoUrl, {
+                      headers: { Authorization: `Bearer ${accessToken}` },
+                      redirect: "error",
+                    });
+                    if (!response.ok) return null;
+                    const parsed = oidcUserInfoSchema.safeParse(await response.json());
+                    if (!parsed.success) return null;
+                    const { sub, email, email_verified, name, picture } = parsed.data;
+                    return { sub, email, emailVerified: email_verified === true, name: name ?? email, image: picture };
+                  } catch {
+                    return null;
+                  }
+                },
+              }
+            : { requireIdTokenVerification: true }),
           clientId: oidc.clientId,
           clientSecret: oidcSecret,
           scopes: ["openid", "email", "profile"],
@@ -337,11 +393,11 @@ export function createBetterAuthInstance(
         },
       ],
     });
-    (authConfig as { plugins?: unknown[] }).plugins = [...(authConfig.plugins ?? []), oidcPlugin];
+    authConfig.plugins = [...(authConfig.plugins ?? []), oidcPlugin];
   }
 
   if (!baseUrl) {
-    delete (authConfig as { baseURL?: string }).baseURL;
+    delete authConfig.baseURL;
   }
 
   const defaultAuth = betterAuth(authConfig);
@@ -369,6 +425,8 @@ export function createBetterAuthInstance(
   };
 
   return {
+    options: defaultAuth.options,
+    $context: defaultAuth.$context,
     handler: (request) => {
       const auth = shouldDisableSecureAuthCookies({
         ...cookieSecurityInput,

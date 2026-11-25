@@ -18,7 +18,10 @@ export function profileSelection(profile, platform, rows, sources, policy) {
     assert.ok(rows.some(row => row.file === rule.file && row.name.includes(rule.name_contains)), "Required mapping collected no cases");
   }
   const mapped = sourceScope ? mapEnvironments(rows, sources, { ...policy, rules, conditional_expansions: [] }).cases : undefined;
-  if (mapped) assert.ok(mapped.every(row => row.environments.length), "Skipped source case has no environment mapping");
+  if (mapped) {
+    const unmapped = mapped.filter(row => !row.environments.length);
+    assert.equal(unmapped.length, 0, `Skipped source case has no environment mapping: ${unmapped.map(row => `${row.file}: ${row.name}`).join("\n")}`);
+  }
   // A complete package roster excludes exactly the cases that a source-backed rule assigns to another
   // profile of the same package on a different platform. Each exclusion must be skipped here.
   const packageRoot = policy.environments[profile]?.package_root;
@@ -61,6 +64,17 @@ export function profileSelection(profile, platform, rows, sources, policy) {
     ...(allCasesRequired ? { deferredCases } : {}),
     ...(mapped ? { collectedCases: mapped, deferredCases: mapped.filter(row => !row.environments.includes(profile)) } : {}),
     testNamePattern: allCasesRequired || sourceScope ? undefined : rules.map(rule => escape(rule.name_contains)).join("|") };
+}
+
+export function serializeProfileErrors(errors) {
+  // Vitest preserves custom fields, including execFileSync's self-referencing
+  // `error`. Keep diagnostics without serializing arbitrary process state.
+  return errors.map(error => ({
+    name: typeof error?.name === "string" ? error.name : "Error",
+    message: typeof error?.message === "string" ? error.message : typeof error === "string" ? error : "Unknown error",
+    stack: typeof error?.stack === "string" ? error.stack : undefined,
+    code: typeof error?.code === "string" ? error.code : undefined,
+  }));
 }
 
 export function verifyProfileResults(selection, results, errors) {
