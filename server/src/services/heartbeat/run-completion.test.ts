@@ -152,14 +152,16 @@ it("constructs completion handlers without querying or starting work", () => {
 });
 
 const support = await getEmbeddedPostgresTestSupport();
-describe.skipIf(!support.supported && !process.env.PAPERCLIP_TEST_DATABASE_URL)("heartbeat run completion boundary", () => {
+const external = process.env.PAPERCLIP_TEST_DATABASE_URL;
+describe.skipIf(!support.supported && !external)("heartbeat run completion boundary", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | undefined;
   let db: Db;
+  let drainActiveRunExecutions: (() => Promise<void>) | undefined;
+  let fixtureCount = 0;
   beforeAll(async () => {
     // Keep the accounting transaction real without reading provider receipt files.
     vi.spyOn(usageReceipts, "indexPendingUsageReceipts").mockResolvedValue(new Map());
     vi.spyOn(usageReceipts, "recoverPendingRunUsageReceipts").mockResolvedValue([]);
-    const external = process.env.PAPERCLIP_TEST_DATABASE_URL;
     if (external) db = createDb(external);
     else {
       database = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-completion");
@@ -167,10 +169,26 @@ describe.skipIf(!support.supported && !process.env.PAPERCLIP_TEST_DATABASE_URL)(
     }
     await db.execute(sql`set client_min_messages = warning`);
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
-  afterAll(async () => { await db?.$client.end(); await database?.cleanup(); vi.restoreAllMocks(); });
-  beforeEach(async () => { await db.execute(sql`truncate table companies restart identity cascade`); });
+  afterAll(async () => {
+    try {
+      try {
+        await drainActiveRunExecutions?.();
+      } finally {
+        await db?.$client.end({ timeout: 1 });
+      }
+    } finally {
+      try {
+        await database?.cleanup();
+      } finally {
+        vi.restoreAllMocks();
+      }
+    }
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+  // Keep resetting a caller-provided database. In an owned disposable database,
+  // separate companies avoid rewriting every dependent table and index per test.
+  if (external) beforeEach(async () => { await db.execute(sql`truncate table companies restart identity cascade`); });
 
-  async function fixture(patch: Partial<typeof heartbeatRuns.$inferInsert> = {}, issuePrefix = "CMP") {
+  async function fixture(patch: Partial<typeof heartbeatRuns.$inferInsert> = {}, issuePrefix = `CMP${++fixtureCount}`) {
     const [company] = await db.insert(companies).values({ name: "Completion", issuePrefix }).returning();
     const [agent] = await db.insert(agents).values({ companyId: company.id, name: "Completing agent", adapterType: "process" }).returning();
     const [wake] = await db.insert(agentWakeupRequests).values({ companyId: company.id, agentId: agent.id, source: "on_demand", status: "claimed" }).returning();
@@ -438,12 +456,12 @@ describe.skipIf(!support.supported && !process.env.PAPERCLIP_TEST_DATABASE_URL)(
     return { issue, native, binding, execution };
   }
 
-  it.each(["completeRun", "failRun"] as const)("settles the outgoing agent after a case handoff in %s", async operation => {
+  it.each([["completeRun", 1], ["failRun", 2]] as const)("settles the outgoing agent after a case handoff in %s", async (operation, caseNumber) => {
     const f = await fixture();
     await db.update(agents).set({ status: "running", lifecycleState: "ready" }).where(eq(agents.id, f.agent.id));
     const [recipient] = await db.insert(agents).values({ companyId: f.agent.companyId, name: "Next phase", adapterType: "process" }).returning();
     const [issue] = await db.insert(issues).values({ companyId: f.agent.companyId, title: "Case task", status: "in_progress", assigneeAgentId: f.agent.id }).returning();
-    const [record] = await db.insert(cases).values({ companyId: f.agent.companyId, caseNumber: 1, identifier: "CASE-1", caseType: "work", title: issue.title, workIssueId: issue.id, handoffVersion: 1 }).returning();
+    const [record] = await db.insert(cases).values({ companyId: f.agent.companyId, caseNumber, identifier: `CASE-${caseNumber}`, caseType: "work", title: issue.title, workIssueId: issue.id, handoffVersion: 1 }).returning();
     await db.insert(caseHandoffs).values({ companyId: f.agent.companyId, caseId: record.id, issueId: issue.id, version: 1,
       fromAgentId: f.agent.id, toAgentId: recipient.id, phase: "verification", instructions: "Verify the saved work",
       actorType: "agent", actorId: f.agent.id, sourceRunId: f.run.id, wakeupRequestId: randomUUID(), idempotencyKey: "next-phase", inputFingerprint: "next-phase", state: "awaiting_release" });
@@ -1564,6 +1582,8 @@ describe.skipIf(!support.supported && !process.env.PAPERCLIP_TEST_DATABASE_URL)(
     await interactions.answerQuestions(issue, interaction.id, { answers: [{ questionId: "choice", optionIds: ["yes"] }] },
       { userId: "local-board" });
     const heartbeat = heartbeatService(db);
+    drainActiveRunExecutions = heartbeat.drainActiveRunExecutions;
+    onTestFinished(() => heartbeat.drainActiveRunExecutions());
     const answerHeartbeat = legacy ? { ...heartbeat, wakeup: (...[agentId, options]: Parameters<typeof heartbeat.wakeup>) => {
       const contextSnapshot = { ...options?.contextSnapshot };
       delete contextSnapshot.mutation;
