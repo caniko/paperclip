@@ -149,7 +149,7 @@ Verified development evidence:
 
 ### Outstanding gates
 
-1. **Disposable Atlas system-provider run.** An earlier passing disposable run
+1. **Disposable system-provider run.** An earlier passing disposable run
    predates the empty-root, same-UID credential/cross-worker read, requested
    subdirectory/sibling, and delayed ancestor replacement assertions. The harness
    declined the strengthened privileged invocation. An operator must run the
@@ -167,12 +167,11 @@ Verified development evidence:
    instruction bundles and runtime services are refused. Qualify the deployed
    workload's toolchain, networking, CPU/memory/task limits and control traffic.
    Unprotected adapter staging is not evidence for the protected path.
-5. **Canix maintenance rollout.** Active host candidates remain `atlas`, `nomad`,
-   `starlord`, `murph`, `bar`, and `thething`; `camel` is inactive. Personal
-   declarations remain in Home Manager; identity, confinement, workers and
-   authority enrollment belong in NixOS. Qualify Atlas-local and Nomad-SSH access
-   using disposable roots and selected-user UID/GID, then coordinate Atlas/Nomad
-   synchronization writers before enrolling canonical repositories or homes.
+5. **Canix maintenance rollout.** Personal declarations remain in Home Manager;
+   identity, confinement, workers and authority enrollment belong in NixOS.
+   Qualify local and SSH access using disposable roots and selected-user UID/GID,
+   then coordinate cross-host synchronization writers before enrolling canonical
+   repositories or homes.
    Existing worker confinement hides homes, `/data`, and `/run/user` and has not
    been qualified for this maintenance path. Both Paperclip instances stay disabled.
 
