@@ -11,11 +11,17 @@ type Agent = Pick<typeof agents.$inferSelect, "id" | "companyId" | "adapterType"
 
 function matchesAtlasAdapterConfig(binding: AtlasAdmission, config: Record<string, unknown> | null | undefined, dispatch = false) {
   if (config?.engine !== "cli" || config.command !== binding.command) return false;
-  const allowed = ["engine", "command", "model", "timeoutSec", "dangerouslySkipPermissions"];
+  const allowed = binding.adapterType === "gemini_local"
+    ? ["engine", "command", "model", "timeoutSec", "cliFlavor"]
+    : ["engine", "command", "model", "timeoutSec", "dangerouslySkipPermissions"];
   if (dispatch) allowed.push("env");
   if (binding.adapterType === "opencode_local") {
     allowed.push("standalone", "variant");
     if (config.standalone !== true || config.model !== binding.model || config.variant !== binding.variant) return false;
+    if (Object.hasOwn(config, "env") &&
+        (!config.env || Object.getPrototypeOf(config.env) !== Object.prototype)) return false;
+  } else if (binding.adapterType === "gemini_local") {
+    if (config.cliFlavor !== binding.cliFlavor || config.model !== binding.model) return false;
     if (Object.hasOwn(config, "env") &&
         (!config.env || Object.getPrototypeOf(config.env) !== Object.prototype)) return false;
   }
@@ -107,18 +113,26 @@ export async function prepareAtlasScratch(binding: AtlasAdmission) {
       host: binding.host, port: binding.port, username: binding.username, remoteCwd: binding.remoteWorkspacePath,
       remoteWorkspacePath: binding.remoteWorkspacePath, workspaceRealizationMode: "copy", strictHostKeyChecking: true,
       knownHosts: atlasKnownHosts(binding), privateKey: credential,
-      atlas: { sshExecutable: binding.sshExecutable, scratchDir },
+      atlas: {
+        sshExecutable: binding.sshExecutable,
+        scratchDir,
+        ...(binding.adapterType === "gemini_local" && binding.dangerouslySkipPermissions === true
+          ? { dangerouslySkipPermissions: true }
+          : {}),
+      },
     },
   } as const satisfies AdapterExecutionTarget;
 }
 
 export function assertAtlasDispatch(binding: AtlasAdmission, target: AdapterExecutionTarget | null | undefined, config: Record<string, unknown>, cwd: string) {
+  const expectedSkipPermissions = binding.adapterType === "gemini_local" && binding.dangerouslySkipPermissions === true;
   if (target?.kind !== "remote" || target.transport !== "ssh" || target.environmentId !== binding.environmentId || !target.leaseId ||
     target.remoteCwd !== binding.remoteWorkspacePath || target.spec.remoteCwd !== target.remoteCwd ||
     target.spec.host !== binding.host || target.spec.port !== binding.port || target.spec.username !== binding.username ||
     target.spec.knownHosts !== atlasKnownHosts(binding) || !target.spec.strictHostKeyChecking || !target.spec.privateKey ||
     target.spec.workspaceRealizationMode !== "copy" || target.spec.remoteWorkspacePath !== binding.remoteWorkspacePath ||
     target.spec.atlas?.sshExecutable !== binding.sshExecutable || target.spec.atlas.scratchDir !== cwd || target.spec.atlas.probe ||
+    (target.spec.atlas.dangerouslySkipPermissions === true) !== expectedSkipPermissions ||
     !matchesAtlasAdapterConfig(binding, config, true)) {
     throw forbidden("Final Atlas dispatch differs from the qualified binding");
   }

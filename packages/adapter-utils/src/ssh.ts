@@ -27,13 +27,19 @@ import {
   type RuntimeProgressSink,
 } from "./runtime-progress.js";
 
-import { ATLAS_OPENCODE_ENV, atlasSshEnv } from "./remote-execution-env.js";
+import { ATLAS_GEMINI_ENV, ATLAS_OPENCODE_ENV, atlasSshEnv } from "./remote-execution-env.js";
 
 const SSH_STDIN_COMMAND = "IFS= read -r paperclip_ssh_command_b64 || exit 125; paperclip_ssh_command=$(printf '%s' \"$paperclip_ssh_command_b64\" | base64 -d) || exit 125; unset paperclip_ssh_command_b64; eval \"$paperclip_ssh_command\"";
 
 export interface SshConnectionConfig {
   /** Set by trusted controller/adapter code, never by adapter config. */
-  atlas?: Readonly<{ sshExecutable: string; scratchDir: string; probe?: true; adapterType?: "opencode_local" }>;
+  atlas?: Readonly<{
+    sshExecutable: string;
+    scratchDir: string;
+    probe?: true;
+    adapterType?: "opencode_local" | "gemini_local";
+    dangerouslySkipPermissions?: boolean;
+  }>;
   useHostAuth?: boolean;
   tailscaleSocket?: string;
   tailscaleIdentity?: string;
@@ -1529,11 +1535,25 @@ export async function runSshCommand(
   }
 }
 
-export function loadAtlasBridgeToken(file: string | undefined, key: "PAPERCLIP_API_KEY" | "PAPERCLIP_BRIDGE_TOKEN"): string {
+function validateAtlasBridgeTokenFile(file: string | undefined): string {
   if (!file || !/^\/tmp\/paperclip-atlas-[0-9a-f]{32}\/bearer$/.test(file)) {
     throw new Error("Missing protected Atlas bridge credential");
   }
-  return `{ set +x; IFS= read -r ${key} < ${shellQuote(file)} && test -n "$${key}" && export ${key}; }`;
+  return file;
+}
+
+export function loadAtlasBridgeToken(file: string | undefined, key: "PAPERCLIP_API_KEY" | "PAPERCLIP_BRIDGE_TOKEN"): string {
+  const validated = validateAtlasBridgeTokenFile(file);
+  return `{ set +x; IFS= read -r ${key} < ${shellQuote(validated)} && test -n "$${key}" && export ${key}; }`;
+}
+
+function verifyAtlasBridgeTokenFile(file: string | undefined): { file: string; check: string } {
+  const validated = validateAtlasBridgeTokenFile(file);
+  const quoted = shellQuote(validated);
+  return {
+    file: validated,
+    check: `{ test -f ${quoted} && test ! -L ${quoted} && test -r ${quoted} && test -s ${quoted}; }`,
+  };
 }
 
 export function atlasBridgeTokenDelivery(spec: SshRemoteExecutionSpec, bearer: string) {
@@ -1573,12 +1593,19 @@ export async function buildSshSpawnTarget(input: {
     }
   }
   const atlas = input.spec.atlas;
-  const loadToken = atlas && !atlas.probe ? loadAtlasBridgeToken(input.env.PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE, "PAPERCLIP_API_KEY") : null;
+  const geminiTokenFile = atlas && !atlas.probe && atlas.adapterType === "gemini_local"
+    ? verifyAtlasBridgeTokenFile(input.env.PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE)
+    : null;
+  const loadToken = atlas && !atlas.probe && atlas.adapterType !== "gemini_local"
+    ? loadAtlasBridgeToken(input.env.PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE, "PAPERCLIP_API_KEY")
+    : geminiTokenFile?.check ?? null;
   const auth = await createSshAuthArgs(input.spec);
   const sshArgs = [...auth.args];
   const launchEnv = atlas ? {
     ...atlasSshEnv(atlas.probe ? undefined : input.env),
+    ...(geminiTokenFile ? { PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: geminiTokenFile.file } : {}),
     ...(atlas.adapterType === "opencode_local" ? ATLAS_OPENCODE_ENV : {}),
+    ...(atlas.adapterType === "gemini_local" ? ATLAS_GEMINI_ENV : {}),
   } : input.env;
   const envArgs = Object.entries(launchEnv)
     .filter((entry): entry is [string, string] => typeof entry[1] === "string")
