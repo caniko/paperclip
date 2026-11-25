@@ -122,7 +122,7 @@ describe("opencode remote environment diagnostics", () => {
     expect(runAdapterExecutionTargetProcess).toHaveBeenCalledExactlyOnceWith(
       expect.any(String), expect.objectContaining({ remoteCwd: runtimeCwd,
         spec: expect.objectContaining({ atlas: expect.objectContaining({ adapterType: "opencode_local", probe: true }) }) }), "/worker/opencode",
-      ["run", "--standalone", "--format", "json", "--model", "openai/gpt-4.1", "--variant", "high"],
+      ["run", "--standalone", "--format", "json", "--model", "openai/gpt-4.1#high"],
       expect.objectContaining({ cwd: runtimeCwd, env: { OPENCODE_DISABLE_PROJECT_CONFIG: "1" } }),
     );
     expect(discoverOpenCodeModels).not.toHaveBeenCalled();

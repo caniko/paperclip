@@ -30,9 +30,9 @@ const atlasAdmissionSchema = z.discriminatedUnion("adapterType", [
     ...atlasAdmissionFields,
     adapterType: z.literal("opencode_local"),
     standalone: z.literal(true),
-    // Slashes inside model IDs are valid; a #variant suffix would compete with --variant.
+    // Slashes inside model IDs are valid; # separates the two pins in the CLI model reference.
     model: z.string().regex(/^(?!-)(?:[^/\s\p{C}#]+\/)+[^/\s\p{C}#]+$/u),
-    variant: z.string().regex(/^(?!-)[^\s\p{C}]+$/u),
+    variant: z.string().regex(/^(?!-)[^\s\p{C}#]+$/u),
   }).strict(),
 ]);
 export type AtlasAdmission = Readonly<z.infer<typeof atlasAdmissionSchema>>;

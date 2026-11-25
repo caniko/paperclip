@@ -271,11 +271,15 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   }
 }
 
+const ATLAS_MODEL_PATTERN = /^(?!-)(?:[^/\s\p{C}#]+\/)+[^/\s\p{C}#]+$/u;
+const ATLAS_VARIANT_PATTERN = /^(?!-)[^\s\p{C}#]+$/u;
+
 /** Only server-admitted pins are used by the Atlas run and hello probe. */
 export function atlasOpenCodeRunArgs(config: Record<string, unknown>): string[] | null {
   const { model, variant, standalone } = config;
-  if (standalone !== true || typeof model !== "string" || !model || typeof variant !== "string" || !variant) return null;
-  return ["run", "--standalone", "--format", "json", "--model", model, "--variant", variant];
+  if (standalone !== true || typeof model !== "string" || typeof variant !== "string") return null;
+  if (!ATLAS_MODEL_PATTERN.test(model) || !ATLAS_VARIANT_PATTERN.test(variant)) return null;
+  return ["run", "--standalone", "--format", "json", "--model", `${model}#${variant}`];
 }
 
 /** Managed credentials must never leave host-only homes in a remote process. */
