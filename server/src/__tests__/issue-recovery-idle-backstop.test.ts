@@ -82,6 +82,9 @@ describeIssueRecovery("stranded-task checks at idle for a staging-shaped company
       recoveryActions: 12, terminated: 3, wakeOnDemand: false });
     const [side] = await state.db.insert(issues).values({ companyId: f.companyId, title: "Finished side task", status: "done" })
       .returning({ id: issues.id });
+    // The template has no stats for the seeded population. Without them the
+    // assigned-work interruption lookup can run once per historical run instead of once per task.
+    await state.db.execute(sql`analyze agents, issues, heartbeat_runs, issue_recovery_actions`);
     const activity = () => bounded(state.db.transaction(tx => notifyIssueGraphRecovery(tx, { companyId: f.companyId, issueId: side!.id })),
       () => "the unrelated activity hint to commit");
     return { ...f, population, activity };
