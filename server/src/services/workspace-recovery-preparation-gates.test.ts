@@ -217,12 +217,16 @@ describe("automatic retained workspace recovery", () => {
       actorId: "local-board", actorSource: "local_implicit", observedRunId: f.runId, idempotencyKey: randomUUID() });
     await recoverRetainedWorkspace(f.input);
     const heartbeat = heartbeatService(db);
-    await Promise.all([heartbeat.resumeRemoteStopComments(await run(f.runId)),
-      heartbeat.resumeTaskRetry(f.companyId, receipt.requestId!)]);
+    const source = await run(f.runId);
+    // Force the interleaving where Retry consumes the wake before recovery scans it.
+    await heartbeat.resumeTaskRetry(f.companyId, receipt.requestId!);
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, receipt.requestId!));
+    expect(wake).toMatchObject({ status: "coalesced", runId: expect.any(String) });
+    await heartbeat.resumeRemoteStopComments(source);
     const successors = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, f.companyId),
       inArray(heartbeatRuns.status, ["queued", "scheduled_retry"])));
     expect(successors).toHaveLength(1);
-    expect(successors[0].status).toBe("queued");
+    expect(successors[0]).toMatchObject({ id: wake.runId, status: "queued" });
     expect(await readFreshWorkspaceReadiness(db, successors[0])).toMatchObject({ mode: "resume_preserved_workspace" });
   }, 30_000);
 

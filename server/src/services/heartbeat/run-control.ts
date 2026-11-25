@@ -726,6 +726,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
           const retry = await dependencies.scheduleBoundedRetry(run.id);
           await recordInterruptedPreparationContinuation(db, run,
             retry.outcome === "scheduled" ? retry.run.status === "cancelled" ? "blocked" : "delivered"
+              : retry.outcome === "not_scheduled" && "errorCode" in retry && retry.errorCode === "task_retry_owns_continuation" ? "delegated"
               : retry.outcome === "retry_exhausted" ? "exhausted" : "deferred",
             retry.outcome === "scheduled" ? retry.run.id : undefined);
         } else await recordInterruptedPreparationContinuation(db, run, "deferred");

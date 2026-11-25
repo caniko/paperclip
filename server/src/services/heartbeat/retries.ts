@@ -55,6 +55,7 @@ import {
   sql,
 } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { isUuidLike } from "@paperclipai/shared";
 import {
   agents,
   agentWakeupRequests,
@@ -532,6 +533,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
       preserveWakeContext?: boolean;
     },
   ) {
+    const recoverySourceRunId = run.id;
     if (isProviderQuotaActionRequired(run, opts?.now)) return { outcome: "not_scheduled" as const,
       reason: "Review the provider account's billing and usage allowance before retrying.",
       issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
@@ -659,6 +661,9 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
     // not promote an untrusted or legacy contextSnapshot.issueId into a new
     // issue binding: that could either violate the FK or misclassify history.
     const issueId = run.scopeKind === "issue" ? run.issueId : null;
+    const contextIssueId = readNonEmptyString(contextSnapshot.issueId);
+    const retryAdmissionIssueId = interruptedPreparation || interruptedPreparationLane
+      ? issueId ?? (isUuidLike(contextIssueId) ? contextIssueId : null) : null;
 
     const reportRetryExhausted = async () => {
       const exhaustion = {
@@ -905,6 +910,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
             | "issue_not_in_progress"
             | "continuation_user_authorization_missing"
             | "workspace_verification_cleanup_pending"
+            | "task_retry_owns_continuation"
             | "issue_execution_lock_changed";
           issueId: string | null;
           details: Record<string, unknown>;
@@ -918,13 +924,33 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
           retryReason !== MAX_TURN_CONTINUATION_RETRY_REASON &&
           retryReason !== INTERACTION_CONTINUATION_INFRA_RETRY_REASON
         ) {
-          if (issueId)
+          const lockedIssueId = issueId ?? retryAdmissionIssueId;
+          if (lockedIssueId)
             await tx.execute(
-              sql`select id from issues where company_id = ${run.companyId} and id = ${issueId} for update`,
+              sql`select id from issues where company_id = ${run.companyId} and id = ${lockedIssueId} for update`,
             );
           await tx.execute(
             sql`select id from heartbeat_runs where company_id = ${run.companyId} and id = ${run.id} for update`,
           );
+          if (retryAdmissionIssueId) {
+            // Retry admission uses the same issue lock. Its receipt owns the
+            // continuation both before and after it is bound to a successor.
+            const sourceRunId = sql<string>`${agentWakeupRequests.payload}#>>'{taskRetry,sourceRunId}'`;
+            const [explicitRetry] = await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+              eq(agentWakeupRequests.companyId, run.companyId),
+              eq(agentWakeupRequests.agentId, run.agentId),
+              eq(agentWakeupRequests.reason, "task_retry"),
+              eq(agentWakeupRequests.requestedByActorType, "user"),
+              sql`${agentWakeupRequests.payload}->>'issueId' = ${retryAdmissionIssueId}`,
+              inArray(sourceRunId, [recoverySourceRunId, run.id]),
+              or(eq(agentWakeupRequests.status, "deferred_issue_execution"),
+                and(eq(agentWakeupRequests.status, "coalesced"), sql`${agentWakeupRequests.runId}::text <> ${sourceRunId}`)),
+            )).limit(1);
+            if (explicitRetry) return {
+              outcome: "not_scheduled", issueId: retryAdmissionIssueId, errorCode: "task_retry_owns_continuation",
+              reason: "Task Retry owns the interrupted preparation continuation.", details: { requestId: explicitRetry.id },
+            };
+          }
           const [existing] = await tx
             .select()
             .from(heartbeatRuns)
@@ -943,7 +969,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
               reusedExisting: true,
             };
           if (transientIssueId !== null) {
-            if (transientIssueId !== issueId)
+            if (transientIssueId !== lockedIssueId)
               await tx.execute(
                 sql`select id from issues where company_id = ${run.companyId} and id = ${transientIssueId} for update`,
               );
