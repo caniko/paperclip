@@ -8,7 +8,6 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { defaultSuiteWeight, loadShardDurations } from "../general-server-shard.mjs";
-import { renderStopQualification } from "../generate-composer-stop-qualification.mjs";
 import {
   DEFAULT_PARALLEL_WORKERS,
   IGNORED_SPECS,
@@ -351,22 +350,22 @@ test("the prepared Stop workflow selects the absolute candidate root and retains
   assert.match(jobs.get("e2e_shards"), /retention-days: 32/);
 });
 
-test("the independent hosted Stop lane keeps the qualified prepared commands", () => {
-  const prepared = readFileSync(trustedPrWorkflow, "utf8");
-  const qualification = readFileSync(path.join(repoRoot, ".github/workflows/qualification-native-stop.yml"), "utf8");
-  assert.equal(qualification, renderStopQualification(prepared));
-  const original = readWorkflowJobs(prepared).get("native_composer_stop");
-  const independent = readWorkflowJobs(qualification).get("native_composer_stop");
-  assert.equal(independent.slice(independent.indexOf("    env:\n")).trimEnd(), original.slice(original.indexOf("    env:\n")).trimEnd());
-  assert.match(independent, /runs-on: ubuntu-24\.04/);
-  assert.match(independent, /timeout-minutes: 20/);
-  assert.doesNotMatch(independent, /needs\.gate/);
-  // 8b24d50ab4 is 1339fe2dde plus fork lockfile acceptance only; the Stop job is unchanged.
-  assert.match(readFileSync(prCallerWorkflow, "utf8"), /pr-trusted\.yml@8b24d50ab43739857aa436e7a3f664168429efec/);
-  // SHA-256 of the workflow qualified in Stop run 40941483197 (head 1339fe2dde); hosted checkouts can be shallow.
-  assert.equal(createHash("sha256").update(qualification).digest("hex"),
-    "b063f0ddf24c8c0bc10557200bb7bb2364d5edc5a8ee2059ef783a12ec7072a2",
-    "policy promotion must preserve the independently qualified Stop workflow byte-for-byte");
+test("the prepared native Stop job matches the immutable PR caller pin byte-for-byte", () => {
+  const job = readWorkflowJobs(readTrustedPrWorkflow()).get("native_composer_stop");
+  assert.ok(job, "pr-trusted.yml must define the native_composer_stop job");
+  assert.match(
+    readFileSync(prCallerWorkflow, "utf8"),
+    /pr-trusted\.yml@8b24d50ab43739857aa436e7a3f664168429efec/,
+  );
+  // Hash the pinned job body so this check also works in shallow CI checkouts.
+  assert.equal(
+    createHash("sha256").update(job).digest("hex"),
+    "9fd0f9a9a77e981d67eac37e24f8f76c2d7231c0385ac9b4c616ea2ad7783aef",
+    "any change to the native Stop job must be qualified by the PR advancing the pr.yml pin",
+  );
+  for (const [, action] of job.matchAll(/^\s*(?:-\s+)?uses:[ \t]*(\S+)/gm)) {
+    assert.match(action, /^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/, `native Stop action must be SHA-pinned: ${action}`);
+  }
 });
 
 test("the stacked PR scope selector runs full CI only where intended", () => {
