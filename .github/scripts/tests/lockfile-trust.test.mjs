@@ -49,6 +49,13 @@ test('blocks the refresh author and branch from a fork', () => {
   assert.equal(result.allowed, false);
 });
 
+test('blocks a refresh bot PR opened within a fork', () => {
+  const repository = 'caniko/paperclip';
+  const result = classifyPullRequest({ ...base, author: 'github-actions[bot]', headRepo: repository,
+    baseRepo: repository, headRef: 'chore/refresh-lockfile', changedPaths: ['pnpm-lock.yaml'] });
+  assert.equal(result.allowed, false);
+});
+
 test('allows the refresh workflow to change the lockfile and its proof', () => {
   const result = classifyPullRequest({ ...base, author: 'github-actions[bot]', headRef: 'chore/refresh-lockfile',
     changedPaths: ['pnpm-lock.yaml', 'tests/runner-e2e/report-lock.json', 'tests/runner-e2e/report-lock.patch'] });
@@ -176,7 +183,7 @@ function runPrCheck(build) {
     };
     git('init', '-q');
     const baseSha = commit('base', { 'pnpm-lock.yaml': 'lock: base\n', 'package.json': '{}\n' });
-    const { author, commits } = build(commit);
+    const { author, commits } = build(commit, git);
     const bin = path.join(root, '.bin');
     execFileSync('mkdir', [bin]);
     writeFileSync(path.join(bin, 'gh'), '#!/bin/sh\nprintf "%s\\n" "$GH_STUB_OUTPUT"\n');
@@ -266,10 +273,22 @@ test('pr command blocks a contributor lockfile change', () => {
   assert.match(result.output, /^writer=none$/m);
 });
 
+test('pr command detects a protected root lockfile renamed away', () => {
+  const result = runPrCheck((commit, git) => {
+    git('config', 'diff.renames', 'true');
+    git('mv', 'pnpm-lock.yaml', 'other.yaml');
+    commit('contributor', {});
+    return { author: 'contributor', commits: [] };
+  });
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stdout, /Do not commit pnpm-lock\.yaml/);
+});
+
 test('workflows run the trust policy from trusted code and pass the verified hash to the proof refresh', () => {
   const pr = readFileSync('.github/workflows/pr-trusted.yml', 'utf8');
   assert.match(pr, /policy_path=\.github\/scripts\/lockfile-trust\.mjs/);
   assert.match(pr, /git show "\$trusted_base:\$policy_path" > "\$policy"/);
+  assert.match(pr, /git diff --no-renames --name-only "\$trusted_base\.\.\.\$HEAD_SHA" -- "\$\{lock_paths\[@\]\}"/);
   assert.match(pr, /BASE_SHA="\$trusted_base" GITHUB_OUTPUT="\$writer" node "\$policy" pr/);
   assert.match(pr, /PAPERCLIP_CI_PR_AUTHOR: \$\{\{ github\.event\.pull_request\.user\.login \}\}/);
   assert.doesNotMatch(pr, /github\.head_ref != 'chore\/refresh-lockfile'/);

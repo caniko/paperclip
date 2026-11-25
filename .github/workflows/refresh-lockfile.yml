@@ -10,30 +10,87 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: refresh-lockfile-master
+  group: refresh-lockfile-${{ github.ref_name }}
   cancel-in-progress: false
 
+env:
+  # Keep this list equal to LOCKFILES in .github/scripts/lockfile-trust.mjs.
+  LOCKFILES: pnpm-lock.yaml scripts/typecheck-sandbox-providers/pnpm-lock.yaml packages/plugins/sandbox-providers/daytona/pnpm-lock.yaml
+  REPORT_PROOF: tests/runner-e2e/report-lock.json tests/runner-e2e/report-lock.patch
+  SDK_PROOF: tests/runner-e2e/source-sdk-public-inputs.json
+
 jobs:
-  refresh:
+  # Only this job needs Actions API access to download from a previous run.
+  # It never checks out branch code.
+  held_input:
+    if: github.repository == 'paperclipai/paperclip'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # Holds the lockfile bot key. Restrict this environment to master so no
-    # other branch or workflow can mint a token that bypasses master rules.
-    environment: lockfile-refresh
+    timeout-minutes: 5
     permissions:
       actions: read
-      contents: write
-      pull-requests: write
-    env:
-      # Every lockfile this workflow owns: the root one, then the sandbox
-      # providers' own lockfiles. Keep it equal to LOCKFILES in
-      # .github/scripts/lockfile-trust.mjs, which blocks contributor edits to
-      # the same files. A test checks that the two lists match.
-      LOCKFILES: pnpm-lock.yaml scripts/typecheck-sandbox-providers/pnpm-lock.yaml packages/plugins/sandbox-providers/daytona/pnpm-lock.yaml
+    outputs:
+      artifact_id: ${{ steps.upload-held.outputs.artifact-id }}
+    steps:
+      - name: Fetch previously held locks
+        id: held
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_REPOSITORY" != "paperclipai/paperclip" ] || [ "$GITHUB_REF" != "refs/heads/master" ]; then
+            exit 0
+          fi
+          run_id="$(
+            gh run list --workflow refresh-lockfile.yml --branch master --status success --limit 20 \
+              --repo "$GITHUB_REPOSITORY" --json databaseId,event,headBranch \
+              --jq '[.[] | select(.headBranch == "master" and (.event == "push" or .event == "schedule" or .event == "workflow_dispatch"))][0].databaseId // empty'
+          )"
+          if [ -z "$run_id" ] || ! gh run download "$run_id" --name held-pnpm-lock \
+              --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/held-lock" 2>/dev/null; then
+            echo "The previous refresh held nothing. Resolving from master."
+            exit 0
+          fi
+          echo 'found=true' >> "$GITHUB_OUTPUT"
+
+      - name: Pass held locks to refresh
+        id: upload-held
+        if: steps.held.outputs.found == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: held-lock-input-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/held-lock/
+          retention-days: 7
+          if-no-files-found: error
+
+  refresh:
+    needs: [held_input]
+    if: >-
+      ${{ !cancelled() && (needs.held_input.result == 'success' || needs.held_input.result == 'skipped') &&
+          (github.repository == 'paperclipai/paperclip' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      canonical_master: ${{ steps.route.outputs.canonical_master }}
+      prepared: ${{ steps.route.outputs.prepared }}
+      changed: ${{ steps.commit-locks.outputs.changed }}
+      artifact_id: ${{ steps.upload-locks.outputs.artifact-id }}
 
     steps:
+      - name: Classify refresh destination
+        id: route
+        run: |
+          # GitHub Actions expression comparisons are case-insensitive.
+          if [ "$GITHUB_REPOSITORY" = "paperclipai/paperclip" ] && [ "$GITHUB_REF" = "refs/heads/master" ]; then
+            printf '%s\n' 'canonical_master=true' 'prepared=false' >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' 'canonical_master=false' 'prepared=true' >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
@@ -53,37 +110,35 @@ jobs:
       # versions while their manifests are unchanged and they can age past the
       # gate. Read them from that run's artifact, not the PR branch: anyone with
       # write access can push to chore/refresh-lockfile.
+      - name: Download held lock input
+        if: steps.route.outputs.canonical_master == 'true' && needs.held_input.outputs.artifact_id != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.held_input.outputs.artifact_id }}
+          path: ${{ runner.temp }}/held-lock
+
       - name: Reuse versions from a held refresh
-        env:
-          GH_TOKEN: ${{ github.token }}
+        if: steps.route.outputs.canonical_master == 'true' && needs.held_input.outputs.artifact_id != ''
         run: |
-          run_id="$(
-            gh run list --workflow refresh-lockfile.yml --branch master --status success --limit 20 \
-              --json databaseId,event \
-              --jq '[.[] | select(.event == "push" or .event == "schedule" or .event == "workflow_dispatch")][0].databaseId // empty'
-          )"
           held="$RUNNER_TEMP/held-lock"
-          if [ -z "$run_id" ] || ! gh run download "$run_id" --name held-pnpm-lock --dir "$held" 2>/dev/null; then
-            echo "The previous refresh held nothing. Resolving from master."
-            exit 0
-          fi
           # An artifact saved before the provider lockfiles has no
           # source-locks.sha256. Resolve from master instead.
           if [ ! -f "$held/source-locks.sha256" ]; then
-            echo "Run $run_id held its refresh in an older format. Resolving from master."
+            echo "The held refresh is in an older format. Resolving from master."
             exit 0
           fi
           # Reuse the held locks only while master still has every lock they
           # were resolved from. A lock change on master, such as a maintainer's
           # correction, supersedes them.
           if ! sha256sum --check --status "$held/source-locks.sha256"; then
-            echo "A lockfile on master changed after run $run_id held its refresh. Resolving from master."
+            echo "A lockfile on master changed after the held refresh. Resolving from master."
             exit 0
           fi
-          for lock in $LOCKFILES; do
+          read -ra locks <<< "$LOCKFILES"
+          for lock in "${locks[@]}"; do
             cp "$held/$lock" "$lock"
           done
-          echo "Resolving from the lockfiles held by run $run_id."
+          echo "Resolving from the previously held lockfiles."
 
       - name: Refresh pnpm lockfile
         run: pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
@@ -120,7 +175,7 @@ jobs:
             echo "Lockfile is already up to date."
             exit 0
           fi
-          unexpected="$(printf '%s\n' "$changed" | awk -v allowed="$LOCKFILES tests/runner-e2e/report-lock.json tests/runner-e2e/report-lock.patch" '
+          unexpected="$(printf '%s\n' "$changed" | awk -v allowed="$LOCKFILES $REPORT_PROOF" '
             BEGIN { n = split(allowed, files, " "); for (i = 1; i <= n; i++) ok[files[i]] = 1 }
             !($2 in ok) { print }')"
           if [ -n "$unexpected" ]; then
@@ -129,43 +184,138 @@ jobs:
             exit 1
           fi
 
+      - name: Commit refreshed locks locally
+        id: commit-locks
+        run: |
+          read -ra files <<< "$LOCKFILES $REPORT_PROOF"
+          for file in "${files[@]}" "$SDK_PROOF"; do
+            if [ ! -f "$file" ] || [ -L "$file" ]; then
+              echo "::error title=Incomplete lockfile refresh::Missing or non-regular file: $file"
+              exit 1
+            fi
+          done
+          # A verified Dependabot lockfile that already resolves changes only
+          # the reporting-lock proof. Commit that proof too.
+          if git diff --quiet HEAD -- "${files[@]}"; then
+            echo "Lockfiles and reporting-lock proof unchanged, nothing to do."
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "lockfile-bot"
+          git config user.email "lockfile-bot@users.noreply.github.com"
+
+          git add -- "${files[@]}"
+          git commit -m "chore(lockfile): refresh pnpm lockfiles"
+          # The SDK public source proof pins the committed lock blob and the report-lock output hash.
+          # Resync those pins before handing off the six files (#20615).
+          node tests/runner-e2e/source-sdk-public-inputs.mjs "$(git rev-parse HEAD)" --write
+          git add -- "$SDK_PROOF"
+          git commit --amend --no-edit
+          node tests/runner-e2e/source-sdk-public-inputs.mjs "$(git rev-parse HEAD)" --check
+          echo 'changed=true' >> "$GITHUB_OUTPUT"
+
+      - name: Upload refreshed locks and proof
+        id: upload-locks
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: prepared-lock-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 32
+          if-no-files-found: error
+          path: |
+            pnpm-lock.yaml
+            scripts/typecheck-sandbox-providers/pnpm-lock.yaml
+            packages/plugins/sandbox-providers/daytona/pnpm-lock.yaml
+            tests/runner-e2e/report-lock.json
+            tests/runner-e2e/report-lock.patch
+            tests/runner-e2e/source-sdk-public-inputs.json
+
+  publish:
+    needs: [refresh]
+    if: needs.refresh.outputs.canonical_master == 'true' && needs.refresh.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Restrict the bot-key environment to master as an independent boundary.
+    environment: lockfile-refresh
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout canonical refresh source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Node.js for publication
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Download refreshed locks and proof
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.refresh.outputs.artifact_id }}
+          path: ${{ runner.temp }}/prepared-lock
+
+      - name: Apply refreshed locks and proof
+        run: |
+          prepared="$(realpath -- "$RUNNER_TEMP")/prepared-lock"
+          read -ra files <<< "$LOCKFILES $REPORT_PROOF $SDK_PROOF"
+          for file in "${files[@]}"; do
+            input="$prepared/$file"
+            if [ ! -f "$input" ] || [ -L "$input" ] || [ "$(realpath -- "$input")" != "$input" ]; then
+              echo "::error title=Invalid refresh artifact::Missing or non-regular file: $file"
+              exit 1
+            fi
+          done
+          for file in "${files[@]}"; do
+            cp -- "$prepared/$file" "$file"
+          done
+
+      - name: Commit artifact for publication
+        id: commit-artifact
+        run: |
+          read -ra files <<< "$LOCKFILES $REPORT_PROOF $SDK_PROOF"
+          git config user.name "lockfile-bot"
+          git config user.email "lockfile-bot@users.noreply.github.com"
+          git add -- "${files[@]}"
+          git commit -m "chore(lockfile): refresh pnpm lockfiles"
+          node tests/runner-e2e/source-sdk-public-inputs.mjs "$(git rev-parse HEAD)" --check
+          echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Resolution picks the newest matching version for any added or widened
+      # dependency. The gate verifies every added version on npm and enforces
+      # the age requirement outside the harness allowlist.
+      - name: Check release age of added package versions
+        id: release-age
+        run: |
+          # Keep each base lockfile at its repository path. "Stage held
+          # lockfile" hashes them from there.
+          base="$RUNNER_TEMP/base-locks"
+          pairs=()
+          read -ra locks <<< "$LOCKFILES"
+          for lock in "${locks[@]}"; do
+            mkdir -p "$base/$(dirname "$lock")"
+            # A lockfile that master does not have yet has no base, so all of its entries count as added.
+            git show "$GITHUB_SHA:$lock" > "$base/$lock" 2>/dev/null || : > "$base/$lock"
+            pairs+=(--base "$base/$lock" --head "$lock")
+          done
+          node .github/scripts/check-lockfile-release-age.mjs \
+            "${pairs[@]}" \
+            --min-age-days 3 \
+            --report "$RUNNER_TEMP/release-age-report.md"
+          cat "$RUNNER_TEMP/release-age-report.md" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Create or update pull request
         id: upsert-pr
         env:
           GH_TOKEN: ${{ github.token }}
           REPO_OWNER: ${{ github.repository_owner }}
-          SOURCE_REF: ${{ github.ref }}
+          REFRESH_HEAD: ${{ steps.commit-artifact.outputs.head_sha }}
         run: |
-          # A verified Dependabot lockfile that already resolves changes only
-          # the reporting-lock proof. Commit that proof too.
-          if git diff --quiet -- $LOCKFILES tests/runner-e2e/report-lock.json tests/runner-e2e/report-lock.patch; then
-            echo "Lockfiles and reporting-lock proof unchanged, nothing to do."
-            echo "pr_url=" >> "$GITHUB_OUTPUT"
-            echo "head_sha=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
           BRANCH="chore/refresh-lockfile"
-          git config user.name "lockfile-bot"
-          git config user.email "lockfile-bot@users.noreply.github.com"
-
-          git checkout -B "$BRANCH"
-          git add $LOCKFILES tests/runner-e2e/report-lock.json tests/runner-e2e/report-lock.patch
-          git commit -m "chore(lockfile): refresh pnpm lockfiles"
-          # The SDK public source proof pins the committed lock blob and the
-          # report-lock output hash. This PR merges without CI, so resync those
-          # pins from the commit above and check them before pushing (#20615).
-          node tests/runner-e2e/source-sdk-public-inputs.mjs "$(git rev-parse HEAD)" --write
-          git add tests/runner-e2e/source-sdk-public-inputs.json
-          git commit --amend --no-edit
-          node tests/runner-e2e/source-sdk-public-inputs.mjs "$(git rev-parse HEAD)" --check
-          if [ "$SOURCE_REF" != refs/heads/master ]; then
-            # Feature preparation cannot replace an existing bot history or
-            # open an auto-merge path from the feature into master.
-            git push origin "$BRANCH"
-            echo "pr_url=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          git checkout -B "$BRANCH" "$REFRESH_HEAD"
           git push --force origin "$BRANCH"
 
           # Only reuse an open PR from this repository owner, not a fork with the same branch name.
@@ -237,38 +387,6 @@ jobs:
           echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
           echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Retain generated feature lock
-        if: github.ref != 'refs/heads/master'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: prepared-lock-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          retention-days: 32
-          if-no-files-found: error
-          path: pnpm-lock.yaml
-
-      # Resolution picks the newest matching version for any added or widened
-      # dependency. The gate verifies every added version on npm and enforces
-      # the age requirement outside the harness allowlist.
-      - name: Check release age of added package versions
-        id: release-age
-        if: steps.upsert-pr.outputs.pr_url != ''
-        run: |
-          # Keep each base lockfile at its repository path. "Stage held
-          # lockfile" hashes them from there.
-          base="$RUNNER_TEMP/base-locks"
-          pairs=()
-          for lock in $LOCKFILES; do
-            mkdir -p "$base/$(dirname "$lock")"
-            # A lockfile that master does not have yet has no base, so all of its entries count as added.
-            git show "$GITHUB_SHA:$lock" > "$base/$lock" 2>/dev/null || : > "$base/$lock"
-            pairs+=(--base "$base/$lock" --head "$lock")
-          done
-          node .github/scripts/check-lockfile-release-age.mjs \
-            "${pairs[@]}" \
-            --min-age-days 3 \
-            --report "$RUNNER_TEMP/release-age-report.md"
-          cat "$RUNNER_TEMP/release-age-report.md" >> "$GITHUB_STEP_SUMMARY"
-
       - name: Hold lockfile PR for review
         if: steps.release-age.outputs.eligible == 'false'
         env:
@@ -294,13 +412,14 @@ jobs:
         if: steps.release-age.outputs.eligible == 'false'
         run: |
           held="$RUNNER_TEMP/held-upload"
-          for lock in $LOCKFILES; do
+          read -ra locks <<< "$LOCKFILES"
+          for lock in "${locks[@]}"; do
             mkdir -p "$held/$(dirname "$lock")"
             cp "$lock" "$held/$lock"
           done
           # Hash the master lockfiles this refresh started from, by repository
           # path, so the next run can check them with sha256sum --check.
-          (cd "$RUNNER_TEMP/base-locks" && sha256sum $LOCKFILES) > "$held/source-locks.sha256"
+          (cd "$RUNNER_TEMP/base-locks" && sha256sum "${locks[@]}") > "$held/source-locks.sha256"
 
       - name: Save held lockfile for the next refresh
         if: steps.release-age.outputs.eligible == 'false'

@@ -12,13 +12,16 @@ GitHub Actions owns every managed pnpm lockfile:
 
 `LOCKFILES` in `.github/scripts/lockfile-trust.mjs` lists them.
 
-- Do not commit any of them in pull requests. Only the lockfile refresh workflow
-  and verified Dependabot commits may change them.
+- Do not edit any of them by hand in pull requests. Only CI-owned content and
+  verified Dependabot commits may change them.
 - Pull request CI validates dependency resolution when manifests change. A stale
   lockfile is resolved in place for that run.
-- Pushes to `master` run `.github/workflows/refresh-lockfile.yml`. It regenerates
-  each lockfile with `pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile`
-  and opens one `chore/refresh-lockfile` pull request for all of them. See
+- Pushes to upstream `master` run `.github/workflows/refresh-lockfile.yml`. It regenerates
+  each lockfile with `pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile`.
+  The refresh job has read-only repository access. Only publication from the
+  exact `paperclipai/paperclip` `refs/heads/master` uses the `lockfile-refresh`
+  environment and write permissions. It takes the six files from that run's
+  artifact and opens or updates one `chore/refresh-lockfile` pull request. See
   `doc/RELEASE-AUTOMATION-SETUP.md` for when the bot merges it.
 - A local `docker build` installs the Runner with a frozen lockfile. When the
   root `pnpm-lock.yaml` is behind the Runner's manifests, run that same command
@@ -28,6 +31,37 @@ GitHub Actions owns every managed pnpm lockfile:
 The Pi and Kimi distribution lockfiles under `packages/paperclip-runner/scripts/`
 are not on this list. They hold attested provider pins, so change them by hand
 (see `rules/acpx-profile-identity.mdc`).
+
+### Prepare lockfiles in the `caniko/paperclip` fork
+
+When a fork PR needs refreshed locks, commit and push the dependency changes
+first, leaving the lock and proof files at their trusted base or upstream
+versions. Dispatch the refresh on that branch:
+
+```sh
+repo=caniko/paperclip
+branch=$(git branch --show-current)
+source=$(git rev-parse HEAD)
+gh workflow run refresh-lockfile.yml --repo "$repo" --ref "$branch"
+gh run list --repo "$repo" --workflow refresh-lockfile.yml --commit "$source" --event workflow_dispatch
+```
+
+Once the dispatch succeeds, set `run` to its run ID and download its artifact:
+
+```sh
+attempt=$(gh api "repos/$repo/actions/runs/$run" --jq .run_attempt)
+prepared=$(mktemp -d)
+gh run download "$run" --repo "$repo" --name "prepared-lock-$source-$run-$attempt" --dir "$prepared"
+```
+
+Copy the three lockfiles and
+`tests/runner-e2e/{report-lock.json,report-lock.patch,source-sdk-public-inputs.json}`
+from the artifact to the same paths in your checkout. Commit them together
+without editing their bytes, then push the PR branch. The dispatch never pushes
+a branch or opens a PR. CI requires all six files to be regular, non-symlink
+files in the artifact and to match the PR head byte for byte. The dispatch
+commit must remain an ancestor of the PR head. If you rewrite that commit
+or the artifact is no longer available, prepare again.
 
 ## Trusted PR Workflow
 
