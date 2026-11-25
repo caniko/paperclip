@@ -16965,15 +16965,15 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       const f = await githubPreIngressRecoveryFixture();
       await f.makeScanDue();
       const state = await f.checkpoint();
-      const dueAt = Date.now() + 30_000;
-      await db.update(chatSdkState).set({ value: { ...(state.value as Record<string, unknown>),
-        nextScanAt: new Date(dueAt).toISOString() } }).where(eq(chatSdkState.id, state.id));
       const errors: unknown[] = [];
       const coordinator = createDeliveryWorkCoordinator({ owner: db, canRun: () => true, onError: error => errors.push(error) });
       try {
-        vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+        vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+        const dueAt = Date.now() + 30_000;
+        await db.update(chatSdkState).set({ value: { ...(state.value as Record<string, unknown>),
+          nextScanAt: new Date(dueAt).toISOString() } }).where(eq(chatSdkState.id, state.id));
         await f.service.registerGitHubWebhookRecoveryWork(coordinator, () => true).ready;
-        await expect.poll(() => idleWorkSnapshot().active).toBe(0);
+        await expect.poll(() => idleWorkSnapshot().active, { interval: 0 }).toBe(0);
         expect(coordinator.nextWakeAt()).toBe(dueAt);
         const reads = vi.spyOn(db, "select");
         try { await vi.advanceTimersByTimeAsync(15_000); expect(reads).not.toHaveBeenCalled(); }
@@ -17153,6 +17153,9 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
 
     it("reconstructs more than one page of GitHub recovery deadlines and dispatches fair batches of five", async () => {
       const first = await githubPreIngressRecoveryFixture(), second = await githubPreIngressRecoveryFixture();
+      const originals = await Promise.all([first.checkpoint(), second.checkpoint()]);
+      const firstScanAt = Math.min(...originals.map(({ value }) =>
+        Date.parse(String((value as Record<string, unknown>).nextScanAt))));
       const ids: string[] = [];
       for (const [f, count] of [[first, 103], [second, 3]] as const) {
         const [endpoint] = await readChatEndpointsById(f.endpoint.id);
@@ -17168,16 +17171,19 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         inArray(chatSdkState.endpointId, ids), eq(chatSdkState.stateKey, "paperclip:github-webhook-recovery:v1")));
       const errors: unknown[] = [];
       const coordinator = createDeliveryWorkCoordinator({ owner: db, canRun: () => true, onError: error => errors.push(error) });
-      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
       try {
         await first.service.registerGitHubWebhookRecoveryWork(coordinator, () => true).ready;
         const initial = await windows();
         expect(initial).toHaveLength(5);
         expect(new Set(initial.map(row => row.companyId)).size).toBe(2);
+        // Slow PostgreSQL writes must not spend virtual time or start a periodic GitHub scan.
         await vi.waitFor(async () => {
-          await vi.advanceTimersByTimeAsync(1000);
+          const next = coordinator.nextWakeAt();
+          if (next !== null && next < firstScanAt) await vi.advanceTimersToNextTimerAsync();
           expect(await windows()).toHaveLength(106);
-        }, { timeout: 10_000 });
+        }, { interval: 0, timeout: 10_000 });
+        expect(Date.now()).toBeLessThan(firstScanAt);
         expect(first.requests).toEqual([]); expect(second.requests).toEqual([]); expect(errors).toEqual([]);
       } finally { await coordinator.stop(); vi.useRealTimers(); }
     });
