@@ -5,7 +5,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OPENROUTER_ATTRIBUTION_HEADERS } from "@paperclipai/adapter-utils/openrouter-attribution";
-import { prepareOpenCodeRuntimeConfig } from "./runtime-config.js";
+import { atlasOpenCodeRunArgs, prepareOpenCodeRuntimeConfig } from "./runtime-config.js";
 
 const cleanupPaths = new Set<string>();
 
@@ -32,6 +32,33 @@ async function makeConfigHome(initialConfig?: Record<string, unknown>) {
   }
   return root;
 }
+
+describe("atlasOpenCodeRunArgs", () => {
+  const config = { standalone: true, model: "provider/model", variant: "high" };
+
+  it("passes the variant as part of the OpenCode V2 model reference", () => {
+    expect(atlasOpenCodeRunArgs(config)).toEqual([
+      "run", "--standalone", "--format", "json", "--model", "provider/model#high",
+    ]);
+  });
+
+  it.each([
+    { standalone: false },
+    { model: "" },
+    { variant: "" },
+    { model: "gpt-4.1" },
+    { model: "-provider/model" },
+    { model: "provider/model\u007f" },
+    { model: "provider/model#low" },
+    { model: "provider/model name" },
+    { variant: "-high" },
+    { variant: "high\u007f" },
+    { variant: "hi#gh" },
+    { variant: "high\t" },
+  ])("rejects invalid standalone pins: %j", (override) => {
+    expect(atlasOpenCodeRunArgs({ ...config, ...override })).toBeNull();
+  });
+});
 
 describe("prepareOpenCodeRuntimeConfig", () => {
   it("keeps Atlas configuration worker-owned and strips controller credentials and paths", async () => {

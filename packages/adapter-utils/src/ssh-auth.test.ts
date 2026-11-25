@@ -60,14 +60,17 @@ describe("SSH authentication selection", () => {
       const spec = await atlasFixtureSpec(root);
       const probe = invocation !== "run";
       const worker = path.join(root, "opencode");
-      await writeFile(worker, "#!/bin/sh\nexec env\n", { mode: 0o700 });
+      await writeFile(worker, '#!/bin/sh\nprintf "argv:%s\\n" "$@"\nexec env\n', { mode: 0o700 });
+      const args = invocation === "models"
+        ? ["models", "--standalone"]
+        : ["run", "--standalone", "--format", "json", "--model", "openai/gpt-4.1#high"];
       const bridge = atlasBridgeTokenDelivery(spec, "fixture-bridge-bearer");
       if (!probe) await bridge.deliver();
       try {
         const launch = await buildSshSpawnTarget({
           spec: { ...spec, atlas: { ...spec.atlas, adapterType: "opencode_local", ...(probe ? { probe: true } : {}) } },
           command: worker,
-          args: invocation === "models" ? ["models"] : ["run", "--standalone", "--format", "json", "--model", "openai/gpt-4.1", "--variant", "high"],
+          args,
           env: {
             OPENCODE_DISABLE_PROJECT_CONFIG: "0", CALLER_ONLY: "arbitrary", OPENAI_API_KEY: "fixture-host-provider",
             PAPERCLIP_API_KEY: "fixture-jwt", PAPERCLIP_BRIDGE_TOKEN: "fixture-bridge-bearer",
@@ -76,6 +79,7 @@ describe("SSH authentication selection", () => {
         });
         try {
           const { stdout } = await execFileAsync(launch.command, launch.args, { env: {} });
+          expect(stdout.split("\n").filter((line) => line.startsWith("argv:"))).toEqual(args.map((arg) => `argv:${arg}`));
           expect(stdout.split("\n").filter((line) => /^(OPENCODE_|PAPERCLIP_|OPENAI_|CALLER_ONLY=)/.test(line)).sort()).toEqual(
             probe ? ["OPENCODE_DISABLE_PROJECT_CONFIG=1"] : [
               "OPENCODE_DISABLE_PROJECT_CONFIG=1", "PAPERCLIP_API_KEY=fixture-bridge-bearer", "PAPERCLIP_API_URL=http://callback.invalid",

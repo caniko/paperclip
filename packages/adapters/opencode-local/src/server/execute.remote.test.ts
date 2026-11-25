@@ -200,7 +200,7 @@ describe("opencode remote execution", () => {
       expect(syncDirectoryToSsh.mock.calls.map(([input]) => input.remoteDir)).toEqual([
         attemptDir, `${attemptDir}/.paperclip-runtime/opencode/skills`,
       ]);
-      expect(runChildProcess).toHaveBeenNthCalledWith(1, "atlas-run", "/worker/opencode", ["models"],
+      expect(runChildProcess).toHaveBeenNthCalledWith(1, "atlas-run", "/worker/opencode", ["models", "--standalone"],
         expect.objectContaining({ cwd: attemptDir, env: { OPENCODE_DISABLE_PROJECT_CONFIG: "1" }, remoteExecution: expect.objectContaining({
           remoteCwd: attemptDir, atlas: expect.objectContaining({ adapterType: "opencode_local", probe: true }),
         }) }));
@@ -214,7 +214,7 @@ describe("opencode remote execution", () => {
       }));
       if (outcome === "protected") {
         const runCall = runChildProcess.mock.calls[1]!;
-        expect(runCall[2]).toEqual(["run", "--standalone", "--format", "json", "--model", "openai/gpt-4.1", "--variant", "high"]);
+        expect(runCall[2]).toEqual(["run", "--standalone", "--format", "json", "--model", "openai/gpt-4.1#high"]);
         expect(runCall[3]).toMatchObject({ cwd: attemptDir, env: { PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: tokenFile, OPENCODE_DISABLE_PROJECT_CONFIG: "1" },
           remoteExecution: { remoteCwd: attemptDir, atlas: { adapterType: "opencode_local" } } });
       } else {

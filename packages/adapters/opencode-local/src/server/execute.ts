@@ -127,7 +127,7 @@ export async function ensureRemoteOpenCodeModelConfiguredAndAvailable(input: {
     input.runId,
     atlas ? { ...target, spec: { ...target.spec, atlas: { ...atlas, probe: true } } } : target,
     input.command,
-    ["models"],
+    atlas ? ["models", "--standalone"] : ["models"],
     {
       cwd: input.cwd,
       env: atlas ? ATLAS_OPENCODE_ENV : input.env,
