@@ -1,5 +1,61 @@
 import { asNumber, asString, parseJson, parseObject } from "@paperclipai/adapter-utils/server-utils";
 
+const ATLAS_GEMINI_MODEL_PATTERN = /^gemini-[A-Za-z0-9._-]+$/;
+const ATLAS_GEMINI_MODEL_MAX_LEN = 128;
+const AGY_MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const AGY_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+const MAX_AGY_COUNTED_STEPS = 10_000;
+
+/** Split an advertised agy model ID with an effort suffix (e.g. gemini-4-neon-high)
+ * into the base inference model and explicit --effort flag. */
+export function splitAgyModelEffort(model: string): { model: string; effort: string | null } {
+  const dash = model.lastIndexOf("-");
+  if (dash <= 0 || dash === model.length - 1) return { model, effort: null };
+  const base = model.slice(0, dash);
+  const effort = model.slice(dash + 1);
+  if (!AGY_EFFORTS.has(effort)) return { model, effort: null };
+  if (model.startsWith("gemini-") && !ATLAS_GEMINI_MODEL_PATTERN.test(base)) {
+    return { model, effort: null };
+  }
+  return { model: base, effort };
+}
+
+/** Only server-admitted pins are used by the Atlas agy run and hello probe.
+ * Permission bypass is controlled solely by controller policy and defaults off. */
+export function atlasGeminiRunArgs(
+  config: Record<string, unknown>,
+  policy?: Readonly<{ dangerouslySkipPermissions?: boolean }>,
+): string[] | null {
+  const { cliFlavor, model } = config;
+  if (cliFlavor !== "agy" || typeof model !== "string") return null;
+  if (model.length > ATLAS_GEMINI_MODEL_MAX_LEN || !ATLAS_GEMINI_MODEL_PATTERN.test(model)) return null;
+  const resolved = splitAgyModelEffort(model);
+  const args = ["--output-format", "stream-json", "--input-format", "stream-json", "--model", resolved.model];
+  if (resolved.effort) args.push("--effort", resolved.effort);
+  if (policy?.dangerouslySkipPermissions === true) args.push("--dangerously-skip-permissions");
+  return args;
+}
+
+export function formatAgyStreamJsonInput(prompt: string): string {
+  return `${JSON.stringify({ event: "user", message: { role: "user", content: prompt } })}\n`;
+}
+
+export function parseAgyModelsOutput(stdout: string): Array<{ id: string; label: string }> {
+  const seen = new Set<string>();
+  const models: Array<{ id: string; label: string }> = [];
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const tabIndex = line.indexOf("\t");
+    const id = (tabIndex === -1 ? line : line.slice(0, tabIndex)).trim();
+    const label = (tabIndex === -1 ? id : line.slice(tabIndex + 1).trim()) || id;
+    if (!AGY_MODEL_ID_PATTERN.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    models.push({ id, label });
+  }
+  return models;
+}
+
 function collectMessageText(message: unknown): string[] {
   if (typeof message === "string") {
     const trimmed = message.trim();
@@ -24,10 +80,15 @@ function collectMessageText(message: unknown): string[] {
 }
 
 function readSessionId(event: Record<string, unknown>): string | null {
+  const result = parseObject(event.result);
+  const stepUpdate = parseObject(event.step_update);
   return (
     asString(event.session_id, "").trim() ||
     asString(event.sessionId, "").trim() ||
     asString(event.sessionID, "").trim() ||
+    asString(event.conversation_id, "").trim() ||
+    asString(result.conversation_id, "").trim() ||
+    asString(stepUpdate.conversation_id, "").trim() ||
     asString(event.checkpoint_id, "").trim() ||
     asString(event.thread_id, "").trim() ||
     null
@@ -73,6 +134,20 @@ function accumulateUsage(
 
 }
 
+function readAgyUsage(usageRaw: unknown): { inputTokens: number; cachedInputTokens: number; outputTokens: number } | null {
+  const source = parseObject(usageRaw);
+  if (Object.keys(source).length === 0) return null;
+  const inputTokens = Math.max(0, asNumber(source.input_tokens, 0));
+  const cachedInputTokens = Math.max(0, asNumber(source.cache_read_tokens, 0));
+  const output = Math.max(0, asNumber(source.output_tokens, 0));
+  const thinking = Math.max(0, asNumber(source.thinking_tokens, 0));
+  const total = Math.max(0, asNumber(source.total_tokens, 0));
+  // agy reports input_tokens already excluding cache_read_tokens, output_tokens
+  // already including thinking_tokens, and total_tokens = input_tokens + output_tokens.
+  const outputTokens = Math.max(output, thinking, total - inputTokens);
+  return { inputTokens, cachedInputTokens, outputTokens };
+}
+
 export function parseGeminiJsonl(stdout: string) {
   return createGeminiJsonlParser()(stdout);
 }
@@ -81,6 +156,16 @@ export function parseGeminiJsonl(stdout: string) {
 export function createGeminiJsonlParser() {
   let sessionId: string | null = null;
   const messages: string[] = [];
+  const agyStepTexts = new Map<string, string>();
+  const agyCountedSteps = new Set<string>();
+  const agyStepUsage = {
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+  };
+  let agyFinalUsage: { inputTokens: number; cachedInputTokens: number; outputTokens: number } | null = null;
+  let agyFinalResponse: string | null = null;
+  let terminalStatus: "success" | "error" | null = null;
   let errorMessage: string | null = null;
   let costUsd: number | null = null;
   let resultEvent: Record<string, unknown> | null = null;
@@ -115,6 +200,62 @@ export function createGeminiJsonlParser() {
       if (foundSessionId) sessionId = foundSessionId;
 
       const type = asString(event.type, "").trim();
+      const agyEvent = type ? "" : asString(event.event, "").trim();
+
+      if (agyEvent === "init") {
+        continue;
+      }
+
+      if (agyEvent === "step_update") {
+        const step = parseObject(event.step_update);
+        const stepKey = typeof step.step_index === "number" ? String(step.step_index) : "__anon";
+        if (asString(step.step_type, "").trim() === "agent_response") {
+          const delta = typeof step.text_delta === "string" ? step.text_delta : "";
+          if (delta) {
+            agyStepTexts.set(stepKey, `${agyStepTexts.get(stepKey) ?? ""}${delta}`);
+          }
+        }
+        if (asString(step.state, "").trim().toUpperCase() === "DONE" && !agyCountedSteps.has(stepKey)) {
+          const stepUsage = readAgyUsage(step.usage);
+          if (stepUsage) {
+            if (agyCountedSteps.size >= MAX_AGY_COUNTED_STEPS) {
+              throw new Error(`agy accounting exceeded maximum distinct step count (${MAX_AGY_COUNTED_STEPS})`);
+            }
+            agyCountedSteps.add(stepKey);
+            agyStepUsage.inputTokens += stepUsage.inputTokens;
+            agyStepUsage.cachedInputTokens += stepUsage.cachedInputTokens;
+            agyStepUsage.outputTokens += stepUsage.outputTokens;
+          }
+        }
+        continue;
+      }
+
+      if (agyEvent === "result") {
+        const agyResult = parseObject(event.result);
+        resultEvent = agyResult;
+        const responseText = asString(agyResult.response, "").trim();
+        if (responseText) agyFinalResponse = responseText;
+        const status = asString(agyResult.status, "").trim().toLowerCase();
+        const finishedReason = asString(agyResult.finished_reason, "").trim().toLowerCase();
+        if (status === "success" && finishedReason !== "error") {
+          terminalStatus = "success";
+        } else {
+          terminalStatus = "error";
+          const text = asErrorText(agyResult.error ?? agyResult.message ?? agyResult.response).trim();
+          errorMessage = text || (status ? `agy run failed with status ${status}` : "agy run failed without an error message");
+        }
+        const finalUsage = readAgyUsage(agyResult.usage);
+        if (finalUsage) {
+          agyFinalUsage = terminalStatus === "success"
+            ? finalUsage
+            : {
+                inputTokens: Math.max(finalUsage.inputTokens, agyStepUsage.inputTokens),
+                cachedInputTokens: Math.max(finalUsage.cachedInputTokens, agyStepUsage.cachedInputTokens),
+                outputTokens: Math.max(finalUsage.outputTokens, agyStepUsage.outputTokens),
+              };
+        }
+        continue;
+      }
 
       if (type === "assistant") {
         messages.push(...collectMessageText(event.message));
@@ -202,12 +343,25 @@ export function createGeminiJsonlParser() {
       }
     }
 
+    const effectiveAgyUsage = agyFinalUsage ?? agyStepUsage;
+    const summary =
+      messages.length > 0
+        ? messages.join("\n\n").trim()
+        : agyStepTexts.size > 0
+          ? [...agyStepTexts.values()].map((text) => text.trim()).filter(Boolean).join("\n\n").trim()
+          : agyFinalResponse ?? "";
+
     return {
       sessionId,
-      summary: messages.join("\n\n").trim(),
-      usage: { ...usage },
+      summary,
+      usage: {
+        inputTokens: usage.inputTokens + effectiveAgyUsage.inputTokens,
+        cachedInputTokens: usage.cachedInputTokens + effectiveAgyUsage.cachedInputTokens,
+        outputTokens: usage.outputTokens + effectiveAgyUsage.outputTokens,
+      },
       costUsd,
       errorMessage,
+      terminalStatus,
       resultEvent,
       question,
     };
@@ -278,7 +432,7 @@ export function describeGeminiFailure(parsed: Record<string, unknown>): string |
   return parts.length > 1 ? parts.join(": ") : null;
 }
 
-const GEMINI_AUTH_REQUIRED_RE = /(?:not\s+authenticated|please\s+authenticate|api[_ ]?key\s+(?:required|missing|invalid)|authentication\s+required|manual\s+authorization\s+is\s+required|unauthorized|invalid\s+credentials|not\s+logged\s+in|login\s+required|run\s+`?gemini\s+auth(?:\s+login)?`?\s+first)/i;
+const GEMINI_AUTH_REQUIRED_RE = /(?:not\s+authenticated|please\s+authenticate|please\s+sign\s+in|log\s+out\s*\(\/logout\)\s+and\s+log\s+back\s+in|api[_ ]?key\s+(?:required|missing|invalid)|authentication\s+required|manual\s+authorization\s+is\s+required|unauthorized|invalid\s+credentials|not\s+logged\s+in|login\s+required|run\s+`?gemini\s+auth(?:\s+login)?`?\s+first)/i;
 const GEMINI_QUOTA_EXHAUSTED_RE =
   /(?:resource_exhausted|quota|rate[-\s]?limit|too many requests|\b429\b|billing details)/i;
 

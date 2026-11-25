@@ -3,21 +3,30 @@ import type { AdapterUsageCheckpoint } from "./types.js";
 /** Project accounting protocol fields before retaining a stream snapshot.
  * Content-bearing strings are never retained in the accounting buffer. */
 const fields = new Set([
-  "type", "subtype", "role", "id", "session_id", "sessionID", "thread_id", "model", "modelID", "providerID",
+  "type", "subtype", "event", "step_update", "step_index", "state", "result", "status", "finished_reason",
+  "role", "id", "session_id", "sessionID", "thread_id", "model", "modelID", "providerID",
   "usage", "usageMetadata", "modelUsage", "message", "part", "info", "stats", "tokens", "cost", "total",
   "input", "output", "cache", "read", "write", "input_tokens", "output_tokens", "cached_input_tokens",
+  "thinking_tokens", "cache_read_tokens",
   "cache_read_input_tokens", "cache_creation_input_tokens", "inputTokens", "outputTokens", "cacheReadInputTokens",
   "cacheCreationInputTokens", "cachedInputTokens", "promptTokenCount", "candidatesTokenCount", "cachedContentTokenCount",
   "reasoning", "cacheRead", "cacheWrite", "prompt", "candidates", "totalTokenCount", "total_tokens", "toolUsePromptTokenCount", "messages",
   "thoughtsTokenCount", "inputTokens", "totalTokens", "cached", "thoughts", "total_cost_usd", "cost_usd", "costUSD", "costUsd",
 ]);
-const stringFields = new Set(["type", "subtype", "role", "id", "session_id", "sessionID", "thread_id", "model", "modelID", "providerID"]);
+const stringFields = new Set([
+  "type", "subtype", "event", "state", "status", "role", "id", "session_id", "sessionID", "thread_id", "model", "modelID", "providerID",
+]);
 function project(value: unknown, depth = 0, field = ""): unknown {
   if (depth > 8) return undefined;
+  if (field === "finished_reason") {
+    return typeof value === "string" && value.trim().toLowerCase() === "error" ? "error" : false;
+  }
   if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
   // Retain an invalid-type marker without retaining its contents. Omitting a
   // malformed optional counter would let parsers default it to a valid zero.
-  if (typeof value === "string") return stringFields.has(field) ? value.slice(0, 250) : false;
+  if (typeof value === "string") {
+    return stringFields.has(field) ? value.slice(0, 250) : false;
+  }
   if (Array.isArray(value)) return value.slice(0, 500).map(item => project(item, depth + 1));
   if (!value || typeof value !== "object") return undefined;
   return Object.fromEntries(Object.entries(value).filter(([key]) => fields.has(key))

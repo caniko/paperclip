@@ -100,6 +100,66 @@ describe("SSH authentication selection", () => {
     }
   });
 
+  it.each(["models", "hello", "run"] as const)("sets only the fixed Gemini launch flags for Atlas %s", async (invocation) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pc-atlas-gemini-"));
+    try {
+      const spec = await atlasFixtureSpec(root);
+      const probe = invocation !== "run";
+      const worker = path.join(root, "agy");
+      await writeFile(worker, '#!/bin/sh\nprintf "argv:%s\\n" "$@"\nexec env\n', { mode: 0o700 });
+      const args = invocation === "models"
+        ? ["models"]
+        : ["--output-format", "stream-json", "--input-format", "stream-json", "--model", "gemini-4-neon", "--effort", "high"];
+      const bridge = atlasBridgeTokenDelivery(spec, "fixture-bridge-bearer");
+      if (!probe) await bridge.deliver();
+      try {
+        const launch = await buildSshSpawnTarget({
+          spec: { ...spec, atlas: { ...spec.atlas, adapterType: "gemini_local", ...(probe ? { probe: true } : {}) } },
+          command: worker,
+          args,
+          env: {
+            NO_BROWSER: "0", AGY_ACP_FORCE_FILE_STORAGE: "0", GEMINI_CLI_TRUST_WORKSPACE: "false",
+            CALLER_ONLY: "arbitrary", GEMINI_API_KEY: "fixture-gemini-key", GOOGLE_API_KEY: "fixture-google-key",
+            CLOUD_CODE_URL: "http://caller.invalid",
+            PAPERCLIP_API_KEY: "fixture-jwt", PAPERCLIP_BRIDGE_TOKEN: "fixture-bridge-bearer",
+            PAPERCLIP_API_URL: "http://callback.invalid", PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: bridge.file,
+          },
+        });
+        try {
+          const { stdout } = await execFileAsync(launch.command, launch.args, { env: {} });
+          expect(stdout.split("\n").filter((line) => line.startsWith("argv:"))).toEqual(args.map((arg) => `argv:${arg}`));
+          expect(stdout.split("\n").filter((line) => /^(NO_BROWSER=|AGY_|GEMINI_|GOOGLE_|CLOUD_CODE_|PAPERCLIP_|CALLER_ONLY=)/.test(line)).sort()).toEqual(
+            probe ? [
+              "AGY_ACP_FORCE_FILE_STORAGE=1", "GEMINI_CLI_TRUST_WORKSPACE=true", "NO_BROWSER=1",
+            ] : [
+              "AGY_ACP_FORCE_FILE_STORAGE=1", "GEMINI_CLI_TRUST_WORKSPACE=true", "NO_BROWSER=1",
+              "PAPERCLIP_API_URL=http://callback.invalid", `PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE=${bridge.file}`,
+            ],
+          );
+          expect(stdout).not.toContain("fixture-bridge-bearer");
+          expect(stdout).not.toContain("PAPERCLIP_API_KEY=");
+          const remoteCommand = launch.args.at(-1)!;
+          for (const forbidden of [
+            "fixture-jwt", "fixture-bridge-bearer", "fixture-gemini-key", "fixture-google-key",
+            "caller.invalid", "CALLER_ONLY", "PAPERCLIP_API_KEY", ...(probe ? [bridge.file, "callback.invalid"] : []),
+          ]) {
+            expect(remoteCommand).not.toContain(forbidden);
+          }
+          if (!probe) {
+            await bridge.cleanup();
+            await expect(execFileAsync(launch.command, launch.args, { env: {} })).rejects.toThrow();
+          }
+        } finally {
+          await launch.cleanup();
+        }
+      } finally {
+        if (!probe) await bridge.cleanup();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("delivers the Atlas bearer out of band for bridge and adapter launches and cleans it up", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "pc-atlas-auth-"));
     const argvLog = path.join(root, "argv");

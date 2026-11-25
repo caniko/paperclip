@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import { join } from "node:path";
 import { probePluginRunnerEnvironment } from "./native-runtime/plugin-runner-probe.js";
 import { pluginRunnerAiConnectionRequiredTestResult } from "./plugin-runner-ai-connection.js";
@@ -660,18 +661,24 @@ export function agentEnvironmentTestService(db: Db, pluginWorkerManager?: Plugin
     const binding = atlasAdmissionForAgent(agent, agent.companyId);
     if (!binding) throw forbidden("No qualified Atlas test binding");
     const { environment, lease } = await acquireAtlasExecution({ environments: environmentsSvc, binding, runId: null, issueId: null });
+    let scratchDir: string | null = null;
     try {
-      const [currentAgent] = await db.select().from(agents)
-        .where(and(eq(agents.id, binding.agentId), eq(agents.companyId, binding.companyId)));
-      if (!currentAgent || atlasAdmissionForAgent(currentAgent, binding.companyId) !== binding) {
-        throw forbidden("No qualified Atlas agent execution binding");
+      try {
+        const [currentAgent] = await db.select().from(agents)
+          .where(and(eq(agents.id, binding.agentId), eq(agents.companyId, binding.companyId)));
+        if (!currentAgent || atlasAdmissionForAgent(currentAgent, binding.companyId) !== binding) {
+          throw forbidden("No qualified Atlas agent execution binding");
+        }
+        const target = await prepareAtlasScratch(binding);
+        scratchDir = target.spec.atlas.scratchDir;
+        const executionTarget = { ...target, leaseId: lease.id, spec: { ...target.spec, atlas: { ...target.spec.atlas, probe: true as const } } };
+        return await requireServerAdapter(binding.adapterType).testEnvironment({
+          companyId: binding.companyId, adapterType: binding.adapterType, config: { ...currentAgent.adapterConfig },
+          executionTarget, environmentName: environment.name,
+        });
+      } finally {
+        if (scratchDir) await fs.rmdir(scratchDir).catch(() => {});
       }
-      const target = await prepareAtlasScratch(binding);
-      const executionTarget = { ...target, leaseId: lease.id, spec: { ...target.spec, atlas: { ...target.spec.atlas, probe: true as const } } };
-      return await requireServerAdapter(binding.adapterType).testEnvironment({
-        companyId: binding.companyId, adapterType: binding.adapterType, config: { ...currentAgent.adapterConfig },
-        executionTarget, environmentName: environment.name,
-      });
     } finally {
       await environmentsSvc.releaseLease(lease.id, "released");
     }

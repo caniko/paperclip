@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  atlasGeminiRunArgs,
   createGeminiJsonlParser,
   detectGeminiAuthRequired,
+  formatAgyStreamJsonInput,
   isGeminiTransientNetworkError,
   isGeminiSessionUnrecoverableError,
+  parseAgyModelsOutput,
   parseGeminiJsonl,
+  splitAgyModelEffort,
 } from "./parse.js";
 
 describe("parseGeminiJsonl", () => {
@@ -247,5 +251,181 @@ describe("Gemini accounting semantics", () => {
   it("preserves explicit zero and distinguishes absent prices", () => {
     expect(parseGeminiJsonl(JSON.stringify({ type: "result", total_cost_usd: 0 })).costUsd).toBe(0);
     expect(parseGeminiJsonl(JSON.stringify({ type: "result" })).costUsd).toBeNull();
+  });
+});
+
+describe("agy CLI helpers and stream-json parsing", () => {
+  it("splits advertised agy effort suffixes into model and --effort", () => {
+    expect(splitAgyModelEffort("gemini-4-neon-high")).toEqual({ model: "gemini-4-neon", effort: "high" });
+    expect(splitAgyModelEffort("gemini-4-neon-xhigh")).toEqual({ model: "gemini-4-neon", effort: "xhigh" });
+    expect(splitAgyModelEffort("gemini-4-neon-medium")).toEqual({ model: "gemini-4-neon", effort: "medium" });
+    expect(splitAgyModelEffort("gemini-3.8-flash")).toEqual({ model: "gemini-3.8-flash", effort: null });
+    expect(splitAgyModelEffort("gemini-high")).toEqual({ model: "gemini-high", effort: null });
+  });
+
+  it("validates Atlas agy run arguments strictly and derives permission bypass solely from controller policy", () => {
+    expect(atlasGeminiRunArgs({ cliFlavor: "agy", model: "gemini-4-neon-high", dangerouslySkipPermissions: true })).toEqual([
+      "--output-format", "stream-json", "--input-format", "stream-json",
+      "--model", "gemini-4-neon", "--effort", "high",
+    ]);
+    expect(atlasGeminiRunArgs(
+      { cliFlavor: "agy", model: "gemini-4-neon-high" },
+      { dangerouslySkipPermissions: true },
+    )).toEqual([
+      "--output-format", "stream-json", "--input-format", "stream-json",
+      "--model", "gemini-4-neon", "--effort", "high", "--dangerously-skip-permissions",
+    ]);
+    expect(atlasGeminiRunArgs({ cliFlavor: "agy", model: "gemini-3.8-flash" })).toEqual([
+      "--output-format", "stream-json", "--input-format", "stream-json",
+      "--model", "gemini-3.8-flash",
+    ]);
+    for (const invalid of [
+      { cliFlavor: "gemini", model: "gemini-4-neon-high" },
+      { cliFlavor: undefined, model: "gemini-4-neon-high" },
+      { cliFlavor: "agy", model: "auto" },
+      { cliFlavor: "agy", model: "claude-opus-5-5-max" },
+      { cliFlavor: "agy", model: "-gemini-4-neon-high" },
+      { cliFlavor: "agy", model: "google/gemini-4-neon-high" },
+      { cliFlavor: "agy", model: `gemini-${"a".repeat(130)}` },
+    ]) {
+      expect(atlasGeminiRunArgs(invalid)).toBeNull();
+    }
+  });
+
+  it("formats agy stream-json user turn input and parses agy models output", () => {
+    expect(formatAgyStreamJsonInput("Respond with hello.")).toBe(
+      `${JSON.stringify({ event: "user", message: { role: "user", content: "Respond with hello." } })}\n`,
+    );
+    expect(parseAgyModelsOutput([
+      "Fetching available models...",
+      "gemini-4-neon-high\tGemini 4 Neon (High)",
+      "gemini-3.8-flash\tGemini 3.8 Flash",
+      "gemini-4-neon-high\tDuplicate",
+      "gemini-2.5-pro",
+      "",
+    ].join("\n"))).toEqual([
+      { id: "gemini-4-neon-high", label: "Gemini 4 Neon (High)" },
+      { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash" },
+      { id: "gemini-2.5-pro", label: "gemini-2.5-pro" },
+    ]);
+  });
+
+  it("parses agy stream-json init, step_update, and result without double-counting usage", () => {
+    const stdout = [
+      JSON.stringify({ event: "init", conversation_id: "conv-123", init: { model: "gemini-4-neon-high" } }),
+      JSON.stringify({ event: "step_update", step_update: { conversation_id: "conv-123", step_index: 0, state: "DONE", step_type: "user_input" } }),
+      JSON.stringify({ event: "step_update", step_update: { conversation_id: "conv-123", step_index: 1, state: "RUNNING", step_type: "agent_response", text_delta: "hello " } }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conv-123",
+          step_index: 1,
+          state: "DONE",
+          step_type: "agent_response",
+          text_delta: "world\n",
+          usage: { input_tokens: 20, output_tokens: 15, thinking_tokens: 5, cache_read_tokens: 80, total_tokens: 35 },
+        },
+      }),
+      JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: "conv-123",
+          status: "SUCCESS",
+          response: "hello world\n",
+          num_turns: 1,
+          usage: { input_tokens: 20, output_tokens: 15, thinking_tokens: 5, cache_read_tokens: 80, total_tokens: 35 },
+        },
+      }),
+    ].join("\n");
+
+    const parsed = parseGeminiJsonl(stdout);
+    expect(parsed.sessionId).toBe("conv-123");
+    expect(parsed.summary).toBe("hello world");
+    expect(parsed.errorMessage).toBeNull();
+    expect(parsed.terminalStatus).toBe("success");
+    expect(parsed.resultEvent).toMatchObject({ status: "SUCCESS", conversation_id: "conv-123" });
+    expect(parsed.usage).toEqual({ inputTokens: 20, cachedInputTokens: 80, outputTokens: 15 });
+  });
+
+  it("retains completed step usage and null terminalStatus if agy exits before emitting a result event", () => {
+    const stdout = [
+      JSON.stringify({ event: "init", conversation_id: "conv-partial" }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conv-partial",
+          step_index: 1,
+          state: "DONE",
+          step_type: "agent_response",
+          text_delta: "partial reply",
+          usage: { input_tokens: 12, output_tokens: 7, thinking_tokens: 2, cache_read_tokens: 40, total_tokens: 19 },
+        },
+      }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conv-partial",
+          step_index: 1,
+          state: "DONE",
+          step_type: "agent_response",
+          usage: { input_tokens: 12, output_tokens: 7, thinking_tokens: 2, cache_read_tokens: 40, total_tokens: 19 },
+        },
+      }),
+    ].join("\n");
+    const parsed = parseGeminiJsonl(stdout);
+    expect(parsed.sessionId).toBe("conv-partial");
+    expect(parsed.summary).toBe("partial reply");
+    expect(parsed.terminalStatus).toBeNull();
+    expect(parsed.resultEvent).toBeNull();
+    expect(parsed.usage).toEqual({ inputTokens: 12, cachedInputTokens: 40, outputTokens: 7 });
+  });
+
+  it("captures agy ERROR results (including empty diagnostics) and auth failures", () => {
+    const stdout = JSON.stringify({
+      event: "result",
+      result: {
+        conversation_id: "",
+        status: "ERROR",
+        response: "",
+        error: "Eligibility check failed: PERMISSION_DENIED (code 403): forbidden. Please log out (/logout) and log back in (/login).",
+        finished_reason: "error",
+      },
+    });
+    const parsed = parseGeminiJsonl(stdout);
+    expect(parsed.terminalStatus).toBe("error");
+    expect(parsed.errorMessage).toContain("PERMISSION_DENIED");
+    expect(detectGeminiAuthRequired({ parsed: parsed.resultEvent, stdout, stderr: "" }).requiresAuth).toBe(true);
+    expect(detectGeminiAuthRequired({ parsed: null, stdout: "", stderr: "Error: Please sign in to view available models." }).requiresAuth).toBe(true);
+
+    const silentError = parseGeminiJsonl(JSON.stringify({
+      event: "result",
+      result: { conversation_id: "conv-silent", status: "ERROR", response: "", error: "" },
+    }));
+    expect(silentError.terminalStatus).toBe("error");
+    expect(silentError.errorMessage).toContain("error");
+
+    const errorAfterStep = parseGeminiJsonl([
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "conv-err-usage",
+          step_index: 1,
+          state: "DONE",
+          step_type: "agent_response",
+          usage: { input_tokens: 18, output_tokens: 9, thinking_tokens: 3, cache_read_tokens: 50, total_tokens: 27 },
+        },
+      }),
+      JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: "conv-err-usage",
+          status: "SUCCESS",
+          finished_reason: "error",
+          usage: { input_tokens: 0, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 0 },
+        },
+      }),
+    ].join("\n"));
+    expect(errorAfterStep.terminalStatus).toBe("error");
+    expect(errorAfterStep.usage).toEqual({ inputTokens: 18, cachedInputTokens: 50, outputTokens: 9 });
   });
 });

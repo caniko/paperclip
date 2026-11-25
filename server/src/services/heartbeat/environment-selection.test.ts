@@ -68,6 +68,60 @@ it("checks the same Atlas OpenCode pins at declaration and final dispatch", () =
   }
 });
 
+it("checks the same Atlas Gemini agy pins at declaration and final dispatch", () => {
+  const binding: AtlasAdmission = {
+    companyId: randomUUID(), agentId: randomUUID(), environmentId: randomUUID(), adapterType: "gemini_local",
+    host: "127.0.0.1", port: 2222, username: "worker", hostKey: "ssh-ed25519 fixture", privateKeyCredential: "worker-key",
+    workspaceClass: "copy-scratch", remoteWorkspacePath: "/worker/work", command: "/worker/agy", sshExecutable: "/bin/ssh",
+    cliFlavor: "agy", model: "gemini-4-neon-high",
+  };
+  const config = { engine: "cli", command: binding.command, cliFlavor: "agy", model: binding.model };
+  const agent = { id: binding.agentId, companyId: binding.companyId, adapterType: binding.adapterType,
+    defaultEnvironmentId: binding.environmentId, adapterConfig: config, runtimeConfig: {} };
+  const cwd = "/controller/scratch";
+  const { host, port, username, remoteWorkspacePath: remoteCwd } = binding;
+  const target = { kind: "remote", transport: "ssh", environmentId: binding.environmentId, leaseId: randomUUID(), remoteCwd,
+    spec: { host, port, username, remoteCwd, remoteWorkspacePath: remoteCwd, workspaceRealizationMode: "copy",
+      knownHosts: `[${host}]:${port} ${binding.hostKey}`, strictHostKeyChecking: true, privateKey: "fixture",
+      atlas: { sshExecutable: binding.sshExecutable, scratchDir: cwd } },
+  } as const satisfies AdapterExecutionTarget;
+  vi.mocked(atlasExecutionPolicy).mockReturnValue({ admissions: [binding], home: "/controller", credentialFiles: {} });
+  try {
+    expect(atlasAdmissionForAgent(agent, agent.companyId)).toBe(binding);
+    expect(() => assertAtlasDispatch(binding, target, { ...config, env: {} }, cwd)).not.toThrow();
+    for (const change of [
+      { engine: "acp" }, { engine: undefined }, { command: undefined }, { command: "/other/agy" },
+      { cliFlavor: undefined }, { cliFlavor: "gemini" }, { model: undefined }, { model: "gemini-3.8-flash" },
+      { dangerouslySkipPermissions: true }, { dangerouslySkipPermissions: false }, { dangerouslySkipPermissions: "true" },
+      { sandbox: true }, { extraArgs: [] }, { args: [] }, { agentCommand: "/other/acp" },
+      { managedAiConnection: true }, { instructionsFilePath: "/etc/passwd" }, { cwd: "/elsewhere" },
+      { env: { GEMINI_API_KEY: "fixture" } },
+    ]) {
+      const drifted = { ...config, ...change };
+      expect(() => atlasAdmissionForAgent({ ...agent, adapterConfig: drifted }, agent.companyId)).toThrow("No qualified Atlas");
+      expect(() => assertAtlasDispatch(binding, target, drifted, cwd)).toThrow("Final Atlas dispatch");
+    }
+    expect(() => atlasAdmissionForAgent({ ...agent, adapterConfig: { ...config, env: {} } }, agent.companyId)).toThrow();
+    expect(() => assertAtlasDispatch(binding, target, { ...config, env: [] }, cwd)).toThrow();
+    for (const drifted of [
+      { ...target, leaseId: null }, { ...target, environmentId: randomUUID() }, { ...target, remoteCwd: "/other" },
+      { ...target, spec: { ...target.spec, knownHosts: "different" } },
+      { ...target, spec: { ...target.spec, atlas: { ...target.spec.atlas, probe: true as const } } },
+      { ...target, spec: { ...target.spec, atlas: { ...target.spec.atlas, dangerouslySkipPermissions: true } } },
+    ]) expect(() => assertAtlasDispatch(binding, drifted, config, cwd)).toThrow("Final Atlas dispatch");
+    const allowSkipBinding: AtlasAdmission = { ...binding, dangerouslySkipPermissions: true };
+    expect(() => assertAtlasDispatch(allowSkipBinding, target, { ...config, env: {} }, cwd)).toThrow("Final Atlas dispatch");
+    expect(() => assertAtlasDispatch(
+      allowSkipBinding,
+      { ...target, spec: { ...target.spec, atlas: { ...target.spec.atlas, dangerouslySkipPermissions: true } } },
+      { ...config, env: {} },
+      cwd,
+    )).not.toThrow();
+  } finally {
+    vi.mocked(atlasExecutionPolicy).mockReturnValue(null);
+  }
+});
+
 it("releases an Atlas slot if the actual acquired target differs before preparation", async () => {
   const binding: AtlasAdmission = {
     companyId: "company", agentId: "agent", environmentId: "environment", adapterType: "claude_local",

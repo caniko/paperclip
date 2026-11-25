@@ -34,6 +34,13 @@ const atlasAdmissionSchema = z.discriminatedUnion("adapterType", [
     model: z.string().regex(/^(?!-)(?:[^/\s\p{C}#]+\/)+[^/\s\p{C}#]+$/u),
     variant: z.string().regex(/^(?!-)[^\s\p{C}#]+$/u),
   }).strict(),
+  z.object({
+    ...atlasAdmissionFields,
+    adapterType: z.literal("gemini_local"),
+    cliFlavor: z.literal("agy"),
+    model: z.string().max(128).regex(/^gemini-[A-Za-z0-9._-]+$/),
+    dangerouslySkipPermissions: z.boolean().optional(),
+  }).strict(),
 ]);
 export type AtlasAdmission = Readonly<z.infer<typeof atlasAdmissionSchema>>;
 const atlasExecutionPolicySchema = z.object({ admissions: z.array(atlasAdmissionSchema) }).strict()
