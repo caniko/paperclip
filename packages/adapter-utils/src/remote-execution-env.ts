@@ -16,8 +16,13 @@ const REMOTE_EXECUTION_ENV_IDENTITY_KEYS = new Set([
   "XDG_RUNTIME_DIR",
 ]);
 
-// A launch policy, not a forwarded environment key.
+// Launch policies, not forwarded environment keys.
 export const ATLAS_OPENCODE_ENV = Object.freeze({ OPENCODE_DISABLE_PROJECT_CONFIG: "1" } as const);
+export const ATLAS_GEMINI_ENV = Object.freeze({
+  NO_BROWSER: "1",
+  AGY_ACP_FORCE_FILE_STORAGE: "1",
+  GEMINI_CLI_TRUST_WORKSPACE: "true",
+} as const);
 
 // Exact keys only. The SSH account owns PATH, HOME, provider and forge state.
 const atlasEnvKeys = new Set([

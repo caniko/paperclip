@@ -79,4 +79,34 @@ describe("declarative startup credentials", () => {
     ]) expect(accepts({ ...binding, ...change }), JSON.stringify(change)).toBe(false);
     expect(accepts(binding, binding)).toBe(false);
   });
+
+  it("admits only explicit, strictly pinned Atlas Gemini agy bindings", () => {
+    const descriptor = { version: 1, home: "/var/lib/paperclip", instance: "one", configFile: "/config.json",
+      executionProfile: "atlas-ssh", credentialFiles: { worker: "/run/paperclip/key" } };
+    const binding = {
+      companyId: "01c386b4-02a5-4071-9e07-bea5d4f2824d", agentId: "978d03ab-e5da-44f8-9b88-2f614bf5f047",
+      environmentId: "91b06dd5-36df-45f8-94aa-d63c03436aeb", workspaceClass: "copy-scratch",
+      command: "/worker/agy", sshExecutable: "/bin/ssh", remoteWorkspacePath: "/worker/scratch",
+      host: "127.0.0.1", port: 2222, username: "worker", privateKeyCredential: "worker",
+      hostKey: `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI${"A".repeat(43)}`,
+      adapterType: "gemini_local", cliFlavor: "agy", model: "gemini-4-neon-high",
+    };
+    const accepts = (...admissions: unknown[]) =>
+      deploymentDescriptorSchema.safeParse({ ...descriptor, atlasExecutionPolicy: { admissions } }).success;
+    expect(accepts(binding)).toBe(true);
+    expect(accepts({ ...binding, dangerouslySkipPermissions: false })).toBe(true);
+    expect(accepts({ ...binding, dangerouslySkipPermissions: true })).toBe(true);
+    for (const change of [
+      { dangerouslySkipPermissions: "true" }, { dangerouslySkipPermissions: null },
+      { cliFlavor: undefined }, { cliFlavor: "gemini" }, { cliFlavor: "acp" },
+      { model: undefined }, { model: "auto" }, { model: "claude-opus-5-5-max" },
+      { model: "-gemini-4-neon-high" }, { model: "google/gemini-4-neon-high" },
+      { model: "gemini-4-neon-high#high" }, { model: "gemini-4-neon-high\n" },
+      { model: `gemini-${"a".repeat(130)}` },
+      { standalone: true }, { variant: "high" }, { sandbox: true }, { extraArgs: [] },
+      { env: {} }, { adapterType: "claude_local" }, { privateKeyCredential: "unbound" },
+      { host: "192.0.2.1" }, { command: "/worker/../agy" }, { username: "root" },
+    ]) expect(accepts({ ...binding, ...change }), JSON.stringify(change)).toBe(false);
+    expect(accepts(binding, binding)).toBe(false);
+  });
 });
