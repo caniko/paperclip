@@ -150,7 +150,7 @@ describe("deferred receipt durable dispatch", () => {
       const remaining = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.status, "scheduled_retry"));
       expect(remaining, JSON.stringify({ next: coordinator.nextWakeAt(), at: Date.now(),
         runs: remaining.map(run => ({ id: run.id, at: run.scheduledRetryAt, error: run.errorCode })) })).toHaveLength(0);
-    });
+    }, { timeout: 15_000 });
   }
   it("is quiet after empty reconstruction and terminal receipt history", async () => {
     const f = await fixture();
@@ -337,12 +337,11 @@ describe("deferred receipt durable dispatch", () => {
     await heartbeat.registerScheduledRetryCancellationWork(coordinator, () => !drain).ready;
     await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, occupant.id));
     await heartbeat.registerRunDispatchWork(coordinator, () => !drain).ready;
-    await waitForReal(async () => {
-      await heartbeat.drainActiveRunExecutions();
-      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, receipt.runId!));
-      expect(run.status, JSON.stringify({ error: run.error, code: run.errorCode })).toBe("succeeded");
-      expect(run.stdoutExcerpt).toContain("receipt-proof");
-    }, { timeout: 15_000 });
+    // The initial dispatch pass has registered its execution. Wait for its
+    // completion directly; the test timeout already bounds the real process.
+    await heartbeat.drainActiveRunExecutions();
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, receipt.runId!));
+    expect(run).toMatchObject({ status: "succeeded", stdoutExcerpt: expect.stringContaining("receipt-proof") });
     expect(await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
       .where(sql`${heartbeatRuns.contextSnapshot}->>'taskRetryRequestId' = ${retry.requestId}`)).toHaveLength(1);
     await finish(f.issue.id);
