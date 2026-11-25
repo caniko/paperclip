@@ -24,16 +24,16 @@ const atlasAdmissionFields = {
   privateKeyCredential: credentialName,
   remoteWorkspacePath: executablePath,
 };
+export const atlasOpenCodePins = {
+  command: executablePath,
+  standalone: z.literal(true),
+  // Slashes inside model IDs are valid; # separates the two pins in the CLI model reference.
+  model: z.string().regex(/^(?!-)(?:[^/\s\p{C}#]+\/)+[^/\s\p{C}#]+$/u),
+  variant: z.string().regex(/^(?!-)[^\s\p{C}#]+$/u),
+};
 const atlasAdmissionSchema = z.discriminatedUnion("adapterType", [
   z.object({ ...atlasAdmissionFields, adapterType: z.literal("claude_local") }).strict(),
-  z.object({
-    ...atlasAdmissionFields,
-    adapterType: z.literal("opencode_local"),
-    standalone: z.literal(true),
-    // Slashes inside model IDs are valid; # separates the two pins in the CLI model reference.
-    model: z.string().regex(/^(?!-)(?:[^/\s\p{C}#]+\/)+[^/\s\p{C}#]+$/u),
-    variant: z.string().regex(/^(?!-)[^\s\p{C}#]+$/u),
-  }).strict(),
+  z.object({ ...atlasAdmissionFields, ...atlasOpenCodePins, adapterType: z.literal("opencode_local") }).strict(),
   z.object({
     ...atlasAdmissionFields,
     adapterType: z.literal("gemini_local"),
