@@ -165,7 +165,7 @@ try {
   const rawReporter = new QualificationJUnitReporter();
   rawReporter.options.outputFile = path.join(evidence, "raw-results.junit");
   ctx = await createVitest({ ...options, testNamePattern: selection.testNamePattern,
-    // 
+    //
     reporters: [profile === "runnerd" ? progressReporter : "default", rawReporter] });
   const executionSpecs = await ctx.globTestSpecifications(filters);
   assert.deepEqual(specificationRows(executionSpecs, testRoot), discovery);
