@@ -17,11 +17,8 @@ release_fail() {
   exit 1
 }
 
-# Fork-only packages keep their closure entry but must never be published from here:
-# the fork has no npm credentials for the @paperclipai scope, and a failed attempt is
-# still a publication attempt. Names come from check-release-package-bootstrap.mjs so
-# the exemption lives in one place. Dry runs and pack/verify paths are unaffected.
-reject_pending_bootstrap_publish() {
+# Pack-only packages stay in the release closure but must never be published.
+reject_pack_only_publish() {
   local package_name="$1"
   local dry_run="${2:-false}"
 
@@ -29,18 +26,18 @@ reject_pending_bootstrap_publish() {
     return 0
   fi
 
-  local pending_list
-  if ! pending_list="$(node "$REPO_ROOT/scripts/check-release-package-bootstrap.mjs" --pending-bootstrap)"; then
-    release_fail "could not read the pending-bootstrap package list"
+  local pack_only_list
+  if ! pack_only_list="$(node "$REPO_ROOT/scripts/release-package-map.mjs" pack-only)"; then
+    release_fail "could not read pack-only packages from scripts/release-package-manifest.json"
   fi
-  if printf '%s\n' "$pending_list" | grep -Fxq -- "$package_name"; then
-    release_fail "refusing to publish ${package_name}: it is a fork-only package pending bootstrap, and this fork never publishes the @paperclipai scope"
+  if printf '%s\n' "$pack_only_list" | grep -Fxq -- "$package_name"; then
+    release_fail "refusing to publish ${package_name}: scripts/release-package-manifest.json marks it packOnly (packed and verified, never published to npm)"
   fi
   return 0
 }
 
 # Preflight the whole plan before the first publish, so a plan that contains a
-# pending-bootstrap package fails as a unit instead of after earlier packages
+# pack-only package fails as a unit instead of after earlier packages
 # already advanced their dist-tags.
 assert_publish_plan_allowed() {
   local package_info="$1"
@@ -53,7 +50,7 @@ assert_publish_plan_allowed() {
   local pkg_dir pkg_name pkg_version
   while IFS=$'\t' read -r pkg_dir pkg_name pkg_version; do
     [ -z "$pkg_dir" ] && continue
-    reject_pending_bootstrap_publish "$pkg_name" "false"
+    reject_pack_only_publish "$pkg_name" "false"
   done <<< "$package_info"
   return 0
 }

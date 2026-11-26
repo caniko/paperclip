@@ -106,6 +106,9 @@ function readPauseSuppressionHoldId(resultJson: Record<string, unknown> | null) 
 const ACTIVE_RUN_STATUSES = ["queued", "running"] as const;
 const DEFAULT_RELEASE_POLICY: IssueTreeHoldReleasePolicy = { strategy: "manual" };
 const MAX_PAUSE_HOLD_ANCESTOR_DEPTH = 100;
+// As a gate exception, these reasons apply only to dependency blocking. Active
+// pause holds in this fork have no verified interaction-wake exception: queued
+// comment work requires explicit pause release (b2103bea63; doc/composer-stop.md).
 export const ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS: ReadonlySet<string> = new Set([
   "issue_commented",
   "issue_reopened_via_comment",

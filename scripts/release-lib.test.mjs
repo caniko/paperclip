@@ -414,14 +414,15 @@ test("every publish job budgets for build time, four delayed packages and the in
   }
 });
 
-function runPendingBootstrapGuard(packageName, dryRun = "false") {
+function runPackOnlyGuard(packageName, dryRun = "false", root = repoRoot) {
   return spawnSync("bash", [
     "-c",
-    'set -euo pipefail; source "$1/scripts/release-lib.sh"; reject_pending_bootstrap_publish "$2" "$3"',
+    'set -euo pipefail; source "$1/scripts/release-lib.sh"; REPO_ROOT="$4"; reject_pack_only_publish "$2" "$3"',
     "bash",
     repoRoot,
     packageName,
     dryRun,
+    root,
   ], { encoding: "utf8" });
 }
 
@@ -432,13 +433,14 @@ function runPublishPlanPreflight(plan, dryRun = "false") {
     "publish_calls=0",
     'publish_package_to_npm() { publish_calls=$((publish_calls + 1)); }',
     'set_dist_tag() { publish_calls=$((publish_calls + 1)); }',
-    'assert_publish_plan_allowed "$2" "$3"',
+    'if [ -z "$2" ]; then assert_publish_plan_allowed "$(list_public_package_info)" "$3";',
+    'else assert_publish_plan_allowed "$2" "$3"; fi',
     'echo "publish_calls=$publish_calls"',
   ].join("\n");
   return spawnSync("bash", ["-c", script, "bash", repoRoot, plan, dryRun], { encoding: "utf8" });
 }
 
-test("a non-dry-run release plan with a pending-bootstrap package fails before any publish", () => {
+test("the live non-dry-run release plan with a pack-only package fails before any publish", () => {
   // The preflight runs before the publish loop, so no publisher or dist-tag
   // call can happen for a plan that contains the fork-only adapter.
   const releaseScript = readFileSync(new URL("../scripts/release.sh", import.meta.url), "utf8");
@@ -447,17 +449,12 @@ test("a non-dry-run release plan with a pending-bootstrap package fails before a
       < releaseScript.indexOf('release_info "  Publishing $pkg_name@$pkg_version"'),
   );
 
-  const plan = [
-    "packages/adapters/kimi-local\t@paperclipai/adapter-kimi-local\t1.0.0",
-    "packages/adapters/t3code-local\t@paperclipai/adapter-t3code-local\t0.3.1",
-  ].join("\n");
-
-  const refused = runPublishPlanPreflight(plan);
+  const refused = runPublishPlanPreflight("");
   assert.notEqual(refused.status, 0);
   assert.match(refused.stderr, /@paperclipai\/adapter-t3code-local/);
   assert.doesNotMatch(refused.stdout, /publish_calls=/);
 
-  const dryRun = runPublishPlanPreflight(plan, "true");
+  const dryRun = runPublishPlanPreflight("", "true");
   assert.equal(dryRun.status, 0);
   assert.match(dryRun.stdout, /publish_calls=0/);
 
@@ -466,20 +463,26 @@ test("a non-dry-run release plan with a pending-bootstrap package fails before a
   assert.match(unaffected.stdout, /publish_calls=0/);
 });
 
-test("a real publish refuses pending-bootstrap packages while dry runs and other packages proceed", () => {
+test("a real publish refuses pack-only packages while dry runs and other packages proceed", () => {
   // The real publish loop calls the guard before any publish work.
   assert.match(
     readFileSync(new URL("../scripts/release.sh", import.meta.url), "utf8"),
-    /reject_pending_bootstrap_publish "\$pkg_name" "\$dry_run"/,
+    /reject_pack_only_publish "\$pkg_name" "\$dry_run"/,
   );
 
-  const refused = runPendingBootstrapGuard("@paperclipai/adapter-t3code-local", "false");
+  const refused = runPackOnlyGuard("@paperclipai/adapter-t3code-local");
   assert.notEqual(refused.status, 0);
   assert.match(refused.stderr, /@paperclipai\/adapter-t3code-local/);
-  assert.match(refused.stderr, /fork-only package pending bootstrap/);
+  assert.match(refused.stderr, /marks it packOnly/);
 
-  assert.equal(runPendingBootstrapGuard("@paperclipai/adapter-t3code-local", "true").status, 0);
-  assert.equal(runPendingBootstrapGuard("@paperclipai/server", "false").status, 0);
+  assert.equal(runPackOnlyGuard("@paperclipai/adapter-t3code-local", "true").status, 0);
+  assert.equal(runPackOnlyGuard("@paperclipai/server").status, 0);
+});
+
+test("a real publish fails closed when REPO_ROOT is empty", () => {
+  const refused = runPackOnlyGuard("@paperclipai/server", "false", "");
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /could not read pack-only packages/);
 });
 
 function canaryNumberFixture({ commits, publishedVersions, shallow = false }) {

@@ -413,7 +413,7 @@ else
   assert_publish_plan_allowed "$VERSIONED_PACKAGE_INFO" "$dry_run"
   while IFS=$'\t' read -r pkg_dir pkg_name pkg_version; do
     [ -z "$pkg_dir" ] && continue
-    reject_pending_bootstrap_publish "$pkg_name" "$dry_run"
+    reject_pack_only_publish "$pkg_name" "$dry_run"
     release_info "  Publishing $pkg_name@$pkg_version"
     cd "$REPO_ROOT/$pkg_dir"
     publish_tool="$(package_publish_tool)"

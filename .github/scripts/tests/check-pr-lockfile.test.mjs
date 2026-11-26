@@ -12,7 +12,8 @@ test('passes when lockfile changed by refresh bot on correct branch', () => {
   const result = checkLockfile(
     makeFiles(['pnpm-lock.yaml']),
     'github-actions[bot]',
-    'chore/refresh-lockfile'
+    'chore/refresh-lockfile',
+    'paperclipai/paperclip'
   );
   assert.equal(result.passed, true);
 });
@@ -37,7 +38,7 @@ test('defers to the trusted policy job in the fork', () => {
   assert.equal(checkLockfile(makeFiles(['pnpm-lock.yaml']), 'someuser', 'fix/bug', 'paperclipai/paperclip').passed, false);
   // The fork-only resolution path does not cover the bot branch or other locks/proofs.
   assert.equal(checkLockfile(makeFiles(['pnpm-lock.yaml']), 'someuser', 'chore/refresh-lockfile', 'caniko/paperclip').passed, false);
-  assert.equal(checkLockfile(makeFiles(['pnpm-lock.yaml']), 'github-actions[bot]', 'chore/refresh-lockfile', 'caniko/paperclip').passed, true);
+  assert.equal(checkLockfile(makeFiles(['pnpm-lock.yaml']), 'github-actions[bot]', 'chore/refresh-lockfile', 'caniko/paperclip').passed, false);
   for (const path of ['scripts/typecheck-sandbox-providers/pnpm-lock.yaml', 'tests/runner-e2e/report-lock.patch']) {
     assert.equal(checkLockfile(makeFiles(['pnpm-lock.yaml', path]), 'someuser', 'fix/bug', 'caniko/paperclip').passed, false);
   }

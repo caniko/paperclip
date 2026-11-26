@@ -11,14 +11,27 @@ import {
   waitForPackageVisible,
 } from "./bootstrap-npm-package.mjs";
 
-test("a real bootstrap publish of a pending-bootstrap package is refused", () => {
+test("a real bootstrap publish of a pack-only package is refused", () => {
   assert.throws(
     () => assertBootstrapAllowed("@paperclipai/adapter-t3code-local", true),
-    /fork-only package pending bootstrap/,
+    /packOnly/,
   );
   // A dry run still stages the placeholder, and other packages are unaffected.
   assert.doesNotThrow(() => assertBootstrapAllowed("@paperclipai/adapter-t3code-local", false));
   assert.doesNotThrow(() => assertBootstrapAllowed("@paperclipai/adapter-kimi-local", true));
+});
+
+test("an unreadable pack-only list blocks real bootstrap but is not read in dry-run", () => {
+  const error = new Error("manifest unreadable");
+  let reads = 0;
+  const readPackOnlyNames = () => {
+    reads += 1;
+    throw error;
+  };
+
+  assert.doesNotThrow(() => assertBootstrapAllowed("@paperclipai/adapter-kimi-local", false, readPackOnlyNames));
+  assert.equal(reads, 0);
+  assert.throws(() => assertBootstrapAllowed("@paperclipai/adapter-kimi-local", true, readPackOnlyNames), error);
 });
 
 test("parseArgs recognizes the publish flag", () => {
