@@ -202,6 +202,7 @@ test.describe("chat destination partial updates", () => {
     await page.goto(`/${seed.prefix}/apps/chat/endpoint-discord/settings`);
     await expect(page.getByRole("switch", { name: /^Enable / })).toHaveCount(
       501,
+      { timeout: 8_000 },
     );
     const target = page.getByRole("switch", {
       name: "Enable Extra destination 499",

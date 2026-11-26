@@ -1,5 +1,7 @@
 import { expect, test, type APIRequestContext, type APIResponse } from "@playwright/test";
 
+type TaskLoadingFrame = { at: number; ready: boolean; headerVisible: boolean; loading: number[] | null; loadingComposer: number[] | null; composer: number[] | null; latestY?: number; scrollHeight?: number; loadingFont?: string; titleFont?: string };
+
 async function json(response: APIResponse) {
   expect(response.ok(), `${response.status()} ${await response.text()}`).toBe(true);
   return response.json();
@@ -38,9 +40,9 @@ for (const mobile of [false, true]) test(`a rich task uses one stable loading fr
       await route.fulfill({ json: { ...await response.json(), coordinatorWorkspaceEnabled: true } });
     });
     await page.addInitScript(() => {
-      const frames: Array<{ ready: boolean; headerVisible: boolean; loading: number[] | null; loadingComposer: number[] | null; composer: number[] | null; latestY?: number; scrollHeight?: number; loadingFont?: string; titleFont?: string }> = [];
+      const frames: TaskLoadingFrame[] = [];
       Object.assign(window, { taskLoadingFrames: frames });
-      const sample = () => {
+      const sample = (at: number) => {
         const box = (selector: string) => {
           const element = document.querySelector(selector);
           if (!element || getComputedStyle(element).visibility !== "visible") return null;
@@ -55,6 +57,7 @@ for (const mobile of [false, true]) test(`a rich task uses one stable loading fr
         const header = document.querySelector('[data-testid="issue-detail-header"]');
         const bounds = header?.getBoundingClientRect();
         frames.push({
+          at,
           ready: !!document.querySelector('[data-testid="task-chat-thread"] > [aria-busy="false"]'),
           headerVisible: !!header && getComputedStyle(header).visibility === "visible" && bounds!.bottom > 60 && bounds!.top < innerHeight,
           loading: box('[data-testid="task-chat-loading-frame"]'),
@@ -72,9 +75,18 @@ for (const mobile of [false, true]) test(`a rich task uses one stable loading fr
     await page.goto(fixture.route);
     await expect(page.getByTestId("task-chat-thread").locator(':scope > [aria-busy="false"]')).toBeVisible();
     await expect(page.getByRole("button", { name: "Approve patch", exact: true })).toBeVisible();
-    await page.waitForTimeout(500);
-    const frames = await page.evaluate(() => (window as unknown as { taskLoadingFrames: Array<{ ready: boolean; headerVisible: boolean; loading: number[] | null; loadingComposer: number[] | null; composer: number[] | null; latestY?: number; scrollHeight?: number; loadingFont?: string; titleFont?: string }> }).taskLoadingFrames);
-    await info.attach("loading-frames", { body: JSON.stringify(frames), contentType: "application/json" });
+    const readyAt = await page.evaluate(() => performance.now());
+    let frames: TaskLoadingFrame[] = [];
+    try {
+      // An elapsed timer does not guarantee that rAF sampled enough ready frames.
+      await expect.poll(async () => {
+        frames = await page.evaluate(() => (window as unknown as { taskLoadingFrames: TaskLoadingFrame[] }).taskLoadingFrames);
+        return (frames.at(-1)?.at ?? 0) >= readyAt + 500
+          && frames.filter(frame => frame.ready && frame.latestY !== undefined).length >= 6;
+      }).toBe(true);
+    } finally {
+      await info.attach("loading-frames", { body: JSON.stringify(frames), contentType: "application/json" });
+    }
     expect(frames.filter(frame => !frame.ready && frame.headerVisible)).toEqual([]);
     const loading = frames.filter(frame => frame.loading);
     const ready = frames.filter(frame => frame.ready && frame.latestY !== undefined);
