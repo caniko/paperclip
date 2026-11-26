@@ -219,9 +219,12 @@ pub fn run_fake_harness(
                 output.send("terminal", json!({ "terminal": payload }))?;
             }
             FakeHarnessStep::SpawnWorker => {
+                // Keep PATH: without it a Nix sandbox shell cannot find `sleep`,
+                // exits at once, and the cleanup tests race its exit.
                 let worker = Command::new("sh")
                     .args(["-c", "sleep 60"])
                     .env_clear()
+                    .envs(std::env::var_os("PATH").map(|path| ("PATH", path)))
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
