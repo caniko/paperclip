@@ -418,6 +418,9 @@ fn spawn_linger_process() -> (SupervisedProcess, u32, u64) {
         }
     }
     let worker_pid = worker_pid.expect("linger script should report its worker pid");
+    // A worker that cannot start its command exits within milliseconds; give it
+    // that time so the check below proves it lingers instead of racing its exit.
+    std::thread::sleep(Duration::from_millis(200));
     assert!(process_running(u64::from(harness_pid)));
     assert!(process_running(worker_pid));
     (process, harness_pid, worker_pid)
