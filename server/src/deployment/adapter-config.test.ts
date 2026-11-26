@@ -25,6 +25,55 @@ describe("native declaration adapter contracts", () => {
     expect(() => validateDeclaredAdapterConfig("opencode_local", {}, {})).toThrow();
   });
 
+  const standaloneOpenCode = {
+    standalone: true, engine: "cli", command: "/worker/opencode",
+    model: "openrouter/openai/gpt-5.4", variant: "high",
+    dangerouslySkipPermissions: false, timeoutSec: 900,
+  };
+
+  it("accepts a standalone OpenCode CLI declaration with Atlas-compatible pins", () => {
+    expect(() => validateDeclaredAdapterConfig("opencode_local", standaloneOpenCode, {})).not.toThrow();
+  });
+
+  it("accepts explicit standalone opt-out without changing the legacy contract", () => {
+    expect(() => validateDeclaredAdapterConfig("opencode_local", {
+      standalone: false, managedService: true, dangerouslySkipPermissions: false,
+    }, {})).not.toThrow();
+  });
+
+  it.each([
+    ["server engine", { engine: "server" }],
+    ["unknown engine", { engine: "foo" }],
+    ["missing engine", { engine: undefined }],
+    ["non-boolean standalone", { standalone: "true" }],
+    ["missing standalone", { standalone: undefined }],
+    ["disabled standalone", { standalone: false }],
+    ["missing command", { command: undefined }],
+    ["relative command", { command: "opencode" }],
+    ["missing model", { model: undefined }],
+    ["empty model", { model: "" }],
+    ["model suffix conflicting with the variant", { model: "provider/model#high" }],
+    ["missing variant", { variant: undefined }],
+    ["empty variant", { variant: "" }],
+    ["blank variant", { variant: " " }],
+    ["missing permission choice", { dangerouslySkipPermissions: undefined }],
+    ["managed service", { managedService: true }],
+    ["managed AI connection", { managedAiConnection: true }],
+    ["server URL", { baseUrl: "http://example.invalid" }],
+    ["server token", { serverToken: "fixture" }],
+    ["extra CLI arguments", { extraArgs: [] }],
+    ["environment override", { env: {} }],
+    ["unknown key", { unexpected: true }],
+  ] as const)("rejects standalone OpenCode with %s", (_label, overrides) => {
+    expect(() => validateDeclaredAdapterConfig("opencode_local", { ...standaloneOpenCode, ...overrides }, {}))
+      .toThrow("Invalid declared adapter configuration");
+  });
+
+  it("rejects standalone OpenCode credential bindings that would add an adapter env", () => {
+    expect(() => validateDeclaredAdapterConfig("opencode_local", standaloneOpenCode, { "env.OPENAI_API_KEY": "provider" }))
+      .toThrow("Unsupported or reserved adapter credential binding");
+  });
+
   it("declares managed OpenCode without overriding the personal backend", () => {
     expect(() => validateDeclaredAdapterConfig("opencode_local", {
       managedService: true, dangerouslySkipPermissions: false, model: "openai/gpt-6.1-sol", cwd: "/workspace",
