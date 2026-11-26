@@ -36,7 +36,7 @@ const support = await getEmbeddedPostgresTestSupport();
     overBudget?: boolean;
   } = {}) {
     const companyId = randomUUID(), agentId = randomUUID();
-    await db.insert(companies).values({ id: companyId, name: "Time jump", issuePrefix: `T${companyId.slice(0, 4)}`.toUpperCase() });
+    await db.insert(companies).values({ id: companyId, name: "Time jump", issuePrefix: `T${companyId.replaceAll("-", "").toUpperCase()}` });
     await db.insert(agents).values({ id: agentId, companyId, name: "Codex", role: "engineer", status: "idle",
       adapterType: "paperclip_runner" });
     const [issue] = await db.insert(issues).values({ companyId, title: "Resumed task", status: "in_progress",
