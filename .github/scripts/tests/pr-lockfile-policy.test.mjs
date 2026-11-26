@@ -1,80 +1,247 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { LOCKFILES, REPORT_LOCK_FILES } from "../lockfile-trust.mjs";
 
-test("lock policy consumes large diffs and accepts only unchanged approved CI imports", t => {
-  const workflow = readFileSync(new URL("../../workflows/pr-trusted.yml", import.meta.url), "utf8");
-  const step = workflow.split("      - name: Block untrusted lockfile edits")[1].split("      - name:")[0];
-  const script = step.split("        run: |\n")[1].replace(/^ {10}/gm, "");
+const policySource = fileURLToPath(new URL("../lockfile-trust.mjs", import.meta.url));
+const workflowPath = ".github/workflows/refresh-lockfile.yml";
+const policyScript = readFileSync(new URL("../../workflows/pr-trusted.yml", import.meta.url), "utf8")
+  .split("      - name: Block untrusted lockfile edits")[1].split("      - name:")[0]
+  .split("        run: |\n")[1].replace(/^ {10}/gm, "");
+
+test("lock policy consumes large diffs and accepts only unchanged upstream master imports", t => {
   const directory = mkdtempSync(join(tmpdir(), "pr-lock-policy-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const oldBotPolicy = join(directory, "old-bot-policy.mjs");
+  writeFileSync(oldBotPolicy, `import { appendFileSync } from "node:fs";
+appendFileSync(process.env.GITHUB_OUTPUT, "writer=refresh-bot\\n");`);
   writeFileSync(join(directory, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
   writeFileSync(join(directory, "git"), `#!${process.execPath}
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 const args = process.argv.slice(2);
 if (args[0] === "show") process.stdout.write(readFileSync(process.env.POLICY_SOURCE));
-else if (args[0] === "diff" && args[1] === "--name-only") {
+else if (args[0] === "diff" && args.includes("--name-only")) {
   const locks = (process.env.LOCK_CHANGED === "true" ? "pnpm-lock.yaml\\n" : "") + process.env.EXTRA_LOCK;
   console.log(locks + (args.includes("--") ? "" : Array.from({length:10000},(_,i)=>"changed/"+i).join("\\n")));
 }
 else if (args[0] === "diff" && args[1] === "--quiet") {
-  const fetched = readFileSync(process.env.FETCH_STATE, "utf8");
-  process.exit(process.env.MANUAL_LOCK === "true" ||
-    (process.env.REFRESH_LOCK === "true" && fetched.endsWith(" master")) ||
-    (process.env.FORK_REFRESH === "true" && !fetched.startsWith("https://github.com/caniko/paperclip.git ")) ? 1 : 0);
+  const imported = process.env.IMPORT_FROM;
+  const fetched = readFileSync(process.env.FETCH_STATE, "utf8").trim().split("\\n").at(-1);
+  process.exit(imported === fetched ? 0 : 1);
 }
-else if (args[0] === "fetch") { writeFileSync(process.env.FETCH_STATE, args.slice(-2).join(" ")); process.exit(process.env.FETCH_FAILED === "true" || (process.env.REFRESH_FETCH_FAILED === "true" && args.at(-1) !== "master") || (process.env.FORK_FETCH_FAILED === "true" && args.at(-2) === "https://github.com/caniko/paperclip.git") || (process.env.UPSTREAM_REFRESH_MISSING === "true" && args.at(-2) === "https://github.com/paperclipai/paperclip.git" && args.at(-1) !== "master") ? 1 : 0); }
+else if (args[0] === "fetch") {
+  appendFileSync(process.env.FETCH_STATE, args.slice(-2).join(" ") + "\\n");
+  process.exit(process.env.FETCH_FAILED === "true" ? 1 : 0);
+}
 else if (args[0] === "merge-base") console.log("a".repeat(40));
-else if (args[0] === "rev-parse") process.exit(1);
+else if (args[0] === "cat-file" && args[1] === "-e" && args[2] === "head:pnpm-lock.yaml") process.exit(0);
+else if (args[0] === "rev-parse") {
+  if (args.at(-1) !== "FETCH_HEAD") process.exit(1);
+  console.log("b".repeat(40));
+}
 else process.exit(2);
 `, { mode: 0o700 });
   const scenarios = [
     { changed: false, succeeds: true },
     { succeeds: true },
-    { manual: true },
+    { imported: "" },
     { fetchFailed: true },
-    { refresh: true, succeeds: true },
-    { refresh: true, manual: true },
-    { refresh: true, refreshFetchFailed: true },
-    { fork: true, succeeds: true },
-    { fork: true, manual: true },
-    { fork: true, forkFetchFailed: true },
-    { fork: true, upstreamRefreshMissing: true, succeeds: true },
-    { refresh: true, upstreamRefreshMissing: true, manual: true },
-    { fork: true, repository: "untrusted/paperclip" },
-    { manual: true, repository: "paperclipai/paperclip" },
-    { manual: true, extra: "scripts/typecheck-sandbox-providers/pnpm-lock.yaml" },
-    { manual: true, extra: "tests/runner-e2e/report-lock.patch" },
+    { imported: "https://github.com/paperclipai/paperclip.git refs/heads/chore/refresh-lockfile", extra: REPORT_LOCK_FILES[0] },
+    { imported: "https://github.com/caniko/paperclip.git refs/heads/chore/refresh-lockfile", extra: REPORT_LOCK_FILES[1] },
+    { repository: "untrusted/paperclip" },
+    { repository: "paperclipai/paperclip" },
+    { imported: "", extra: LOCKFILES[1] },
+    { imported: "", extra: REPORT_LOCK_FILES[1] },
     { author: "dependabot[bot]", extra: "tests/runner-e2e/report-lock.patch" },
     { ref: "chore/refresh-lockfile" },
+    { ref: "chore/refresh-lockfile", author: "github-actions[bot]", policy: oldBotPolicy },
   ];
   for (const scenario of scenarios) {
-    const { changed = true, manual = false, fetchFailed = false,
-      refresh = false, refreshFetchFailed = false, fork = false, forkFetchFailed = false, upstreamRefreshMissing = false,
-      repository = "caniko/paperclip", succeeds = false, extra = "", author = "contributor", ref = "feature" } = scenario;
+    const { changed = true, imported = "https://github.com/paperclipai/paperclip.git master", fetchFailed = false,
+      repository = "caniko/paperclip", succeeds = false, extra = "", author = "contributor", ref = "feature", policy = policySource } = scenario;
     // In the fork, a change no CI-owned import matches defers to CI's own resolution step.
     const deferred = changed && !extra && !succeeds && repository === "caniko/paperclip" && ref === "feature";
     const githubEnv = join(directory, "github-env");
     const githubOutput = join(directory, "github-output");
+    const fetchState = join(directory, "fetched-ref");
     writeFileSync(githubEnv, "");
     writeFileSync(githubOutput, "");
-    const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script], { cwd: directory, encoding: "utf8", timeout: 10000,
-      env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, FETCH_STATE: join(directory, "fetched-ref"),
-        LOCK_CHANGED: String(changed), EXTRA_LOCK: extra ? `${extra}\n` : "", MANUAL_LOCK: String(manual),
-        FETCH_FAILED: String(fetchFailed), REFRESH_LOCK: String(refresh), REFRESH_FETCH_FAILED: String(refreshFetchFailed),
-        FORK_REFRESH: String(fork), FORK_FETCH_FAILED: String(forkFetchFailed), UPSTREAM_REFRESH_MISSING: String(upstreamRefreshMissing),
-        POLICY_SOURCE: fileURLToPath(new URL("../lockfile-trust.mjs", import.meta.url)),
+    writeFileSync(fetchState, "");
+    const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", policyScript], { cwd: directory, encoding: "utf8", timeout: 10000,
+      env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, FETCH_STATE: fetchState,
+        LOCK_CHANGED: String(changed), EXTRA_LOCK: extra ? `${extra}\n` : "", IMPORT_FROM: imported,
+         FETCH_FAILED: String(fetchFailed), POLICY_SOURCE: policy,
         BASE_SHA: "base", HEAD_SHA: "head", PR_AUTHOR: author, HEAD_REPO: repository, HEAD_REF: ref, PR_NUMBER: "1",
         GITHUB_SHA: "merge", RUNNER_TEMP: directory, GITHUB_REPOSITORY: repository, GITHUB_ENV: githubEnv, GITHUB_OUTPUT: githubOutput } });
     assert.equal(result.status === 0, succeeds || deferred, `${JSON.stringify(scenario)}: ${result.stdout} ${result.stderr}`);
+    assert.doesNotMatch(readFileSync(fetchState, "utf8"), /refs\/heads\/chore\/refresh-lockfile/);
     assert.doesNotMatch(result.stderr, /Broken pipe/);
     assert.equal(readFileSync(githubEnv, "utf8").includes("PAPERCLIP_LOCK_FROM_CI_RESOLUTION=true"), deferred);
     assert.equal(readFileSync(githubOutput, "utf8"), succeeds || deferred ? "writer=none\n" : "");
-    if (manual && !succeeds && !deferred) assert.match(result.stdout, /Do not commit pnpm-lock.yaml/);
+    if (policy === oldBotPolicy) assert.match(result.stdout, /Only upstream may publish lockfile bot PRs/);
+    if (!imported && !succeeds && !deferred) assert.match(result.stdout, /Do not commit pnpm-lock.yaml/);
+  }
+});
+
+test("the fork accepts only an authenticated ancestor's exact prepared lock artifact", async t => {
+  const directory = mkdtempSync(join(tmpdir(), "pr-prepared-lock-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const repo = join(directory, "repo");
+  const bin = join(directory, "bin");
+  const runnerTemp = join(directory, "runner");
+  for (const path of [repo, bin, runnerTemp]) mkdirSync(path);
+  const config = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+    GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid" };
+  const git = (...args) => execFileSync("git", args, { cwd: repo, env: config, encoding: "utf8" }).trim();
+  const write = (root, file, bytes) => {
+    mkdirSync(join(root, file, ".."), { recursive: true });
+    writeFileSync(join(root, file), bytes);
+  };
+  const commit = message => {
+    git("add", "-A");
+    git("commit", "-qm", message);
+    return git("rev-parse", "HEAD");
+  };
+  const lockPaths = [...LOCKFILES, ...REPORT_LOCK_FILES, "tests/runner-e2e/source-sdk-public-inputs.json"];
+  const fork = "caniko/paperclip";
+  git("init", "-q", "-b", "master");
+  git("config", "diff.renames", "true");
+  write(repo, workflowPath, readFileSync(new URL("../../workflows/refresh-lockfile.yml", import.meta.url)));
+  write(repo, ".github/scripts/lockfile-trust.mjs", readFileSync(policySource));
+  for (const file of lockPaths) write(repo, file, `base ${file}\n`);
+  const base = commit("trusted base");
+  const upstream = join(directory, "upstream.git");
+  git("clone", "-q", "--bare", repo, upstream);
+  git("config", `url.${upstream}.insteadOf`, "https://github.com/paperclipai/paperclip.git");
+  git("config", `url.${repo}.insteadOf`, "https://github.com/caniko/paperclip.git");
+
+  const prepare = (name, setup = () => {}) => {
+    git("checkout", "-q", "--detach", base);
+    write(repo, "feature.txt", name);
+    setup();
+    const source = commit(name);
+    for (const file of lockPaths) write(repo, file, `resolved ${file}\n`);
+    return { source, head: commit(`${name} locks`) };
+  };
+  const valid = prepare("valid");
+  const unrelated = prepare("unrelated");
+  const doctored = prepare("changed workflow", () => write(repo, workflowPath, "# changed\n"));
+  const tainted = prepare("edited input", () => write(repo, LOCKFILES[1], "not CI-owned\n"));
+  const changedHelper = prepare("changed helper", () => write(repo, "tests/runner-e2e/prepare-report-lock.mjs", "// changed\n"));
+  const changedConfig = prepare("changed config", () => write(repo, ".npmrc", "lockfile-dir=nested\n"));
+  git("checkout", "-q", "--detach", base);
+  write(repo, workflowPath, "# fork base workflow differs from upstream\n");
+  write(repo, LOCKFILES[1], "fork base lock differs from upstream\n");
+  const forkBase = commit("fork base advanced independently");
+  git("checkout", "-q", "--detach", valid.head);
+  git("rm", "-q", "--", LOCKFILES[1]);
+  const withDeletion = commit("head omits provider lock");
+  git("checkout", "-q", "--detach", base);
+  git("mv", LOCKFILES[0], "other.yaml");
+  const withRename = commit("head renames root lock");
+  const artifact = join(directory, "artifact");
+  for (const file of lockPaths) write(artifact, file, `resolved ${file}\n`);
+  const gitLog = join(directory, "git.log");
+  writeFileSync(join(bin, "git"), `#!/bin/sh
+if [ "$1" = fetch ]; then
+  printf '%s\\n' "$*" >> "$GIT_LOG"
+  [ "$FETCH_FAILS" = false ] || exit 1
+fi
+exec "$REAL_GIT" "$@"
+`, { mode: 0o700 });
+  writeFileSync(join(bin, "gh"), `#!/bin/sh
+set -eu
+case "$1 $2" in
+  "api repos/$GITHUB_REPOSITORY/actions/workflows/refresh-lockfile.yml/runs?event=workflow_dispatch&status=success&per_page=100")
+    printf 'api\\n' >> "$GH_LOG"
+    cat "$RUNS"
+    [ "$API_FAILS" = false ];;
+  "run download")
+    printf 'download\\n' >> "$GH_LOG"
+    # If policy leaves the loop's stdin connected, consume the remaining run rows.
+    cat > /dev/null
+    [ "$3" = 47 ] && [ "$4" = --repo ] && [ "$5" = "$GITHUB_REPOSITORY" ] &&
+      [ "$6" = --name ] && [ "$7" = "prepared-lock-$ARTIFACT_SOURCE-47-2" ] && [ "$8" = --dir ] || exit 1
+    case "$9" in "$RUNNER_TEMP"/*) ;; *) exit 1;; esac
+    [ -z "$(ls -A "$9")" ] && [ "$DOWNLOAD_FAILS" = false ]
+    cp -R "$ARTIFACT/." "$9/";;
+  *) exit 99;;
+esac
+`, { mode: 0o700 });
+  const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  const run = { id: 47, run_attempt: 2, head_sha: valid.source, event: "workflow_dispatch",
+    conclusion: "success", head_repository: { full_name: fork }, path: workflowPath };
+  const cases = [
+    { name: "valid prepared locks", pass: true },
+    { name: "valid when only upstream vouches for the workflow and inputs", target: forkBase, pass: true },
+    { name: "valid against trusted base when upstream is unavailable", fetchFails: true, pass: true },
+    { name: "clobbered refresh branch does not matter", branch: unrelated.head, pass: true },
+    { name: "matching mutable refresh branch is not proof", branch: valid.head, rows: [] },
+    { name: "skip a missing artifact without losing the next API row", rows: [{ ...run, id: 46 }, run], pass: true },
+    ...["push", "pull_request"].map(event => ({ name: `reject event ${event}`, rows: [{ ...run, event }] })),
+    ...["failure", "cancelled"].map(conclusion => ({ name: `reject conclusion ${conclusion}`, rows: [{ ...run, conclusion }] })),
+    { name: "wrong head repository", rows: [{ ...run, head_repository: { full_name: "other/paperclip" } }] },
+    { name: "wrong workflow", rows: [{ ...run, path: ".github/workflows/other.yml" }] },
+    { name: "source is not an ancestor", rows: [{ ...run, head_sha: unrelated.source }], source: unrelated.source },
+    { name: "source workflow was changed", ...doctored, rows: [{ ...run, head_sha: doctored.source }] },
+    { name: "source lock was hand-edited", ...tainted, rows: [{ ...run, head_sha: tainted.source }] },
+    { name: "source helper was changed", ...changedHelper, rows: [{ ...run, head_sha: changedHelper.source }] },
+    { name: "source pnpm config was changed", ...changedConfig, rows: [{ ...run, head_sha: changedConfig.source }] },
+    { name: "download error", downloadFails: true },
+    { name: "one byte differs in the root lock", mismatch: LOCKFILES[0] },
+    { name: "one byte differs in the report patch", mismatch: REPORT_LOCK_FILES[1] },
+    { name: "missing proof file", missing: lockPaths[5] },
+    { name: "a file absent at head is rejected even with a complete artifact", head: withDeletion },
+    { name: "a file absent from both the head and the artifact is rejected", head: withDeletion, missing: LOCKFILES[1] },
+    { name: "a symlink to matching bytes is not a regular artifact file", link: LOCKFILES[1] },
+    { name: "a renamed-away root lock is rejected", head: withRename },
+    { name: "API error with valid-looking stdout", apiFails: true },
+    { name: "canonical repository does not consult artifacts", repository: "paperclipai/paperclip" },
+    { name: "reserved refresh head cannot use artifacts", ref: "chore/refresh-lockfile" },
+    { name: "fork bot cannot use the reserved refresh head", ref: "chore/refresh-lockfile", author: "github-actions[bot]" },
+    { name: "Dependabot cannot use artifacts", author: "dependabot[bot]" },
+  ];
+  for (const { name, pass = false, branch, rows = [run], source = valid.source, head = valid.head, target = base,
+    downloadFails = false, apiFails = false, fetchFails = false,
+    mismatch, missing, link, repository = fork, ref = "feature", author = "contributor" } of cases) {
+    await t.test(name, () => {
+      if (branch) {
+        git("update-ref", "refs/heads/chore/refresh-lockfile", branch);
+        git("update-ref", "refs/remotes/origin/chore/refresh-lockfile", branch);
+      }
+      const githubEnv = join(directory, "github-env");
+      const githubOutput = join(directory, "github-output");
+      const runs = join(directory, "runs.json");
+      const ghLog = join(directory, "gh.log");
+      for (const file of [githubEnv, githubOutput, gitLog, ghLog]) writeFileSync(file, "");
+      writeFileSync(runs, JSON.stringify({ workflow_runs: rows }));
+      if (mismatch) write(artifact, mismatch, `Resolved ${mismatch}\n`);
+      if (missing) rmSync(join(artifact, missing));
+      if (link) {
+        write(artifact, "matching-bytes", `resolved ${link}\n`);
+        rmSync(join(artifact, link));
+        symlinkSync(join(artifact, "matching-bytes"), join(artifact, link));
+      }
+      const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-c", policyScript], { cwd: repo, encoding: "utf8", timeout: 10000,
+        env: { ...config, PATH: `${bin}:${config.PATH}`, REAL_GIT: realGit, GIT_LOG: gitLog, GH_LOG: ghLog, RUNS: runs,
+          ARTIFACT: artifact, ARTIFACT_SOURCE: source, DOWNLOAD_FAILS: String(downloadFails), API_FAILS: String(apiFails),
+          FETCH_FAILS: String(fetchFails), BASE_SHA: target, HEAD_SHA: head, PR_AUTHOR: author, HEAD_REPO: repository, HEAD_REF: ref, PR_NUMBER: "1",
+          GITHUB_SHA: head, RUNNER_TEMP: runnerTemp, GITHUB_REPOSITORY: repository, GITHUB_ENV: githubEnv, GITHUB_OUTPUT: githubOutput } });
+      if (link) rmSync(join(artifact, link));
+      for (const file of [mismatch, missing, link].filter(Boolean)) write(artifact, file, `resolved ${file}\n`);
+      assert.equal(result.status, pass ? 0 : 1, `${result.stdout}\n${result.stderr}`);
+      assert.equal(readFileSync(githubOutput, "utf8"), pass ? "writer=none\n" : "");
+      assert.equal(readFileSync(githubEnv, "utf8"), "", "proof must not defer to CI resolution");
+      assert.doesNotMatch(readFileSync(gitLog, "utf8"), /refs\/heads\/chore\/refresh-lockfile/);
+      const ghCalls = readFileSync(ghLog, "utf8");
+      if (pass) assert.match(ghCalls, /download/);
+      if (repository !== fork || ref !== "feature" || author !== "contributor") assert.equal(ghCalls, "");
+    });
   }
 });
 
@@ -231,32 +398,6 @@ test("CI's lock resolution uses real pnpm and ignores PR-controlled pnpm hooks",
   const workspaceRefused = run(widened);
   assert.notEqual(workspaceRefused.status, 0, `${workspaceRefused.stdout} ${workspaceRefused.stderr}`);
   assert.equal(git("worktree", "list").split("\n").length, 1);
-});
-
-test("feature-branch lock refresh publishes non-force without opening or merging another PR", t => {
-  const workflow = readFileSync(new URL("../../workflows/refresh-lockfile.yml", import.meta.url), "utf8");
-  const step = workflow.split("      - name: Create or update pull request")[1].split("      - name:")[0];
-  const script = step.split("        run: |\n")[1].replace(/^ {10}/gm, "");
-  const directory = mkdtempSync(join(tmpdir(), "pr-lock-refresh-"));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const log = join(directory, "git.log");
-  writeFileSync(join(directory, "git"), `#!${process.execPath}
-import { appendFileSync } from "node:fs";
-const args = process.argv.slice(2);
-appendFileSync(process.env.GIT_LOG, JSON.stringify(args) + "\\n");
-if (args[0] === "diff") process.exit(1);
-if (args.includes("--force")) process.exit(22);
-`, { mode: 0o700 });
-  writeFileSync(join(directory, "gh"), `#!${process.execPath}\nprocess.exit(23);\n`, { mode: 0o700 });
-  writeFileSync(join(directory, "node"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
-  const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script], { cwd: directory, encoding: "utf8", timeout: 10000,
-    env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, GIT_LOG: log,
-      LOCKFILES: "pnpm-lock.yaml scripts/typecheck-sandbox-providers/pnpm-lock.yaml packages/plugins/sandbox-providers/daytona/pnpm-lock.yaml",
-      GITHUB_OUTPUT: join(directory, "output"), SOURCE_REF: "refs/heads/feature", REPO_OWNER: "caniko" } });
-  assert.equal(result.status, 0, `${result.stdout} ${result.stderr}`);
-  const commands = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line));
-  assert.deepEqual(commands.filter(args => args[0] === "push"), [["push", "origin", "chore/refresh-lockfile"]]);
-  assert.equal(readFileSync(join(directory, "output"), "utf8"), "pr_url=\n");
 });
 
 test("prepared lock policy has an independent exact-head attempt-1 hosted gate before caller promotion", () => {

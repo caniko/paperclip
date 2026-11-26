@@ -179,14 +179,34 @@ jobs:
           fi
           writer="$RUNNER_TEMP/lockfile-writer"
           : > "$writer"
+          accepted=false
           if verdict="$(BASE_SHA="$trusted_base" GITHUB_OUTPUT="$writer" node "$policy" pr)"; then
             if ! grep -Eq '^writer=(none|dependabot|refresh-bot)$' "$writer"; then
               echo "::error title=Lockfile policy::lockfile-trust.mjs did not report a lockfile writer."
               exit 1
             fi
-            printf '%s\n' "$verdict"
-            cat "$writer" >> "$GITHUB_OUTPUT"
-            exit 0
+            # Older base policies can still trust a fork bot.
+            if grep -qx 'writer=refresh-bot' "$writer" && [ "$GITHUB_REPOSITORY" != paperclipai/paperclip ]; then
+              echo "::error title=Lockfile policy::Only upstream may publish lockfile bot PRs."
+              exit 1
+            fi
+            accepted=true
+          fi
+          mapfile -t lock_paths < <(LOCK_POLICY="$policy" node --input-type=module -e '
+            const { LOCKFILES, REPORT_LOCK_FILES } = await import(process.env.LOCK_POLICY);
+            console.log([...LOCKFILES, ...REPORT_LOCK_FILES, "tests/runner-e2e/source-sdk-public-inputs.json"].join("\n"));')
+          test "${#lock_paths[@]}" -eq 6
+          changed="$(git diff --no-renames --name-only "$trusted_base...$HEAD_SHA" -- "${lock_paths[@]}")"
+          if [ "$accepted" = true ]; then
+            # Older base policies can miss a rename's deleted side. SDK source
+            # pins are included in prepared artifacts but may change on their own.
+            if ! grep -qx 'writer=none' "$writer" || [ -z "$changed" ] ||
+               [ "$changed" = tests/runner-e2e/source-sdk-public-inputs.json ]; then
+              printf '%s\n' "$verdict"
+              cat "$writer" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            verdict="Do not commit changes to managed locks or report proof without CI-owned content."
           fi
 
           # A trust-check error, bot rejection or non-fork PR cannot use the fork policy.
@@ -195,32 +215,79 @@ jobs:
             printf '%s\n' "$verdict"
             exit 1
           fi
-          mapfile -t lock_paths < <(LOCK_POLICY="$policy" node --input-type=module -e '
-            const { LOCKFILES, REPORT_LOCK_FILES } = await import(process.env.LOCK_POLICY);
-            console.log([...LOCKFILES, ...REPORT_LOCK_FILES].join("\n"));')
-          test "${#lock_paths[@]}" -gt 0
-          changed="$(git diff --name-only "$trusted_base...$HEAD_SHA" -- "${lock_paths[@]}")"
           test -n "$changed"
           mapfile -t edited <<< "$changed"
 
           # An upstream sync may bring in CI-owned files, but every changed
           # lock/proof must match the same approved ancestor byte for byte.
-          for source in \
-            'https://github.com/paperclipai/paperclip.git master' \
-            'https://github.com/paperclipai/paperclip.git refs/heads/chore/refresh-lockfile' \
-            'https://github.com/caniko/paperclip.git refs/heads/chore/refresh-lockfile'; do
-            read -r repository ref <<< "$source"
-            git fetch --no-tags "$repository" "$ref" || continue
-            imported="$(git merge-base "$HEAD_SHA" FETCH_HEAD)" || continue
-            if git diff --quiet "$imported" "$HEAD_SHA" -- "${edited[@]}"; then
-              echo "Lock content matches CI-owned imported ancestor $imported from $repository $ref"
+          upstream=
+          if git fetch --no-tags https://github.com/paperclipai/paperclip.git master &&
+             upstream="$(git rev-parse --verify FETCH_HEAD)" &&
+             imported="$(git merge-base "$HEAD_SHA" "$upstream")"; then
+            if git diff --quiet --no-renames "$imported" "$HEAD_SHA" -- "${edited[@]}"; then
+              echo "Lock content matches CI-owned imported ancestor $imported from upstream master"
               echo 'writer=none' >> "$GITHUB_OUTPUT"
               exit 0
             fi
-          done
+          fi
+
+          prepared_artifact_matches() (
+            temp="$(realpath -- "$RUNNER_TEMP")" || return 1
+            prepared="$(mktemp -d "$temp/prepared-lock.XXXXXX")" || return 1
+            trap 'rm -rf -- "$prepared"' EXIT
+            gh run download "$run" --repo "$GITHUB_REPOSITORY" \
+              --name "prepared-lock-$source-$run-$attempt" --dir "$prepared" < /dev/null || return 1
+            set -o pipefail
+            for file in "${lock_paths[@]}"; do
+              entry="$(git ls-tree "$HEAD_SHA" -- "$file")" || return 1
+              downloaded="$prepared/$file"
+              [[ "$entry" =~ ^100(644|755)\ blob\  ]] || return 1
+              [ -f "$downloaded" ] && [ ! -L "$downloaded" ] &&
+                [ "$(realpath -- "$downloaded")" = "$downloaded" ] || return 1
+              git cat-file -e "$HEAD_SHA:$file" || return 1
+              git show "$HEAD_SHA:$file" | cmp -s - "$downloaded" || return 1
+            done
+          )
+
+          # Only the fork exception above can reach this check. Require the
+          # workflow and the local code/configuration it can execute to match
+          # the same trusted tree; committed dependency manifests may differ.
+          workflow=.github/workflows/refresh-lockfile.yml
+          refresh_controls=("$workflow" "$policy_path"
+            tests/runner-e2e/prepare-report-lock.mjs tests/runner-e2e/source-sdk-public-inputs.mjs
+            ':(glob)**/.npmrc' ':(glob)**/.pnpmfile.cjs' ':(glob)**/pnpm-workspace.yaml'
+            ':(glob)**/.gitattributes')
+          trusted_refresh_source() {
+            [ -n "$1" ] && git cat-file -e "$1:$workflow" 2>/dev/null &&
+              git diff --quiet "$1" "$source" -- "${refresh_controls[@]}"
+          }
+          # Bound the lookup to the most recent 100 successful dispatches.
+          # Check metadata in Bash as well as using the scoped API endpoint.
+          if runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/refresh-lockfile.yml/runs?event=workflow_dispatch&status=success&per_page=100")" &&
+             rows="$(jq -r '.workflow_runs[] | [(.id // "-"), (.run_attempt // "-"), (.head_sha // "-"),
+               (.event // "-"), (.conclusion // "-"), (.head_repository.full_name // "-"), (.path // "-")] | @tsv' <<< "$runs")"; then
+            while IFS=$'\t' read -r run attempt source event conclusion repository path; do
+              [[ "$event" = workflow_dispatch && "$conclusion" = success &&
+                 "$repository" = "$GITHUB_REPOSITORY" && "$path" = "$workflow" &&
+                 "$run" =~ ^[1-9][0-9]*$ && "$attempt" =~ ^[1-9][0-9]*$ && "$source" =~ ^[a-f0-9]{40}$ ]] || continue
+              git merge-base --is-ancestor "$source" "$HEAD_SHA" || continue
+              trusted_refresh_source "$trusted_base" || trusted_refresh_source "$upstream" || continue
+              if ! git diff --quiet "$trusted_base" "$source" -- "${lock_paths[@]}"; then
+                if [ -z "$upstream" ] || ! imported="$(git merge-base "$source" "$upstream")" ||
+                   ! git diff --quiet "$imported" "$source" -- "${lock_paths[@]}"; then
+                  continue
+                fi
+              fi
+              if prepared_artifact_matches; then
+                echo "Lock content matches CI's prepared artifact from run $run attempt $attempt at $source"
+                echo 'writer=none' >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            done <<< "$rows"
+          fi
 
           # Only the root lock may be regenerated independently later in this job.
-          if [ "$changed" != pnpm-lock.yaml ]; then
+          if [ "$changed" != pnpm-lock.yaml ] || ! git cat-file -e "$HEAD_SHA:pnpm-lock.yaml"; then
             printf '%s\n' "$verdict"
             exit 1
           fi

@@ -142,12 +142,6 @@ function collectReleasePackagesForChangedPaths(
   return changedReleasePackages;
 }
 
-// A fork-only adapter has no upstream counterpart, and this fork has no npm credentials
-// for the @paperclipai scope, so the package can never be published from here. Skip only
-// the "does not exist on npm yet" failure for these exact names; registry failures and
-// every other check still run. Remove an entry when the package is published or upstreamed.
-export const PENDING_BOOTSTRAP_PACKAGES = new Set(["@paperclipai/adapter-t3code-local"]);
-
 export function classifyChangedPackages(changedReleasePackages, inspect = inspectNpmPackage) {
   const missingPackages = [];
   const registryFailures = [];
@@ -156,7 +150,6 @@ export function classifyChangedPackages(changedReleasePackages, inspect = inspec
     const npmStatus = inspect(pkg.name);
 
     if (npmStatus.status === "missing") {
-      if (PENDING_BOOTSTRAP_PACKAGES.has(pkg.name)) continue;
       missingPackages.push(pkg);
       continue;
     }
@@ -209,11 +202,7 @@ function main(changedPaths) {
 }
 
 if (process.argv[1] && normalizePath(process.argv[1]).endsWith("scripts/check-release-package-bootstrap.mjs")) {
-  if (process.argv.includes("--pending-bootstrap")) {
-    for (const name of PENDING_BOOTSTRAP_PACKAGES) process.stdout.write(`${name}\n`);
-  } else {
-    main(process.argv.slice(2));
-  }
+  main(process.argv.slice(2));
 }
 
 export {

@@ -28,7 +28,6 @@ class JournaledGenerationTest(unittest.TestCase):
         }))
         for replacement in [
             patch.object(generation, "MIGRATIONS", self.migrations),
-            patch.object(generation, "PROVISIONAL", self.migrations / "0295_nostalgic_rhodey.sql"),
             patch.dict(os.environ, {"RUNNER_TEMP": str(self.root), "GITHUB_OUTPUT": str(self.root / "outputs")}),
         ]:
             replacement.start()

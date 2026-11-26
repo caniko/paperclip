@@ -3,7 +3,7 @@
  * lockfile-trust.mjs
  *
  * Decides who may change the dependency locks (LOCKFILES). Only trusted environments write them:
- * - the lockfile refresh workflow (`chore/refresh-lockfile`, opened by github-actions[bot]),
+ * - the upstream lockfile refresh workflow (`chore/refresh-lockfile`, opened by github-actions[bot]),
  * - Dependabot, when the exact bytes of each lockfile it changes come from a verified Dependabot commit.
  *
  * The reporting-lock proof (`tests/runner-e2e/report-lock.json` and `.patch`) can rewrite the
@@ -36,6 +36,7 @@ export const PROVIDER_LOCKFILES = [
 export const LOCKFILES = [LOCKFILE, ...PROVIDER_LOCKFILES];
 export const REPORT_LOCK_FILES = ['tests/runner-e2e/report-lock.json', 'tests/runner-e2e/report-lock.patch'];
 export const DEPENDABOT_LOGIN = 'dependabot[bot]';
+export const REFRESH_REPOSITORY = 'paperclipai/paperclip';
 export const REFRESH_BRANCH = 'chore/refresh-lockfile';
 export const REFRESH_PR_AUTHOR = 'github-actions[bot]';
 // GitHub commits and signs Dependabot commits as web-flow. A verified signature proves only who
@@ -82,7 +83,7 @@ export function classifyPullRequest({ changedPaths, author, headRepo, baseRepo, 
   }
 
   const sameRepo = Boolean(headRepo) && headRepo === baseRepo;
-  if (sameRepo && author === REFRESH_PR_AUTHOR && headRef === REFRESH_BRANCH) {
+  if (baseRepo === REFRESH_REPOSITORY && sameRepo && author === REFRESH_PR_AUTHOR && headRef === REFRESH_BRANCH) {
     return { allowed: true, writer: 'refresh-bot', reason: 'The lockfile refresh workflow opened this pull request.' };
   }
 
@@ -157,7 +158,8 @@ function checkPullRequest() {
   const headSha = required('HEAD_SHA');
   const author = required('PR_AUTHOR');
   // Diff against the merge base so recent base-branch commits are not counted as PR changes.
-  const changedPaths = run('git', ['diff', '--name-only', `${baseSha}...${headSha}`]).split('\n').filter(Boolean);
+  // A rename must report the removed path as well as its new name.
+  const changedPaths = run('git', ['diff', '--no-renames', '--name-only', `${baseSha}...${headSha}`]).split('\n').filter(Boolean);
 
   const dependabotLockCommits = {};
   const changedLockfiles = LOCKFILES.filter((file) => changedPaths.includes(file));

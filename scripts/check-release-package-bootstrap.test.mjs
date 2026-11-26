@@ -6,7 +6,6 @@ import {
   classifyNpmViewFailure,
   collectReleasePackagesForChangedPaths,
   getBaseReleaseState,
-  PENDING_BOOTSTRAP_PACKAGES,
 } from "./check-release-package-bootstrap.mjs";
 
 test("manifest changes without base state validate all release-enabled packages", () => {
@@ -105,30 +104,35 @@ test("base release state falls back to public packages when manifest is absent",
   ]);
 });
 
-test("the pending-bootstrap allowlist skips only the missing-on-npm failure", () => {
-  const listed = {
+test("pack-only packages are not collected even when both manifests change", () => {
+  const packed = {
     dir: "packages/adapters/t3code-local",
     name: "@paperclipai/adapter-t3code-local",
-    publishFromCi: true,
+    publishFromCi: false,
+    packOnly: true,
   };
-  const unlisted = { dir: "packages/adapters/unpublished", name: "@paperclipai/adapter-unpublished", publishFromCi: true };
-
-  const result = classifyChangedPackages([listed, unlisted], () => ({ status: "missing" }));
-
-  assert.deepEqual(result.missingPackages.map((pkg) => pkg.name), ["@paperclipai/adapter-unpublished"]);
-  assert.deepEqual(result.registryFailures, []);
-  assert.ok(PENDING_BOOTSTRAP_PACKAGES.has("@paperclipai/adapter-t3code-local"));
+  const enabled = { dir: "packages/a", name: "@paperclipai/a", publishFromCi: true };
+  assert.deepEqual(
+    collectReleasePackagesForChangedPaths(
+      ["scripts/release-package-manifest.json", `${packed.dir}/package.json`],
+      [packed, enabled],
+    ),
+    [enabled],
+  );
 });
 
-test("the pending-bootstrap allowlist does not skip a registry failure", () => {
-  const listed = {
-    dir: "packages/adapters/t3code-local",
-    name: "@paperclipai/adapter-t3code-local",
-    publishFromCi: true,
-  };
-
-  const result = classifyChangedPackages([listed], () => ({ status: "registry_error", detail: "registry unavailable" }));
-
-  assert.deepEqual(result.missingPackages, []);
-  assert.deepEqual(result.registryFailures.map(({ pkg }) => pkg.name), ["@paperclipai/adapter-t3code-local"]);
+test("classification reports every missing package and registry error without exemptions", () => {
+  const packages = [
+    { dir: "packages/adapters/t3code-local", name: "@paperclipai/adapter-t3code-local", publishFromCi: true },
+    { dir: "packages/a", name: "@paperclipai/a", publishFromCi: true },
+  ];
+  const detail = "registry unavailable";
+  assert.deepEqual(classifyChangedPackages(packages, () => ({ status: "missing" })), {
+    missingPackages: packages,
+    registryFailures: [],
+  });
+  assert.deepEqual(classifyChangedPackages(packages, () => ({ status: "registry_error", detail })), {
+    missingPackages: [],
+    registryFailures: packages.map((pkg) => ({ pkg, detail })),
+  });
 });

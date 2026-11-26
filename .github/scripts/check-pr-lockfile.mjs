@@ -6,7 +6,7 @@
  * Export: checkLockfile(files, prAuthor, prBranch, repository) → { passed, failures }
  */
 import { fileURLToPath } from 'node:url';
-import { DEPENDABOT_LOGIN, LOCKFILES, REFRESH_BRANCH, REFRESH_PR_AUTHOR, REPORT_LOCK_FILES } from './lockfile-trust.mjs';
+import { DEPENDABOT_LOGIN, LOCKFILES, REFRESH_BRANCH, REFRESH_PR_AUTHOR, REFRESH_REPOSITORY, REPORT_LOCK_FILES } from './lockfile-trust.mjs';
 
 export function checkLockfile(files, prAuthor, prBranch, repository) {
   const changed = files.map(f => f.filename);
@@ -18,7 +18,7 @@ export function checkLockfile(files, prAuthor, prBranch, repository) {
       && lockfilesChanged.length === 1 && lockfilesChanged[0] === 'pnpm-lock.yaml'
       && proofChanged.length === 0) return { passed: true, failures: [] };
 
-  if (prAuthor === REFRESH_PR_AUTHOR && prBranch === REFRESH_BRANCH) return { passed: true, failures: [] };
+  if (repository === REFRESH_REPOSITORY && prAuthor === REFRESH_PR_AUTHOR && prBranch === REFRESH_BRANCH) return { passed: true, failures: [] };
   if (prAuthor === DEPENDABOT_LOGIN && proofChanged.length === 0) return { passed: true, failures: [] };
 
   const edited = [...lockfilesChanged, ...proofChanged].map(f => `\`${f}\``).join(', ');

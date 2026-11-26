@@ -50,9 +50,7 @@ function discoverPublicPackages() {
   return packages;
 }
 
-function loadReleaseManifest() {
-  const manifest = readJson(manifestPath);
-
+function loadReleaseManifest(manifest = readJson(manifestPath)) {
   if (!Array.isArray(manifest)) {
     throw new Error(`expected ${manifestPath} to contain an array.`);
   }
@@ -76,26 +74,34 @@ function loadReleaseManifest() {
       );
     }
 
+    if (entry.packOnly !== undefined && (entry.packOnly !== true || entry.publishFromCi)) {
+      throw new Error(
+        `manifest entry ${index + 1} (${entry.dir}) in ${manifestPath}: "packOnly" must be true and requires "publishFromCi": false.`,
+      );
+    }
+
     return entry;
   });
+}
+
+function packOnlyPackageNames() {
+  return loadReleaseManifest().filter((entry) => entry.packOnly === true).map((entry) => entry.name);
 }
 
 // Sections whose @paperclipai workspace deps are rewritten to the calver release
 // version by replaceWorkspaceDeps() and that consumers resolve at install time.
 const RESOLVED_DEP_SECTIONS = ["dependencies", "optionalDependencies", "peerDependencies"];
 
-// A publishFromCi:true package gets republished at the unified calver version every
-// release, and every @paperclipai/* workspace: dep it declares is rewritten to that
-// same calver version. If the target is NOT publishFromCi:true it never gets a calver
-// publish, so the rewritten spec points at a version that will never exist on npm and
-// the package becomes uninstallable. Detect those edges so the release fails fast
-// instead of shipping a broken canary (e.g. server -> skills-catalog from #8327).
+const inReleaseClosure = (pkg) => pkg.publishFromCi === true || pkg.packOnly === true;
+
+// Workspace specs are rewritten to the release version, so every internal
+// runtime target must be versioned and packed as part of the same release.
 function findUnpublishableWorkspaceEdges(packages) {
-  const publishFromCiByName = new Map(packages.map((pkg) => [pkg.name, pkg.publishFromCi]));
+  const closureNames = new Set(packages.filter(inReleaseClosure).map((pkg) => pkg.name));
   const problems = [];
 
   for (const pkg of packages) {
-    if (!pkg.publishFromCi) continue;
+    if (!inReleaseClosure(pkg)) continue;
 
     for (const section of RESOLVED_DEP_SECTIONS) {
       const deps = pkg.pkg[section];
@@ -104,13 +110,12 @@ function findUnpublishableWorkspaceEdges(packages) {
       for (const [depName, spec] of Object.entries(deps)) {
         if (!depName.startsWith("@paperclipai/")) continue;
         if (typeof spec !== "string" || !spec.startsWith("workspace:")) continue;
-        if (publishFromCiByName.get(depName) === true) continue;
+        if (closureNames.has(depName)) continue;
 
         problems.push(
-          `${pkg.name} (${pkg.dir}) is publishFromCi:true but declares a "${section}" workspace dependency on ${depName}, ` +
-            `which is not publishFromCi:true. The release version rewrite would point ${depName} at the calver version, ` +
-            `but that version is never published, so installs of ${pkg.name} would fail to resolve. ` +
-            `Enable publishFromCi for ${depName} (bootstrap its first npm publish if needed) or drop the workspace dependency.`,
+          `${pkg.name} (${pkg.dir}) declares a "${section}" workspace dependency on ${depName}, ` +
+            `which is neither publishFromCi:true nor packOnly:true. ` +
+            `Enroll ${depName} in the release closure or drop the workspace dependency.`,
         );
       }
     }
@@ -162,6 +167,7 @@ function buildReleasePackagePlan() {
   const packages = discoveredPackages.map((pkg) => ({
     ...pkg,
     publishFromCi: manifestByDir.get(pkg.dir).publishFromCi,
+    packOnly: manifestByDir.get(pkg.dir).packOnly === true,
   }));
 
   const edgeProblems = findUnpublishableWorkspaceEdges(packages);
@@ -212,7 +218,7 @@ function sortTopologically(packages) {
 }
 
 function getReleasePackages() {
-  const ordered = sortTopologically(buildReleasePackagePlan().filter((pkg) => pkg.publishFromCi));
+  const ordered = sortTopologically(buildReleasePackagePlan().filter(inReleaseClosure));
   const entrypoint = ordered.find((pkg) => pkg.name === CHANNEL_ENTRYPOINT_PACKAGE);
 
   if (!entrypoint) {
@@ -286,14 +292,15 @@ function listPackages() {
 function checkConfiguration() {
   const packages = buildReleasePackagePlan();
   const enabledCount = packages.filter((pkg) => pkg.publishFromCi).length;
-  const disabledCount = packages.length - enabledCount;
+  const packOnlyCount = packages.filter((pkg) => pkg.packOnly).length;
+  const disabledCount = packages.length - enabledCount - packOnlyCount;
 
   if (enabledCount === 0) {
     throw new Error(`no packages are enabled for CI publishing in ${manifestPath}`);
   }
 
   process.stdout.write(
-    `Release package manifest OK: ${enabledCount} enabled for CI publish, ${disabledCount} disabled pending bootstrap.\n`,
+    `Release package manifest OK: ${enabledCount} enabled for CI publish, ${packOnlyCount} pack-only, ${disabledCount} disabled.\n`,
   );
 }
 
@@ -302,6 +309,7 @@ function usage() {
     [
       "Usage:",
       "  node scripts/release-package-map.mjs list",
+      "  node scripts/release-package-map.mjs pack-only",
       "  node scripts/release-package-map.mjs check",
       "  node scripts/release-package-map.mjs set-version <version>",
       "",
@@ -318,22 +326,22 @@ if (isDirectRun) {
     process.exit(0);
   }
 
-  if (command === "check") {
+  if (command === "pack-only") {
+    for (const name of packOnlyPackageNames()) process.stdout.write(`${name}\n`);
+  } else if (command === "check") {
     checkConfiguration();
     process.exit(0);
-  }
-
-  if (command === "set-version") {
+  } else if (command === "set-version") {
     if (!arg) {
       usage();
       process.exit(1);
     }
     setVersion(arg);
     process.exit(0);
+  } else {
+    usage();
+    process.exit(1);
   }
-
-  usage();
-  process.exit(1);
 }
 
 export {
@@ -343,4 +351,5 @@ export {
   findUnpublishableWorkspaceEdges,
   getReleasePackages,
   loadReleaseManifest,
+  packOnlyPackageNames,
 };

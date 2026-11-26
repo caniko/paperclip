@@ -697,6 +697,7 @@ describeEmbeddedPostgres("issue list routes assigneeAgentId filter", () => {
     expect(second.headers["x-paperclip-request-cache"]).toBe("hit");
   });
 
+  // Hundreds of sequential HTTP requests and database reads can exceed the default timeout on CI.
   it("bounds compact issue-list server cache entries", async () => {
     const companyId = randomUUID();
     const issueId = randomUUID();
@@ -717,8 +718,7 @@ describeEmbeddedPostgres("issue list routes assigneeAgentId filter", () => {
     });
 
     const app = createApp(companyId);
-    // Filling the cache can take longer than its five-second expiry on CI.
-    // Keep entries alive so this test measures capacity eviction alone.
+    // Freeze the clock so expiry cannot mask a capacity-eviction failure.
     const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now());
     try {
       for (let index = 0; index < ISSUE_LIST_SERVER_CACHE_MAX_ENTRIES + 5; index += 1) {
@@ -732,7 +732,7 @@ describeEmbeddedPostgres("issue list routes assigneeAgentId filter", () => {
     } finally {
       clock.mockRestore();
     }
-  });
+  }, 45_000);
 
   it("logs request_storm_detected for identical in-flight compact issue-list fanout without query values", async () => {
     const companyId = randomUUID();
