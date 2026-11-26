@@ -355,7 +355,7 @@ test("the prepared native Stop job matches the immutable PR caller pin byte-for-
   assert.ok(job, "pr-trusted.yml must define the native_composer_stop job");
   assert.match(
     readFileSync(prCallerWorkflow, "utf8"),
-    /pr-trusted\.yml@8b24d50ab43739857aa436e7a3f664168429efec/,
+    /pr-trusted\.yml@bcb5f45ffc42d44d5db8315c8c1cb67fdae8f3d7/,
   );
   // Hash the pinned job body so this check also works in shallow CI checkouts.
   assert.equal(
