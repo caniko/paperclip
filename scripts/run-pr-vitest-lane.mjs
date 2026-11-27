@@ -17,6 +17,7 @@ import { filesMatchedByFilters, listPackageVitestFiles, planPackageLanes } from 
 const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = resolve(workspaceRoot, "packages/paperclip-runner");
 const args = process.argv.slice(2).filter((value) => value !== "--dry-run");
+if (args[0] === "--") args.shift();
 const dryRun = process.argv.includes("--dry-run");
 
 function fail(message) {
@@ -43,7 +44,18 @@ const laneCount = laneMatch ? Number(laneMatch[2]) : null;
 if (laneMatch && (laneCount < 1 || laneIndex < 1 || laneIndex > laneCount)) {
   fail(`invalid package lane: ${laneArgs[0]}`);
 }
-const nativeServerOnly = args.includes("--native-server");
+const nativeArgs = args.filter((value) => value === "--native-server" || value.startsWith("--native-server="));
+const nativeMatch = nativeArgs.length === 1 ? /^--native-server(?:=(\d+)\/(\d+))?$/.exec(nativeArgs[0]) : null;
+if (nativeArgs.length > 0 && !nativeMatch) {
+  fail(`unrecognized native server argument: ${nativeArgs.join(" ")}`);
+}
+const nativeServerOnly = Boolean(nativeMatch);
+const nativeLaneIndex = Number(nativeMatch?.[1] ?? 1);
+const nativeLaneCount = Number(nativeMatch?.[2] ?? 1);
+if (!Number.isSafeInteger(nativeLaneIndex) || !Number.isSafeInteger(nativeLaneCount)
+    || nativeLaneIndex < 1 || nativeLaneIndex > nativeLaneCount) {
+  fail(`invalid native server lane: ${nativeArgs[0]}`);
+}
 if ([shardArg, laneMatch, nativeServerOnly].filter(Boolean).length > 1) {
   fail("--shard, --package-lane and --native-server are mutually exclusive");
 }
@@ -97,7 +109,8 @@ const plannedCommands = [
   ...(runNativeRunnerGroup
     ? [{
         command: "pnpm",
-        args: ["test:run:general", "--", "--group", "general-server-native-runner"],
+        args: ["test:run:general", "--", "--group", "general-server-native-runner",
+          ...(nativeLaneCount > 1 ? ["--shard-index", String(nativeLaneIndex - 1), "--shard-count", String(nativeLaneCount)] : [])],
         cwd: workspaceRoot,
       }]
     : []),

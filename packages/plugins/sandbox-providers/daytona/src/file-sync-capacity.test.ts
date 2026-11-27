@@ -1,5 +1,5 @@
 import { createServer } from "node:net";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -19,6 +19,16 @@ const executable = (names: string[], version: string) => names.map(name => {
   const resolved = spawnSync("/bin/sh", ["-c", 'command -v "$1"', "sh", name], { encoding: "utf8" }).stdout?.trim();
   return resolved && spawnSync(resolved, ["--version"], { encoding: "utf8" }).stdout?.includes(version) ? resolved : undefined;
 }).find(Boolean);
+
+function sandboxCommandResult(result: SpawnSyncReturns<string>, failures: string[]) {
+  // Some shells exec the final command and never print their usual SIGXFSZ
+  // diagnostic. Keep the real size-limit fault visible to the sandbox client.
+  const limitExceeded = result.signal === "SIGXFSZ"
+    || result.status === 128 + os.constants.signals.SIGXFSZ;
+  const stderr = result.stderr + (limitExceeded ? "\nFile size limit exceeded" : "");
+  if (result.status !== 0) failures.push(stderr);
+  return { exitCode: result.status ?? 1, result: result.stdout + stderr };
+}
 // Match the provider's GNU tools. Hosts without these or Python's PTY relay
 // skip this integration regression, like the nearby real-GNU-tar tests.
 const requiredTools = {
@@ -136,8 +146,7 @@ it.skipIf(Object.values(requiredTools).some(tool => !tool)).each(["success", "pr
     process: {
       executeCommand: async (command: string) => {
         const result = spawnSync("bash", ["-c", directArchive ? 'exec sh -c "$1"' : 'ulimit -f 128; exec sh -c "$1"', "bash", command], { env, encoding: "utf8" });
-        if (result.status !== 0) failures.push(result.stderr);
-        return { exitCode: result.status ?? 1, result: result.stdout + result.stderr };
+        return sandboxCommandResult(result, failures);
       },
       createPty: async (options: DaytonaPtyCreateOptions) => {
         // A real PTY exercises raw-mode startup, echo suppression and the
@@ -253,8 +262,7 @@ it.skipIf(Object.values(requiredTools).some(tool => !tool)).each([
           return { exitCode: 43, result: "cp: Permission denied\nsnapshot copy failed" };
         }
         const result = spawnSync(requiredTools.bash!, ["-c", 'ulimit -f 128; exec sh -c "$1"', "bash", command], { env, encoding: "utf8" });
-        if (result.status !== 0) failures.push(result.stderr);
-        return { exitCode: result.status ?? 1, result: result.stdout + result.stderr };
+        return sandboxCommandResult(result, failures);
       },
       createPty: async (options: DaytonaPtyCreateOptions) => {
         sessions += 1;

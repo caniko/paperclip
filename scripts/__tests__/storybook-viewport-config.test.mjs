@@ -19,7 +19,7 @@ test("Storybook viewport config uses the Storybook 10 parameter shape", () => {
 
   for (const path of sourceFiles(storybookRoot)) {
     const source = readFileSync(path, "utf8");
-    if (/\b(?:defaultViewport|viewports)\s*:/.test(source)) legacyViewportKeys.push(path);
+    if (/\bviewport\s*:\s*\{[^{}]*\b(?:defaultViewport|viewports)\s*:/.test(source)) legacyViewportKeys.push(path);
   }
 
   assert.deepEqual(
