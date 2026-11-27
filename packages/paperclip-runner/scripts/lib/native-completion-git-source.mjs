@@ -125,7 +125,7 @@ export function inspectNativeCompletionRunnerd({ repositoryRoot, sourceSha, sour
 }
 
 /** Preserve tracked-source cleanliness; allow only the verified workflow download. */
-export function inspectNativeCompletionSourceMetadata({ repositoryRoot, sourceFiles, baseSha, variant, shallowParentAnchors }) {
+export function inspectNativeCompletionSourceMetadata({ repositoryRoot, sourceFiles, baseSha, variant, shallowParentAnchors = undefined }) {
   const git = (args, raw = false) => spawnSync("git", ["--no-replace-objects", ...args], {
     cwd: repositoryRoot, encoding: raw ? undefined : "utf8", timeout: 30_000,
   });

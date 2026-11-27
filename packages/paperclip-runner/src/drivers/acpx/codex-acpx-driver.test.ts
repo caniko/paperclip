@@ -1913,11 +1913,11 @@ describe("Codex ACPX harness driver", () => {
     async ({ outcome, toolCallId }) => {
       const command = "printf 'sensitive-value' > /workspace/denied.txt";
       const fixture = driverFixture({ agent: "cursor", model: "explicit-test-model", providerPolicy: { readOnly: false } }, {
-        runtimeEvents: [{ type: "tool_call", tag: "tool_call", toolCallId, title: "Run command", kind: "execute", status: "pending", rawInput: { command } }],
+        runtimeEvents: [{ type: "tool_call", tag: "tool_call", toolCallId, title: "Run command", kind: "execute", status: "pending", text: "Run command", rawInput: { command } }],
       });
       const session = await fixture.driver.openSession({ runId: "run-cursor-receipt", normalizedSessionId: "session-1", workingDirectory: "/workspace" });
       const origin = collectUntil(session.events(), "tool.execution.started");
-      const { turnId } = await session.startTurn({ message: { text: "Request the command." } });
+      const { turnId } = await session.startTurn({ message: { role: "user", text: "Request the command." } });
       const originEvents = await origin;
       const created = collectUntil(session.events(), "runtime_request.created");
       const callback = fixture.host.startTurn.mock.calls[0]![0].onPermissionRequest!;

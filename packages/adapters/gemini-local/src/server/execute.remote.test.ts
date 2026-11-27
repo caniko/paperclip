@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -13,9 +13,9 @@ const {
   syncDirectoryToSsh,
   startAdapterExecutionTargetPaperclipBridge,
 } = vi.hoisted(() => ({
-  runChildProcess: vi.fn(async () => ({
+  runChildProcess: vi.fn(async (_runId: string, _command: string, _args: string[], _options?: Record<string, unknown>) => ({
     exitCode: 0,
-    signal: null,
+    signal: null as string | null,
     timedOut: false,
     stdout: [
       JSON.stringify({ type: "system", subtype: "init", session_id: "gemini-session-1", model: "gemini-2.5-pro" }),
@@ -40,8 +40,11 @@ const {
     stderr: "",
     exitCode: 0,
   })),
-  syncDirectoryToSsh: vi.fn(async () => undefined),
-  startAdapterExecutionTargetPaperclipBridge: vi.fn(async () => ({
+  syncDirectoryToSsh: vi.fn(async (_input: { localDir: string; remoteDir: string }) => undefined),
+  startAdapterExecutionTargetPaperclipBridge: vi.fn(async (): Promise<{
+    env: Record<string, string>;
+    stop: () => Promise<void>;
+  } | null> => ({
     env: {
       PAPERCLIP_API_URL: "http://127.0.0.1:4310",
       PAPERCLIP_API_KEY: "bridge-token",
@@ -93,12 +96,295 @@ describe("gemini remote execution", () => {
 
   afterEach(async () => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
     while (cleanupDirs.length > 0) {
       const dir = cleanupDirs.pop();
       if (!dir) continue;
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
   });
+
+  it.each([
+    "protected",
+    "protected-skip-permissions",
+    "missing",
+    "unprotected",
+    "setup-failure",
+    "staging-failure",
+    "probe-failure",
+    "probe-auth-required",
+    "probe-missing-model",
+    "acp-engine",
+    "invalid-model",
+    "db-skip-permissions",
+    "silent-error",
+    "finished-reason-error",
+    "missing-terminal-result",
+    "truncated-tail-no-onUsage",
+  ])(
+    "fences Atlas agy execution and its unauthenticated model probe (%s)", async (outcome) => {
+      const workspace = await mkdtemp(path.join(os.tmpdir(), "gemini-atlas-scratch-"));
+      cleanupDirs.push(workspace);
+      vi.stubEnv("GEMINI_API_KEY", "controller-gemini-key");
+      vi.stubEnv("GOOGLE_API_KEY", "controller-google-key");
+      vi.stubEnv("PAPERCLIP_API_URL", "http://controller.invalid");
+      const hostToken = "fake-controller-jwt";
+      const tokenFile = `/tmp/paperclip-atlas-${"a".repeat(32)}/bearer`;
+      const stop = vi.fn(async () => {});
+      const onUsage = outcome === "truncated-tail-no-onUsage" ? undefined : vi.fn(async () => {});
+      const runsExecution = [
+        "protected",
+        "protected-skip-permissions",
+        "silent-error",
+        "finished-reason-error",
+        "missing-terminal-result",
+        "truncated-tail-no-onUsage",
+      ].includes(outcome);
+      if (runsExecution) startAdapterExecutionTargetPaperclipBridge.mockResolvedValueOnce({
+        env: { PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: tokenFile, PAPERCLIP_API_URL: "http://127.0.0.1:4310" }, stop,
+      });
+      if (outcome === "missing") startAdapterExecutionTargetPaperclipBridge.mockResolvedValueOnce(null);
+      if (outcome === "unprotected") startAdapterExecutionTargetPaperclipBridge.mockResolvedValueOnce({
+        env: { PAPERCLIP_API_KEY: "plaintext-bridge-token" }, stop,
+      });
+      if (outcome === "setup-failure") startAdapterExecutionTargetPaperclipBridge.mockRejectedValueOnce(new Error("bridge setup failed"));
+      if (outcome === "staging-failure") {
+        syncDirectoryToSsh.mockRejectedValueOnce(new Error("scratch staging failed"));
+      }
+      const runsModelsProbe = !["acp-engine", "invalid-model", "db-skip-permissions", "staging-failure"].includes(outcome);
+      if (runsModelsProbe) {
+        runChildProcess.mockImplementationOnce(async (_runId: string, _command: string, args: string[]) => {
+          if (args[0] === "models") {
+            if (outcome === "probe-failure") {
+              return { exitCode: 1, signal: null, timedOut: false, stdout: "", stderr: "probe failed", pid: 122, startedAt: new Date().toISOString() };
+            }
+            if (outcome === "probe-auth-required") {
+              return {
+                exitCode: 1,
+                signal: null,
+                timedOut: false,
+                stdout: "",
+                stderr: "Error: Please sign in to view available models. raw-secret-diagnostic",
+                pid: 122,
+                startedAt: new Date().toISOString(),
+              };
+            }
+            return {
+              exitCode: 0, signal: null, timedOut: false,
+              stdout: outcome === "probe-missing-model"
+                ? "gemini-3.8-flash\tGemini 3.8 Flash\n"
+                : "gemini-4-neon-high\tGemini 4 Neon (High)\n",
+              stderr: "", pid: 122, startedAt: new Date().toISOString(),
+            };
+          }
+          return { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "", pid: 122, startedAt: new Date().toISOString() };
+        });
+      }
+      if (runsExecution) {
+        runChildProcess.mockImplementationOnce(async (_runId, _command, _args, options) => {
+          const onLog = options?.onLog as ((stream: "stdout" | "stderr", chunk: string) => Promise<void>) | undefined;
+          const stepLine = JSON.stringify({
+            event: "step_update",
+            step_update: {
+              conversation_id: "agy-conv-1", step_index: 1, state: "DONE", step_type: "agent_response",
+              text_delta: "hello from agy\n",
+              usage: { input_tokens: 10, output_tokens: 4, thinking_tokens: 1, cache_read_tokens: 20, total_tokens: 14 },
+            },
+          });
+          const lines = [
+            JSON.stringify({ event: "init", conversation_id: "agy-conv-1", init: { model: "gemini-4-neon-high" } }),
+            stepLine,
+            ...(outcome === "silent-error"
+              ? [JSON.stringify({ event: "result", result: { conversation_id: "agy-conv-1", status: "ERROR", response: "", error: "", usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, total_tokens: 0 } } })]
+              : outcome === "finished-reason-error"
+                ? [JSON.stringify({ event: "result", result: { conversation_id: "agy-conv-1", status: "SUCCESS", finished_reason: "error", response: "hello", usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, total_tokens: 0 } } })]
+              : outcome === "missing-terminal-result"
+                ? []
+                : [JSON.stringify({
+                    event: "result",
+                    result: {
+                      conversation_id: "agy-conv-1", status: "SUCCESS", response: "hello from agy\n",
+                      usage: { input_tokens: 15, output_tokens: 6, thinking_tokens: 2, cache_read_tokens: 25, total_tokens: 21 },
+                    },
+                  })]),
+          ];
+          for (const line of lines) {
+            await onLog?.("stdout", `${line}\n`);
+          }
+          return {
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            stdout: outcome === "truncated-tail-no-onUsage" ? "" : lines.join("\n"),
+            stderr: "",
+            pid: 123,
+            startedAt: new Date().toISOString(),
+          };
+        });
+      }
+
+      const remoteCwd = "/remote/atlas";
+      const result = execute({
+        runId: "atlas-gemini-run",
+        agent: { id: "agent-1", companyId: "company-1", name: "Fixture", adapterType: "gemini_local", adapterConfig: {} },
+        runtime: { sessionId: "untrusted-prior-session", sessionParams: null, sessionDisplayId: null, taskKey: null },
+        context: { paperclipWorkspace: { cwd: workspace } },
+        config: {
+          engine: outcome === "acp-engine" ? "acp" : "cli",
+          cliFlavor: "agy",
+          command: "/worker/agy",
+          model: outcome === "invalid-model" ? "claude-opus-5-5-max" : "gemini-4-neon-high",
+          ...(outcome === "db-skip-permissions" ? { dangerouslySkipPermissions: true } : {}),
+          extraArgs: ["--remote-agent"],
+          managedAiConnection: true,
+          instructionsFilePath: "/etc/passwd",
+          env: {
+            PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: "/untrusted-file",
+            GEMINI_API_KEY: "caller-gemini-key",
+            GOOGLE_API_KEY: "caller-google-key",
+            CLOUD_CODE_URL: "http://caller.invalid",
+            CALLER_ONLY: "caller-env-marker",
+          },
+        },
+        executionTarget: {
+          kind: "remote", transport: "ssh", environmentId: "atlas", leaseId: "lease-1", remoteCwd,
+          spec: {
+            host: "127.0.0.1", port: 2222, username: "worker", remoteCwd,
+            remoteWorkspacePath: remoteCwd, privateKey: "fixture-key", knownHosts: "fixture-host", strictHostKeyChecking: true,
+            atlas: {
+              sshExecutable: "/bin/ssh",
+              scratchDir: workspace,
+              ...(outcome === "protected-skip-permissions" ? { dangerouslySkipPermissions: true } : {}),
+            },
+          },
+        },
+        authToken: hostToken,
+        onLog: async () => {},
+        onUsage,
+      });
+
+      if (outcome === "protected" || outcome === "protected-skip-permissions" || outcome === "truncated-tail-no-onUsage") {
+        expect(await result).toMatchObject({
+          exitCode: 0,
+          billingType: "subscription",
+          usageComplete: true,
+          usage: { inputTokens: 15, cachedInputTokens: 25, outputTokens: 6 },
+          ...(outcome === "truncated-tail-no-onUsage" ? {} : { sessionId: "agy-conv-1", summary: "hello from agy" }),
+        });
+        if (onUsage) {
+          expect(onUsage).toHaveBeenCalledWith(expect.objectContaining({
+            complete: false,
+            usage: { inputTokens: 10, cachedInputTokens: 20, outputTokens: 4 },
+          }));
+          expect(onUsage).toHaveBeenLastCalledWith(expect.objectContaining({
+            complete: true,
+            usage: { inputTokens: 15, cachedInputTokens: 25, outputTokens: 6 },
+          }));
+        }
+      } else if (outcome === "probe-auth-required") {
+        const resolved = await result;
+        expect(resolved).toMatchObject({
+          exitCode: 1,
+          errorCode: "gemini_auth_required",
+          errorMessage: "Atlas Gemini worker authentication is not ready.",
+          usageComplete: false,
+        });
+        expect(resolved.errorMessage).not.toContain("raw-secret-diagnostic");
+      } else if (outcome === "silent-error" || outcome === "finished-reason-error" || outcome === "missing-terminal-result") {
+        const resolved = await result;
+        expect(resolved).toMatchObject({
+          exitCode: 1,
+          usageComplete: false,
+          usage: { inputTokens: 10, cachedInputTokens: 20, outputTokens: 4 },
+        });
+        expect(resolved.errorMessage).toBeTruthy();
+        if (onUsage) {
+          expect(onUsage).not.toHaveBeenCalledWith(expect.objectContaining({ complete: true }));
+        }
+      } else {
+        await expect(result).rejects.toThrow(
+          outcome === "acp-engine" || outcome === "invalid-model" || outcome === "db-skip-permissions" ? /cliFlavor=agy/i
+            : outcome === "staging-failure" ? "scratch staging failed"
+            : outcome === "setup-failure" ? "bridge setup failed"
+            : outcome === "probe-failure" ? "Atlas Gemini model probe failed"
+            : outcome === "probe-missing-model" ? "unavailable on the Atlas worker: gemini-4-neon-high"
+            : "protected callback bridge",
+        );
+      }
+
+      expect(prepareWorkspaceForSshExecution).not.toHaveBeenCalled();
+      expect(restoreWorkspaceFromSshExecution).not.toHaveBeenCalled();
+      expect(runSshCommand).not.toHaveBeenCalled();
+      expect(await readdir(workspace)).toEqual([]);
+      if (["acp-engine", "invalid-model", "db-skip-permissions"].includes(outcome)) {
+        expect(syncDirectoryToSsh).not.toHaveBeenCalled();
+        expect(runChildProcess).not.toHaveBeenCalled();
+        expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
+        return;
+      }
+      if (outcome === "staging-failure") {
+        expect(runChildProcess).not.toHaveBeenCalled();
+        expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
+        return;
+      }
+      const attemptDir = syncDirectoryToSsh.mock.calls[0]![0].remoteDir;
+      expect(attemptDir).toMatch(/^\/remote\/atlas\/attempt-/);
+      expect(syncDirectoryToSsh.mock.calls.map(([input]) => input.remoteDir)).toEqual([attemptDir]);
+      expect(runChildProcess).toHaveBeenNthCalledWith(1, "atlas-gemini-run", "/worker/agy", ["models"],
+        expect.objectContaining({
+          cwd: attemptDir,
+          env: { NO_BROWSER: "1", AGY_ACP_FORCE_FILE_STORAGE: "1", GEMINI_CLI_TRUST_WORKSPACE: "true" },
+          remoteExecution: expect.objectContaining({
+            remoteCwd: attemptDir,
+            atlas: expect.objectContaining({ adapterType: "gemini_local", probe: true }),
+          }),
+        }));
+      if (["probe-failure", "probe-auth-required", "probe-missing-model"].includes(outcome)) {
+        expect(runChildProcess).toHaveBeenCalledTimes(1);
+        expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
+        return;
+      }
+      expect(startAdapterExecutionTargetPaperclipBridge).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        hostApiToken: hostToken,
+        target: expect.objectContaining({ remoteCwd: attemptDir }),
+      }));
+      if (runsExecution) {
+        const runCall = runChildProcess.mock.calls[1]!;
+        expect(runCall[2]).toEqual([
+          "--output-format", "stream-json", "--input-format", "stream-json",
+          "--model", "gemini-4-neon", "--effort", "high",
+          ...(outcome === "protected-skip-permissions" ? ["--dangerously-skip-permissions"] : []),
+        ]);
+        expect(runCall[3]).toMatchObject({
+          cwd: attemptDir,
+          env: {
+            PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE: tokenFile,
+            NO_BROWSER: "1",
+            AGY_ACP_FORCE_FILE_STORAGE: "1",
+            GEMINI_CLI_TRUST_WORKSPACE: "true",
+          },
+          remoteExecution: { remoteCwd: attemptDir, atlas: expect.objectContaining({ adapterType: "gemini_local" }) },
+        });
+        const stdinLine = JSON.parse((runCall[3] as { stdin: string }).stdin);
+        expect(stdinLine).toMatchObject({ event: "user", message: { role: "user", content: expect.any(String) } });
+        expect(stdinLine.message.content).toContain("PAPERCLIP_ATLAS_BRIDGE_TOKEN_FILE");
+        expect(stdinLine.message.content).toContain("expectedStatuses");
+        expect(stdinLine.message.content).toContain("if(!r.ok)");
+        expect(stdinLine.message.content).not.toContain("PAPERCLIP_API_KEY");
+      } else {
+        expect(runChildProcess).toHaveBeenCalledTimes(1);
+      }
+      const processCalls = JSON.stringify(runChildProcess.mock.calls);
+      for (const secret of [
+        hostToken, "controller-gemini-key", "controller-google-key",
+        "caller-gemini-key", "caller-google-key", "caller.invalid",
+        "caller-env-marker", "controller.invalid", "/untrusted-file",
+      ]) {
+        expect(processCalls).not.toContain(secret);
+      }
+      expect(stop).toHaveBeenCalledTimes(runsExecution || outcome === "unprotected" ? 1 : 0);
+    },
+  );
 
   it("prepares the workspace, syncs Gemini skills, and restores workspace changes for remote SSH execution", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-gemini-remote-"));
@@ -232,6 +518,7 @@ describe("gemini remote execution", () => {
   });
 
   it("pre-selects gemini-api-key auth in the managed HOME for sandbox execution", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "host-injected-sandbox-key");
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-gemini-sandbox-"));
     cleanupDirs.push(rootDir);
     const workspaceDir = path.join(rootDir, "workspace");
@@ -262,7 +549,7 @@ describe("gemini remote execution", () => {
       startedAt: new Date().toISOString(),
     }));
 
-    await execute({
+    const sandboxResult = await execute({
       runId: "run-sandbox-1",
       agent: {
         id: "agent-1",
@@ -282,7 +569,6 @@ describe("gemini remote execution", () => {
         // and this test covers the CLI lane's managed-HOME auth flow.
         engine: "cli",
         command: "gemini",
-        env: { GEMINI_API_KEY: "test-key" },
       },
       context: {
         paperclipWorkspace: {
@@ -299,6 +585,7 @@ describe("gemini remote execution", () => {
       },
       onLog: async () => {},
     });
+    expect(sandboxResult.billingType).toBe("api");
 
     const runnerScripts = runnerExecute.mock.calls.map(
       (call) => `${call[0].command} ${(call[0].args ?? []).join(" ")}`,

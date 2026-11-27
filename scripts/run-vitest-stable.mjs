@@ -14,6 +14,7 @@ import {
   resolveNightlyOnlySuitesPath,
 } from "./ci/nightly-only-suites.mjs";
 import { runUnderSharedPostgres, shouldWrapWithSharedPostgres } from "./ci/vitest-shared-postgres.mjs";
+import { selectWorkspaceProjectsShard } from "./ci/workspaces-b-shard.mjs";
 
 import { assertSelectedTests, partitionTestLines } from "./test-line-shard.mjs";
 import { loadSelection, selectedShard } from "./ci/test-selection-manifest.mjs";
@@ -147,6 +148,11 @@ const activeNightlyOnlySuites = nightlyExclusionActive ? allNightlyOnlySuites : 
 
 function activeNativeRunnerSuites() {
   return nativeRunnerSuites.filter((file) => !activeNightlyOnlySuites.has(file));
+}
+
+function selectNativeRunnerSuites(shardIndex, shardCount) {
+  const suites = activeNativeRunnerSuites();
+  return shardCount > 1 ? selectGeneralServerShard(suites, shardIndex, shardCount, generalServerShardDurations) : suites;
 }
 
 function resolveServerParallelWorkers(defaultWorkers) {
@@ -388,12 +394,12 @@ function parseCliOptions(argv) {
   const shardAllowed =
     mode === serializedModeName ||
     (mode === generalModeName &&
-      ([...generalServerGroups, generalChatGroupName, generalWorkspacesAGroupName].includes(group)
-        || Boolean(process.env.PAPERCLIP_CI_TEST_SELECTION)
-          && [generalWorkspacesBGroupName, generalWorkspacesCGroupName].includes(group)));
+      ([...generalServerGroups, generalChatGroupName, generalServerNativeRunnerGroupName,
+        generalWorkspacesAGroupName, generalWorkspacesBGroupName].includes(group)
+        || Boolean(process.env.PAPERCLIP_CI_TEST_SELECTION) && group === generalWorkspacesCGroupName));
   if (!shardAllowed && shardIndex !== null) {
     fail(
-      "--shard-index/--shard-count require serialized mode, a shardable general server/chat/workspaces-a group, or a selected workspace group.",
+      "--shard-index/--shard-count require serialized mode, a shardable general group, or a selected workspace group.",
     );
   }
 
@@ -630,7 +636,7 @@ function hasScheduledSuitesForRun(opts, sel) {
     return selectSerializedSuites(activeRouteTests, opts.shardIndex, opts.shardCount).length > 0;
   }
   if (opts.mode === generalModeName && opts.group === generalServerNativeRunnerGroupName) {
-    return activeNativeRunnerSuites().length > 0;
+    return selectNativeRunnerSuites(opts.shardIndex, opts.shardCount).length > 0;
   }
   if (opts.mode === generalModeName && generalServerGroups.includes(opts.group)) {
     const excluded = new Set(excludedServerSuites(opts.group));
@@ -658,9 +664,10 @@ async function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCo
     return;
   }
   if (groupName === generalServerNativeRunnerGroupName) {
-    const suites = activeNativeRunnerSuites();
+    const suites = selectNativeRunnerSuites(shardIndex, shardCount);
+    const shardSuffix = shardCount > 1 ? ` shard ${shardIndex + 1}/${shardCount}` : "";
     if (suites.length === 0) {
-      console.log("\n[test:run] native runner vertical-slice suite: 0 suites after nightly filtering; skipping");
+      console.log(`\n[test:run] native runner vertical-slice suite${shardSuffix}: 0 suites; skipping`);
       return;
     }
     await runVitest(
@@ -670,7 +677,7 @@ async function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCo
         ...(hasSharedTestDatabase ? serializedServerVitestArgs
           : ["--pool=forks", "--isolate", "--fileParallelism", `--maxWorkers=${resolveServerParallelWorkers(4)}`]),
         ...suites],
-      "native runner vertical-slice suite",
+      `native runner vertical-slice suite${shardSuffix}`,
     );
     return;
   }
@@ -743,7 +750,8 @@ async function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCo
   }
 
   if (groupName === generalWorkspacesBGroupName) {
-    await runProjectGroup(generalWorkspacesBProjects, groupName);
+    const projects = selectWorkspaceProjectsShard(generalWorkspacesBProjects, shardIndex, shardCount);
+    if (projects.length > 0) await runProjectGroup(projects, groupName);
     return;
   }
 
@@ -924,7 +932,7 @@ if (options.dryRun) {
           defaultChatShards
             ? generalServerTestFiles.filter(file => file !== chatSuite)
             : options.mode === generalModeName && options.group === generalServerNativeRunnerGroupName
-            ? activeNativeRunnerSuites()
+            ? selectNativeRunnerSuites(options.shardIndex, options.shardCount)
             : options.mode === generalModeName &&
                 generalServerGroups.includes(options.group) &&
                 options.shardCount !== null
@@ -941,7 +949,7 @@ if (options.dryRun) {
           options.group === generalWorkspacesAGroupName
             ? generalWorkspacesAProjects
             : options.group === generalWorkspacesBGroupName
-              ? generalWorkspacesBProjects
+              ? selectWorkspaceProjectsShard(generalWorkspacesBProjects, options.shardIndex, options.shardCount)
               : options.group === generalWorkspacesCGroupName
                 ? generalWorkspacesCProjects
                 : null,

@@ -101,12 +101,27 @@ test("general shards retain scripts and route-named suites outside the serialize
   ]) assert.ok(general.selectedGeneralServerSuites.includes(file), `missing configured server suite: ${file}`);
 });
 
-for (const group of ["general-workspaces-b", "general-workspaces-c"]) {
-  test(`shard flags are rejected for the ${group} group`, () => {
-    const result = dryRun(["--mode", "general", "--group", group, "--shard-index", "0", "--shard-count", "3"]);
-    assert.notEqual(result.status, 0, `${group} must not accept shard flags`);
+for (const [group, field] of [
+  ["general-workspaces-b", "workspaceProjects"],
+  ["general-server-native-runner", "selectedGeneralServerSuites"],
+]) {
+  test(`${group} shards cover the unsharded lane without overlap`, () => {
+    const args = ["--mode", "general", "--group", group];
+    const env = { PAPERCLIP_CI_TEST_SELECTION: "" };
+    const full = dryRunJson(args, env)[field];
+    const shards = [0, 1].map((index) =>
+      dryRunJson([...args, "--shard-index", String(index), "--shard-count", "2"], env)[field],
+    );
+    assert.ok(shards.every((shard) => shard.length > 0));
+    assert.deepEqual(shards.flat().sort(), [...full].sort());
   });
 }
+
+test("unselected workspaces-c rejects shard flags", () => {
+  const result = dryRun(["--mode", "general", "--group", "general-workspaces-c", "--shard-index", "0", "--shard-count", "3"],
+    { PAPERCLIP_CI_TEST_SELECTION: "" });
+  assert.notEqual(result.status, 0);
+});
 
 test("workspace lanes cover every non-server project in the root Vitest configuration", () => {
   const config = readFileSync(path.join(repoRoot, "vitest.config.ts"), "utf8");
@@ -462,11 +477,6 @@ test("the native-runner lane runs exactly the cargo-dependent suites", () => {
   ]);
 });
 
-test("shard flags are rejected for the native-runner group", () => {
-  const result = dryRun(["--mode", "general", "--group", "general-server-native-runner", "--shard-index", "0", "--shard-count", "2"]);
-  assert.notEqual(result.status, 0, "the native-runner lane is a single suite and must not accept shard flags");
-});
-
 // The PR-side exclusion above is safe only while the wiring it assumes holds:
 // pr.yml (the caller whose name reusable pr-trusted.yml jobs see as
 // GITHUB_WORKFLOW) is named PR, the package vitest lanes cover every
@@ -581,6 +591,17 @@ test("--native-server runs only the native group under any workflow", () => {
   }
 });
 
+test("--native-server=K/N dispatches the matching zero-based shard", () => {
+  for (const index of [1, 2]) {
+    const plan = wrapperPlan(["--", `--native-server=${index}/2`]);
+    assert.deepEqual(plan.plannedCommands, [...prepCommands, {
+      ...nativeCommand,
+      args: [...nativeCommand.args, "--shard-index", String(index - 1), "--shard-count", "2"],
+    }]);
+  }
+  assert.deepEqual(wrapperPlan(["--native-server=1/1"]).plannedCommands, [...prepCommands, nativeCommand]);
+});
+
 test("the package lane manifest uses the general server duration schema", () => {
   const manifest = JSON.parse(readFileSync(path.join(runnerRoot, "scripts/vitest-lane-durations.json"), "utf8"));
   const general = JSON.parse(readFileSync(durationsManifest, "utf8"));
@@ -605,7 +626,9 @@ test("the package lane manifest uses the general server duration schema", () => 
 test("package lane arguments fail rather than guess a lane", () => {
   for (const args of [["--package-lane=0/3"], ["--package-lane=4/3"], ["--package-lane=abc"], ["--package-lane", "1/3"],
     ["--package-lane=1/3", "--package-lane=2/3"], ["--package-lane=1/3", "--shard=1/2"], ["--native-server", "--shard=2/2"],
-    ["--native-server", "--package-lane=1/3"], ["--native-server", "src/foo.test.ts"]]) {
+    ["--native-server", "--package-lane=1/3"], ["--native-server", "src/foo.test.ts"],
+    ["--native-server=0/2"], ["--native-server=3/2"], ["--native-server=1/0"], ["--native-server=no"],
+    ["--native-server", "--native-server=1/2"]]) {
     const result = spawnSync(process.execPath, [laneWrapper, ...args, "--dry-run"], {
       cwd: repoRoot, encoding: "utf8", env: workflowEnv({ GITHUB_WORKFLOW: "PR" }),
     });

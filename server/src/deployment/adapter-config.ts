@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { SECRET_PAYLOAD_KEY_RE } from "../redaction.js";
+import { atlasOpenCodePins } from "./runtime.js";
 
 const text = z.string().min(1);
 const duration = z.number().finite().nonnegative();
@@ -31,19 +32,29 @@ const schemas: Record<string, z.ZodType> = {
     url, method: z.enum(["POST", "PUT", "PATCH"]).optional(), headers: headers.optional(),
     payloadTemplate: z.record(z.string(), z.json()).optional(), timeoutMs: duration.optional(),
   }).strict(),
-  opencode_local: z.object({
-    command: text.optional(), model: text.optional(), variant: text.optional(), cwd: text.optional(),
-    // The adapter otherwise defaults to injecting permission=allow. Declarations
-    // must make that choice explicit rather than changing personal policy silently.
-    dangerouslySkipPermissions: z.boolean(),
-    managedService: z.boolean().optional(),
-    args: z.array(z.string()).optional(), extraArgs: z.array(z.string()).optional(),
-    env: env.optional(), timeoutSec: duration.optional(), graceSec: duration.optional(),
-    instructionsFilePath: text.optional(), promptTemplate: z.string().optional(),
-    bootstrapPromptTemplate: z.string().optional(),
-  }).strict().refine(config => !config.managedService || (config.dangerouslySkipPermissions === false
-    && !config.variant && !config.args?.length && !config.extraArgs?.length
-    && Object.keys(config.env ?? {}).every(key => /^PAPERCLIP_[A-Z0-9_]+$/.test(key)))),
+  opencode_local: z.union([
+    z.object({
+      command: text.optional(), model: text.optional(), variant: text.optional(), cwd: text.optional(),
+      // The adapter otherwise defaults to injecting permission=allow. Declarations
+      // must make that choice explicit rather than changing personal policy silently.
+      dangerouslySkipPermissions: z.boolean(),
+      standalone: z.literal(false).optional(),
+      managedService: z.boolean().optional(),
+      args: z.array(z.string()).optional(), extraArgs: z.array(z.string()).optional(),
+      env: env.optional(), timeoutSec: duration.optional(), graceSec: duration.optional(),
+      instructionsFilePath: text.optional(), promptTemplate: z.string().optional(),
+      bootstrapPromptTemplate: z.string().optional(),
+    }).strict().refine(config => !config.managedService || (config.dangerouslySkipPermissions === false
+      && !config.variant && !config.args?.length && !config.extraArgs?.length
+      && Object.keys(config.env ?? {}).every(key => /^PAPERCLIP_[A-Z0-9_]+$/.test(key)))),
+    // Standalone is the Atlas CLI lane. Actual pin equality is checked at admission.
+    z.object({
+      ...atlasOpenCodePins,
+      engine: z.literal("cli"),
+      dangerouslySkipPermissions: z.boolean(),
+      timeoutSec: duration.optional(),
+    }).strict(),
+  ]),
   // Claude Code through its CLI. The ACP engine (the adapter's default) and the
   // sandbox, network, Chrome and managed-connection fields stay closed until
   // audited; the adapter otherwise defaults to skipping permissions. Runtime
@@ -97,7 +108,8 @@ export function validateDeclaredAdapterConfig(
   if (!schema.safeParse(config).success) throw new Error("Invalid declared adapter configuration");
   for (const field of Object.keys(credentials)) {
     if (type === "hermes_gateway" && field === "apiKey") continue;
-    if (!["process", "opencode_local", "claude_local"].includes(type) || !/^env\.[A-Z_][A-Z0-9_]*$/.test(field)
+    if ((type === "opencode_local" && config.standalone === true)
+      || !["process", "opencode_local", "claude_local"].includes(type) || !/^env\.[A-Z_][A-Z0-9_]*$/.test(field)
       || /^(PAPERCLIP_|DATABASE_|BETTER_AUTH_|NODE_OPTIONS$|LD_)/.test(field.slice(4))) {
       throw new Error("Unsupported or reserved adapter credential binding");
     }

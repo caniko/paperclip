@@ -31,7 +31,8 @@ for (const [name, command] of [
     "tests/runner-e2e/native-completion-git-source.test.mjs", "tests/runner-e2e/native-completion-source-contract.test.mjs",
     "tests/runner-e2e/chat-feature-testops-api.test.mjs", "tests/runner-e2e/chat-feature-testops-cli.test.mjs", "tests/runner-e2e/chat-feature-testops-results.test.mjs", "tests/runner-e2e/testops-chat-reporter.test.mjs", "tests/runner-e2e/chat-feature-testops-retained-verification.node-test.mjs",
     "tests/runner-e2e/chat-completion-testops-api.test.mjs", "tests/runner-e2e/chat-completion-testops-contract.test.mjs",
-    "tests/runner-e2e/chat-full-catalog-testops-manifest.test.mjs", "tests/runner-e2e/chat-full-catalog-testops-reconcile.test.mjs", "tests/runner-e2e/chat-full-catalog-testops-adapter.test.mjs", "tests/runner-e2e/chat-catalog-testops-streaming.test.mjs"]],
+    "tests/runner-e2e/chat-full-catalog-testops-manifest.test.mjs", "tests/runner-e2e/chat-full-catalog-testops-reconcile.test.mjs", "tests/runner-e2e/chat-full-catalog-testops-adapter.test.mjs", "tests/runner-e2e/chat-catalog-testops-streaming.test.mjs",
+    "tests/runner-e2e/runner-protocol-testops.test.mjs"]],
 ]) {
   const result = spawnSync(process.execPath, command, {
     cwd: root, env: name === "Vitest" ? invocationEnv("vitest", env) : env, stdio: "inherit",

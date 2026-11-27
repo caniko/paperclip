@@ -43,9 +43,9 @@ function OpenPicker({ kind, options }: { kind: "Assignee" | "Project"; options: 
 const meta = {
   id: "components-entity-pickers-mobile",
   title: "Tasks and conversations/Task creation and lifecycle/Components/Entity pickers/Mobile",
+  globals: { viewport: { value: "mobile1", isRotated: false } },
   parameters: {
     layout: "fullscreen",
-    viewport: { defaultViewport: "mobile1" },
     paperclip: {
       "capabilities": [
         "tasks/create"

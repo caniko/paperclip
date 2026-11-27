@@ -768,9 +768,7 @@ export const NewIssueMobileAssigneePicker: Story = {
 
 export const NewIssueMobileProjectPicker: Story = {
   name: "New Issue - Mobile Project Picker",
-  parameters: {
-    viewport: { defaultViewport: "mobile" },
-  },
+  globals: { viewport: { value: "mobile", isRotated: false } },
   render: () => (
     <DialogStory
       eyebrow="NewIssueDialog"

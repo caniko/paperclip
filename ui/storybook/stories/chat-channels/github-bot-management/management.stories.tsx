@@ -169,10 +169,7 @@ export const RepositoryFailure: Story = {
 export const Mobile: Story = {
   name: "02 States / Mobile conversations",
   args: { state: "long" },
-  parameters: {
-    ...route("conversations"),
-    viewport: { defaultViewport: "mobile1" },
-  },
+  parameters: route("conversations"),
   globals: { viewport: { value: "mobile1", isRotated: false } },
 };
 function Policy() {
