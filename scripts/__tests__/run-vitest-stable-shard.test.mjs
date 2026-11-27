@@ -101,12 +101,18 @@ test("general shards retain scripts and route-named suites outside the serialize
   ]) assert.ok(general.selectedGeneralServerSuites.includes(file), `missing configured server suite: ${file}`);
 });
 
-for (const group of ["general-workspaces-b", "general-workspaces-c"]) {
+for (const group of ["general-workspaces-c"]) {
   test(`shard flags are rejected for the ${group} group`, () => {
     const result = dryRun(["--mode", "general", "--group", group, "--shard-index", "0", "--shard-count", "3"]);
     assert.notEqual(result.status, 0, `${group} must not accept shard flags`);
   });
 }
+
+test("general-workspaces-b accepts shard flags and forwards Vitest shard notation", () => {
+  const shard = dryRunJson(["--mode", "general", "--group", "general-workspaces-b", "--shard-index", "0", "--shard-count", "2"]);
+  assert.equal(shard.workspacesVitestShard, "1/2");
+  assert.ok(shard.workspaceProjects.length > 0);
+});
 
 test("workspace lanes cover every non-server project in the root Vitest configuration", () => {
   const config = readFileSync(path.join(repoRoot, "vitest.config.ts"), "utf8");
@@ -462,9 +468,14 @@ test("the native-runner lane runs exactly the cargo-dependent suites", () => {
   ]);
 });
 
-test("shard flags are rejected for the native-runner group", () => {
-  const result = dryRun(["--mode", "general", "--group", "general-server-native-runner", "--shard-index", "0", "--shard-count", "2"]);
-  assert.notEqual(result.status, 0, "the native-runner lane is a single suite and must not accept shard flags");
+test("native-runner shards cover every native-runner suite exactly once", () => {
+  const full = dryRunJson(["--mode", "general", "--group", "general-server-native-runner"]).selectedGeneralServerSuites;
+  const shards = [0, 1].map((index) =>
+    dryRunJson(["--mode", "general", "--group", "general-server-native-runner", "--shard-index", String(index), "--shard-count", "2"]).selectedGeneralServerSuites,
+  );
+  const combined = shards.flat();
+  assert.equal(new Set(combined).size, combined.length, "native-runner shards must not overlap");
+  assert.deepEqual(combined.sort(), [...full].sort());
 });
 
 // The PR-side exclusion above is safe only while the wiring it assumes holds:
@@ -579,6 +590,16 @@ test("--native-server runs only the native group under any workflow", () => {
     assert.equal(plan.runPackageTests, false);
     assert.equal(plan.runNativeRunnerGroup, true);
   }
+  const shard1 = wrapperPlan(["--native-server=1/2"], { GITHUB_WORKFLOW: "PR" });
+  assert.deepEqual(shard1.plannedCommands, [
+    ...prepCommands,
+    { command: "pnpm", args: ["test:run:general", "--", "--group", "general-server-native-runner", "--shard-index", "0", "--shard-count", "2"], cwd: repoRoot },
+  ]);
+  const shard2 = wrapperPlan(["--native-server=2/2"], { GITHUB_WORKFLOW: "PR" });
+  assert.deepEqual(shard2.plannedCommands, [
+    ...prepCommands,
+    { command: "pnpm", args: ["test:run:general", "--", "--group", "general-server-native-runner", "--shard-index", "1", "--shard-count", "2"], cwd: repoRoot },
+  ]);
 });
 
 test("the package lane manifest uses the general server duration schema", () => {

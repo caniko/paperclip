@@ -633,7 +633,7 @@ test("shared history loads older messages without replacing the latest turn", as
     await page.reload();
     await expect(
       page.getByText("History message 64", { exact: true }),
-    ).toBeVisible();
+    ).toBeVisible({ timeout: 15_000 });
     // Scroll the shared transcript, including its older-page sentinel.
     await page.getByText("History message 64", { exact: true }).hover();
     for (

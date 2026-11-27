@@ -43,7 +43,19 @@ const laneCount = laneMatch ? Number(laneMatch[2]) : null;
 if (laneMatch && (laneCount < 1 || laneIndex < 1 || laneIndex > laneCount)) {
   fail(`invalid package lane: ${laneArgs[0]}`);
 }
-const nativeServerOnly = args.includes("--native-server");
+const nativeArgs = args.filter((value) => value === "--native-server" || value.startsWith("--native-server="));
+const nativeShardMatch = nativeArgs.length === 1 && nativeArgs[0].startsWith("--native-server=")
+  ? /^--native-server=(\d+)\/(\d+)$/.exec(nativeArgs[0])
+  : null;
+if (nativeArgs.length > 1 || (nativeArgs.length === 1 && nativeArgs[0] !== "--native-server" && !nativeShardMatch)) {
+  fail(`unrecognized native server argument: ${nativeArgs.join(" ")}`);
+}
+const nativeShardIndex = nativeShardMatch ? Number(nativeShardMatch[1]) : null;
+const nativeShardCount = nativeShardMatch ? Number(nativeShardMatch[2]) : null;
+if (nativeShardMatch && (nativeShardCount < 1 || nativeShardIndex < 1 || nativeShardIndex > nativeShardCount)) {
+  fail(`invalid native server shard: ${nativeArgs[0]}`);
+}
+const nativeServerOnly = nativeArgs.length === 1;
 if ([shardArg, laneMatch, nativeServerOnly].filter(Boolean).length > 1) {
   fail("--shard, --package-lane and --native-server are mutually exclusive");
 }
@@ -97,7 +109,10 @@ const plannedCommands = [
   ...(runNativeRunnerGroup
     ? [{
         command: "pnpm",
-        args: ["test:run:general", "--", "--group", "general-server-native-runner"],
+        args: [
+          "test:run:general", "--", "--group", "general-server-native-runner",
+          ...(nativeShardMatch ? ["--shard-index", String(nativeShardIndex - 1), "--shard-count", String(nativeShardCount)] : []),
+        ],
         cwd: workspaceRoot,
       }]
     : []),

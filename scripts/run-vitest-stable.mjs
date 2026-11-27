@@ -388,12 +388,12 @@ function parseCliOptions(argv) {
   const shardAllowed =
     mode === serializedModeName ||
     (mode === generalModeName &&
-      ([...generalServerGroups, generalChatGroupName, generalWorkspacesAGroupName].includes(group)
+      ([...generalServerGroups, generalChatGroupName, generalServerNativeRunnerGroupName, generalWorkspacesAGroupName, generalWorkspacesBGroupName].includes(group)
         || Boolean(process.env.PAPERCLIP_CI_TEST_SELECTION)
-          && [generalWorkspacesBGroupName, generalWorkspacesCGroupName].includes(group)));
+          && generalWorkspacesCGroupName === group));
   if (!shardAllowed && shardIndex !== null) {
     fail(
-      "--shard-index/--shard-count require serialized mode, a shardable general server/chat/workspaces-a group, or a selected workspace group.",
+      "--shard-index/--shard-count require serialized mode, a shardable general server/chat/workspaces-a/workspaces-b group, or a selected workspace group.",
     );
   }
 
@@ -630,7 +630,11 @@ function hasScheduledSuitesForRun(opts, sel) {
     return selectSerializedSuites(activeRouteTests, opts.shardIndex, opts.shardCount).length > 0;
   }
   if (opts.mode === generalModeName && opts.group === generalServerNativeRunnerGroupName) {
-    return activeNativeRunnerSuites().length > 0;
+    const suites = activeNativeRunnerSuites();
+    if (opts.shardCount !== null && opts.shardCount > 1) {
+      return selectGeneralServerShard(suites, opts.shardIndex, opts.shardCount, generalServerShardDurations).length > 0;
+    }
+    return suites.length > 0;
   }
   if (opts.mode === generalModeName && generalServerGroups.includes(opts.group)) {
     const excluded = new Set(excludedServerSuites(opts.group));
@@ -658,11 +662,17 @@ async function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCo
     return;
   }
   if (groupName === generalServerNativeRunnerGroupName) {
-    const suites = activeNativeRunnerSuites();
+    const allSuites = activeNativeRunnerSuites();
+    const suites = shardCount !== null && shardCount > 1
+      ? selectGeneralServerShard(allSuites, shardIndex, shardCount, generalServerShardDurations)
+      : allSuites;
     if (suites.length === 0) {
-      console.log("\n[test:run] native runner vertical-slice suite: 0 suites after nightly filtering; skipping");
+      console.log("\n[test:run] native runner vertical-slice suite: 0 suites after filtering; skipping");
       return;
     }
+    const label = shardCount !== null && shardCount > 1
+      ? `native runner vertical-slice suite shard ${shardIndex + 1}/${shardCount}`
+      : "native runner vertical-slice suite";
     await runVitest(
       ["--project", "@paperclipai/server",
         // Each file owns its database, home, and processes. Keep cases serial,
@@ -670,7 +680,7 @@ async function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCo
         ...(hasSharedTestDatabase ? serializedServerVitestArgs
           : ["--pool=forks", "--isolate", "--fileParallelism", `--maxWorkers=${resolveServerParallelWorkers(4)}`]),
         ...suites],
-      "native runner vertical-slice suite",
+      label,
     );
     return;
   }
@@ -743,7 +753,7 @@ async function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCo
   }
 
   if (groupName === generalWorkspacesBGroupName) {
-    await runProjectGroup(generalWorkspacesBProjects, groupName);
+    await runProjectGroup(generalWorkspacesBProjects, groupName, shardIndex, shardCount);
     return;
   }
 
@@ -924,7 +934,14 @@ if (options.dryRun) {
           defaultChatShards
             ? generalServerTestFiles.filter(file => file !== chatSuite)
             : options.mode === generalModeName && options.group === generalServerNativeRunnerGroupName
-            ? activeNativeRunnerSuites()
+            ? (options.shardCount !== null && options.shardCount > 1
+              ? selectGeneralServerShard(
+                  activeNativeRunnerSuites(),
+                  options.shardIndex,
+                  options.shardCount,
+                  generalServerShardDurations,
+                )
+              : activeNativeRunnerSuites())
             : options.mode === generalModeName &&
                 generalServerGroups.includes(options.group) &&
                 options.shardCount !== null
@@ -946,7 +963,7 @@ if (options.dryRun) {
                 ? generalWorkspacesCProjects
                 : null,
         workspacesVitestShard:
-          options.group === generalWorkspacesAGroupName &&
+          (options.group === generalWorkspacesAGroupName || options.group === generalWorkspacesBGroupName) &&
           options.shardCount !== null &&
           options.shardCount > 1
             ? `${options.shardIndex + 1}/${options.shardCount}`
