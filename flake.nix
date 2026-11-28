@@ -16,8 +16,12 @@
     homeManagerModules.paperclip = import ./nix/modules/home-manager/paperclip.nix;
     nixosModules.homeManager = import ./nix/modules/nixos/home-manager.nix;
     lib.mkHermesWorkerEnv = import ./nix/lib/hermes-worker-env.nix;
+    lib.mkAntigravityWorkerProxy = import ./nix/lib/antigravity-worker-proxy.nix;
     checks = nixpkgs.lib.genAttrs ["x86_64-linux" "aarch64-linux"] (system: {
       hermes-worker-env = import ./nix/tests/hermes-worker-env.nix {
+        pkgs = nixpkgs.legacyPackages.${system};
+      };
+      antigravity-worker-proxy = import ./nix/tests/antigravity-worker-proxy.nix {
         pkgs = nixpkgs.legacyPackages.${system};
       };
     });
